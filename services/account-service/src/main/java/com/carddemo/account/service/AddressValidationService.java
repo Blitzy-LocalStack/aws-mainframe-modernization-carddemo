@@ -4,6 +4,7 @@ import com.carddemo.common.error.ApiError;
 import com.carddemo.common.validation.FieldValidationFlag;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import org.springframework.stereotype.Service;
@@ -1297,7 +1298,7 @@ public class AddressValidationService {
                 case EASILY_RECOGNISABLE_CODE -> EASILY_RECOGNISABLE;
                 default -> throw new IllegalArgumentException(
                         "unrecognised area code classification: U+"
-                                + String.format("%04X", (int) code)
+                                + String.format(Locale.ROOT, "%04X", (int) code)
                                 + "; expected '" + GENERAL_PURPOSE_CODE
                                 + "' or '" + EASILY_RECOGNISABLE_CODE + "'");
             };
@@ -1467,5 +1468,29 @@ public class AddressValidationService {
         public boolean isValid() {
             return fieldErrors.isEmpty();
         }
-    }
+    
+        /**
+         * Renders the message and the SIZE of the per-field list.
+         *
+         * <p>Purpose. This record reports the outcome of validating an address against the seeded lookup
+         * tables, and the risk it carries is specific: a field error names the field it concerns and its
+         * message may quote what was refused, so a rendering that printed the list could reproduce parts of
+         * a cardholder's address -- which {@code docs/architecture/observability.md} L1093 to L1112
+         * withholds -- in the one path an invalid address always reaches.</p>
+         *
+         * <p>Assumptions: the message is kept and the list is not. The message is one of the reference
+         * sentences for a refused state, area code or postal prefix, so it is a constant rather than an echo
+         * of input; the entries are where an echoed value could appear, and the count states that the
+         * validation refused something without reproducing it.</p>
+         *
+         * @return a rendering naming the message and the number of field errors, with the field errors
+         *     themselves omitted; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "AddressValidationResult[message=" + this.message
+                    + ", fieldErrors=" + (this.fieldErrors == null ? "absent"
+                            : this.fieldErrors.size() + " entries") + ']';
+        }
+}
 }

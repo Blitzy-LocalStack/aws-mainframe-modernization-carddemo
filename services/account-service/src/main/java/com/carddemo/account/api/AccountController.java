@@ -18,6 +18,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import java.security.Principal;
+import java.util.Locale;
 import java.util.Objects;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -409,7 +410,7 @@ public class AccountController {
             consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE)
     public AccountContextView lookup(@Valid @RequestBody AccountLookupRequest request) {
-        return this.reads.readAccountContext(request.accountId());
+        return this.reads.readAccountContext(request.accountIdNumber());
     }
 
     /**
@@ -462,7 +463,7 @@ public class AccountController {
             produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<AccountViewResponse> readView(
             @Valid @RequestBody AccountLookupRequest request) {
-        long accountId = request.accountId();
+        long accountId = request.accountIdNumber();
         refuseUnacceptableViewFilter(accountId);
 
         AccountViewService.RevisionedAccountView composed = this.reads.readAccountView(accountId);
@@ -617,7 +618,7 @@ public class AccountController {
             Principal principal) {
 
         return this.reads.listCardCrossReferences(
-                request.accountId(), cursor, direction, principal.getName());
+                request.accountIdNumber(), cursor, direction, principal.getName());
     }
 
     /**
@@ -723,7 +724,7 @@ public class AccountController {
      * @return the identifier as a fixed-width character key, never {@code null}
      */
     private static String elevenDigitKey(long accountId) {
-        return String.format(ACCOUNT_KEY_FORMAT, accountId);
+        return String.format(Locale.ROOT, ACCOUNT_KEY_FORMAT, accountId);
     }
 
     /**

@@ -248,6 +248,100 @@ class ApiErrorSecurityHandlersTest {
     }
 
     /**
+     * The firewall's log line and its problem body both withhold a nine-digit customer identifier.
+     *
+     * <p>⚠️ Purpose: this is the exposure the single-sourced sanitizer closes, at the narrowest width. This
+     * handler used to narrow the rejected path with {@code CardNumberMasker.maskEmbeddedCardNumbers},
+     * which recognises a contiguous run of SIXTEEN digits and nothing shorter, while the shared advice
+     * narrowed the same path at nine. A rejected request line carrying the nine-digit customer identifier
+     * therefore reached a retained log line AND a problem body in the clear -- and a rejected line is
+     * exactly the case a caller controls, because the firewall rejects on the URL's own shape.</p>
+     *
+     * <p>Assumptions: BOTH surfaces are asserted in one case, because they were narrowed by two separate
+     * expressions -- the log statement's and {@code writeProblem}'s -- and a correction reaching only one
+     * would leave the other leaking while a single-surface case passed. The whole run is asserted absent
+     * rather than partially masked: the platform publishes no partial rendering of a customer identifier
+     * anywhere, so retaining any of it would have nothing to justify it.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     *
+     * @throws IOException if writing the mock response fails, which fails the case rather than being
+     *     handled
+     */
+    @Test
+    @DisplayName("a nine-digit customer identifier is withheld from the firewall log and the body")
+    void aCustomerIdentifierIsWithheldFromBothFirewallSurfaces() throws IOException {
+        MDC.put(CorrelationIdFilter.CORRELATION_ID_MDC_KEY, CORRELATION_ID);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        new ApiErrorSecurityHandlers.ApiErrorRequestRejectedHandler(CLOCK)
+                .handle(requestFor("/api/v1/customers/900000001"), response,
+                        new RequestRejectedException("rejected"));
+
+        assertThat(response.getContentAsString())
+                .as("no partial rendering of a customer identifier is published anywhere, so the run "
+                        + "is withheld whole")
+                .doesNotContain("900000001")
+                .contains("/api/v1/customers/*********");
+    }
+
+    /**
+     * The firewall surfaces withhold an eleven-digit account identifier whole and a card number's head.
+     *
+     * <p>⚠️ Purpose: three widths matter and each fails differently, so each is asserted. Nine and eleven
+     * are the customer and account identifiers, for which nothing partial is published, so the run is
+     * withheld ENTIRELY -- and both were in the clear here before the sanitizer was single-sourced.
+     * Sixteen is a card number, for which the platform already publishes a last-four rendering in list
+     * rows, in detail bodies and in the card contract, so retaining four discloses nothing a successful
+     * response would not. Asserting only the identifiers would let a correction that withheld a card
+     * number whole pass, which would break every diagnostic that lines a path up against a card row.</p>
+     *
+     * <p>Assumptions: the two identifiers are asserted with their exact masked renderings rather than
+     * merely as absences, so a correction that dropped the run instead of overwriting it in place would
+     * fail. Length preservation is what lets a reader line a diagnostic path up against an access record
+     * without re-parsing either.</p>
+     *
+     * <p>Assumptions: a short run is asserted to stay LEGIBLE in the same case, because a sanitizer that
+     * masked every digit would satisfy every assertion above while making page sizes, ordinals and date
+     * components unreadable -- and the threshold exists precisely so they stay readable.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     *
+     * @throws IOException if writing one of the mock responses fails, which fails the case rather than
+     *     being handled
+     */
+    @Test
+    @DisplayName("account, card and short-run paths are each narrowed by their own rule")
+    void eachIdentifierWidthIsNarrowedByItsOwnRule() throws IOException {
+        MDC.put(CorrelationIdFilter.CORRELATION_ID_MDC_KEY, CORRELATION_ID);
+
+        MockHttpServletResponse account = new MockHttpServletResponse();
+        new ApiErrorSecurityHandlers.ApiErrorRequestRejectedHandler(CLOCK)
+                .handle(requestFor("/api/v1/accounts/00000000011"), account,
+                        new RequestRejectedException("rejected"));
+        assertThat(account.getContentAsString())
+                .doesNotContain("00000000011")
+                .contains("/api/v1/accounts/***********");
+
+        MockHttpServletResponse card = new MockHttpServletResponse();
+        new ApiErrorSecurityHandlers.ApiErrorRequestRejectedHandler(CLOCK)
+                .handle(requestFor("/api/v1/cards/4111111111111111"), card,
+                        new RequestRejectedException("rejected"));
+        assertThat(card.getContentAsString())
+                .as("a card number keeps the last-four rendering the platform already publishes")
+                .doesNotContain("4111111111111111")
+                .contains("/api/v1/cards/************1111");
+
+        MockHttpServletResponse legible = new MockHttpServletResponse();
+        new ApiErrorSecurityHandlers.ApiErrorRequestRejectedHandler(CLOCK)
+                .handle(requestFor("/api/v1/transactions?page=12345678"), legible,
+                        new RequestRejectedException("rejected"));
+        assertThat(legible.getContentAsString())
+                .as("eight digits is below every protected width, so an ordinal stays readable")
+                .contains("12345678");
+    }
+
+    /**
      * Confirms the factory publishes the same handler the nested class implements.
      *
      * <p>Assumptions: the factory is asserted because it is what the shared auto-configuration publishes

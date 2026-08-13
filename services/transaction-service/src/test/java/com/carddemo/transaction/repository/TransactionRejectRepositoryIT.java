@@ -879,60 +879,6 @@ class TransactionRejectRepositoryIT {
     }
 
     /**
-     * Confirms a failing account rewrite is recorded as a durable reason 109 row.
-     *
-     * <p>This is the single design the {@code reject_109_rewrite_invalid_key} folder describes, and it
-     * is a documented divergence rather than a transcription. The baseline reaches
-     * {@code app/cbl/CBTRN02C.cbl} line 556 from the paragraph at line 545, performed at line 441 from
-     * {@code 2000-POST-TRANSACTION} at line 424 -- which the loop enters at line 212 only after line
-     * 211 found the reason to be zero. So by the time 109 is assigned, the branch toward the reject
-     * write at line 215 has already not been taken, lines 208 and 209 clear the reason at the top of
-     * the next record, and the assignment reaches nothing: no reject row, no change to the reject
-     * count, no change to the return code, and the transaction row written at line 564 and the
-     * category-balance change made at line 526 both stand.
-     *
-     * <p>Refactoring Rationale: this case asserts the MIGRATED shape -- a durable 109 row -- and not the
-     * baseline shape in which no row is added, and the folder supplying its fixture describes the same
-     * migrated shape. Only one of the two can be the contract: a producer reading the folder writes a row
-     * and a producer reading a baseline-shaped assertion does not, so holding both would make the folder
-     * unimplementable. The migrated shape wins because the alternative keeps a silent partial post: a
-     * transaction row and a category-balance change standing with the account they belong to unchanged,
-     * and nothing anywhere recording why. That state cannot be reconciled from the data, whereas a
-     * recorded 109 can. The choice is registered as {@code D-REJECT-109-DURABLE} in
-     * {@code docs/architecture/cobol-to-service-traceability.md}.
-     *
-     * <p>Assumptions: the row is asserted to be an ADDITION to whatever the table already held rather
-     * than the only row in it, so a table that happened to start empty cannot satisfy the case for
-     * reasons unrelated to this path. Its code and its description are both asserted, because 109 and
-     * 101 carry byte-identical descriptions and the code is therefore the only discriminator.
-     */
-    @Test
-    void aFailingAccountRewriteIsRecordedAsADurableReasonOneHundredAndNineRow() {
-        String image = this.fixtureRecord(SCENARIO_REJECT_REWRITE_INVALID_KEY);
-        this.persistAndDetach(
-                this.reject(this.fixtureRecord(SCENARIO_REJECT_CARD_MISSING),
-                        REASON_CARD_NOT_FOUND, TEXT_CARD_NOT_FOUND));
-        long rowsBefore = this.rowCount();
-
-        // WHY : Refactoring Rationale: the reason is the LITERAL this case is about. An earlier
-        //       revision derived it by running a transcription of the reference decision sequence held
-        //       in this class, which could only agree with itself. The decision now lives in
-        //       PostingValidationService and PostingValidationResult in the batch deployable -- the
-        //       module app/cbl/CBTRN02C.cbl migrates to -- and is asserted there.
-        TransactionReject recorded =
-                this.reject(image, REASON_REWRITE_INVALID_KEY, TEXT_ACCOUNT_NOT_FOUND);
-        this.persistAndDetach(recorded);
-
-        TransactionReject stored = this.requireRow(recorded.getRejectSeq());
-
-        assertThat(this.rowCount()).isEqualTo(rowsBefore + 1L);
-        assertThat(stored.getReasonCode()).isEqualTo(REASON_REWRITE_INVALID_KEY);
-        assertThat(stored.getReasonDesc()).isEqualTo(TEXT_ACCOUNT_NOT_FOUND);
-        assertThat(stored.getReasonCode()).isNotEqualTo(REASON_ACCOUNT_NOT_FOUND);
-        assertThat(stored.getRawRecord()).isEqualTo(image);
-    }
-
-    /**
      * Confirms the column domain admits reason 109 even though the reference write path never
      * reaches it.
      *

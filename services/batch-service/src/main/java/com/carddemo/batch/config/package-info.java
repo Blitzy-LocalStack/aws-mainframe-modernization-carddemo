@@ -122,12 +122,16 @@
  *   <li>{@code BatchConfig} owns the module's step infrastructure -- the time source the durable
  *       ledger stamps its rows with, and the nested builder that wraps one unit of work in a
  *       ledger-guarded step -- and the job-parameter contract those steps read. Trade-offs: the step
- *       it builds is a single transactional tasklet rather than a chunk-oriented read-process-write
- *       step. A chunk-oriented step commits per chunk, which would make a partially posted run
- *       observable and a redrive non-idempotent; the reference commits its three writes as one unit
- *       of work, so the tasklet is what preserves that and the ledger row is what makes the redrive
- *       a no-op. The accepted cost is that a very large run holds one transaction open for its
- *       duration. It is the interlock with the
+ *       it builds is a TASKLET rather than a chunk-oriented read-process-write step. A chunk-oriented
+ *       step commits per chunk, at a boundary the framework chooses and no reference paragraph
+ *       corresponds to, which would make a partial state observable at a place the baseline has none
+ *       and a redrive non-idempotent; the tasklet leaves the boundary to the job, and the ledger row
+ *       is what makes the redrive a no-op. Assumptions: what each job then DOES with that freedom
+ *       differs and is not decided here. {@code PostTransactionsJob} suspends the tasklet's own
+ *       boundary and opens one transaction per feed record, matching the reference paragraph that
+ *       commits three writes per record; every other job commits once for the pass, and the accepted
+ *       cost there is that a very large run holds one transaction open for its duration. It is the
+ *       interlock with the
  *       command contract declared on {@code BatchApplication}, whose {@code --job=} option selects
  *       one of seven job tokens and whose {@code --business-date=} option reaches a job under the
  *       parameter key {@code businessDate}. Assumptions: a step that read the business date from

@@ -24,4 +24,32 @@ import java.util.List;
  */
 public record MaintenanceActionBatchResponse(
         List<MaintenanceActionOutcomeResponse> outcomes, int returnCode) {
+
+    /**
+     * Renders the batch outcome as its SIZE and its return code rather than as its outcomes.
+     *
+     * <p>Purpose. The outcome list is as long as the request that produced it, so the compiler-generated
+     * rendering scaled with a caller-supplied count -- the collection concern the diagnostic rule at
+     * {@code docs/architecture/observability.md} L1093 to L1112 addresses. The request shape's own renderer
+     * makes the same choice for the same reason, and the two agree deliberately: a batch and its answer
+     * should be counted the same way so that a mismatch between the counts is visible in a log.</p>
+     *
+     * <p>Assumptions: the return code prints in full and is the component this rendering exists to carry.
+     * It is the reference condition code -- zero, four, eight or sixteen -- so it is a bounded status that
+     * the rule's third clause permits, and it is the one value that says whether the batch as a whole
+     * succeeded, warned or failed.</p>
+     *
+     * <p>Trade-offs: which individual action failed is not visible from a log line and must be read from
+     * the response body. That is accepted for the reason above; the aggregate code tells an operator
+     * whether reading the body is worth doing.</p>
+     *
+     * @return a rendering naming the outcome count and the aggregate return code, with the outcomes
+     *     themselves omitted; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "MaintenanceActionBatchResponse[outcomes=" + (this.outcomes == null ? "absent"
+                : this.outcomes.size() + " entries")
+                + ", returnCode=" + this.returnCode + ']';
+    }
 }

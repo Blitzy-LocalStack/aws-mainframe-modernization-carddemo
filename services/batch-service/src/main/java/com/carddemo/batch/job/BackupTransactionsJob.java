@@ -2,21 +2,27 @@ package com.carddemo.batch.job;
 
 import com.carddemo.batch.config.BatchConfig;
 import com.carddemo.batch.domain.Transaction;
+import com.carddemo.batch.domain.TransactionCategoryBalance;
 import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchReturnCode;
 import com.carddemo.batch.dto.BusinessDate;
 import com.carddemo.batch.dto.DatasetGeneration;
 import com.carddemo.batch.dto.DatasetGeneration.DatasetFamily;
+import com.carddemo.batch.mapper.TransactionCategoryBalanceRecordMapper;
 import com.carddemo.batch.mapper.TransactionRecordMapper;
+import com.carddemo.batch.repository.TransactionCategoryBalanceRepository;
 import com.carddemo.batch.repository.TransactionRepository;
 import com.carddemo.batch.service.BatchStepLedger;
 import com.carddemo.batch.service.DatasetGenerationService;
+import com.carddemo.batch.service.InterestCalculationService;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -242,14 +248,49 @@ public class BackupTransactionsJob {
     /** The name of the single object each staged generation of this family holds. */
     public static final String DATASET_OBJECT_NAME = "transact.bkup";
 
+    /**
+     * Object name of the card-ordered, date-filtered subset staged into the daily generation.
+     *
+     * <p>Assumptions: the reference produces this generation in a DIFFERENT job from the backup --
+     * the sort step at {@code app/jcl/TRANREPT.jcl:37-55} writes
+     * {@code AWS.M2.CARDDEMO.TRANSACT.DALY(+1)} from the very backup generation that same job's
+     * preceding step had just unloaded. Both halves of that pair are performed here because this is
+     * the chain's single unload point: each reference JCL job re-does its own unload so that it can
+     * run standalone, which is why the transaction master is unloaded twice per reference night, and
+     * collapsing the duplicate is the reason the sort's input is available in this step at all.</p>
+     */
+    public static final String DAILY_DATASET_OBJECT_NAME = "transact.daly";
+
+    /**
+     * Object name of the transaction-category-balance unload staged into its backup generation.
+     *
+     * <p>Assumptions: the reference produces this generation at
+     * {@code app/jcl/PRTCATBL.jcl:29-39}, whose {@code REPROC} step unloads
+     * {@code TCATBALF.VSAM.KSDS} to {@code TCATBALF.BKUP(+1)} at {@code DCB=(LRECL=50,RECFM=FB)}.
+     * That is the same unload-a-master-to-a-generation action this step already performs for the
+     * transaction master, over the other master, so it belongs in this step rather than in the report
+     * state that consumes it -- and putting it here is what lets the report state read the relation
+     * instead of a flat file.</p>
+     */
+    public static final String CATEGORY_BALANCE_DATASET_OBJECT_NAME = "tcatbalf.bkup";
+
     /** The prefix of the temporary file the copy is streamed into before upload. */
     private static final String STAGING_FILE_PREFIX = "carddemo-transact-bkup-";
+
+    /** The prefix of the temporary file the card-ordered daily subset is streamed into. */
+    private static final String DAILY_STAGING_FILE_PREFIX = "carddemo-transact-daly-";
+
+    /** The prefix of the temporary file the category-balance unload is streamed into. */
+    private static final String CATEGORY_BALANCE_STAGING_FILE_PREFIX = "carddemo-tcatbalf-bkup-";
 
     /** The operational log this job reports its record counts through. */
     private static final Logger LOG = LoggerFactory.getLogger(BackupTransactionsJob.class);
 
     /** The transaction master being copied. */
     private final TransactionRepository ledger;
+
+    /** The transaction-category-balance master this step unloads to its own backup generation. */
+    private final TransactionCategoryBalanceRepository categoryBalances;
 
     /** The resolver that allocates the new generation and applies the retention rule. */
     private final DatasetGenerationService generations;
@@ -260,8 +301,10 @@ public class BackupTransactionsJob {
     /**
      * Builds the job over the master it copies and the generation resolver it stages through.
      *
-     * @param ledger the transaction master this job reads, ordered by transaction identifier; must
-     *     not be {@code null}
+     * @param ledger the transaction master this job reads, ordered by transaction identifier for the
+     *     full copy and by card number for the daily subset; must not be {@code null}
+     * @param categoryBalances the transaction-category-balance master this job unloads in the key
+     *     order the reference sort declares; must not be {@code null}
      * @param generations the generation resolver that allocates the new generation, stages bytes
      *     into it and names the aged-out generations; must not be {@code null}
      * @param ledgerOfSteps the durable step ledger that makes a re-run of a completed step a no-op;
@@ -269,9 +312,12 @@ public class BackupTransactionsJob {
      * @throws NullPointerException if any argument is {@code null}
      */
     public BackupTransactionsJob(TransactionRepository ledger,
+            TransactionCategoryBalanceRepository categoryBalances,
             DatasetGenerationService generations, BatchStepLedger ledgerOfSteps) {
 
         this.ledger = Objects.requireNonNull(ledger, "ledger must not be null");
+        this.categoryBalances =
+                Objects.requireNonNull(categoryBalances, "categoryBalances must not be null");
         this.generations = Objects.requireNonNull(generations, "generations must not be null");
         this.ledgerOfSteps = Objects.requireNonNull(ledgerOfSteps, "ledgerOfSteps must not be null");
     }
@@ -323,6 +369,7 @@ public class BackupTransactionsJob {
      */
     private RepeatStatus runStep(StepContribution contribution, ChunkContext context) {
         String runId = BatchConfig.runIdOf(context);
+        BusinessDate generationDate = BatchConfig.generationDateOf(context);
         BusinessDate businessDate = BatchConfig.businessDateOf(context);
 
         // WHY : Assumptions: the body runs through the durable (runId, stepName) ledger so that a
@@ -333,7 +380,7 @@ public class BackupTransactionsJob {
         //       spends one of five archival slots on a duplicate and ages out a genuinely older
         //       backup a generation early. The wasted slot is the harm, not the wasted work.
         this.ledgerOfSteps.runStep(runId, STEP_NAME, BatchJobName.BACKUP_TRANSACTIONS,
-                () -> copyToNewGeneration(runId, businessDate));
+                () -> copyToNewGeneration(runId, generationDate, businessDate));
         return RepeatStatus.FINISHED;
     }
 
@@ -346,12 +393,16 @@ public class BackupTransactionsJob {
      *
      * @param runId the orchestrator execution the allocation is claimed under; must not be
      *     {@code null}
-     * @param businessDate the injected business date the generation is partitioned under; must not
-     *     be {@code null}
+     * @param generationDate the injected date the output generations are partitioned under, which
+     *     in that role is orchestration metadata rather than business input; must not be
+     *     {@code null}
+     * @param businessDate the same injected token read in its OTHER role, as the day whose
+     *     transactions the card-ordered subset selects; must not be {@code null}
      * @return {@link BatchReturnCode#CLEAN}, because a copy either completes or raises -- this job
      *     has no soft-warn outcome of its own
      */
-    private BatchReturnCode copyToNewGeneration(String runId, BusinessDate businessDate) {
+    private BatchReturnCode copyToNewGeneration(String runId, BusinessDate generationDate,
+            BusinessDate businessDate) {
         // WHY : Assumptions: `(+1)` is a request for a NEW generation, and the resolver -- not this
         //       job -- decides which number that is and memoises the answer against the run claim.
         //       A repeated request for the same family within one run therefore returns the IDENTICAL
@@ -366,12 +417,65 @@ public class BackupTransactionsJob {
         //       supplies. DatasetGeneration accepts both committed layouts and raises, naming the
         //       offending token, when it can honour neither -- so a malformed token fails loudly
         //       instead of yielding a malformed prefix.
-        DatasetGeneration target = this.generations.allocateNewGeneration(
-                DatasetFamily.TRANSACT_BKUP, businessDate, runId);
+        // WHY : Assumptions: the two date arguments below carry the SAME value through two
+        //       DIFFERENT roles, and reading them through two accessors is how BatchConfig's own
+        //       contract says the roles are told apart. Every `stageOneFamily` call receives the
+        //       generation date, because there the token only names the `dt=` prefix an artifact
+        //       lands under. The daily-subset body receives the business date, because there the
+        //       token is a SELECTION predicate that decides which rows exist in the artifact at all.
+        // WHY : Alternatives Considered: passing one argument named for whichever role dominates.
+        //       Rejected because this job is the only one that holds both roles at once, so a single
+        //       name here would have to be wrong at one of the two call sites -- and the role that
+        //       reaches row selection is precisely the one a reader must not mistake for metadata.
+        // WHY : Assumptions: the THREE families are staged in this order and the order is not
+        //       arbitrary. The full copy comes first because it is the artifact an operator restores
+        //       from and the one the reference's own backup job produces; the card-ordered subset
+        //       second because the reference derives it FROM that copy at
+        //       app/jcl/TRANREPT.jcl:39; and the category-balance unload last because it reads the
+        //       other master entirely and shares nothing with the first two.
+        // WHY : Trade-offs: all three are staged by one step rather than by three states, and the
+        //       eleven-work-state topology of the migration plan's section 0.4.1.7 is the reason.
+        //       Three states would be visible per-artifact in the execution history, which is the
+        //       gain given up; what is kept is a published state count that stays eleven and a
+        //       single transaction in which all three reads see the same committed ledger.
+        stageOneFamily(runId, generationDate, DatasetFamily.TRANSACT_BKUP, DATASET_OBJECT_NAME,
+                this::writeMasterToTemporaryFile);
+        stageOneFamily(runId, generationDate, DatasetFamily.TRANSACT_DALY, DAILY_DATASET_OBJECT_NAME,
+                () -> writeDailySubsetToTemporaryFile(businessDate));
+        stageOneFamily(runId, generationDate, DatasetFamily.TCATBALF_BKUP,
+                CATEGORY_BALANCE_DATASET_OBJECT_NAME, this::writeCategoryBalancesToTemporaryFile);
+        return BatchReturnCode.CLEAN;
+    }
 
-        Path staged = writeMasterToTemporaryFile();
+    /**
+     * Allocates one family's new generation, stages the supplied body into it, then retires the
+     * generations the retention rule names.
+     *
+     * <p>Refactoring Rationale: the three actions were written once against a single family and are
+     * now parameterised by it. The extraction is not tidying: the retention loop reads the family it
+     * was given, and a copy-paste of the block with only the allocation edited would have applied one
+     * family's retention window to another's generations -- deleting live artifacts of the family it
+     * was not meant to touch, silently, and reporting a scratch count that looked correct.</p>
+     *
+     * @param runId the orchestrator execution the allocation is claimed under; must not be
+     *     {@code null}
+     * @param generationDate the injected date the generation is partitioned under, read in its
+     *     orchestration-metadata role; must not be {@code null}
+     * @param family the generation family being written; must not be {@code null}
+     * @param objectName the object name inside the generation prefix; must not be {@code null}
+     * @param body produces the temporary file holding the bytes to stage, and is invoked only after
+     *     the generation has been allocated; must not be {@code null}
+     * @throws IllegalStateException if the body cannot be written or the upload fails
+     */
+    private void stageOneFamily(String runId, BusinessDate generationDate, DatasetFamily family,
+            String objectName, Supplier<Path> body) {
+
+        DatasetGeneration target =
+                this.generations.allocateNewGeneration(family, generationDate, runId);
+
+        Path staged = body.get();
         try {
-            this.generations.stageDataset(target, DATASET_OBJECT_NAME, staged);
+            this.generations.stageDataset(target, objectName, staged);
         } finally {
             // WHY : Assumptions: the temporary file is removed on every path, including a failed
             //       upload, because a batch task's ephemeral disk is finite and a failed step is
@@ -387,14 +491,14 @@ public class BackupTransactionsJob {
         //       log line below reported a retention figure, so the count is accumulated from actual
         //       removals rather than from the size of the list.
         int scratched = 0;
-        for (DatasetGeneration agedOut
-                : this.generations.generationsToScratch(DatasetFamily.TRANSACT_BKUP)) {
+        for (DatasetGeneration agedOut : this.generations.generationsToScratch(family)) {
             scratched += this.generations.scratchGeneration(agedOut);
         }
 
-        LOG.info("event=batch.backup.completed generation={} scratchedObjects={} location={}",
-                target.generationNumber(), scratched, this.generations.datasetUri(target));
-        return BatchReturnCode.CLEAN;
+        LOG.info("event=batch.backup.completed family={} generation={} scratchedObjects={}"
+                        + " location={}",
+                family.datasetSegment(), target.generationNumber(), scratched,
+                this.generations.datasetUri(target));
     }
 
     /**
@@ -444,7 +548,7 @@ public class BackupTransactionsJob {
                 //       inside the lambda and rethrown -- which loses the single catch below that
                 //       both cleans up the partial file and names the path.
                 for (Transaction row : (Iterable<Transaction>) rows::iterator) {
-                    sink.write(TransactionRecordMapper.toRecord(row));
+                    sink.write(TransactionRecordMapper.toRecord(row, layoutOf(row)));
                 }
             }
         } catch (IOException unwritable) {
@@ -455,6 +559,148 @@ public class BackupTransactionsJob {
             deleteQuietly(staged);
             throw new IllegalStateException(
                     "could not write the transaction copy to " + staged, unwritable);
+        }
+
+        return staged;
+    }
+
+    /**
+     * Names which producer's padding rule applies to one row of the master.
+     *
+     * <p>Assumptions: this copy is a BYTE IMAGE of the master, so each record has to carry the pad the
+     * program that wrote it left behind, and section 6.3 of
+     * {@code services/batch-service/src/test/resources/fixtures/README.md} measures that pad as
+     * job-dependent: the accrual pass assembles its description with {@code STRING} at
+     * {@code app/cbl/CBACT04C.cbl:485-489} and leaves seventy-six low values behind it, while the
+     * posting pass moves an already blank-padded feed field at {@code app/cbl/CBTRN02C.cbl:429}. The
+     * relational row carries the description's text and not the bytes behind it, so the producer is
+     * recognised from the attribution the accrual pass itself writes.</p>
+     *
+     * <p>Trade-offs: the recognition is delegated to {@code InterestCalculationService}, which owns
+     * both marks it tests, rather than expressed here. The cost is that this job reads a static method
+     * of a service it does not otherwise use; the alternative was a second copy of the two literals in
+     * this file, which would be a pad rule that silently stops matching the day either literal moves.</p>
+     *
+     * <p>Assumptions: recovering the producer from the record instead of from the dataset it was read out
+     * of is registered as {@code D-TRAN-PAD-PROVENANCE} in
+     * {@code docs/architecture/cobol-to-service-traceability.md} section 7.4, which records the emitted
+     * bytes as preserved and names the one hypothetical row the recognition would misclassify.</p>
+     *
+     * @param row the ledger row about to be encoded; must not be {@code null}
+     * @return {@code INTEREST_GENERATED} for a row the accrual pass wrote and {@code POSTED_MASTER} for
+     *     every other row, never {@code null}
+     */
+    private static TransactionRecordMapper.Layout layoutOf(Transaction row) {
+        return InterestCalculationService.isAccrualGenerated(row)
+                ? TransactionRecordMapper.Layout.INTEREST_GENERATED
+                : TransactionRecordMapper.Layout.POSTED_MASTER;
+    }
+
+    /**
+     * Streams the business date's transactions, card-ordered, into a temporary file.
+     *
+     * <p>Purpose: this is the migrated form of {@code app/jcl/TRANREPT.jcl:37-55}, the sort step that
+     * is the reference's only producer of {@code AWS.M2.CARDDEMO.TRANSACT.DALY}. That step selects on
+     * {@code TRAN-PROC-DT} between two date parameters and orders on {@code TRAN-CARD-NUM}, and it
+     * writes at the input's own record length through {@code DCB=(*.SORTIN)}, which is the 350 bytes
+     * declared at line 31 of the same job. So the emitted file is the same record form as the full
+     * copy above, holding a subset in a different order.</p>
+     *
+     * <p>Assumptions: the range is the single business date, not a period. The reference's two sort
+     * parameters are SYMNAMES literals -- {@code PARM-START-DATE,C'2022-01-01'} and
+     * {@code PARM-END-DATE,C'2022-07-06'} at lines 43-44 -- edited into the job before submission,
+     * whereas the nightly chain supplies exactly one date per execution. A nightly generation
+     * therefore holds the night's own transactions, which is what makes one generation per run
+     * meaningful; a multi-day range remains reachable through the on-demand report path, which takes
+     * its bounds as arguments.</p>
+     *
+     * <p>Trade-offs: the subset is emitted even when the window selects no row, producing an empty
+     * generation rather than none. The reference does the same -- its {@code SORTOUT} is
+     * {@code DISP=(NEW,CATLG,DELETE)} and is catalogued whether or not the {@code INCLUDE} matched --
+     * and an absent generation would be indistinguishable from a step that never ran, which is the
+     * one thing an operator reading the family cannot afford to guess at.</p>
+     *
+     * @param businessDate the injected business date whose transactions are selected; must not be
+     *     {@code null}
+     * @return the temporary file holding the card-ordered subset, never {@code null}
+     * @throws IllegalStateException if the temporary file cannot be created or written
+     */
+    private Path writeDailySubsetToTemporaryFile(BusinessDate businessDate) {
+        final Path staged;
+        try {
+            staged = Files.createTempFile(DAILY_STAGING_FILE_PREFIX, ".dat");
+        } catch (IOException unavailable) {
+            throw new IllegalStateException(
+                    "could not create the temporary file the daily transaction subset streams through",
+                    unavailable);
+        }
+
+        // WHY : Assumptions: the window is built HERE and passed as two instants, because this is the
+        //       only place that knows the date is a single day. The upper bound is the FOLLOWING
+        //       midnight and the finder's predicate is strictly less than it, which is how the
+        //       reference's inclusive end DATE is expressed against a microsecond TIMESTAMP without
+        //       inventing a last-representable-instant that would drop rows inside the final second.
+        LocalDateTime from = businessDate.parseIsoDateForRangeComparison().atStartOfDay();
+        LocalDateTime untilExclusive = from.plusDays(1L);
+
+        try (OutputStream sink = Files.newOutputStream(staged)) {
+            try (Stream<Transaction> rows =
+                    this.ledger.streamProcessedInWindowOrderedByCard(from, untilExclusive)) {
+                for (Transaction row : (Iterable<Transaction>) rows::iterator) {
+                    sink.write(TransactionRecordMapper.toRecord(row));
+                }
+            }
+        } catch (IOException unwritable) {
+            deleteQuietly(staged);
+            throw new IllegalStateException(
+                    "could not write the daily transaction subset to " + staged, unwritable);
+        }
+
+        return staged;
+    }
+
+    /**
+     * Streams every transaction-category balance, in key order, into a temporary file.
+     *
+     * <p>Purpose: this is the migrated form of the {@code REPROC} step at
+     * {@code app/jcl/PRTCATBL.jcl:29-39}, which unloads {@code TCATBALF.VSAM.KSDS} to
+     * {@code TCATBALF.BKUP(+1)} at {@code DCB=(LRECL=50,RECFM=FB)}. The 50 bytes are the record length
+     * {@code app/cpy/CVTRA01Y.cpy:2} declares, and the mapper is what holds that geometry.</p>
+     *
+     * <p>Assumptions: the ordering is by account identifier, then type code, then category code, and
+     * it is the master's own key order rather than a preference -- the three fields are the copybook's
+     * {@code TRAN-CAT-KEY} group at {@code app/cpy/CVTRA01Y.cpy:5-8} in that sequence, and the same
+     * three in the same sequence are what the consuming sort declares at
+     * {@code app/jcl/PRTCATBL.jcl:52}. The finder that expresses it already existed for the interest
+     * step, so the ordering is single-sourced rather than restated.</p>
+     *
+     * <p>This operation accepts no parameters.</p>
+     *
+     * @return the temporary file holding the unload, never {@code null}
+     * @throws IllegalStateException if the temporary file cannot be created or written
+     */
+    private Path writeCategoryBalancesToTemporaryFile() {
+        final Path staged;
+        try {
+            staged = Files.createTempFile(CATEGORY_BALANCE_STAGING_FILE_PREFIX, ".dat");
+        } catch (IOException unavailable) {
+            throw new IllegalStateException(
+                    "could not create the temporary file the category-balance unload streams through",
+                    unavailable);
+        }
+
+        try (OutputStream sink = Files.newOutputStream(staged)) {
+            try (Stream<TransactionCategoryBalance> rows = this.categoryBalances
+                    .findAllByOrderByIdAccountIdAscIdTypeCdAscIdCategoryCdAsc()) {
+                for (TransactionCategoryBalance row : (Iterable<TransactionCategoryBalance>)
+                        rows::iterator) {
+                    sink.write(TransactionCategoryBalanceRecordMapper.toRecord(row));
+                }
+            }
+        } catch (IOException unwritable) {
+            deleteQuietly(staged);
+            throw new IllegalStateException(
+                    "could not write the category-balance unload to " + staged, unwritable);
         }
 
         return staged;
@@ -484,16 +730,25 @@ public class BackupTransactionsJob {
      * Reports the generation families this job stages into.
      *
      * <p>Assumptions: the list is stated here so that an operator or a test can learn which families
-     * this job touches without reading its body or standing up its collaborators. It is exactly one
-     * family, which is why the reference job needs no equivalent statement -- its single data
-     * definition at {@code app/jcl/TRANBKP.jcl:29-33} says the same thing.</p>
+     * this job touches without reading its body or standing up its collaborators. It is THREE, and no
+     * single reference job says the same thing, because the reference spreads these unloads across
+     * three jobs that each re-do their own: {@code app/jcl/TRANBKP.jcl:29-33} for the full copy,
+     * {@code app/jcl/TRANREPT.jcl:51-55} for the card-ordered subset, and
+     * {@code app/jcl/PRTCATBL.jcl:35-39} for the category-balance unload.</p>
+     *
+     * <p>Refactoring Rationale: this returned one family and the job now writes three, so the list is
+     * restated from the body rather than from the job's original scope. The list is what the IAM
+     * scoping in the environment roots and this module's own tests read to decide which prefixes this
+     * task must be able to write, so an under-count here is an access denial at the second family
+     * rather than a documentation gap.</p>
      *
      * <p>This operation accepts no parameters.</p>
      *
-     * @return an immutable list holding the single family this job writes, never {@code null} and
-     *     never empty
+     * @return an immutable list holding the three families this job writes, in the order it writes
+     *     them, never {@code null} and never empty
      */
     public static List<DatasetFamily> stagedFamilies() {
-        return List.of(DatasetFamily.TRANSACT_BKUP);
+        return List.of(DatasetFamily.TRANSACT_BKUP, DatasetFamily.TRANSACT_DALY,
+                DatasetFamily.TCATBALF_BKUP);
     }
 }

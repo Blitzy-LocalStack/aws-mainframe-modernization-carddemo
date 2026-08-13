@@ -35,7 +35,7 @@ command runs rather than when a module is imported -- that timing is what keeps 
 package importable with nothing configured. ``credentials`` and ``role_credentials`` are
 the database bootstrap step that applies each generated credential to the login role that
 authenticates with it; both run immediately after ``sql/V0__schemas_and_roles.sql`` creates
-the fifteen login roles with no password, and they are the delivered mechanism that makes
+the sixteen login roles with no password, and they are the delivered mechanism that makes
 those roles able to authenticate at all -- so they precede every loader in the batch chain
 rather than sitting beside them.
 

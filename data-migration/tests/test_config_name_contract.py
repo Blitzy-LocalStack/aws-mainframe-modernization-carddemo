@@ -263,12 +263,13 @@ def test_environment_name_has_no_default() -> None:
 
 @pytest.mark.parametrize("role", sorted(LOGIN_ROLE_NAMES))
 def test_every_login_role_resolves_a_store_legal_secret_name(role: str) -> None:
-    """Assert each of the fifteen login roles composes a secret name the store accepts.
+    """Assert each of the sixteen login roles composes a secret name the store accepts.
 
     Parameters
     ----------
     role : str
-        One of the fifteen login role names -- eight runtime plus seven migration.
+        One of the sixteen login role names -- eight runtime, seven migration and the
+        read-only verification role.
 
     Raises
     ------
@@ -344,7 +345,7 @@ def test_no_owner_role_can_be_issued_a_credential(schema: str) -> None:
 
 
 def test_the_bootstrap_sql_creates_every_role_the_package_names() -> None:
-    """Assert V0 declares all fifteen login roles and all eight owner roles.
+    """Assert V0 declares all sixteen login roles and all eight owner roles.
 
     Raises
     ------

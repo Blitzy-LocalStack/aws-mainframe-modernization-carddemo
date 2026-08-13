@@ -613,26 +613,44 @@ spring:
           #       (2) Assumptions: what the verified token then AUTHORIZES is
           #       decided by config/SecurityConfig.java, which converts the
           #       `cognito:groups` claim into authorities through common-lib's
-          #       com.carddemo.common.security.JwtRoleConverter. The fraud
-          #       state-setting route is guarded by the carddemo-admin group alone
-          #       -- FRAUD_PATH_PATTERN with hasAuthority(ADMIN_AUTHORITY) -- while
-          #       the read routes admit carddemo-admin or carddemo-user, and the
-          #       chain ends in denyAll() so an unnamed path is refused rather
-          #       than merely authenticated.
-          #       (3) Assumptions: that guard is an INTENTIONAL DOCUMENTED
-          #       IMPROVEMENT and is stated as one rather than as a port, because
-          #       the baseline carries no resource-level security to port. All
-          #       three of this context's transactions are defined
-          #       RESSEC(NO) CMDSEC(NO) --
+          #       com.carddemo.common.security.JwtRoleConverter. EVERY route of this
+          #       context -- the four reads and the one fraud write -- admits
+          #       carddemo-admin or carddemo-user, which is what
+          #       SecurityConfig.businessAccess() and SecurityConfig.fraudAccess()
+          #       both build and what openapi/authorization-api.yaml publishes as
+          #       x-required-authority: carddemo-user on all six operations. The
+          #       chain ends in denyAll(), so a validly signed token carrying
+          #       neither group reaches nothing and an unnamed path is refused
+          #       rather than merely authenticated.
+          #       (3) ⚠️ Refactoring Rationale: paragraph (2) said the fraud route
+          #       was "guarded by the carddemo-admin group alone --
+          #       FRAUD_PATH_PATTERN with hasAuthority(ADMIN_AUTHORITY)", and a
+          #       paragraph (3) here called that guard an intentional documented
+          #       improvement over the baseline. Neither statement is true of this
+          #       service. fraudAccess() grants either business authority, the
+          #       contract publishes the cardholder authority on the fraud
+          #       operation, and there is therefore no added check and no
+          #       divergence to record. The claim is corrected rather than deleted
+          #       because it is the kind an operator acts on: a reader planning
+          #       group membership would have withheld carddemo-user from staff who
+          #       need the fraud write and expected the route to refuse them, and
+          #       would have found it granted.
+          #       (4) Assumptions: the reason the fraud write is NOT restricted
+          #       further is that the baseline restricts nothing at this level and
+          #       there is no resource-level security to port. All three of this
+          #       context's transactions are defined RESSEC(NO) CMDSEC(NO) --
           #       app/app-authorization-ims-db2-mq/csd/CRDDEMO2.csd L46 for
           #       TRANSACTION(CPVD), L56 for TRANSACTION(CPVS) and L66 for
           #       TRANSACTION(CP00) -- so the region performed no resource and no
           #       command check at all, and reaching the fraud program was gated
-          #       only by which menu an operator navigated from. The target adds a
-          #       check the baseline did not have; the divergence is recorded in
-          #       docs/architecture/security-and-identity.md rather than presented
-          #       as parity.
-          #       (4) Refactoring Rationale: in the baseline the user type
+          #       only by which menu an operator navigated from, a gate either user
+          #       type passes. Narrowing the write to administrators would be a
+          #       behavioural change refusing an operation the reference permits,
+          #       which transformation rule T9 admits only as a documented
+          #       divergence; the rule is nevertheless declared SEPARATELY from the
+          #       read rule in SecurityConfig so that such a decision, if it is
+          #       ever taken, lands where its evidence is written.
+          #       (5) Refactoring Rationale: in the baseline the user type
           #       travelled in the COMMAREA as CDEMO-USER-TYPE, storage the
           #       terminal echoed back on every turn, so the claim of being an
           #       administrator was carried in a field the client held. Here the

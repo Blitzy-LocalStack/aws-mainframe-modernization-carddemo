@@ -70,6 +70,17 @@ class RestAccountContextClientTest {
     private static final long ACCOUNT_ID = 11_111_111_111L;
 
     /**
+     * The character form of {@link #ACCOUNT_ID} the request body carries.
+     *
+     * <p>⚠️ Assumptions: the account context declares its lookup member as digits-only TEXT at the
+     * eleven-character width, so the identifier is rendered before it is sent and this is the value the
+     * outgoing body is asserted on. The number above remains the value the client is CALLED with and the
+     * value the ledger keys its rows by, so both forms are named rather than one being derived from the
+     * other -- which is what keeps this case measuring the rendering rather than restating it.</p>
+     */
+    private static final String ACCOUNT_KEY = "11111111111";
+
+    /**
      * The customer identifier the fixture cross-reference resolves to.
      */
     private static final long CUSTOMER_ID = 100_000_001L;
@@ -333,7 +344,7 @@ class RestAccountContextClientTest {
         //   new path is what proves the value still reaches the callee.
         harness.server().expect(requestTo(ORIGIN + "/api/v1/accounts/lookup"))
                 .andExpect(method(HttpMethod.POST))
-                .andExpect(jsonPath("$.accountId").value(ACCOUNT_ID))
+                .andExpect(jsonPath("$.accountId").value(ACCOUNT_KEY))
                 .andRespond(withSuccess("{\"creditLimit\":\"5000.00\",\"cashCreditLimit\":\"1000.00\","
                         + "\"currentBalance\":\"250.75\"}", MediaType.APPLICATION_JSON));
 
@@ -370,6 +381,19 @@ class RestAccountContextClientTest {
      * earlier assertion was pinning the disclosure in place. What the sentence must still name is WHICH
      * component was missing, because that is what distinguishes a truncated body from an omitted field, and
      * that is asserted instead.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the Javadoc block above was UNTERMINATED -- it ended at the paragraph
+     * above with no closing {@code *&#47;} delimiter -- so the comment ran on and absorbed this method's
+     * {@code @Test} and {@code @DisplayName} annotations along with the whole method body. Braces stayed
+     * balanced, so javac compiled the file and Checkstyle passed it, and the only observable symptom was
+     * that this class reported one test fewer than it declares. Every assertion below was therefore inert:
+     * the
+     * three partial-body outcomes and the diagnostic-disclosure property this case exists to pin were
+     * unasserted for as long as the terminator was missing. The terminator is restored, and the
+     * condition is recorded here rather than silently repaired because it is invisible in a diff of the
+     * method it disables and because a reader who trusts a green build has no other way to learn that
+     * a named case never ran.</p>
+     */
     @Test
     @DisplayName("an account body missing any of the three amounts is unavailable")
     void aPartialAccountBodyIsUnavailable() {

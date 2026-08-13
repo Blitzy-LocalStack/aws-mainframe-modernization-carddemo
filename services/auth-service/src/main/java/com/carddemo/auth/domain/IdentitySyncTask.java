@@ -41,18 +41,51 @@ import org.hibernate.type.SqlTypes;
  *
  * <p>Trade-offs: the status transitions are expressed as methods on this type rather than as a state
  * machine held elsewhere, so an invalid transition is refused at the object that owns the field. The cost
- * is three small methods on an entity; the gain is that no caller can mark a task applied twice or revive
- * a settled one, which is the property the idempotent applier depends on.</p>
+ * is the transitions declared below -- applied, abandoned, and the attempt counter that abandons at its
+ * ceiling -- plus the pending predicate all three share; the gain is that no caller can mark a task
+ * applied twice or revive a settled one, which is the property the idempotent applier depends on.</p>
  */
 @Entity
 @Table(name = "identity_sync_task", schema = "auth")
 public class IdentitySyncTask {
+
+    /**
+     * The status of an intention recorded before the act it compensates, and therefore not yet owed.
+     *
+     * <p>⚠️ Purpose: this is the CREATE path's provisioning guard, and it exists because that path
+     * cannot record its intention in the transaction that carries its data. {@code auth.users.cognito_sub}
+     * is not nullable and only the provider mints the subject, so the account must exist before the row
+     * can be written -- which used to mean nothing was recorded until the create had already failed, and
+     * a process death between the provider call and the insert left a pool account that can authenticate,
+     * holds a group, has no row here, and was recorded nowhere at all.</p>
+     *
+     * <p>⚠️ Assumptions: a task in this state is deliberately INVISIBLE to both drains. Between the
+     * guard's commit and the insert's commit the intention is durable and not yet owed, so a
+     * reconciliation pass that applied it would withdraw the pool account of a create still in flight.
+     * The two paths that know the outcome move it on -- to {@link #STATUS_CANCELLED} when the row was
+     * written or the provider refused the username, and to {@link #STATUS_PENDING} when the create failed
+     * after the account may already exist. Alternatives Considered: leaving the guard pending and having
+     * the pass skip rows younger than a grace period; rejected because a grace period is a guess about how
+     * long a create can take, whereas a state the pass does not select cannot be raced at all.</p>
+     */
+    public static final String STATUS_CLAIMED = "CLAIMED";
 
     /** The status of a task still owed to the provider. */
     public static final String STATUS_PENDING = "PENDING";
 
     /** The status of a task the provider confirmed. */
     public static final String STATUS_APPLIED = "APPLIED";
+
+    /**
+     * The status of an intention closed without a provider call, because it turned out not to be owed.
+     *
+     * <p>⚠️ Assumptions: this is distinct from {@link #STATUS_APPLIED} and the distinction is the reason
+     * it exists. APPLIED means the provider confirmed the change; a guard whose create completed, or whose
+     * provider call was refused because the username was taken, had no provider call at all. Recording
+     * either as APPLIED would put a false event in the one table an operator reads to answer whether a
+     * pool account was withdrawn.</p>
+     */
+    public static final String STATUS_CANCELLED = "CANCELLED";
 
     /** The status of a task that reached the attempt ceiling and awaits an operator. */
     public static final String STATUS_ABANDONED = "ABANDONED";
@@ -182,13 +215,49 @@ public class IdentitySyncTask {
      */
     public IdentitySyncTask(String userId, String operation, String firstName, String lastName,
             String previousUserType, String userType, LocalDateTime recordedAt) {
+        this(userId, operation, firstName, lastName, previousUserType, userType, recordedAt,
+                STATUS_PENDING);
+    }
+
+    /**
+     * Records one intended change in a stated initial state.
+     *
+     * <p>⚠️ Assumptions: the initial state is a PARAMETER on this constructor and defaults to pending on
+     * the one above, because the create path's guard has to be durable BEFORE it is owed. Two states are
+     * admitted here and no others: {@link #STATUS_PENDING} for an intention recorded alongside a committed
+     * change, and {@link #STATUS_CLAIMED} for one recorded ahead of the act it compensates. Admitting a
+     * terminal state would let a caller insert a settled row that no applier ever acted on, which is the
+     * one thing this ledger must not contain.</p>
+     *
+     * @param userId the user the change concerns; must not be {@code null}
+     * @param operation the provider verb owed; must not be {@code null}
+     * @param firstName the given name the provider is to hold, or {@code null} for a withdrawal
+     * @param lastName the family name the provider is to hold, or {@code null} for a withdrawal
+     * @param previousUserType the user type the provider currently holds, or {@code null} when there is no
+     *     group to leave
+     * @param userType the user type the provider is to hold, or {@code null} for a withdrawal
+     * @param recordedAt the instant the intention was recorded; must not be {@code null}
+     * @param initialStatus either {@link #STATUS_PENDING} or {@link #STATUS_CLAIMED}
+     * @throws NullPointerException if {@code userId}, {@code operation}, {@code recordedAt} or
+     *     {@code initialStatus} is {@code null}
+     * @throws IllegalArgumentException if {@code initialStatus} is neither pending nor claimed
+     */
+    public IdentitySyncTask(String userId, String operation, String firstName, String lastName,
+            String previousUserType, String userType, LocalDateTime recordedAt,
+            String initialStatus) {
         this.userId = Objects.requireNonNull(userId, "userId must not be null");
         this.operation = Objects.requireNonNull(operation, "operation must not be null");
         this.firstName = firstName;
         this.lastName = lastName;
         this.previousUserType = previousUserType;
         this.userType = userType;
-        this.status = STATUS_PENDING;
+        Objects.requireNonNull(initialStatus, "initialStatus must not be null");
+        if (!STATUS_PENDING.equals(initialStatus) && !STATUS_CLAIMED.equals(initialStatus)) {
+            throw new IllegalArgumentException("initialStatus must be " + STATUS_PENDING + " or "
+                    + STATUS_CLAIMED + ", but was " + initialStatus
+                    + "; a task inserted in a terminal state would record an outcome no applier reached");
+        }
+        this.status = initialStatus;
         this.attempts = 0;
         this.createdAt = Objects.requireNonNull(recordedAt, "recordedAt must not be null");
     }
@@ -311,6 +380,70 @@ public class IdentitySyncTask {
     }
 
     /**
+     * Reports whether this task is a recorded intention that is not yet owed.
+     *
+     * @return {@code true} while the status is claimed
+     */
+    public boolean isClaimed() {
+        return STATUS_CLAIMED.equals(this.status);
+    }
+
+    /**
+     * Moves a claimed guard into the owed set, so that the drains will apply it.
+     *
+     * <p>⚠️ Purpose: the create path calls this when its own outcome is AMBIGUOUS -- the provider call
+     * failed with a fault rather than a refusal, so the pool account may or may not have been created, or
+     * the row write failed after the account certainly was. In both cases a withdrawal is genuinely owed:
+     * the provider's withdrawal is idempotent, so applying it against an account that was never created
+     * is a no-op, while leaving it claimed would strand an account nothing can reach.</p>
+     *
+     * <p>Assumptions: refused on a task that is not claimed, so the transition cannot revive a settled
+     * guard or re-owe one the create already closed. The instant is not recorded, because nothing has been
+     * settled -- the row is entering the state the drains read, not leaving it.</p>
+     *
+     * @throws IllegalStateException if the task is not claimed
+     */
+    public void markOwed() {
+        if (!isClaimed()) {
+            throw new IllegalStateException("identity sync task " + this.taskId + " is " + this.status
+                    + " and cannot be marked owed; only a claimed guard enters the owed set, so that a"
+                    + " settled task cannot be revived");
+        }
+        this.status = STATUS_PENDING;
+    }
+
+    /**
+     * Closes an intention that turned out not to be owed, without recording a provider call.
+     *
+     * <p>⚠️ Purpose: the create path calls this on the two outcomes where nothing needs withdrawing --
+     * the row was written, so the pool account is legitimately owned by a row; or the provider REFUSED the
+     * username, so this attempt created nothing. Marking either applied would record a provider call that
+     * did not happen, in the one table an operator reads to answer whether an account was withdrawn.</p>
+     *
+     * <p>⚠️ Assumptions: accepted from the claimed state AND from pending, and refused from either
+     * terminal state. Two parties can discover that an intention is not owed, and both need to say so
+     * without claiming a provider call. The path that RECORDED a guard closes it when its create completed
+     * or the provider refused the username; the APPLIER closes a pending withdrawal when a row for that
+     * identifier exists, because a withdrawal is owed only against a pool account no row owns. Refusing the
+     * second would force the applier to record it as APPLIED, which is the false event this state exists to
+     * avoid.</p>
+     *
+     * @param settledAt the instant the intention was closed; must not be {@code null}
+     * @throws NullPointerException if {@code settledAt} is {@code null}
+     * @throws IllegalStateException if the task is already in a terminal state
+     */
+    public void markCancelled(LocalDateTime settledAt) {
+        if (!isClaimed() && !isPending()) {
+            throw new IllegalStateException("identity sync task " + this.taskId + " is " + this.status
+                    + " and cannot be cancelled; a settled task is terminal so that a second applier"
+                    + " cannot revive it");
+        }
+        this.status = STATUS_CANCELLED;
+        this.settledAt = Objects.requireNonNull(settledAt, "settledAt must not be null");
+        this.lastFailureCode = null;
+    }
+
+    /**
      * Marks the task confirmed by the provider.
      *
      * <p>Assumptions: this is refused on a task that is not pending, which is what makes double
@@ -327,6 +460,43 @@ public class IdentitySyncTask {
         this.status = STATUS_APPLIED;
         this.settledAt = Objects.requireNonNull(settledAt, "settledAt must not be null");
         this.lastFailureCode = null;
+    }
+
+    /**
+     * Marks the task no longer owed because the condition it was recorded against did not arise.
+     *
+     * <p>Purpose: a compensating withdrawal is armed BEFORE the pool account it would undo is
+     * provisioned, so that a process death between provisioning and the insert leaves the withdrawal
+     * durably owed. When the create instead SUCCEEDS -- or when the pool refuses to create the account at
+     * all -- that withdrawal must stop being owed, and this is the transition that stops it. Without it
+     * the applier would withdraw the account of a user that was created perfectly well.</p>
+     *
+     * <p>Refactoring Rationale: the status is the existing {@code ABANDONED} one rather than a fourth
+     * value, because "will not be applied" is exactly what that status already means: the ceiling arm
+     * below reaches it for a task whose provider call can never succeed, and an armed compensation whose
+     * condition never arose is likewise a task that will never be applied. A distinct value would have to
+     * be added to the column's own check constraint, to the applier's reader and to every operator query
+     * that partitions the ledger, and it would tell an operator nothing the recorded reason does not.</p>
+     *
+     * <p>Assumptions: the reason is recorded in the failure-code column even though no failure occurred,
+     * and the alternative -- leaving it null -- was rejected because an abandoned row with no reason is
+     * indistinguishable from one abandoned at the ceiling by an operator reading the table. The column is
+     * a STABLE CODE rather than a message everywhere else in this ledger, so the values passed here are
+     * codes too.</p>
+     *
+     * <p>Assumptions: it is refused on a task that is not pending, exactly as the two transitions beside
+     * it are, so an applied withdrawal cannot be rewritten as an abandoned one by a later caller.</p>
+     *
+     * @param reason the stable code recording why the task stopped being owed; must not be {@code null}
+     * @param settledAt the instant the task stopped being owed; must not be {@code null}
+     * @throws NullPointerException if {@code reason} or {@code settledAt} is {@code null}
+     * @throws IllegalStateException if the task is not pending
+     */
+    public void markAbandoned(String reason, LocalDateTime settledAt) {
+        requirePending("abandoned");
+        this.lastFailureCode = Objects.requireNonNull(reason, "reason must not be null");
+        this.settledAt = Objects.requireNonNull(settledAt, "settledAt must not be null");
+        this.status = STATUS_ABANDONED;
     }
 
     /**

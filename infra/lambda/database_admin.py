@@ -148,7 +148,7 @@ CREDENTIAL_SECRETS_RAW = os.environ.get("DB_CREDENTIAL_SECRETS", "").strip()
 #       ``carddemo.credential.<role>``, which PostgreSQL accepts even though its
 #       documentation describes custom options as two segments. Verified against
 #       PostgreSQL 17.10 by replaying the bootstrap script, which sets and reads back
-#       every one of the fifteen names.
+#       every one of the sixteen names.
 _CREDENTIAL_SETTING_PREFIX = "carddemo.credential."
 
 # WHY : Assumptions: the credential document is the shape ``infra/modules/secrets``
@@ -338,7 +338,7 @@ def _credential_secrets() -> dict[str, str]:
     Assumptions: an empty mapping is refused rather than treated as "no credentials to
     publish". A caller that supplies none has misconfigured this function, and accepting
     it would send the bootstrap script into a section that raises for every role -- so
-    the failure would name fifteen roles instead of the one variable that was empty.
+    the failure would name sixteen roles instead of the one variable that was empty.
 
     Assumptions: each value is validated as text before use because it becomes a
     ``SecretId``. A non-string would surface as a client-side type error from botocore
@@ -670,7 +670,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     Notes
     -----
     Assumptions: the response and the log line report COUNTS and never a role name or a
-    credential. A count is enough to tell a fifteen-credential bootstrap from an
+    credential. A count is enough to tell a sixteen-credential bootstrap from an
     eight-credential one, which is the question an operator reading an apply transcript
     actually has; a role list would put the credential inventory in Terraform state,
     because ``aws_lambda_invocation`` stores the function's response there.

@@ -528,8 +528,18 @@ public class OpenApiConfig {
         // Refactoring Rationale: the single account-context read scope this extension named was split into
         //   one scope per operation family, so all three are published rather than the one. Publishing the
         //   withdrawn name would tell a caller to mint a scope no verifier admits.
+        // WHY : ⚠️ Refactoring Rationale: a FIFTH scope joined the list, and it is a narrowing rather than
+        //   a new capability. The three cross-reference addresses answered to one scope, and one of them
+        //   -- the account-keyed lookup -- answers with an UNMASKED primary account number, because its
+        //   consumer writes that value into its ledger row as the row's key. Every holder of the
+        //   cross-reference read scope could therefore provoke that disclosure, including the
+        //   authorization context, which calls the card-keyed form only. The disclosing address now
+        //   demands SCOPE_CARD_XREF_RESOLVE_CARD_NUMBER, which the shared per-caller table grants to the
+        //   transaction context alone. Publishing it here is what lets a caller reading the generated
+        //   document learn that the two are different credentials rather than discovering it as a 403.
         scheme.addExtension(REQUIRED_SCOPE_EXTENSION_NAME,
                 List.of(InternalServiceToken.SCOPE_CARD_XREF_READ,
+                        InternalServiceToken.SCOPE_CARD_XREF_RESOLVE_CARD_NUMBER,
                         InternalServiceToken.SCOPE_ACCOUNT_READ,
                         InternalServiceToken.SCOPE_CUSTOMER_READ,
                         InternalServiceToken.SCOPE_CUSTOMER_MASTER_READ));

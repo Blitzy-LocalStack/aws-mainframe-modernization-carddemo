@@ -18,7 +18,10 @@
 #   app/app-vsam-mq/cbl/COACCT01.cbl (the request/reply account inquiry); and
 #   app/cpy/CVACT01Y.cpy (the 300-byte account record), app/cpy/CVCUS01Y.cpy
 #   (the 500-byte customer record) and app/cpy/CVACT03Y.cpy (the 50-byte card
-#   cross-reference record), from which this module's three tables are derived.
+#   cross-reference record), from which THREE of this module's four tables are
+#   derived. The fourth, account.inquiry_reply_ledger, derives from no copybook: it
+#   is the duplicate-reply claim the inquiry consumer keeps, created by the second
+#   migration named below.
 #
 #   The artifacts this file's keys depend on, stated once here rather than
 #   repeated at every key that names one of them. Every one of them EXISTS, so no
@@ -30,9 +33,16 @@
 #       below: spring.security.oauth2.resourceserver.jwt.issuer-uri, the three
 #       carddemo.security.jwt.* keys, and the two carddemo.security.cognito.*
 #       group names. An absent value fails this module's context refresh.
-#     - db/migration/V1__account.sql, the single Flyway migration this module
-#       owns, creating account.accounts, account.customers and account.card_xref
-#       and the idx_card_xref_account_id index, and creating no schema.
+#     - db/migration/V1__account.sql, the FIRST of the two Flyway migrations this
+#       module owns, creating account.accounts, account.customers and
+#       account.card_xref and the idx_card_xref_account_id index, and creating no
+#       schema.
+#     - db/migration/V2__account_inquiry_reply_ledger.sql, the second, creating
+#       account.inquiry_reply_ledger and idx_inquiry_reply_ledger_claimed_at and
+#       altering nothing that exists. Refactoring Rationale: it is a separate
+#       version rather than an edit to V1 because Flyway checksums an applied
+#       migration and refuses a changed one, so folding it in would have been
+#       unable to reach any database V1 had already run against.
 #     - domain/{Account,Customer,CardXref}.java, the three entities that
 #       migration is checked against at startup; see ddl-auto below.
 #     - openapi/account-api.yaml, the hand-authored OpenAPI 3.1 contract of
@@ -154,8 +164,9 @@
 #   Environment yields: one TLS listener on the port below; one pooled
 #   DataSource whose every connection has its schema search path pinned to
 #   account and requires fully verified TLS; a Flyway run that applies
-#   db/migration/V1__account.sql into that schema before the JPA
-#   EntityManagerFactory is built; a JWT resource-server configuration whose
+#   db/migration/V1__account.sql and then
+#   db/migration/V2__account_inquiry_reply_ledger.sql into that schema, in version
+#   order, before the JPA EntityManagerFactory is built; a JWT resource-server configuration whose
 #   decoder additionally enforces the three Cognito claim checks; an SQS client
 #   serving service/InquiryMessageListener.java, which consumes the request queue
 #   named below and publishes its fixed-width reply to the reply queue; an
@@ -164,8 +175,9 @@
 #   openapi/account-api.yaml; and the base log levels the two profiles adjust.
 #
 # WHY : Refactoring Rationale: three clauses above carried a "once ... lands"
-#   qualifier and all three have landed. The migration V1__account.sql exists and
-#   creates the three tables this schema owns; the contract document exists and
+#   qualifier and all three have landed. Both migrations exist -- V1__account.sql
+#   creating the three copybook-derived tables and
+#   V2__account_inquiry_reply_ledger.sql creating the reply ledger, four in total; the contract document exists and
 #   publishes eleven operations; and the queue listener exists, so the SQS client
 #   is not merely "able to serve" one. The qualifiers are removed rather than
 #   left as harmless surplus, because each of them told a reader that a startup
@@ -205,8 +217,9 @@
 #      after connection-timeout and the context fails to start, rather than the
 #      task going healthy and then failing every read it is sent.
 #   5. Migration that cannot apply. FlywayException aborts startup. The three
-#      realistic causes are a checksum mismatch on an already-applied
-#      V1__account.sql, the migration role lacking CREATE on the account
+#      realistic causes are a checksum mismatch on an already-applied migration --
+#      either of the two, and V2 is the one a reader is likelier to have edited --
+#      the migration role lacking CREATE on the account
 #      schema, and an account schema that already holds objects but has no
 #      Flyway history table, which fails rather than silently baselining.
 #   6. Absent or unreachable issuer. The resource server resolves the issuer's
@@ -680,8 +693,10 @@ spring:
 
       # Assumptions: app/cpy/CVACT01Y.cpy, app/cpy/CVCUS01Y.cpy and
       #   app/cpy/CVACT03Y.cpy are the three records this bounded context owns, so
-      #   account is its single schema and holds exactly three tables. Cross-schema
-      #   access is not part of this service's contract. The concrete consequence
+      #   account is its single schema and holds exactly FOUR tables: those three,
+      #   plus account.inquiry_reply_ledger, which owns no record and exists so a
+      #   redelivered inquiry is answered once. Cross-schema access is not part of
+      #   this service's contract. The concrete consequence
       #   of pinning the search path is that an unqualified table name in a query
       #   or a migration cannot silently resolve into another bounded context's
       #   schema; it either finds the object in account or it fails.
@@ -756,10 +771,15 @@ spring:
       leak-detection-threshold: 60000
 
   # -----------------------------------------------------------------------------
-  # Assumptions: (1) this module maps three entities onto three tables in one
-  #       schema, so the settings here are about boundaries rather than about
-  #       mapping breadth; (2) the DDL decision is the load-bearing one and is
-  #       recorded on ddl-auto below.
+  # Assumptions: (1) this module maps three entities onto three of its schema's four
+  #       tables, so the settings here are about boundaries rather than about mapping
+  #       breadth. The fourth, account.inquiry_reply_ledger, is deliberately mapped by
+  #       NO entity: its claim is an INSERT ... ON CONFLICT DO NOTHING and its
+  #       retirement a guarded UPDATE, neither of which a JPA write expresses, so
+  #       repository/InquiryReplyLedger.java issues them as native statements.
+  #       Trade-offs: that table is therefore outside what ddl-auto validate checks,
+  #       which is recorded again on that key rather than only here; (2) the DDL
+  #       decision is the load-bearing one and is recorded on ddl-auto below.
   # -----------------------------------------------------------------------------
   jpa:
 
@@ -778,7 +798,11 @@ spring:
       # Alternatives Considered: `none`, which also emits no DDL and was the
       #   previous setting here. Rejected because it additionally validates
       #   NOTHING: the three entities and V1__account.sql are required to agree
-      #   column for column, and under `none` a member naming a column the
+      #   column for column -- and only those three, because account.inquiry_reply_ledger
+      #   is mapped by no entity, so nothing about it is asserted at startup and its
+      #   agreement with V2__account_inquiry_reply_ledger.sql is asserted by
+      #   InquiryReplyLedgerIT against a real engine instead. Under `none` a member
+      #   naming a column the
       #   migration does not declare starts cleanly and fails later on the first
       #   query that touches it. `validate` turns that agreement into a startup
       #   assertion instead, which is why Flyway is ordered before the
@@ -820,8 +844,8 @@ spring:
 
   # -----------------------------------------------------------------------------
   # Assumptions: (1) schema ownership and code ownership ship in the same
-  #       deployable, so the three tables and the entities that map them cannot be
-  #       applied out of step; (2) three of the settings below - create-schemas,
+  #       deployable, so the four tables, the two migrations that create them and the
+  #       entities that map three of them cannot be applied out of step; (2) three of the settings below - create-schemas,
   #       baseline-on-migrate and clean-disabled - decide what happens when the
   #       schema is not in the state expected, and none of them papers over it, so
   #       each records its own consequence rather than leaving a reader to infer it
@@ -843,8 +867,10 @@ spring:
     locations: classpath:db/migration
 
     # Assumptions: account is the only schema this module touches, and it holds
-    #   exactly three tables, because app/cpy/CVACT01Y.cpy, app/cpy/CVCUS01Y.cpy
-    #   and app/cpy/CVACT03Y.cpy are the only records this bounded context owns.
+    #   exactly four tables. Three are copybook-derived, because app/cpy/CVACT01Y.cpy,
+    #   app/cpy/CVCUS01Y.cpy and app/cpy/CVACT03Y.cpy are the only records this bounded
+    #   context owns; the fourth, account.inquiry_reply_ledger, derives from no record
+    #   and is created by the second migration.
     #   The two settings below therefore name the same schema while doing
     #   different jobs, and both are stated rather than one being left to follow
     #   the other: the first is the set Flyway is permitted to manage, and the

@@ -239,8 +239,11 @@ public final class FixedWidthCodec {
             CopybookLayout.FieldSpec field = declaredFields.get(index);
             Object value = decodeField(record, field, charset);
 
-            // WHY : Trade-offs: blank registered padding is omitted so consumers do not carry inert
-            //       FILLER values, while nonblank or explicitly valued filler remains content. The
+            // WHY : Trade-offs: INERT registered padding is omitted so consumers do not carry a span
+            //       that holds nothing, while filler carrying printable content -- a VALUE clause, or
+            //       the ASCII zeros the reference data pads two records with -- remains content. Inert
+            //       means the blank a MOVE leaves or the low value an untouched record area holds; both
+            //       states are measured in the committed expectations and neither is a domain value. The
             //       omitted bytes are restored during encode, preserving the physical record width.
             if (!isDroppablePadding(spec, field, index, value)) {
                 // WHY : Assumptions: sensitive marks diagnostic handling only. The codec must retain
@@ -913,7 +916,7 @@ public final class FixedWidthCodec {
             CopybookLayout.FieldSpec field, int index, Object value) {
         return isPaddingDescriptor(spec, field, index)
                 && value instanceof String text
-                && isBlank(text);
+                && isInert(text);
     }
 
     /**
@@ -970,6 +973,55 @@ public final class FixedWidthCodec {
     private static boolean isBlank(String text) {
         for (int index = 0; index < text.length(); index++) {
             if (text.charAt(index) != ' ') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Reports whether a padding span holds only bytes no program ever wrote into it.
+     *
+     * <p><b>Purpose.</b> A registered trailing pad is dropped from a decode when it is INERT, and a span
+     * is inert in exactly two states: the blank a {@code MOVE} leaves when it pads an alphanumeric
+     * receiver, and the low value an untouched record area holds when no statement names the item at all.
+     * Both mean "this span carries nothing"; neither is a domain value a consumer should have to carry.</p>
+     *
+     * <p>Assumptions: the second state is measured rather than supposed, and it is the ordinary case for
+     * two records this migration writes. The trailing pad of every committed transaction expectation --
+     * {@code tests/golden/posting/}{@code *}{@code /tranfile.expected} and
+     * {@code tests/golden/interest/}{@code *}{@code /transact.expected} -- holds twenty low values,
+     * because {@code app/cbl/CBTRN02C.cbl:426-438} and {@code app/cbl/CBACT04C.cbl:482-498} each populate
+     * their record's mapped fields and neither names {@code FILLER}; and
+     * {@code tests/golden/posting/zero_balance/tcatbal.expected} holds twenty-two, written by the create
+     * arm over a record area {@code INITIALIZE} does not reach.</p>
+     *
+     * <p>Refactoring Rationale: the drop tested for the blank alone, so a low-value pad was retained as
+     * content. That was invisible while every encoder rebuilt a dropped pad AS blanks -- no image reaching
+     * a decode carried a low-value pad. It stopped being invisible when the two mappers whose records
+     * measure low values began emitting them: a decode of their own output then returned an extra
+     * {@code FILLER} entry, contradicting the mapper package's stated contract that filler is dropped on
+     * decode, and pushing an inert span into every consumer of a decoded map.</p>
+     *
+     * <p>Alternatives Considered: treating a low-value pad as content on the ground that low values and
+     * blanks are two distinct states -- which they genuinely are, and which
+     * {@code app/cpy/CVCRD01Y.cpy:30} relies on with its {@code 88 CCARD-RETURN-MSG-OFF VALUE LOW-VALUES}
+     * condition. Rejected for PADDING specifically, and the distinction is the field's identity rather
+     * than its bytes: that condition is attached to a named {@code PIC X(75)} message field, which this
+     * method is never reached for, because the drop applies only to a registered pad descriptor whose name
+     * is {@code FILLER} or ends in {@code -FILLER}. A pad has no {@code 88} level and no reader, so the
+     * two states cannot mean two things in it. A pad holding printable content, such as the report
+     * record's {@code VALUE} clauses or the ASCII zeros the reference data carries, remains content and is
+     * still retained.</p>
+     *
+     * @param text the decoded characters of the padding span; never {@code null}
+     * @return {@code true} when every character is either the blank or the low value, and {@code false}
+     *     as soon as one is neither
+     */
+    private static boolean isInert(String text) {
+        for (int index = 0; index < text.length(); index++) {
+            char candidate = text.charAt(index);
+            if (candidate != ' ' && candidate != '\0') {
                 return false;
             }
         }

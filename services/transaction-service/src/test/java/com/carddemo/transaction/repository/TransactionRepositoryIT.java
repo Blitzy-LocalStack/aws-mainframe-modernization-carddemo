@@ -365,6 +365,36 @@ class TransactionRepositoryIT {
      */
     private static final String TRAN_ID_LATE_ARRIVAL = "0000000000683520";
 
+    /**
+     * The accrual-shaped identifier of the discriminating pair, carrying hyphens.
+     *
+     * <p>Assumptions: this is the shape the interest accrual really stores, not an invented one.
+     * {@code app/cbl/CBACT04C.cbl} lines 476 to 480 concatenate the ten-character business-date
+     * token into {@code TRAN-ID} with {@code DELIMITED BY SIZE}, so the token contributes its raw
+     * bytes, and the migrated token is an ISO date -- so every accrual run stores identifiers of
+     * exactly this form beside all-digit posted ones.
+     *
+     * <p>Assumptions: it carries the SAME date as {@link #TRAN_ID_POSTED_SAME_DAY}, and that is the
+     * whole reason the pair discriminates. A byte comparison reaches the hyphen at position five,
+     * whose code point is below every digit's, and orders this value FIRST. A collation that gives
+     * punctuation no primary weight compares the remaining digits, finds this value one digit
+     * shorter and higher at the position where they part, and orders it LAST. Two identifiers
+     * carrying different dates would agree under both orders and prove nothing.
+     */
+    private static final String TRAN_ID_ACCRUED_HYPHENATED = "2022-07-18000001";
+
+    /** The all-digit posted identifier of the discriminating pair, on the same date. */
+    private static final String TRAN_ID_POSTED_SAME_DAY = "2022071800000001";
+
+    /**
+     * A punctuation-shifted collation, declared by the case that needs it rather than assumed.
+     *
+     * <p>Assumptions: the pinned engine ships the provider that can express punctuation weighting
+     * but registers no collation using it, so the case has to create one. It is schema-qualified
+     * into {@code ledger} because that is the only schema this module's migration owns.
+     */
+    private static final String SHIFTED_COLLATION = "ledger.carddemo_shifted_punctuation";
+
     /** The second identifier of the four-row card-ordered fixture. */
     private static final String TRAN_ID_SECOND = "0000000000683530";
 
@@ -373,6 +403,51 @@ class TransactionRepositoryIT {
 
     /** The fourth identifier of the four-row card-ordered fixture. */
     private static final String TRAN_ID_FOURTH = "0000000000683570";
+
+    /**
+     * An accrual identifier carrying the separated business-date token, so it contains a hyphen.
+     *
+     * <p>Assumptions: this shape is stored content rather than a contrivance.
+     * {@code app/cbl/CBACT04C.cbl} lines 476 to 480 concatenate the ten-character parameter token
+     * verbatim into the identifier with no normalisation, and bytes 1 to 16 of
+     * {@code tests/golden/interest/happy_path/transact.expected} are {@code 2024-01-15000001}. The
+     * hyphen is the character a byte comparison and a linguistic comparison disagree about, which is
+     * what makes the collation pin observable at all.</p>
+     */
+    private static final String ACCRUAL_ID_HYPHENATED = "2022-07-18000001";
+
+    /** The accrual identifier that immediately follows it, so the pair brackets a page boundary. */
+    private static final String ACCRUAL_ID_HYPHENATED_NEXT = "2022-07-18000002";
+
+    /**
+     * The same day's accrual identifier under the COMPACT token, so it carries no hyphen.
+     *
+     * <p>Assumptions: this is the identifier whose POSITION moves between the two comparisons, and it
+     * is the reason the fixture discriminates. {@code app/jcl/INTCALC.jcl} line 22 passes
+     * {@code PARM='2022071800'}, so both token layouts are committed and both reach this column.
+     * Byte-wise the hyphen (0x2D) precedes every digit, so this value sorts AFTER both hyphenated
+     * ones; under a collation that gives punctuation no primary weight it sorts BEFORE them.</p>
+     */
+    private static final String ACCRUAL_ID_COMPACT = "2022071800000001";
+
+    /**
+     * The file name of the migration that pins byte collation on this schema's ordering-critical columns.
+     *
+     * <p>Assumptions: the name is held in ONE constant rather than repeated in each case that reads the
+     * history row, because it is the one fact here that changes when the migration is renumbered. A case
+     * repeating the literal would keep passing against a renamed file only until the history row was
+     * read, and would then fail somewhere that says nothing about what changed.</p>
+     */
+    private static final String BYTEWISE_COLLATION_MIGRATION = "V3__ledger_bytewise_collation.sql";
+
+    /**
+     * The unqualified name of the collation the discriminating half of the ordering case declares.
+     *
+     * <p>Assumptions: it is created inside the case rather than by the migration or the harness,
+     * because it exists only to prove the fixture can distinguish two orders and must never become
+     * something the schema offers a query.</p>
+     */
+    private static final String LINGUISTIC_COLLATION = "carddemo_shifted_punctuation";
 
     /** The repository under test. */
     @Autowired
@@ -625,6 +700,71 @@ class TransactionRepositoryIT {
     }
 
     /**
+     * Confirms the identifier column carries the byte collation and orders hyphenated keys first.
+     *
+     * <p>This pins the ordering contract of {@code app/jcl/COMBTRAN.jcl} line 28,
+     * {@code TRAN-ID,1,16,CH}, ascending at line 30 -- {@code CH} being a byte-wise character
+     * comparison with no locale involved. Every migrated ordered read over this column is a derived
+     * or JPQL query naming an {@code ORDER BY} and no {@code COLLATE} clause, so the order they get
+     * is the COLUMN's, which is why the contract is pinned on the column and asserted here rather
+     * than restated in each query.
+     *
+     * <p>Assumptions: the first assertion reads the collation from the engine's own catalogue rather
+     * than inferring it from an ordering, so it fails if a future edit drops the clause from
+     * {@code V1__ledger.sql} even on a cluster whose default collation happens to agree with bytes.
+     *
+     * <p>Assumptions: the second and third assertions are a matched pair and neither stands alone.
+     * The second orders by the column naming no collation and requires the hyphenated identifier
+     * first; the third orders the same two rows under a punctuation-shifted collation and requires
+     * the OPPOSITE order. Without the third, the second would hold on any cluster whose default
+     * collation is byte-ordered and would therefore be silent about the pin it exists to check.
+     *
+     * <p>Assumptions: the collation is created inside a transaction so that it COMMITS. This
+     * module's test datasource leaves auto-commit off, so a statement issued outside a transaction
+     * is executed and then discarded when the connection returns to the pool, and because this
+     * engine keeps schema changes transactional the collation would simply not exist by the time
+     * the next statement looked for it.
+     */
+    @Test
+    void theIdentifierColumnCarriesTheByteCollationAndOrdersHyphenatedKeysFirst() {
+        this.persistAndDetach(
+                this.posted(TRAN_ID_ACCRUED_HYPHENATED, SEED_CARD, SEED_AMOUNT_POSITIVE, RANGE_START),
+                this.posted(TRAN_ID_POSTED_SAME_DAY, SEED_CARD, SEED_AMOUNT_POSITIVE, RANGE_START));
+        this.transactionTemplate.executeWithoutResult(status ->
+                this.entityManager.createNativeQuery("create collation if not exists "
+                        + SHIFTED_COLLATION
+                        + " (provider = icu, locale = 'en-u-ka-shifted', deterministic = false)")
+                        .executeUpdate());
+
+        Object declaredCollation = this.singleNativeResult(
+                "select c.collname from pg_attribute a"
+                        + " join pg_class t on t.oid = a.attrelid"
+                        + " join pg_namespace n on n.oid = t.relnamespace"
+                        + " join pg_collation c on c.oid = a.attcollation"
+                        + " where n.nspname = 'ledger' and t.relname = 'transactions'"
+                        + " and a.attname = 'transaction_id'");
+        List<String> columnOrder = this.nativeStringColumn(
+                "select transaction_id from ledger.transactions order by transaction_id");
+        List<String> shiftedOrder = this.nativeStringColumn(
+                "select transaction_id from ledger.transactions"
+                        + " order by transaction_id collate " + SHIFTED_COLLATION);
+
+        assertThat(String.valueOf(declaredCollation))
+                .withFailMessage("ledger.transactions.transaction_id must be declared COLLATE \"C\";"
+                        + " the collation note at the foot of V1__ledger.sql records why, and every"
+                        + " ordered read over this column depends on it")
+                .isEqualTo("C");
+        assertThat(columnOrder)
+                .containsExactly(TRAN_ID_ACCRUED_HYPHENATED, TRAN_ID_POSTED_SAME_DAY);
+        assertThat(shiftedOrder)
+                .withFailMessage("the seeded pair no longer distinguishes byte order from a"
+                        + " punctuation-shifted order, so the assertion above it is no longer"
+                        + " checking the collation pin; restore two identifiers carrying the same"
+                        + " date, one with hyphens and one without")
+                .containsExactly(TRAN_ID_POSTED_SAME_DAY, TRAN_ID_ACCRUED_HYPHENATED);
+    }
+
+    /**
      * Confirms the allocator advances by exactly one per call and ignores what the table holds.
      *
      * <p>This pins the migrated identifier claim that replaces the highest-key derivation of
@@ -693,6 +833,191 @@ class TransactionRepositoryIT {
                         + " and sequence_name = 'transaction_id_seq'");
 
         assertThat(maximum).hasToString("9999999999999999");
+    }
+
+    /**
+     * Confirms the bytewise collation migration pinned all four ordering-critical columns and the key index.
+     *
+     * <p>⚠️ Purpose: the ordered reads of this schema have to reproduce DFSORT's {@code CH} format,
+     * which is a byte-by-byte character comparison -- {@code app/jcl/COMBTRAN.jcl} declares
+     * {@code TRAN-ID,1,16,CH} at its line 28 and orders by it ascending at line 30, and
+     * {@code app/jcl/TRANREPT.jcl} orders by the card field ascending at line 46. A character
+     * column's comparison resolves through its collation, and until
+     * {@code V3__ledger_bytewise_collation.sql} these four columns declared none, so the order was
+     * whatever the database they were created in defaulted to. Review found the batch parity gate
+     * passing for exactly that reason: its container's initdb default happens to be bytewise, while a
+     * managed database created with a linguistic default would have reordered precisely the
+     * identifiers the accrual pass produces -- {@code app/cbl/CBACT04C.cbl:476-480} concatenates its
+     * ten-character token into the key unchanged, and one committed layout of that token carries
+     * hyphens, to which a linguistic collation gives no primary weight.</p>
+     *
+     * <p>Assumptions: the collation is read from {@code information_schema.columns}, whose
+     * {@code collation_name} is NULL for a column that merely INHERITS the database default and names
+     * the collation for a column that pins one. That distinction is why the catalogue is read rather
+     * than an ordering compared: a comparison of two orderings passes on any engine whose default
+     * already agrees with the pin, which is the state that let this defect stand.</p>
+     *
+     * <p>Assumptions: all four columns are asserted in one case rather than one case each, because
+     * they are pinned by one migration for one reason and a partial application is the failure this
+     * guards -- three pinned columns and one inherited would leave the composite category-balance
+     * order half bytewise, which is harder to diagnose than none of them being pinned.</p>
+     *
+     * <p>⚠️ Assumptions: the PRIMARY-KEY INDEX's own collation is asserted beside the column's, because
+     * they are separate catalogue facts. A column pinned without its index rebuilt would still order
+     * correctly and would do it by sorting the whole relation on every keyset page, which is exactly the
+     * property this service's keyset gate exists to protect -- so the index assertion catches a
+     * correctness-preserving performance regression that no ordering assertion can see.</p>
+     *
+     * <p>⚠️ Assumptions: reading the catalogue rather than comparing two orderings is what makes this
+     * case fail on the build host when the pin is removed, and the pinned image is precisely why. This
+     * suite's PostgreSQL image runs musl, which implements no locale-specific collation, so even its
+     * {@code en_US.utf8} compares byte-wise and an ordering assertion would pass with no pin at all.
+     * Amazon Aurora PostgreSQL runs glibc and does not. The catalogue is the only witness that
+     * distinguishes the two deployments.</p>
+     *
+     * <p>Assumptions: the descriptive columns are asserted NOT to be pinned, and that half is
+     * deliberate rather than padding. {@code description} and {@code merchant_name} hold text a person
+     * reads in a sorted list, where a locale-aware order is the correct one; a future edit that pinned
+     * the whole table "for consistency" would silently change how a customer-facing list sorts, and
+     * this is the assertion that would object.</p>
+     */
+    @Test
+    void theBytewiseCollationMigrationPinsEveryOrderingCriticalColumnAndTheKeyIndex() {
+        Object script = this.singleNativeResult(
+                "select script from flyway_schema_history"
+                        + " where success = true and version = '3'");
+
+        assertThat(script).isEqualTo(BYTEWISE_COLLATION_MIGRATION);
+
+        List<String> pinned = this.nativeStringColumn(
+                "select table_name || '.' || column_name || '=' || coalesce(collation_name, 'default')"
+                        + " from information_schema.columns"
+                        + " where table_schema = 'ledger'"
+                        + " and (table_name, column_name) in ("
+                        + "   ('transactions', 'transaction_id'),"
+                        + "   ('transactions', 'card_num'),"
+                        + "   ('transaction_category_balances', 'type_cd'),"
+                        + "   ('transaction_category_balances', 'category_cd'))"
+                        + " order by table_name, column_name");
+
+        assertThat(pinned).containsExactly(
+                "transaction_category_balances.category_cd=C",
+                "transaction_category_balances.type_cd=C",
+                "transactions.card_num=C",
+                "transactions.transaction_id=C");
+
+        List<String> descriptive = this.nativeStringColumn(
+                "select column_name || '=' || coalesce(collation_name, 'default')"
+                        + " from information_schema.columns"
+                        + " where table_schema = 'ledger' and table_name = 'transactions'"
+                        + " and column_name in ('description', 'merchant_name')"
+                        + " order by column_name");
+
+        assertThat(descriptive)
+                .as("a human-facing column must keep the locale-aware order of the database default")
+                .containsExactly("description=default", "merchant_name=default");
+
+        Object indexCollation = this.singleNativeResult(
+                "select co.collname from pg_index x"
+                        + " join pg_class i on i.oid = x.indexrelid"
+                        // WHY : Assumptions: the subscript is ZERO, because indcollation is an
+                        //   oidvector and PostgreSQL indexes that type from 0 rather than from 1
+                        //   like an ordinary array. Measured: subscript 1 selects nothing at all on a
+                        //   single-column index and the query returns no row, which is a failure about
+                        //   the catalogue's indexing base and not about the collation.
+                        + " join pg_collation co on co.oid = x.indcollation[0]"
+                        + " where x.indrelid = 'ledger.transactions'::regclass"
+                        + " and i.relname = 'pk_transactions'");
+
+        assertThat(indexCollation)
+                .as("the primary-key index must carry the same collation as the column, or the keyset"
+                        + " finders cannot use it and each page becomes a sort")
+                .hasToString("C");
+    }
+
+    /**
+     * Confirms the keyset paths order and step byte-wise over identifiers that carry a hyphen.
+     *
+     * <p>Exercises the PRODUCTION finders rather than a probe query, over identifiers on which a
+     * byte-wise order and a linguistic one genuinely disagree. Such identifiers are real stored
+     * content, not a contrivance: {@code app/cbl/CBACT04C.cbl} lines 476 to 480 compose an accrual
+     * identifier with {@code STRING PARM-DATE, WS-TRANID-SUFFIX DELIMITED BY SIZE INTO TRAN-ID}, which
+     * copies the ten-character business-date token verbatim, and bytes 1 to 16 of
+     * {@code tests/golden/interest/happy_path/transact.expected} are {@code 2024-01-15000001}.</p>
+     *
+     * <p>Assumptions: the expected sequence is COMPUTED from the raw bytes here rather than read back
+     * from a second query, so the assertion states the reference's contract independently of whatever
+     * the engine's comparison happens to be. Alternatives Considered: comparing the finders' output
+     * against {@code ORDER BY transaction_id} issued directly; rejected because both readings resolve
+     * through the same collation and would agree under every collation, leaving the claim unfalsifiable.
+     * </p>
+     *
+     * <p>Assumptions: the fixture's discriminating power is asserted in the same case rather than in a
+     * sibling, because the two halves are worthless apart -- an ordering claim over identifiers that
+     * order identically under both comparisons holds vacuously. A punctuation-shifted collation is
+     * declared and the same rows are ordered under it; if that order ever equals the byte-wise one, the
+     * identifiers stopped discriminating and this case says so instead of passing.</p>
+     */
+    @Test
+    void theKeysetPathsOrderByteWiseOverIdentifiersCarryingAHyphen() {
+        this.persistAndDetach(
+                this.posted(ACCRUAL_ID_HYPHENATED, SEED_CARD, SEED_AMOUNT_POSITIVE, RANGE_START),
+                this.posted(ACCRUAL_ID_HYPHENATED_NEXT, SEED_CARD, SEED_AMOUNT_POSITIVE, RANGE_START),
+                this.posted(ACCRUAL_ID_COMPACT, SEED_CARD, SEED_AMOUNT_POSITIVE, RANGE_START),
+                this.posted(TRAN_ID_FIRST, SEED_CARD_LEADING_ZERO, SEED_AMOUNT_NEGATIVE, RANGE_START));
+
+        List<String> byteWiseExpected = byteWiseAscending(List.of(
+                ACCRUAL_ID_HYPHENATED, ACCRUAL_ID_HYPHENATED_NEXT, ACCRUAL_ID_COMPACT, TRAN_ID_FIRST));
+
+        List<String> opening = this.transactions
+                .findAllByOrderByTranIdAsc(Limit.of(byteWiseExpected.size()))
+                .stream().map(Transaction::getTranId).toList();
+
+        assertThat(opening).containsExactlyElementsOf(byteWiseExpected);
+
+        // WHY : Assumptions: the cursor is the SECOND byte-wise row, so the forward step has to place
+        //       the hyphenated identifiers relative to the compact one rather than merely return
+        //       whatever follows a row at the extreme. Under a punctuation-shifted comparison the
+        //       compact identifier sorts BEFORE both hyphenated ones, so a strict `>` resolved through
+        //       that collation returns a different remainder -- which is exactly the skipped-or-repeated
+        //       page the keyset walk must not produce.
+        List<String> forward = this.transactions
+                .findByTranIdGreaterThanOrderByTranIdAsc(
+                        byteWiseExpected.get(1), Limit.of(byteWiseExpected.size()))
+                .stream().map(Transaction::getTranId).toList();
+
+        assertThat(forward)
+                .containsExactlyElementsOf(byteWiseExpected.subList(2, byteWiseExpected.size()));
+
+        List<String> backward = this.transactions
+                .findByTranIdLessThanOrderByTranIdDesc(
+                        byteWiseExpected.get(2), Limit.of(byteWiseExpected.size()))
+                .stream().map(Transaction::getTranId).toList();
+
+        assertThat(backward)
+                .containsExactlyElementsOf(
+                        byteWiseExpected.subList(0, 2).reversed());
+
+        // WHY : Assumptions: the collation is declared here and not assumed to exist. The pinned image
+        //       ships the provider that can express punctuation weighting but registers no collation
+        //       using it, so the case declares one; it is non-deterministic because a shifted weighting
+        //       can rank two distinct strings equal at every level, which a deterministic collation may
+        //       not do.
+        this.transactionTemplate.executeWithoutResult(status ->
+                this.entityManager.createNativeQuery(
+                        "create collation if not exists ledger." + LINGUISTIC_COLLATION
+                                + " (provider = icu, locale = 'en-u-ka-shifted',"
+                                + " deterministic = false)").executeUpdate());
+
+        List<String> linguistic = this.nativeStringColumn(
+                "select transaction_id from ledger.transactions"
+                        + " order by transaction_id collate ledger." + LINGUISTIC_COLLATION);
+
+        assertThat(linguistic)
+                .as("the seeded identifiers no longer distinguish a byte-wise order from a linguistic"
+                        + " one, so the ordering contract of app/jcl/COMBTRAN.jcl:28 is no longer being"
+                        + " checked; restore an identifier carrying a hyphen where the two disagree")
+                .isNotEqualTo(byteWiseExpected);
     }
 
     /**
@@ -1272,6 +1597,111 @@ class TransactionRepositoryIT {
                 "Purchase at Abshire-Lowe", amount, 800000000L,
                 "Abshire-Lowe", "North Enoshaven", "72112     ", cardNum,
                 SEED_ORIG_TS, procTs);
+    }
+
+    /**
+     * The ledger key is collated byte-wise in the schema this service's own migrations produce.
+     *
+     * <p>⚠️ Purpose: this asserts the OUTCOME of
+     * {@code db/migration/V3__ledger_bytewise_collation.sql} in the module that authors it. The
+     * migration applying without error is not the same claim: Flyway would report success for a
+     * migration whose {@code ALTER} had been edited away, and every case in this class would still pass,
+     * because nothing else here depends on how the key collates. Reading the catalogue is what makes the
+     * ordering contract fail loudly if the declaration is ever lost.
+     *
+     * <p>⚠️ Assumptions: the contract being pinned is the reference sort at
+     * {@code app/jcl/COMBTRAN.jcl:28-30}, {@code TRAN-ID,1,16,CH} ascending — a BYTE comparison — and the
+     * byte-ordered VSAM index the list screen pages through at {@code app/cbl/COTRN00C.cbl:595-664}. The
+     * six keyset browse methods on {@link TransactionRepository} carry no {@code COLLATE} clause of their
+     * own by design: they inherit the column's collation, so this one assertion covers all of them.
+     *
+     * <p>⚠️ Assumptions: the collation is read from {@code pg_attribute.attcollation} and NOT from an
+     * index definition. Once a column carries a collation, an index over it no longer prints a
+     * {@code COLLATE} clause, because the index collation equals the column's — measured directly
+     * against PostgreSQL 17.10 — so an index-text assertion would fail on a correct schema and pass on
+     * one where only an index had been collated.
+     *
+     * <p>⚠️ Refactoring Rationale: this case asserted {@code card_num} to be UNCOLLATED, on the ground
+     * that "collating the table would silently reorder the card-ordered access path as well". That
+     * assertion is WITHDRAWN and the column is now asserted pinned, because the premise is false against
+     * the reference. {@code app/jcl/TRANREPT.jcl:41} declares that access path's sort symbol as
+     * {@code TRAN-CARD-NUM,263,16,ZD} -- a ZONED-DECIMAL, i.e. numeric, comparison -- over a field that
+     * is sixteen unsigned digits in every row. For fixed-width digit strings a numeric comparison, an
+     * unsigned-byte comparison and a linguistic comparison all agree, so pinning the column cannot
+     * reorder that path at all; what pinning removes is the path's dependence on whatever collation the
+     * deploying engine defaults to. The property this case was reaching for -- that the pin is targeted
+     * rather than applied to the whole table -- survives, and is asserted where it actually bites, on the
+     * descriptive columns a person reads in a sorted list.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    void theLedgerKeyIsCollatedByteWise() {
+        assertThat(collationOfLedgerColumn("transaction_id"))
+                .as("V3 must leave the key collated \"C\", or every ordered read of it becomes a"
+                        + " linguistic order and the combine step stops reproducing"
+                        + " app/jcl/COMBTRAN.jcl:28-30")
+                .isEqualTo("C");
+        assertThat(collationOfLedgerColumn("card_num"))
+                .as("the card-ordered path's reference sort is ZD at app/jcl/TRANREPT.jcl:41, which a"
+                        + " byte comparison reproduces exactly for fixed-width digits, so the pin makes"
+                        + " that path independent of the engine default rather than reordering it")
+                .isEqualTo("C");
+    }
+
+    /**
+     * Reads the collation the engine holds for one column of {@code ledger.transactions}.
+     *
+     * <p>Assumptions: the aliases are abbreviations rather than the words they stand for, because
+     * {@code COLLATION} and {@code SCHEMA} are reserved words in this engine's grammar and using either
+     * as an unquoted alias is refused with a bare {@code syntax error at or near "."}.
+     *
+     * @param columnName the column to inspect; must name a column of {@code ledger.transactions}
+     * @return the collation name the catalogue holds, or the literal {@code default} when the column
+     *     carries none of its own and therefore inherits the database's
+     */
+    private String collationOfLedgerColumn(String columnName) {
+        return String.valueOf(singleNativeResult(
+                "SELECT coalesce(coll.collname, 'default')"
+                        + " FROM pg_attribute att"
+                        + " JOIN pg_class rel ON rel.oid = att.attrelid"
+                        + " JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace"
+                        + " LEFT JOIN pg_collation coll ON coll.oid = att.attcollation"
+                        + " WHERE nsp.nspname = 'ledger' AND rel.relname = 'transactions'"
+                        + " AND att.attname = '" + columnName + "'"));
+    }
+
+    /**
+     * Sorts identifiers the way {@code app/jcl/COMBTRAN.jcl}'s {@code CH} sort format does.
+     *
+     * <p>Assumptions: the comparison is over UNSIGNED byte values, position by position, shorter value
+     * first on a common prefix -- which is what a character sort format does on the reference platform
+     * and what {@code COLLATE "C"} does here. Java's own {@code String} comparison compares UTF-16 code
+     * units, which agrees with this for every character these identifiers can contain but stops
+     * agreeing above U+007F, so the bytes are compared explicitly rather than relying on that overlap.
+     * </p>
+     *
+     * <p>Alternatives Considered: {@code Comparator.naturalOrder()} on the strings, which is shorter.
+     * Rejected because it would state the expectation in terms of a Java library ordering rather than
+     * in terms of the bytes the reference sorts, and the point of this expectation is that it is
+     * derived from the reference's contract and not from the platform running the test.</p>
+     *
+     * <p>Assumptions: the two platform types are named in FULL rather than imported, matching the
+     * fully-qualified {@code java.util.Comparator} already used above. That keeps every declaration
+     * line in this file at the line number two fixture READMEs cite for {@link #FIXED_CLOCK}; an added
+     * import would displace them all by one and silently falsify both citations.</p>
+     *
+     * @param identifiers the identifiers to order, in any order; must not be {@code null} and must
+     *     contain no {@code null}
+     * @return a new list holding the same identifiers in ascending unsigned-byte order, never
+     *     {@code null}
+     */
+    private static List<String> byteWiseAscending(List<String> identifiers) {
+        return identifiers.stream()
+                .sorted(java.util.Comparator.comparing(
+                        identifier -> identifier.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1),
+                        java.util.Arrays::compareUnsigned))
+                .toList();
     }
 
     /**

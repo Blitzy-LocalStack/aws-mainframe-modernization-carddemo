@@ -43,8 +43,13 @@ objects and all retained versions/delete markers only after evidence approval.
 # WHAT: identify the two application buckets Terraform will refuse to destroy while populated.
 # WHY : Assumptions: names are outputs rather than constants and must be read
 #       from the state being removed.
-SPA_BUCKET="$(terraform -chdir="$ENV_ROOT" output -raw spa_bucket_name)"
-DATASET_BUCKET="$(terraform -chdir="$ENV_ROOT" output -raw dataset_bucket_name)"
+# WHY : Refactoring Rationale: both names are read from the module output OBJECT the root
+#       publishes -- `spa` and `datasets` -- rather than from root outputs named
+#       `spa_bucket_name` and `dataset_bucket_name`. Neither root output exists, so both
+#       reads failed with "Output ... not found" and the two variables were empty; the
+#       printf below then invited a reviewer to approve emptying two unnamed buckets.
+SPA_BUCKET="$(terraform -chdir="$ENV_ROOT" output -json spa | jq -r '.spa_bucket_name')"
+DATASET_BUCKET="$(terraform -chdir="$ENV_ROOT" output -json datasets | jq -r '.bucket_name')"
 printf 'Review before emptying: %s %s\n' "$SPA_BUCKET" "$DATASET_BUCKET"
 ```
 

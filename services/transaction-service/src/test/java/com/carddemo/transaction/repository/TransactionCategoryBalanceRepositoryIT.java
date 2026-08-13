@@ -791,9 +791,17 @@ class TransactionCategoryBalanceRepositoryIT {
      * <p>Trade-offs: the cost accepted is a compile-time dependency on one provider exception type in
      * this file. It is bounded and already precedented -- the entity this class exercises binds two
      * provider annotations for its fixed-width columns -- and what it buys is an assertion that names
-     * {@code pk_transaction_category_balances} and the triple
-     * {@code (account_id, type_cd, category_cd)}, so a key silently reduced to fewer components would
-     * fail here rather than pass.
+     * {@code pk_transaction_category_balances}, so a refusal by some other rule would fail here rather
+     * than pass.
+     *
+     * <p>⚠️ Refactoring Rationale: the triple {@code (account_id, type_cd, category_cd)} was asserted
+     * from that same exception MESSAGE, and is now asserted from the live CATALOGUE instead. The columns
+     * only ever appeared in the message because the driver folded the server's {@code DETAIL} field into
+     * it, and that detail also enumerates the offending row's VALUES -- so the assertion depended on a
+     * driver setting that has since been turned off precisely because it published record data into
+     * logs. Reading {@code pg_get_constraintdef} is the stronger source in any case: it states the
+     * columns AND their order as the engine holds them, where the detail line stated only the order the
+     * message happened to render, and it is the pattern the sibling repository suites already use.
      */
     @Test
     void aSecondRowUnderAnEqualCompositeKeyIsRejected() {
@@ -804,8 +812,17 @@ class TransactionCategoryBalanceRepositoryIT {
 
         assertThatExceptionOfType(ConstraintViolationException.class)
                 .isThrownBy(() -> this.persistAndDetach(duplicate))
-                .withMessageContaining("pk_transaction_category_balances")
-                .withMessageContaining("(account_id, type_cd, category_cd)");
+                .withMessageContaining("pk_transaction_category_balances");
+
+        Object declared = this.entityManager.createNativeQuery(
+                        "select pg_get_constraintdef(oid) from pg_constraint"
+                                + " where conname = 'pk_transaction_category_balances'")
+                .getSingleResult();
+        assertThat(String.valueOf(declared))
+                .as("the key that refused the row must be the composite over all three components, in"
+                        + " the order the migration declares, or a key silently reduced to fewer would"
+                        + " pass the refusal assertion above")
+                .contains("(account_id, type_cd, category_cd)");
 
         assertThat(this.rowCount()).isEqualTo(1L);
         assertThat(this.balances.findById(this.seededKey()).orElseThrow().getBalance())

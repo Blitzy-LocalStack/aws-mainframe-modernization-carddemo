@@ -4,8 +4,14 @@
 // Purpose:
 //   TypeScript project for the BROWSER half of the ui tree: every source file
 //   under ui/src. It type-checks that tree and never emits from it. Its sibling
-//   ui/tsconfig.node.json covers the two Node-executed config files, and the two
+//   ui/tsconfig.node.json covers the three Node-executed members it names --
+//   vite.config.ts, vitest.config.ts and documentationGate.test.ts -- and the two
 //   projects are disjoint by design.
+//   Refactoring Rationale: this sentence described that sibling as covering "the
+//   two Node-executed config files", which understated it by one and mislabelled
+//   the third: documentationGate.test.ts is a test rather than a config file, and
+//   it sits there because it shells out to ESLint and needs Node globals the
+//   browser project withholds.
 //
 //   Current source coverage is whatever exists under ui/src, because `include`
 //   names the directory rather than a file list: today that is the three card
@@ -43,8 +49,8 @@
 {
   "compilerOptions": {
     // Assumptions: ES2022 is the level this tree is validated against at both
-    // ends -- the build stage runs node:22.23.1-alpine and ui/package.json
-    // requires node `^22.22.0 || >=24.0.0`, and the bundle is served to modern
+    // ends -- the build stage runs node:22.23.2-alpine and ui/package.json
+    // requires node `^22.23.2 || >=24.18.1`, and the bundle is served to modern
     // browsers through CloudFront with no legacy floor stated anywhere in the
     // migration plan. A lower target would down-level constructs every supported
     // runtime implements, enlarging the bundle for a browser this deployment does

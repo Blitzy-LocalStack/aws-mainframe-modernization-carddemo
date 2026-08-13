@@ -51,20 +51,26 @@
  *       data groups.</dd>
  * </dl>
  *
- * <p>Assumptions: {@code BatchStepLedger} and {@code BatchErrorPublisher} are the fifth and sixth
- * types in the production package and are deliberately NOT entries above, because the roster is a
- * roster of transcribed paragraphs and neither type transcribes one -- the production charter names
- * both separately for exactly that reason, the ledger because the baseline has no checkpoint contract
- * to transcribe and the publisher because the baseline's batch programs contain no message-queue verb
- * at all. Both are nonetheless asserted in this package, each being a no-container rule over its own
- * arguments like the four above, so a reader counting types in the directory and pairings in this list
- * will find six and four and should not read the difference as an omission.</p>
+ * <p>Assumptions: {@code BatchStepLedger}, {@code BatchErrorPublisher} and
+ * {@code DailyFeedWatermarkService} sit in the production package beside the four and are deliberately
+ * NOT entries above, because the roster is a roster of transcribed paragraphs and none of the three
+ * transcribes one -- the production charter names all three separately for exactly that reason, the
+ * ledger because the baseline has no checkpoint contract to transcribe, the publisher because the
+ * baseline's batch programs contain no message-queue verb at all, and the watermark because the
+ * baseline's feed is a dataset replaced between runs and so carries no consumed position. All three are
+ * nonetheless asserted in this package, each being a no-container rule over its own arguments like the
+ * four above, so a reader counting types in the production directory and pairings in this list will
+ * find nine and four and should not read the difference as an omission. Refactoring Rationale: this
+ * paragraph named two types and gave the count as six, and both readings went stale as the directory
+ * grew; the two ordinals it used to assign ("the fifth and sixth types") are dropped, because an
+ * ordinal into a directory is invalidated by any class landing before it alphabetically while a name
+ * is not.</p>
  *
  * <p>Refactoring Rationale: the pairings above are the target shape and are NOT a description of the
  * current directory, and stating them as though they were is the single most misleading thing this
  * charter could do -- the production charter records the same hazard against its own inventory.
- * Measured at this revision the directory holds <b>six</b> test types, which is every pairing in
- * the roster above plus the aggregate and one sender:
+ * Measured at this revision the directory holds <b>seven</b> test types, which is every pairing in
+ * the roster above plus the aggregate, one sender and one position keeper:
  *
  * <ul>
  *   <li>{@code PostingValidationServiceTest} -- landed against the first pairing, 15 cases.</li>
@@ -85,6 +91,18 @@
  *       {@code D-BATCH-FAILURE-EVENT-PUBLISHED}. The cases cover the destination, the JSON body,
  *       the closed three-attribute set, the absence of both ordered-queue identifiers, and the two
  *       failure sources it swallows rather than raises.</li>
+ *   <li>{@code DailyFeedWatermarkServiceTest} -- 8 cases against {@code DailyFeedWatermarkService},
+ *       which pairs with no roster entry above on the same terms as the sender: it transcribes no
+ *       paragraph because the reference has no consumed position to transcribe, its feed being a flat
+ *       dataset replaced between runs rather than an accumulating relation. The cases cover the absent
+ *       row reporting nothing consumed, WHICH of the two reads takes the row lock, the insert and the
+ *       mutate arms of an advance, the non-advance that is a no-op in both the equal and the lower
+ *       direction, and the three refusals -- a negative ordinal, a blank feed name, and a business-date
+ *       token of the wrong width. Assumptions: the last of those asserts width and NOTHING else, which
+ *       matches {@code com.carddemo.common.time.BusinessDate} rather than relaxing it -- that type
+ *       admits both the compact {@code 2022071800} layout the reference passes at
+ *       {@code app/jcl/INTCALC.jcl:22} and the separated ISO layout, so a case demanding an ISO token
+ *       would assert a contract the production type does not have.</li>
  * </ul>
  *
  * <p>So every subject in the roster is under assertion and no ruling below is unasserted, and the
@@ -251,24 +269,25 @@
  * unordered feed produces one accrual per row instead of one per account, and does so without
  * failing.</p>
  *
- * <p>Assumptions: the baseline truncates toward zero and the migrated code now does the same, so
- * there is no rounding difference for an assertion here to reconcile. The baseline carries no
- * {@code ROUNDED} phrase on the statement at {@code app/cbl/CBACT04C.cbl:464-465} -- measured, not
- * assumed: the phrase appears nowhere in that program's 652 lines and nowhere in {@code app/cbl} at
- * all -- so its target field, declared {@code WS-MONTHLY-INT PIC S9(09)V99} at line 168, discards
- * surplus digits toward zero. {@code InterestCalculationService} declares {@code ACCRUAL_ROUNDING} as
- * that mode and an assertion in this package compares it against
- * {@code Money.BASELINE_INTEREST_ROUNDING}, so a constant that drifted from the behaviour it names
- * fails the build rather than misleading a reader.</p>
+ * <p>Trade-offs: the baseline discards the surplus digits of the accrual quotient and the migrated
+ * code rounds them half up, so an assertion here on an amount landing exactly on a half cent expects
+ * one cent MORE than the reference stores. The baseline carries no {@code ROUNDED} phrase on the
+ * statement at {@code app/cbl/CBACT04C.cbl:464-465} -- measured, not assumed: the phrase appears
+ * nowhere in that program's 652 lines and nowhere in {@code app/cbl} at all -- so its target field,
+ * declared {@code WS-MONTHLY-INT PIC S9(09)V99} at line 168, discards surplus digits toward zero. The
+ * migrated mode is transformation rule T3's half up, which the rule states for the money path with no
+ * exception for the accrual, and the difference is registered as divergence {@code C-ROUNDING} in
+ * {@code docs/architecture/cobol-to-service-traceability.md}. {@code InterestCalculationService}
+ * declares {@code ACCRUAL_ROUNDING} derived from {@code Money.GENERAL_ROUNDING} and an assertion in
+ * this package compares the two, so a constant that drifted from the behaviour it names fails the
+ * build rather than misleading a reader.</p>
  *
- * <p>Refactoring Rationale: this paragraph recorded a divergence identified C-ROUNDING and instructed
- * a maintainer that "expecting truncation would fail against production code that is behaving as
- * designed". Expecting truncation is now correct, and the instruction is withdrawn along with the
- * divergence -- the identifier survives only as a withdrawal record in
- * {@code docs/architecture/cobol-to-service-traceability.md} section 7.5. The warning the paragraph
- * ended with is worth keeping in its inverted form: an assertion here must not be changed to make a
- * production mode pass, because that is how a parity difference gets retired by accident in either
- * direction.</p>
+ * <p>Refactoring Rationale: this paragraph twice recorded the opposite disposition -- first that the
+ * accrual rounded half up and diverged, then that it truncated and the divergence was withdrawn. The
+ * half-up reading is restored, because a frozen transformation rule outranks a parity argument for
+ * which the plan itself provides a divergence register. The warning the paragraph has always ended
+ * with still holds in both directions: an assertion here must not be changed to make a production mode
+ * pass, because that is how a parity difference gets retired by accident.</p>
  *
  * <h3>The two category-balance arms are separately asserted partitions</h3>
  *

@@ -1305,7 +1305,32 @@ public class ReferenceBatchUpdateService {
         public int returnCode() {
             return this.anyRejected ? RETURN_CODE_SOFT_WARN : RETURN_CODE_CLEAN;
         }
-    }
+    
+        /**
+         * Renders the two aggregates and the SIZE of the outcome list.
+         *
+         * <p>Purpose. Nothing here is protected -- reference maintenance concerns type and category codes,
+         * not people -- so this renderer exists for the collection reason in
+         * {@code docs/architecture/observability.md} L1093 to L1112: the outcome list is as long as the
+         * batch that produced it, and the batch is bounded at a thousand actions, so the generated
+         * rendering could emit a thousand nested outcomes in one line.</p>
+         *
+         * <p>Assumptions: the processed count and the rejection flag are kept because they are the answer.
+         * A reference batch is read to learn whether anything was refused and how much was attempted, and
+         * a disagreement between the processed count and the list size is itself the fault worth seeing --
+         * which is why both are rendered rather than one standing in for the other.</p>
+         *
+         * @return a rendering naming the rejection flag, the processed count and the number of outcomes,
+         *     with the outcomes themselves omitted; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "BatchUpdateResult[anyRejected=" + this.anyRejected
+                    + ", processedCount=" + this.processedCount
+                    + ", outcomes=" + (this.outcomes == null ? "absent"
+                            : this.outcomes.size() + " entries") + ']';
+        }
+}
 
     /**
      * Raised when the maintenance record stream cannot be read to its end.

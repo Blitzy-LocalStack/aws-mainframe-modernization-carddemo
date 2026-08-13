@@ -49,12 +49,21 @@ import org.yaml.snakeyaml.Yaml;
  * packaged resource was stale or absent.</p>
  *
  * <p>Alternatives Considered: a running application context with a mock request per route, which is the
- * stronger form and is what a negative authorization test would need. It is not available at this
- * checkpoint - this module has no application class yet, so there is no context to stand up - and
- * waiting for one would have left the rules unverified during exactly the interval in which they were
- * introduced. This test therefore asserts the rule TABLE that
- * {@link SecurityConfig#filterChain} builds its matchers from, which is the same value, and the
- * runtime assertion is added when the application class lands.</p>
+ * stronger form and is what a negative authorization test needs. This class does not use it, and the reason
+ * is division of labour rather than availability: it asserts the rule TABLE that
+ * {@link SecurityConfig#filterChain} builds its matchers from, which is a value a document can be compared
+ * against, while {@code SecurityConfigTest} and {@code SecurityChainDispatchTest} stand the chain up and
+ * drive requests through it. Refactoring Rationale: this paragraph read "this module has no application
+ * class yet, so there is no context to stand up", which was true when it was written and is not now --
+ * {@code CardApplication} exists and two sibling classes do stand a context up. The sentence is corrected
+ * rather than deleted because the choice it explains is still the right one; only its stated reason had gone
+ * stale.</p>
+ *
+ * <p>Assumptions: the RESPONSE shapes this document declares are held to the records that serialise into
+ * them by {@link CardApiContractGateTest}, not here. That division is deliberate: this class owns the
+ * document's agreement with the security rules and the shared constants, and that one owns its agreement
+ * with the Java types and with its own published examples, so neither grows into a place where every
+ * contract assertion is added by default.</p>
  */
 class CardApiContractTest {
 
@@ -665,13 +674,17 @@ class CardApiContractTest {
     }
 
     /**
-     * Asserts that the page envelope declares and requires exactly the five members the shared
+     * Asserts that the page envelope declares and requires exactly the four members the shared
      * response type carries, so no generated client receives an accessor for a member no service
      * emits and no strict client rejects a valid response for a member no service sends.
      *
-     * <p>Assumptions: the five are read from the shared type rather than restated as a literal list
-     * where the type can be reached, because the whole defect this asserts against was a contract that
-     * named members the type does not declare.</p>
+     * <p>Assumptions: the four are {@code items}, {@code firstKey}, {@code lastKey} and
+     * {@code hasNext} -- the closed set {@code com.carddemo.common.web.PageResponse} declares -- and
+     * they are named here in the same order the record declares them, because the whole defect this
+     * asserts against was a contract that named members the type does not declare. Refactoring
+     * Rationale: this Javadoc said five while its own display name and its own assertion said four, so
+     * the sentence a reader trusts disagreed with the sentence the build enforces; the arity is now
+     * stated once, from the record.</p>
      */
     @Test
     @DisplayName("the page envelope declares and requires exactly the shared envelope's four members")

@@ -558,8 +558,18 @@ class ReferenceApiContractTest {
         //       operation was refused before any action was read and no outcome exists to report per
         //       action. The set is still asserted exactly rather than loosened to "contains", because
         //       an exact set is what would catch a 409 being added here later.
+        // WHY : ⚠️ Refactoring Rationale: the four PROTOCOL refusals joined this set when every
+        //       contract in this system began publishing the outcomes its shared runtime already
+        //       produced -- 405 on every operation, 406 wherever a body is returned, and 413 and 415
+        //       wherever one is accepted. The load-bearing claim of this assertion is unchanged and is
+        //       the continued absence of a batch-level 404 and 409, which would describe an
+        //       all-or-nothing run the baseline does not have. None of the four says anything about the
+        //       batch: each is raised before an action is read, so no per-action outcome exists to
+        //       report. The set stays EXACT rather than loosened to "contains", because an exact set is
+        //       what would catch a 409 being added here later -- which is the whole point of the case.
         assertThat(mapping(responses, "responses").keySet())
-                .containsExactlyInAnyOrder("200", "400", "401", "403", "500", "503");
+                .containsExactlyInAnyOrder("200", "400", "401", "403", "405", "406", "413", "415",
+                        "500", "503");
     }
 
     /**
@@ -634,5 +644,70 @@ class ReferenceApiContractTest {
 
         assertThat(published.matcher("").matches()).isTrue();
         assertThat(CorrelationIdFilter.isConformingCorrelationId("")).isFalse();
+    }
+
+    /**
+     * Asserts that every published operation declares the transport refusals this service can produce,
+     * and that each of the three has a shape a client can bind to.
+     *
+     * <p>⚠️ Refactoring Rationale: all three were reachable and UNDECLARED. The shared advice in
+     * {@code services/common-lib} answers a wrong method with 405, a body in the wrong media type with
+     * 415 and an unsatisfiable {@code Accept} header with 406, on every route of every service, and this
+     * contract declared none of them. A client generated from it had no branch for any of the three and a
+     * hand-written one, {@code ui/src/api/client.ts}, could only report each as an unrecognised body. The
+     * census is written as a loop rather than as a list of paths so that an operation added later is
+     * covered without this case being edited.</p>
+     *
+     * <p>Assumptions: the operation count is asserted so the loop cannot pass vacuously. A scanner that
+     * matched nothing -- because a path item gained a member, or because the document was restructured --
+     * would otherwise assert nothing at all while reading as though it had checked every route.</p>
+     */
+    @Test
+    @DisplayName("every operation declares the transport refusals the shared advice can produce")
+    void theTransportRefusalsAreDeclaredWhereTheyCanOccur() {
+        Map<String, Object> document = this.contract;
+        Map<String, Object> paths = mapping(document, "paths");
+        int operations = 0;
+
+        for (String path : paths.keySet()) {
+            Map<String, Object> methods = mapping(paths, path);
+            for (String method : methods.keySet()) {
+
+                // WHY : Assumptions: a path item carries members that are not operations -- a shared
+                //       description, a shared parameter list -- so an operation is identified by carrying
+                //       an operationId rather than by the key not being one of those. Naming the
+                //       exclusions instead would need amending every time a path item gained a member.
+                if (!(methods.get(method) instanceof Map)) {
+                    continue;
+                }
+                Map<String, Object> operation = mapping(methods, method);
+                if (!operation.containsKey("operationId")) {
+                    continue;
+                }
+                operations++;
+                Map<String, Object> responses = mapping(operation, "responses");
+                assertThat(responses)
+                        .as("%s %s must declare both refusals every route can produce", method, path)
+                        .containsKeys("405", "406");
+                if (operation.containsKey("requestBody")) {
+                    assertThat(responses)
+                            .as("%s %s accepts a body, so it can refuse the body's media type",
+                                    method, path)
+                            .containsKey("415");
+                }
+            }
+        }
+
+        assertThat(operations)
+                .as("the census is not vacuous; every published operation was examined")
+                .isEqualTo(19);
+
+        Map<String, Object> declared = mapping(mapping(document, "components"), "responses");
+        assertThat(declared)
+                .as("each refusal is declared once and referenced, so the three cannot drift apart")
+                .containsKeys("MethodNotAllowed", "NotAcceptable", "UnsupportedMediaType");
+        assertThat(mapping(mapping(declared, "MethodNotAllowed"), "headers"))
+                .as("a 405 names the methods the route does publish, which is what a client acts on")
+                .containsKey("Allow");
     }
 }

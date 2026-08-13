@@ -42,12 +42,27 @@
 #   inventory written into a comment is correct on the day it is written and
 #   misleading afterwards, so it is stated once here rather than restated at every
 #   key, and it names the commands that check it instead of asking to be trusted.
-#     - db/migration/V1__ledger.sql, the single Flyway migration this module owns
-#       and the file that creates the four `ledger` tables, so
+#     - db/migration/V1__ledger.sql, the FIRST of the two Flyway migrations this
+#       module owns and the file that creates the four `ledger` tables, so
 #       spring.flyway.locations below resolves to real DDL and a start-up applies
 #       it. Its four tables -- transactions, daily_transactions,
 #       transaction_rejects and transaction_category_balances -- are the schema
 #       this module owns.
+#     - db/migration/V2__ledger_transaction_id_allocator.sql, the second, which
+#       creates ONE SEQUENCE and nothing else: ledger.transaction_id_seq, the
+#       database-owned allocator that issues transaction identifiers for the two
+#       interactive write paths, transaction add and bill payment. It is NOT a
+#       fifth table -- it creates no table, alters no table and confers no
+#       privilege beyond what the schema owner already holds -- so the four-table
+#       statement above remains exact.
+#       Refactoring Rationale: the allocator replaced deriving an identifier as
+#       max(transaction_id) + 1 in Java. That reproduced what the baseline does at
+#       app/cbl/COTRN02C.cbl:444-447 and app/cbl/COBIL00C.cbl:212-215 but not the
+#       GUARANTEE it relied on: CICS serialised those two transactions and two
+#       Fargate tasks are not serialised, so two concurrent adds read one maximum
+#       and collide on one key. The migration also positions the sequence past
+#       whatever the cutover extract loaded, which is why it is a migration rather
+#       than a bean.
 #     - application-dev.yml and application-prod.yml, the two profile overlays
 #       this document is written to be overridden by, so the statements below about
 #       what an overlay may differ in are constraints those two files are held to.
@@ -94,8 +109,10 @@
 #   Assumptions: Flyway needs a second artifact beyond its core, and the failure
 #     mode of omitting it is a run-time abort rather than a build error. Detail
 #     at the `spring.flyway` key.
-#   Assumptions: this module ships exactly one migration, V1__ledger.sql, into
-#     one migration location. Detail at spring.flyway.locations.
+#   Assumptions: this module ships exactly TWO migrations, V1__ledger.sql and
+#     V2__ledger_transaction_id_allocator.sql, into one migration location, and the
+#     second creates a sequence rather than a table. Detail at
+#     spring.flyway.locations.
 #   Assumptions: the Actuator health endpoint is a deployment contract with two
 #     consumers defined outside this repository's Java. Detail at `management`.
 #   Assumptions: the token issuer is resolved at run time, and identity is now
@@ -390,10 +407,20 @@ spring:
   flyway:
     enabled: true
 
-    # WHY : Assumptions: this module ships exactly one migration,
-    #       V1__ledger.sql, and is the sole owner of the four `ledger` tables.
-    #       That migration now occupies this location and is the DDL Flyway
-    #       applies before JPA starts. The schemas themselves and the
+    # WHY : Assumptions: this module ships exactly TWO migrations into this one
+    #       location -- V1__ledger.sql, which creates the four `ledger` tables this
+    #       module solely owns, and V2__ledger_transaction_id_allocator.sql, which
+    #       creates the single sequence ledger.transaction_id_seq and no table at
+    #       all. Both occupy this location and both are DDL Flyway applies, in
+    #       version order, before JPA starts.
+    # WHY : Refactoring Rationale: three statements in this file said ONE
+    #       migration. V2 is a separate version rather than an edit to V1 because
+    #       Flyway checksums an applied migration and refuses a changed one, so
+    #       folding the sequence into V1 could not reach a database V1 had already
+    #       run against. It is also why the allocator is a sequence and not a
+    #       table: ddl-auto below is `validate`, which compares the entities
+    #       against the schema, and a sequence is invisible to that comparison
+    #       while a fifth table would have to be mapped by an entity nothing needs. The schemas themselves and the
     #       per-service database roles are created ahead of any service
     #       starting, by the migration
     #       bootstrap DDL under data-migration/sql; the seed rows for the shared
@@ -580,15 +607,26 @@ spring:
   #       would move the mapper to the other generation and unregister the module that makes money a
   #       string.
   jackson:
-    # WHY : Assumptions: the screens this service replaces render a fixed field
-    #       set on every turn, because a BMS map writes each field position
-    #       whether it holds a value or a blank, so a constant response shape is
-    #       what the client is built for. Omitting nulls would force the browser
-    #       client to distinguish an absent field from an empty one, a
-    #       distinction the 3270 contract never made and for which the SPA
-    #       therefore has no rule.
-    default-property-inclusion: always
-
+    # WHY : ⚠️ Refactoring Rationale: `default-property-inclusion: always` USED to be
+    #       declared here and is now declared once, for the whole fleet, in
+    #       services/common-lib/src/main/resources/carddemo-common-defaults.yml, which
+    #       the spring.config.import above pulls in. It moved because it was never a
+    #       transaction-service decision: all SEVEN published API contracts --
+    #       services/*/src/main/resources/openapi/*-api.yaml -- list every component of
+    #       the shared error body in `required` and justify it on the ground that "the
+    #       services set `default-property-inclusion: always`", and this document was
+    #       the only place any service actually did. Six contracts therefore cited a
+    #       setting their own deployment never made, with the framework's own
+    #       null-writing default masking the gap. Keeping a copy here as well was
+    #       considered and rejected: two declarations of one fleet-wide serialisation
+    #       decision are two places for it to diverge, and the shared file carries the
+    #       full reasoning -- the fixed BMS field geometry that makes the response shape
+    #       constant, and the string-valued money contract that depends on a key always
+    #       being present. Assumptions: an imported value sits beneath this document in
+    #       precedence, so this service could still override it; that it does not is the
+    #       point. The behaviour is covered rather than assumed -- a controller case in
+    #       this module asserts a null-valued key is EMITTED rather than omitted, so an
+    #       inclusion setting that stopped reaching this service fails a test here.
     datatype:
       datetime:
         # WHY : Assumptions: the baseline holds both transaction timestamps as

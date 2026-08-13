@@ -296,7 +296,7 @@ variable "tags" {
 # -----------------------------------------------------------------------------
 
 variable "s3_cloudfront_distribution_arns" {
-  description = "CloudFront distribution ARNs the S3 key's mandatory `cloudfront.amazonaws.com` decrypt grant is confined to; empty narrows the grant to every distribution in THIS account and partition, which is the tightest scope expressible without a dependency cycle."
+  description = "ADDITIONAL exact CloudFront distribution ARNs admitted by the S3 key's `cloudfront.amazonaws.com` decrypt grant, beyond the mandatory `cloudfront_distribution_arn`. Empty -- the default -- confines the grant to that one distribution. Wildcards are refused: the grant's condition is `ArnEquals`, which performs no wildcard expansion, so a pattern entry would match nothing and every asset request under it would answer 403."
   type        = list(string)
   default     = []
   nullable    = false
@@ -307,50 +307,63 @@ variable "s3_cloudfront_distribution_arns" {
   #       that decrypts those objects. Without a service-principal grant to it
   #       every asset request answers 403 while the bucket, the distribution, the
   #       origin access control and the key each look correct in isolation, which
-  #       is why the grant in main.tf is UNCONDITIONAL. Trade-offs: an
-  #       unconditional grant is wider than one gated on a populated list, and it
-  #       is preferred here because an availability property of the front end must
-  #       not depend on an operator remembering to populate that list; the two
-  #       conditions described below carry the narrowing instead.
+  #       is why the grant in main.tf is UNCONDITIONAL.
   #
   # WHY : Assumptions: a grant to a service principal is otherwise usable by
   #       that service on behalf of ANY account it serves, so an unconditioned
   #       CloudFront grant would let a stranger's distribution decrypt this
   #       bucket's objects -- the confused-deputy problem. main.tf therefore
   #       always applies two conditions: the request must be made on behalf of
-  #       THIS account, and its source ARN must match a distribution ARN. With
-  #       this list empty the ARN pattern is
-  #       `arn:<partition>:cloudfront::<this account>:distribution/*`, which
-  #       still admits only distributions this account owns.
-  #       Alternatives Considered: requiring the exact distribution ARN, which
-  #       is the tightest possible scope. Rejected as a REQUIRED input because
-  #       the distribution is created by the `cloudfront-spa` module, which
-  #       consumes this key's ARN for the bucket's default encryption -- so
-  #       feeding the distribution ARN back into this module from the same root
-  #       is a module-level dependency cycle that Terraform refuses to graph. A
-  #       root with a pre-existing distribution, or an operator tightening the
-  #       scope on a second apply, can still supply it here, which is why the
-  #       seam exists at all rather than the pattern being hardcoded.
-  #       Trade-offs: no `kms:ViaService` condition accompanies these two,
-  #       unlike the queue key's scheduler grant. CloudFront calls KMS itself
-  #       when it retrieves an encrypted object, so a condition asserting the
-  #       request arrived through the storage service would match nothing and
-  #       would deny the very path the grant exists to permit.
+  #       THIS account, and its source ARN must EQUAL one of the distribution ARNs
+  #       composed from this input, `cloudfront_distribution_arns` and the
+  #       mandatory `cloudfront_distribution_arn`.
   #
-  # WHY : Assumptions: a CloudFront ARN carries no region -- the service is
-  #       global, so the region segment is empty -- and a value that names
-  #       something other than a distribution would silently widen or void the
-  #       condition rather than fail loudly: an `ArnLike` test against a
-  #       malformed pattern simply never matches, and every asset request then
-  #       returns 403 with nothing in the plan to explain it. A wildcard is
-  #       admitted because narrowing to a distribution-ARN prefix is a
-  #       legitimate intermediate scope.
+  # WHY : Refactoring Rationale: this input previously described itself as
+  #       "empty narrows the grant to every distribution in THIS account and
+  #       partition", and the comment beside it explained an account-wide
+  #       `arn:<partition>:cloudfront::<account>:distribution/*` fallback and
+  #       rejected an exact-ARN requirement as "a module-level dependency cycle
+  #       that Terraform refuses to graph". All three claims were false of this
+  #       module. `cloudfront_distribution_arn` IS a required exact-ARN input, so
+  #       the composed list is never empty and the fallback statement could never
+  #       render -- it has been deleted. And the cycle does not exist: both
+  #       environment roots pass `module.cloudfront_spa.distribution_arn` into this
+  #       module and both graph cleanly, because the distribution depends on the
+  #       KEY while this list feeds the key POLICY, which is a separate resource.
+  #       The claims mattered because together they told a reader the grant was
+  #       account-wide by default and could not be tightened, when in fact it is
+  #       already confined to one exact distribution and this list only widens it.
+  #
+  # WHY : Trade-offs: no `kms:ViaService` condition accompanies the two above,
+  #       unlike the queue key's scheduler grant. CloudFront calls KMS itself when
+  #       it retrieves an encrypted object, so a condition asserting the request
+  #       arrived through the storage service would match nothing and would deny
+  #       the very path the grant exists to permit.
+  #
+  # WHY : Assumptions: a CloudFront ARN carries no region -- the service is global,
+  #       so the region segment is empty -- and the identifier segment admits only
+  #       upper-case letters and digits, with NO wildcard.
+  #       Refactoring Rationale: the identifier character class was `[A-Z0-9*]+`
+  #       and is now `[A-Z0-9]+`. The old class admitted a trailing `*` and the
+  #       error message advertised it as "a prefix rather than one distribution",
+  #       but the consuming condition is `ArnEquals`, which compares ARNs without
+  #       expanding wildcards -- so a pattern entry silently admitted nothing and
+  #       produced a 403 with nothing in the plan to explain it. Refusing the value
+  #       at plan time is the only place that failure is diagnosable. A caller who
+  #       genuinely wants prefix semantics needs an `ArnLike` condition, which this
+  #       module does not offer for this grant; adding one would widen a grant on
+  #       cardholder-facing objects and is not a change a validation relaxation
+  #       should be able to smuggle in.
+  #       Assumptions: duplicates are refused too, matching the sibling
+  #       `cloudfront_distribution_arns`, because a duplicate entry reaches the
+  #       policy document as a repeated condition value -- accepted by the API and
+  #       silently meaningless, so it reads as narrowing that is not there.
   validation {
-    condition = alltrue([
+    condition = length(distinct(var.s3_cloudfront_distribution_arns)) == length(var.s3_cloudfront_distribution_arns) && alltrue([
       for arn in var.s3_cloudfront_distribution_arns :
-      can(regex("^arn:[a-z0-9-]+:cloudfront::[0-9]{12}:distribution/[A-Z0-9*]+$", arn))
+      can(regex("^arn:[a-z0-9-]+:cloudfront::[0-9]{12}:distribution/[A-Z0-9]+$", arn))
     ])
-    error_message = "Each s3_cloudfront_distribution_arns entry must be a CloudFront distribution ARN of the form arn:<partition>:cloudfront::<account-id>:distribution/<id>. CloudFront is a global service, so the region segment is empty; a trailing * is accepted to narrow the grant to a prefix rather than one distribution."
+    error_message = "s3_cloudfront_distribution_arns must contain unique, exact CloudFront distribution ARNs of the form arn:<partition>:cloudfront::<account-id>:distribution/<id>. CloudFront is a global service, so the region segment is empty; wildcard distribution identifiers are refused because the consuming condition is ArnEquals and would match nothing."
   }
 }
 

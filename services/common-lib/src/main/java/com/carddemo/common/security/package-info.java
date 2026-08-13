@@ -5,14 +5,24 @@
  *
  * <h2>The directory, measured rather than remembered</h2>
  *
- * <p>Nine compilation units sit in this directory: this charter and the eight production classes
- * {@code CardNumberMasker}, {@code CognitoAccessTokenValidator}, {@code HtmlTextEncoder},
- * {@code InternalServiceToken}, {@code JwtRoleConverter}, {@code MaskedCardNumber},
- * {@code OpaqueIdentifier} and {@code SealedSelector}. Every inventory, file name, class name and
- * count in this charter is a measurement of that directory, and the labelled census further down is
- * re-derived from it on every build by
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/SharedKernelInventoryTest.java},
- * so a ninth class arriving here fails the build rather than quietly falsifying this file.</p>
+ * <p>Ten compilation units sit in this directory: this charter and the nine production classes
+ * {@code ApprovedOriginPolicy}, {@code CardNumberMasker}, {@code CognitoAccessTokenValidator},
+ * {@code HtmlTextEncoder}, {@code InternalServiceToken}, {@code JwtRoleConverter},
+ * {@code MaskedCardNumber}, {@code OpaqueIdentifier} and {@code SealedSelector}. Every inventory,
+ * file name, class name and count in this charter is a measurement of that directory, and the
+ * labelled census further down is re-derived from it on every build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/SharedKernelInventoryTest.java}.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: this paragraph said NINE compilation units and eight production
+ * classes, named eight of them, and closed by promising that "a ninth class arriving here fails the
+ * build rather than quietly falsifying this file". The ninth class arrived --
+ * {@code ApprovedOriginPolicy} -- and the build did not fail, because what the census test read was
+ * the labelled sum and the own-share line further down, both of which were right, and not this
+ * sentence. The promise was therefore describing a check that did not cover the text making it. It
+ * is corrected here, and the check was widened rather than the promise softened: the same test now
+ * re-derives the kernel root's roster of named classes and refuses any census figure in this
+ * charter that its own directory does not support, so this sentence is covered by the mechanism it
+ * cites.</p>
  *
  * <p><b>Purpose.</b> This package is the shared-kernel home for exactly one
  * decision: given a token the resource server has already validated, which

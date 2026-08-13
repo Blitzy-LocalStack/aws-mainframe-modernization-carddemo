@@ -12,20 +12,34 @@
 #
 #   Every other production mechanism is inherited on purpose, so that a passing
 #   test exercises the deployed shape rather than a test-only substitute. The
-#   migration applied here is the one this module owns,
-#   db/migration/V1__account.sql, and the mappings it is checked against are the
-#   entities under com.carddemo.account.domain.
+#   migrations applied here are the two this module owns,
+#   db/migration/V1__account.sql and
+#   db/migration/V2__account_inquiry_reply_ledger.sql, and the mappings they are
+#   checked against are the entities under com.carddemo.account.domain.
 #
-#   Two classes activate this profile, both of them repository integration
-#   tests: repository/AccountScreenProjectionIT.java and
-#   repository/CustomerMasterRepositoryIT.java. Each starts a PostgreSQL
+#   SEVEN classes activate this profile, every one of them a repository
+#   integration test, and they are the whole of the module's repository/
+#   directory: AccountRepositoryIT, AccountScreenProjectionIT,
+#   AccountUpdateAtomicityIT, CardXrefRepositoryIT, CustomerMasterRepositoryIT,
+#   CustomerRepositoryIT and InquiryReplyLedgerIT. Each starts a PostgreSQL
 #   container, creates the account schema and its owning role before the context
 #   is built, publishes the generated connection coordinates and the matching
-#   migration pair through @DynamicPropertySource, and loads a narrow
+#   migration locations through @DynamicPropertySource, and loads a narrow
 #   @SpringBootConfiguration that reaches only this context's entities and
-#   repositories. No other test class in this module reads this file, and no
-#   build plugin activates the profile on their behalf. That division of labour
-#   is what keeps every schema, role and grant statement out of this file.
+#   repositories. The module's eighth integration test, config/AwsStarterRuntimeIT,
+#   deliberately does NOT activate this profile -- it asserts start-up behaviour
+#   rather than storage -- and no other test class in this module reads this
+#   file, nor does any build plugin activate the profile on their behalf. That
+#   division of labour is what keeps every schema, role and grant statement out
+#   of this file.
+#
+#   Refactoring Rationale: this paragraph named exactly TWO consuming classes,
+#   AccountScreenProjectionIT and CustomerMasterRepositoryIT, and the count is
+#   re-measured rather than incremented: `grep -rl '@ActiveProfiles("test")'
+#   src/test/java` reports the seven above. An exhaustive list is kept in
+#   preference to non-exhaustive wording because the point of the list is to say
+#   which contexts this overlay has to be correct FOR, and a reader cannot
+#   derive that from "several".
 #
 # Parameters:
 #   Each property key below is the YAML analogue of a parameter, and every one
@@ -36,9 +50,9 @@
 #   This file consumes no environment variable and declares no value that names
 #   a network location, an account, a role credential, or key material of any
 #   kind. That is a property of the file rather than an accident of it: the
-#   values a deployment injects arrive here from the container the two tests
-#   start, and the values a deployment keeps in a managed store are read by
-#   neither context.
+#   values a deployment injects arrive here from the container each of the seven
+#   tests starts, and the values a deployment keeps in a managed store are read
+#   by none of those contexts.
 #
 # Return values:
 #   The effective Spring Environment after this overlay is merged over
@@ -46,8 +60,11 @@
 #   file imports. That Environment yields: a cleartext loopback connection to a
 #   container-supplied database over a narrow pool; a Flyway run that applies
 #   V1__account.sql into the account schema the test setup created, under the
-#   ownership the base profile's own statement selects; a Hibernate mapping
-#   validation against the tables that migration produced; no remote
+#   ownership the base profile's own statement selects, followed by
+#   V2__account_inquiry_reply_ledger.sql, which the duplicate-reply claim ledger
+#   needs and which InquiryReplyLedgerIT asserts arrived through Flyway's own
+#   history rather than through a hand-built table; a Hibernate mapping
+#   validation against the tables those migrations produced; no remote
 #   configuration lookup; and no running queue listener.
 #
 # Exceptions or errors:
@@ -211,11 +228,12 @@ spring:
     #   data-migration/sql/V0__schemas_and_roles.sql is the exclusive authority
     #   for schemas, owner roles, runtime roles and grants in this system, which
     #   is why the base profile forbids Flyway from creating a schema and why
-    #   db/migration/V1__account.sql carries no CREATE SCHEMA, no CREATE ROLE
-    #   and no GRANT of its own. A PostgreSQL container has never run that
+    #   neither db/migration/V1__account.sql nor
+    #   db/migration/V2__account_inquiry_reply_ledger.sql carries a CREATE
+    #   SCHEMA, a CREATE ROLE or a GRANT of its own. A PostgreSQL container has never run that
     #   bootstrap, so the schema and its owning role have to exist before Flyway
     #   opens its first connection -- and the integration-test setup in the java
-    #   tree is what creates them, in a documented step on each of the two
+    #   tree is what creates them, in a documented step on each of the seven
     #   consuming classes, ahead of context refresh. This file inherits
     #   create-schemas unchanged and leaves the base profile's own ownership
     #   statement in force, so the deployed mechanism that makes migrated
@@ -276,8 +294,8 @@ logging:
 # -----------------------------------------------------------------------------
 #
 #   1. No datasource URL, user name or credential, and no migration pair.
-#      Assumptions: both consumers publish all five of those through
-#      @DynamicPropertySource from the container they start, and a dynamic
+#      Assumptions: every consumer publishes all five of those through
+#      @DynamicPropertySource from the container it starts, and a dynamic
 #      property outranks a profile document. Committing a connection string was
 #      rejected on the ground that a default which resolves is a default that
 #      can be run against by accident -- and a port and database name generated
@@ -297,12 +315,12 @@ logging:
 #
 #   3. No endpoint, no queue location, no issuer, no role credential and no key
 #      material of any kind.
-#      Assumptions: neither consumer reads any of them. Both exclude the
-#      resource-server and queue auto-configurations by name, and neither
+#      Assumptions: no consumer reads any of them. Each excludes the
+#      resource-server and queue auto-configurations by name, and none of them
 #      reaches the api, service, mapper or config packages, so the beans that
 #      would read an issuer, an application client identifier, a key alias, the
 #      three queue names, the two internal signing keys or the reference-context
-#      address are absent from both contexts. Spring resolves a placeholder only
+#      address are absent from every one of those contexts. Spring resolves a placeholder only
 #      when something reads the property, so the base profile's fallback-free
 #      entries raise nothing here. A later test that does need one registers it
 #      dynamically, beside the container coordinates it already registers.
@@ -319,7 +337,7 @@ logging:
 #      location in its source either and expected one at run time.
 #
 #   4. No actuator exposure override.
-#      Assumptions: both consumers run with no web environment, so no actuator
+#      Assumptions: every consumer runs with no web environment, so no actuator
 #      surface exists for a narrower list to describe. The inherited list is
 #      left exactly as it stands because the unauthenticated health route on it
 #      is the one the load-balancer target group and the container health check
@@ -327,7 +345,7 @@ logging:
 #      would describe a surface no deployment has.
 #
 #   5. No server port, no listener transport and no application name override.
-#      Assumptions: neither consumer binds a listener, so the inherited port and
+#      Assumptions: no consumer binds a listener, so the inherited port and
 #      the inherited transport settings are never read. The port is shared with
 #      the container image and the load-balancer contract, and the application
 #      name is the service identity that logging and metrics tag every record

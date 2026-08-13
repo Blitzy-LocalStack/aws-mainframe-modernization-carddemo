@@ -65,7 +65,7 @@
  * is where the reference keeps it. The layer that issues the walk settles {@code hasNext} from a
  * surplus row read beyond the window, which is the reference's own technique.
  *
- * <h2>The closed inventory: this charter plus five interfaces</h2>
+ * <h2>The closed inventory: this charter plus six interfaces</h2>
  *
  * <p>Refactoring Rationale: this inventory formerly declared itself a <b>target contract</b>
  * rather than a measurement, on the ground that a role named in it with no file beside this one
@@ -74,11 +74,14 @@
  * time, and a reader can take it in the present tense without qualification. The caveat is
  * recorded rather than deleted because the sibling charters still carry the same wording where
  * their own sets are still incomplete, and a reader comparing the two should be able to see that
- * the difference is a difference in delivery rather than in convention. The number 6 remains a
- * closed set on both readings: a seventh file in this package is a defect and not an addition, which
+ * the difference is a difference in delivery rather than in convention. The count remains a
+ * closed set on both readings: a file beyond the set is a defect and not an addition, which
  * is the same guarantee the sibling projection charter states for its own set at its L11.
+ * Refactoring Rationale: that count was 6 and is now 7.
+ * {@code CategoryBalanceReportRepository} arrived with the category-balance report of
+ * {@code app/jcl/PRTCATBL.jcl}, so the closed set is seven and the defect an eighth.
  *
- * <p>Six files, and a seventh is a defect rather than an addition:
+ * <p>Seven files, and an eighth is a defect rather than an addition:
  * <ul>
  *   <li>this {@code package-info.java}, the charter and the decision register;</li>
  *   <li>{@code StatementTransactionRepository} -- the card-ordered transaction traversal;</li>
@@ -88,10 +91,13 @@
  *   <li>{@code StatementAccountRepository} -- the keyed account lookup;</li>
  *   <li>{@code TransactionReportRepository} -- the report-side query surface, standing in for
  *       the four-way join {@code app/cbl/CBTRN03C.cbl} opens.</li>
+ *   <li>{@code CategoryBalanceReportRepository} -- the ordered category-balance traversal, in the
+ *       key sequence {@code SORT FIELDS} declares at {@code app/jcl/PRTCATBL.jcl:52}. It has no
+ *       COBOL counterpart at all: the report it feeds is a DFSORT step with no program.</li>
  * </ul>
  *
  * <p>The first four together discharge the entire responsibility of
- * {@code app/cbl/CBSTM03B.CBL}, and each of the five maps to a view projection in the sibling
+ * {@code app/cbl/CBSTM03B.CBL}, and each of the six maps to a view projection in the sibling
  * {@code domain} package rather than to a table another context owns.
  *
  * <p>Assumptions: the context charter one level up, at
@@ -100,7 +106,8 @@
  * description of the first four roles and of the access modes their source declares --
  * {@code CBSTM03B.CBL} L33 and L39 declare {@code ACCESS MODE IS SEQUENTIAL} for the
  * transaction and cross-reference files, L45 and L51 declare {@code ACCESS MODE IS RANDOM}
- * for the customer and account files -- and the report-side surface is the fifth beside them.
+ * for the customer and account files -- and the two report-side surfaces are the fifth and sixth
+ * beside them.
  * The two readings agree; the four-role phrasing counts the statement path only.
  *
  * <h2>No write path exists here</h2>

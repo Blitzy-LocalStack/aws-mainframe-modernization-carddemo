@@ -82,8 +82,10 @@ class StatementDiagnosticRenderingTest {
          */
         private StatementResponse subject() {
             return new StatementResponse(CARD_NUMBER, ACCOUNT_ID, CUSTOMER_NAME,
-                    Money.of("1234.56"), 7, "s3://bucket/plain.txt", "s3://bucket/page.html",
-                    "2026-08-08 06:00:00.000000");
+                    Money.of("1234.56"), 7,
+                    "/api/v1/reports/statements/artifacts/AAAAAAAAAAAAAAAAAAAAAA",
+                    "/api/v1/reports/statements/artifacts/BBBBBBBBBBBBBBBBBBBBBB",
+                    "2026-08-08 06:00:00.000000", 240L, 27L);
         }
 
         /**
@@ -128,9 +130,16 @@ class StatementDiagnosticRenderingTest {
         void operationalValuesRemain() {
             assertThat(subject().toString())
                     .contains("StatementResponse")
-                    .contains("s3://bucket/plain.txt")
-                    .contains("s3://bucket/page.html")
-                    .contains("transactionCount=7");
+                    .contains("/api/v1/reports/statements/artifacts/AAAAAAAAAAAAAAAAAAAAAA")
+                    .contains("/api/v1/reports/statements/artifacts/BBBBBBBBBBBBBBBBBBBBBB")
+                    .contains("transactionCount=7")
+                    // WHY : Assumptions: the two artifact POSITIONS are asserted present for the same
+                    //       reason the locations are -- they are ordinals into a run-wide document, they
+                    //       attribute nothing to anybody, and they are what an operator needs in order
+                    //       to look at the records a complaint concerns. Withholding them would make
+                    //       this rendering describe a statement nobody could find.
+                    .contains("firstRecord=240")
+                    .contains("recordCount=27");
         }
     }
 

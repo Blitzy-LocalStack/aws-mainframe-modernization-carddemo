@@ -89,4 +89,36 @@ public record PendingAuthListView(
                     "screenMessage must be one of the three reference navigation sentences");
         }
     }
+
+    /**
+     * Renders this body as the shape of the page it carries, delegating to neither nested component.
+     *
+     * <p>Purpose. Both nested components carry protected values -- the summary holds the account's
+     * financial position and the cardholder's postal identity, and each row holds an approved amount --
+     * so the compiler-generated rendering disclosed a whole page of them through one call.</p>
+     *
+     * <p>Alternatives Considered: relying on the two nested renderings instead, now that each nested
+     * type declares a safe one. Rejected because that makes this type's disclosure a property of two
+     * other files: a component added to the summary without its renderer updated, or a page envelope
+     * whose rendering changed, would leak through here with nothing in this file to show it. Reading the
+     * page's shape directly makes this rendering independent of both.</p>
+     *
+     * <p>Assumptions: the row count is read from the envelope's item list rather than from its
+     * {@code hasNext} indicator, because the two answer different questions -- how many rows this body
+     * actually carries, and whether another page follows -- and a paging fault is usually a disagreement
+     * between them.</p>
+     *
+     * <p>Trade-offs: the boundary sentence is rendered in full because it is one of exactly three
+     * reference strings this record's own compact constructor confines it to, so it can carry no value
+     * from a row and no text from a client.</p>
+     *
+     * @return a rendering carrying the row count, the forward-availability indicator and the boundary
+     *     sentence, with the summary and the rows themselves omitted; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "PendingAuthListView[rows=" + this.page.items().size()
+                + ", hasNext=" + this.page.hasNext()
+                + ", screenMessage=" + this.screenMessage + ']';
+    }
 }

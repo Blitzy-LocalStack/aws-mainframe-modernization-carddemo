@@ -3,6 +3,7 @@ package com.carddemo.reference.config;
 import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.security.CognitoAccessTokenValidator;
 import com.carddemo.common.security.JwtRoleConverter;
+import jakarta.servlet.DispatcherType;
 import java.time.Clock;
 import java.util.List;
 import org.springframework.beans.factory.annotation.Value;
@@ -234,6 +235,37 @@ public class SecurityConfig {
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(requests -> requests
+                        // WHY : (1) Refactoring Rationale: the container's ERROR dispatch is permitted
+                        //       before every other rule, and this context needed it more than a chain
+                        //       ending in a plain catch-all would. When the servlet forwards a refusal it
+                        //       rendered -- an unsupported media type, an unacceptable representation, a
+                        //       body over the published ceiling -- to its own error path, that forward
+                        //       keeps the ORIGINAL request method. A refused POST therefore arrived at
+                        //       /error and matched the POST rule below, whose pattern is /**, so the
+                        //       forward was re-judged as a mutating call and answered
+                        //       carddemo-admin-or-nothing. A caller owed 415 received 401 or 403 on a path
+                        //       it never addressed, and an anonymous caller could not be told why its
+                        //       request was malformed at all. A GET reached the denying catch-all instead,
+                        //       so both halves of the surface were affected by different rules.
+                        // WHY : (2) Assumptions: the rule matches the DISPATCHER TYPE and not the path, so
+                        //       a direct request to /error is still refused by exactly the rules that
+                        //       refuse it today. A path-based permit would open that path to any caller,
+                        //       and the container's own error body is not a shape
+                        //       src/main/resources/openapi/reference-api.yaml publishes for any operation.
+                        // WHY : (3) Assumptions: the shared defaults narrow the filter chain to the
+                        //       REQUEST and ASYNC dispatches, so in a fully-configured application this
+                        //       rule is defence in depth. It is declared nonetheless, because a sliced web
+                        //       test builds this chain WITHOUT that property and would measure the refused
+                        //       dispatch rather than the served one -- and because a chain that depends on
+                        //       an external property for a security-visible outcome states its intent
+                        //       nowhere.
+                        // WHY : (4) Alternatives Considered: narrowing this chain to the REQUEST dispatch
+                        //       alone, which has the same effect here. Rejected because it silently
+                        //       withdraws authorization from ASYNC dispatches too, so an asynchronous
+                        //       handler added later would run outside every rule below. The auth, account,
+                        //       card and authorization contexts resolve it this same way, which is what
+                        //       keeps the five chains comparable.
+                        .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                         .requestMatchers(HEALTH_PATH).permitAll()
                         // WHY : Assumptions: granted by NETWORK POSITION and not by authority,
                         //       because the only configured consumer is the task-local collector and

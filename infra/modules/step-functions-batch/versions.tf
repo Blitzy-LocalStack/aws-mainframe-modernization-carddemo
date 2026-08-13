@@ -4,7 +4,7 @@
 # Purpose:
 #   The Terraform CLI and provider contract for the `step-functions-batch`
 #   module, and nothing else. The module body provisions the batch orchestration
-#   layer that replaces the mainframe's nightly job stream: the eleven-work-state
+#   layer that replaces the mainframe's nightly job stream: the twelve-work-state
 #   `carddemo-daily-batch` state machine, a second and much smaller state machine
 #   for on-demand reports, one shared IAM execution role and one CloudWatch log
 #   group per machine. Resources, inputs and outputs live in main.tf,

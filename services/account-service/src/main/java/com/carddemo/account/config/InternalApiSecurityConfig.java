@@ -11,6 +11,8 @@ import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
 import com.nimbusds.jose.proc.JWSVerificationKeySelector;
 import com.nimbusds.jose.proc.SecurityContext;
 import com.nimbusds.jwt.proc.DefaultJWTProcessor;
+import jakarta.servlet.DispatcherType;
+import jakarta.servlet.RequestDispatcher;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.Base64;
@@ -129,6 +131,27 @@ public class InternalApiSecurityConfig {
     public static final String CARD_XREF_READ_AUTHORITY =
             AUTHORITY_PREFIX + InternalServiceToken.SCOPE_CARD_XREF_READ;
 
+    /**
+     * The authority a token must confer to reach the ONE cross-reference address that answers with an
+     * unmasked primary account number.
+     *
+     * <p>Refactoring Rationale: the three cross-reference addresses answered to ONE authority, and one of
+     * them is not like the other two. The card-keyed lookup answers with two identifiers and no card number,
+     * the paged walk answers with the card masked to its last four digits, and the account-keyed lookup
+     * answers with the whole sixteen digits -- because its consumer writes that value into its ledger row as
+     * the key, which {@code READ-CXACAIX-FILE} at lines 576 to 604 of {@code app/cbl/COTRN02C.cbl} and the
+     * same read at line 414 of {@code app/cbl/COBIL00C.cbl} both require. While one authority governed all
+     * three, every holder of the cross-reference scope could provoke that disclosure, including the
+     * authorization context, which reads the card-keyed form only. Splitting the disclosing address onto its
+     * own authority is what makes the exposure purpose-bound rather than merely reachability-bound.</p>
+     *
+     * <p>Assumptions: the scope this authority is composed from is granted to the TRANSACTION subject alone
+     * in {@code InternalServiceToken.PERMITTED_SCOPES}, so the narrowing is enforced at both ends -- the
+     * other caller cannot mint the scope, and this chain refuses a token that does not carry it.</p>
+     */
+    public static final String CARD_XREF_RESOLVE_AUTHORITY =
+            AUTHORITY_PREFIX + InternalServiceToken.SCOPE_CARD_XREF_RESOLVE_CARD_NUMBER;
+
     /** The authority a token authorising the account reads confers. */
     public static final String ACCOUNT_READ_AUTHORITY =
             AUTHORITY_PREFIX + InternalServiceToken.SCOPE_ACCOUNT_READ;
@@ -177,13 +200,14 @@ public class InternalApiSecurityConfig {
      * controller whose path moved could not leave this chain matching the old one -- which would silently
      * expose the moved path to the human chain instead.</p>
      *
-     * <p>Refactoring Rationale: the set is assembled from TWO groups rather than declared as one flat list,
-     * because the two groups are governed by different authorities. Previously one list fed one rule, so
+     * <p>Refactoring Rationale: the set is assembled from GROUPS rather than declared as one flat list,
+     * because the groups are governed by different authorities. Previously one list fed one rule, so
      * every address on the chain was reachable by every internal credential -- and two of them disclose a
-     * whole customer record. Composing the security matcher from the same two groups the authorization rules
-     * are written against is what keeps the boundary of the chain and the boundary between the authorities
-     * from drifting apart: an address added to either group is governed by that group's authority by
-     * construction, and one added to neither reaches no handler at all.</p>
+     * whole customer record while a third discloses an unmasked primary account number. Composing the
+     * security matcher from the same groups the authorization rules are written against is what keeps the
+     * boundary of the chain and the boundary between the authorities from drifting apart: an address added to
+     * a group is governed by that group's authority by construction, and one added to no group reaches no
+     * handler at all.</p>
      *
      * <p>Trade-offs: package-visible rather than private, as are both groups. A test in this package asserts
      * that this matcher accepts exactly these internal paths and refuses every neighbouring one, which is
@@ -194,16 +218,123 @@ public class InternalApiSecurityConfig {
      * visibility keeps the methods out of the module's API while making the discriminator directly
      * assertable.</p>
      *
-     * <p>Assumptions: this method returns the UNION of the two authority groups, because it decides only
-     * which chain governs an address and both groups are governed by this one. Which of the two authorities
-     * a given address demands is decided by {@link #decisionReadPaths()} and
-     * {@link #customerMasterPaths()}, whose members are disjoint and whose union is exactly this set.</p>
+     * <p>Assumptions: this method returns the UNION of the authority groups, because it decides only which
+     * chain governs an address and every group is governed by this one. Which authority a given address
+     * demands is decided by {@link #decisionReadPaths()} and {@link #customerMasterPaths()}, whose members
+     * are disjoint and whose union is exactly the address set this chain claims.</p>
      *
-     * @return a matcher accepting exactly the internal addresses of this context and nothing else, never
-     *     {@code null}
+     * <p>Refactoring Rationale: a THIRD member joined the union that is not a path group at all --
+     * {@link #internalErrorDispatches()}, which claims the container's error dispatch of a request that was
+     * addressed to one of these paths. It is part of the chain's security matcher rather than of a group
+     * because it carries no authority of its own: it decides which chain, and therefore which RULE SET,
+     * renders the error of a request a machine token made. Leaving it out let those dispatches fall to the
+     * identity-provider chain, whose terminal rule requires a Cognito group authority that no machine token
+     * carries.</p>
+     *
+     * @return a matcher accepting exactly the internal addresses of this context, and the error dispatches
+     *     of those addresses, and nothing else, never {@code null}
      */
     static RequestMatcher internalPaths() {
-        return new OrRequestMatcher(decisionReadPaths(), customerMasterPaths());
+        return new OrRequestMatcher(decisionReadPaths(), customerMasterPaths(),
+                internalErrorDispatches());
+    }
+
+    /**
+     * The addresses this chain governs, as within-application paths, in the order the groups declare them.
+     *
+     * <p>Purpose. {@link #internalErrorDispatches()} has to answer a question the path matchers cannot: not
+     * "what is this request addressed to" but "what was the request that FAILED addressed to". On the
+     * container's error dispatch the request target is the deployment's error page and the original target
+     * survives only as the {@code jakarta.servlet.error.request_uri} attribute, so the decision is made
+     * against a set of address strings rather than against a matcher over the current target.</p>
+     *
+     * <p>Trade-offs: this is a SECOND derivation of the same eight addresses, which is duplication accepted
+     * on one condition -- that the two cannot drift apart silently. Both are composed from the controllers'
+     * own published constants, so a moved path moves in both; and
+     * {@code InternalApiSecurityConfigTest} asserts that every entry here is accepted by
+     * {@link #internalPaths()} and that the count matches the enumerated groups, so an address added to a
+     * group without being added here fails the build. The alternative -- wrapping the error-dispatched
+     * request so the existing path matchers could be re-run against the original target -- was rejected
+     * because a path matcher resolves its target through the framework's cached request path, which the
+     * dispatcher re-derives for the error page, so the wrapper would decide against whichever of the two
+     * representations the library happened to consult.</p>
+     *
+     * @return the within-application paths of every address this chain claims, never {@code null} and never
+     *     empty
+     */
+    static List<String> internalAddresses() {
+        return List.of(
+                CardXrefController.BASE_PATH + CardXrefController.LOOKUP_PATH,
+                CardXrefController.BASE_PATH + CardXrefController.LOOKUP_BY_ACCOUNT_PATH,
+                CardXrefController.BASE_PATH + CardXrefController.SEARCH_BY_ACCOUNT_PATH,
+                AccountController.BASE_PATH + AccountController.LOOKUP_PATH,
+                CustomerController.BASE_PATH + CustomerController.LOOKUP_PATH,
+                CustomerController.BASE_PATH + CustomerController.DISPLAY_PATH,
+                CustomerController.BASE_PATH + CustomerController.RECORD_PATH,
+                CustomerController.BASE_PATH);
+    }
+
+    /**
+     * The container's ERROR dispatch of a request that was addressed to one of this chain's own addresses.
+     *
+     * <p>Purpose. Keeps the error page of an internal request on the chain that authenticated the request
+     * itself. When the framework cannot write a response -- a caller whose accept header admits nothing the
+     * converters produce is the reachable case -- the container re-dispatches to the deployment's error
+     * page, and the security filters see that dispatch as a fresh request to a DIFFERENT address. Without
+     * this matcher that address belongs to the identity-provider chain, so an internal caller's error page
+     * is decided by rules written for browser callers: its terminal rule requires a Cognito group authority,
+     * which no machine token carries, so the caller's real failure would be replaced by a refusal on a path
+     * it never addressed.</p>
+     *
+     * <p>Measured: the refusal an unclaimed error dispatch produces is 401 and not 403, and the reason is
+     * worth recording because it corrects the mechanism this matcher was first written against. The
+     * framework's authentication filters extend {@code OncePerRequestFilter}, whose
+     * {@code shouldNotFilterErrorDispatch} returns true, so {@code BearerTokenAuthenticationFilter} does not
+     * run on an error dispatch and NO decoder is consulted by either chain -- the token is not
+     * "reauthenticated under the wrong decoder", it is not authenticated at all. The authorization filter
+     * does run, reaches the rules with no principal, and the refusal is rendered as unauthenticated. What
+     * this matcher therefore preserves is which chain's RULES and refusal renderers govern an internal
+     * address, in every dispatch, which is the regime the credential was admitted under.
+     * {@code SecurityChainDispatchTest} records the three neutralisation measurements behind this.</p>
+     *
+     * <p>Assumptions: the original ADDRESS decides and the original METHOD is deliberately not consulted,
+     * although the attribute for it does not exist and the dispatch preserves the method anyway. What this
+     * matcher settles is which authentication regime renders the error of a request the caller made with a
+     * machine token, and that is a property of the address the caller reached for rather than of the verb it
+     * used. A request whose method no matcher in the groups claims never reached a handler either -- it is
+     * exactly the kind of failure that produces an error dispatch -- so excluding it here would send the one
+     * case this matcher exists for to the wrong chain.</p>
+     *
+     * <p>Assumptions: the context path is removed before the comparison, because the attribute carries the
+     * full request target including it while the constants carry within-application paths. Comparing the two
+     * unmodified would silently stop matching if the deployment were ever mounted under a prefix, and the
+     * failure mode would be the wrong-decoder refusal this matcher exists to prevent.</p>
+     *
+     * <p>Alternatives Considered: matching every ERROR dispatch onto this chain, rather than only those whose
+     * original address is internal. Rejected because the identity-provider chain would then never see an
+     * error dispatch at all, and its own callers' error pages would be authenticated by the machine-token
+     * decoder -- the same defect with the two regimes exchanged.</p>
+     *
+     * @return a matcher accepting exactly the error dispatches of this chain's own addresses, never
+     *     {@code null}
+     */
+    private static RequestMatcher internalErrorDispatches() {
+        List<String> addresses = internalAddresses();
+        return request -> {
+            if (request.getDispatcherType() != DispatcherType.ERROR) {
+                return false;
+            }
+            Object originalTarget = request.getAttribute(RequestDispatcher.ERROR_REQUEST_URI);
+            if (!(originalTarget instanceof String target)) {
+                return false;
+            }
+            String contextPath = request.getContextPath();
+            String withinApplication = contextPath != null && !contextPath.isEmpty()
+                    && target.startsWith(contextPath)
+                    ? target.substring(contextPath.length())
+                    : target;
+            return addresses.contains(withinApplication);
+        };
     }
 
     /**
@@ -264,28 +395,72 @@ public class InternalApiSecurityConfig {
         //       step inside its own composition at app/cbl/COACTVWC.cbl L723 -- so granting either to a
         //       business group would ADD a capability rather than preserve one, which is the same
         //       reading SecurityConfig.CARD_XREF_PATH_PATTERN records for the subtree as a whole.
-        return new OrRequestMatcher(cardXrefPaths(matchers), accountPaths(matchers),
-                customerPaths(matchers));
+        return new OrRequestMatcher(cardXrefResolvePaths(matchers), cardXrefPaths(matchers),
+                accountPaths(matchers), customerPaths(matchers));
     }
 
     /**
-     * The cross-reference addresses, which the cross-reference read scope authorises.
+     * The cross-reference addresses that disclose NO card number, which the cross-reference read scope
+     * authorises.
      *
-     * <p>Assumptions: the three are one group because they resolve the same row keyed three ways, so a caller
-     * entitled to one is entitled to the others on the same grounds. Splitting them into three scopes would
-     * produce three values always issued together.</p>
+     * <p>Refactoring Rationale: this group held all THREE cross-reference addresses, on the ground that they
+     * "resolve the same row keyed three ways, so a caller entitled to one is entitled to the others on the
+     * same grounds", and that splitting them "would produce three values always issued together". The
+     * account-keyed lookup has been moved out to {@link #cardXrefResolvePaths}, because that reasoning holds
+     * for how the addresses are KEYED and not for what they DISCLOSE: this group's two answer with
+     * identifiers and with a card number masked to its last four digits, while the one removed answers with
+     * the whole sixteen digits. Nor are the two scopes always issued together -- the authorization context
+     * holds this one alone.</p>
+     *
+     * <p>Assumptions: the two that remain are one group on the original grounds, which still apply between
+     * them: neither publishes a primary account number, so a caller entitled to either is entitled to the
+     * other.</p>
+     *
+     * <p>Trade-offs: package-visible rather than private, as the sibling groups are, so a test in this
+     * package can assert which of the two cross-reference authorities governs which address directly.
+     * Reaching that through the assembled chain would report a mismatch as a status code, naming neither
+     * the group that matched nor the one that did not -- and the property being asserted here is exactly
+     * which group an address falls in.</p>
      *
      * @param matchers the builder each pattern is composed on; must not be {@code null}
-     * @return a matcher accepting exactly the cross-reference internal addresses, never {@code null}
+     * @return a matcher accepting exactly the two non-disclosing cross-reference addresses, never
+     *     {@code null}
      */
-    private static RequestMatcher cardXrefPaths(PathPatternRequestMatcher.Builder matchers) {
+    static RequestMatcher cardXrefPaths(PathPatternRequestMatcher.Builder matchers) {
         return new OrRequestMatcher(
                 matchers.matcher(HttpMethod.POST,
                         CardXrefController.BASE_PATH + CardXrefController.LOOKUP_PATH),
                 matchers.matcher(HttpMethod.POST,
-                        CardXrefController.BASE_PATH + CardXrefController.LOOKUP_BY_ACCOUNT_PATH),
-                matchers.matcher(HttpMethod.POST,
                         CardXrefController.BASE_PATH + CardXrefController.SEARCH_BY_ACCOUNT_PATH));
+    }
+
+    /**
+     * The one cross-reference address that answers with an unmasked primary account number, which
+     * {@link #CARD_XREF_RESOLVE_AUTHORITY} authorises.
+     *
+     * <p>Purpose. The account-keyed lookup resolves an account to the card number its lowest-ordering card
+     * holds, and it carries that value in full because its consumer writes it into the ledger row as the
+     * row's key -- the transcribed form of {@code READ-CXACAIX-FILE} at lines 576 to 604 of
+     * {@code app/cbl/COTRN02C.cbl} and of the same read at line 414 of {@code app/cbl/COBIL00C.cbl}. A
+     * masked value would be a different key, so the disclosure cannot be withdrawn without losing parity;
+     * what a separate authority does is bound who can provoke it.</p>
+     *
+     * <p>Assumptions: this rule is declared BEFORE {@link #cardXrefPaths} in the chain below, and the order
+     * is a correctness requirement rather than a convention. The framework evaluates authorization rules in
+     * declaration order and stops at the first whose matcher accepts the request, so with the wider group
+     * stated first this address would be authorised by the read authority and the split would be inert while
+     * looking complete -- the same trap the customer-master rule records.</p>
+     *
+     * <p>Trade-offs: package-visible for the reason recorded on {@link #cardXrefPaths}: the split is only
+     * a control if the disclosing address is matched by this group and by no wider one, and that is a
+     * property of the matchers rather than of any response.</p>
+     *
+     * @param matchers the builder the pattern is composed on; must not be {@code null}
+     * @return a matcher accepting exactly the account-keyed cross-reference lookup, never {@code null}
+     */
+    static RequestMatcher cardXrefResolvePaths(PathPatternRequestMatcher.Builder matchers) {
+        return matchers.matcher(HttpMethod.POST,
+                CardXrefController.BASE_PATH + CardXrefController.LOOKUP_BY_ACCOUNT_PATH);
     }
 
     /**
@@ -428,9 +603,45 @@ public class InternalApiSecurityConfig {
                 //       it the decision authority by default -- which is why internalPaths is composed
                 //       FROM the two groups rather than written independently of them, so no address can
                 //       reach this chain without having been placed in a group first.
+                // WHY : Purpose: the container's ERROR dispatch is admitted before any authority rule is
+                //       consulted, so the error page of a request this chain authenticated is rendered
+                //       rather than refused. Every rule below ends at denyAll, and the error page is not
+                //       one of this chain's addresses, so without this rule an internal caller whose
+                //       response could not be written received 403 on a path it never addressed instead of
+                //       the failure it actually provoked.
+                // WHY : Assumptions: the rule matches the DISPATCHER TYPE and not the error path's name,
+                //       because the deployment owns that mapping and this configuration does not. A
+                //       path-based permit would additionally let any caller address the error page
+                //       directly and provoke the container's own error body, which no operation in
+                //       openapi/account-api.yaml declares.
+                // WHY : Assumptions: it is stated here even though carddemo-common-defaults.yml registers
+                //       the security filter for REQUEST and ASYNC only, which keeps a deployed chain from
+                //       seeing an error dispatch at all. A chain has to state its own security intent: a
+                //       sliced or hand-wired context builds this chain WITHOUT that property, and the
+                //       property is a registration detail that a later deployment could widen without
+                //       anyone re-reading this file.
+                // WHY : Measured: admitting the dispatch gives up nothing that authentication was
+                //       protecting, because authentication does not run on an error dispatch at all. The
+                //       framework's authentication filters extend OncePerRequestFilter, whose
+                //       shouldNotFilterErrorDispatch returns true, so BearerTokenAuthenticationFilter is
+                //       skipped and no decoder is consulted; the authorization filter is not one of those
+                //       and does run, which is why an unadmitted dispatch is refused as UNAUTHENTICATED
+                //       rather than forbidden -- it reaches the rules with no principal. The original
+                //       request's own authorization decision was already taken, under this chain's rules
+                //       and this chain's decoder, before the response could not be written.
+                // WHY : Trade-offs: what is accepted is that the error page of an internal request is
+                //       rendered without a principal, so the shared advice attributes it to the
+                //       correlation identifier rather than to a caller. That is the same information a
+                //       container's own error page carries, and the alternative -- refusing the dispatch
+                //       to keep an attribution -- destroys the response the caller was owed in order to
+                //       improve a log line.
                 .authorizeHttpRequests(requests -> requests
+                        .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                         .requestMatchers(customerMasterPaths())
                         .hasAuthority(INTERNAL_CUSTOMER_MASTER_AUTHORITY)
+                        .requestMatchers(
+                                cardXrefResolvePaths(PathPatternRequestMatcher.withDefaults()))
+                        .hasAuthority(CARD_XREF_RESOLVE_AUTHORITY)
                         .requestMatchers(cardXrefPaths(PathPatternRequestMatcher.withDefaults()))
                         .hasAuthority(CARD_XREF_READ_AUTHORITY)
                         .requestMatchers(accountPaths(PathPatternRequestMatcher.withDefaults()))
@@ -705,10 +916,20 @@ public class InternalApiSecurityConfig {
      * {@link #requiredCustomerRecordsAuthority()} makes which group each returns unambiguous at every call
      * site.</p>
      *
-     * @return the authority the decision-path reads require, never {@code null}
+     * <p>Refactoring Rationale: the list carries FOUR authorities where it carried three, because the
+     * cross-reference family was split: the address that answers with an unmasked primary account number
+     * demands {@link #CARD_XREF_RESOLVE_AUTHORITY} and the two that answer with none demand
+     * {@link #CARD_XREF_READ_AUTHORITY}. It is returned here beside the three it joins because every
+     * caller of this accessor asks the same question -- which authorities does the decision surface of this
+     * chain demand -- and an authority the chain enforces but this list omits is one no test would notice
+     * had stopped being enforced.</p>
+     *
+     * @return the authorities the decision-path reads require, in the order the chain's rules state them,
+     *     never {@code null}
      */
     public static List<SimpleGrantedAuthority> requiredAuthorities() {
-        return List.of(new SimpleGrantedAuthority(CARD_XREF_READ_AUTHORITY),
+        return List.of(new SimpleGrantedAuthority(CARD_XREF_RESOLVE_AUTHORITY),
+                new SimpleGrantedAuthority(CARD_XREF_READ_AUTHORITY),
                 new SimpleGrantedAuthority(ACCOUNT_READ_AUTHORITY),
                 new SimpleGrantedAuthority(CUSTOMER_READ_AUTHORITY));
     }

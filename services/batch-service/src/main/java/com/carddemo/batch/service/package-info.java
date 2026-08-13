@@ -30,7 +30,11 @@
  * real Javadoc rather than merely existing. The plugin is bound to Maven's
  * {@code validate} phase and fails the build at warning severity, so both fire before
  * anything in this directory is compiled. The consequence is worth stating plainly: the
- * absence of this file would fail the six sibling classes, not itself.</p>
+ * absence of this file would fail the nine sibling types, not itself. Refactoring Rationale: that
+ * number read six and the directory held nine, so it is restated as a measurement a reader can
+ * re-take -- {@code ls} this directory, subtract this charter, and the remainder is what the two
+ * checks above would fail. Naming the population rather than a remembered total is the only form of
+ * the sentence that survives the next class landing here.</p>
  *
  * <p>Trade-offs: no in-source escape hatch exists here and none is wanted. The
  * annotation-based suppression filter and both comment-based ones are deliberately omitted
@@ -87,9 +91,19 @@
  * orchestration section below, and neither may be read into this roster. Refactoring Rationale: the
  * word RULE is emphasised here because the previous wording, "Four classes, and no fifth", was true of
  * this roster and false of the directory from the moment {@code BatchStepLedger} landed -- a reader
- * counting files found five, then six, and had to reach the section three hundred lines below to learn
- * that the closure was never over files. Saying which population is closed is cheaper than the sentence
- * that reconciles two readings of it.</p>
+ * counting files found five, then six, and now finds nine, and had to reach the section three hundred
+ * lines below to learn that the closure was never over files. Saying which population is closed is
+ * cheaper than the sentence that reconciles two readings of it. The nine are the four transcriptions
+ * below, {@code BatchStepLedger} and {@code BatchErrorPublisher} named in the orchestration section,
+ * {@code DailyFeedWatermarkService} named there with them, {@code BatchStepLedgerWriter} which the
+ * invariants section names as the one type carrying an independent transaction, and
+ * {@code BatchFailureReporter}, the port {@code BatchStepLedger} reports a failed STEP through and the
+ * only interface here -- its adapter is {@code com.carddemo.batch.config.SqsBatchFailureReporter},
+ * which is why the interface is in this package and the transport is not. Assumptions: that port and
+ * {@code BatchErrorPublisher} are two senders and not one; the port carries the step-level failure the
+ * ledger records, the publisher carries the RUN-level notification
+ * {@code com.carddemo.batch.BatchApplication} issues, and reading either as the other's interface
+ * would suggest a layer that does not exist.</p>
  *
  * <dl>
  *   <dt>{@code PostingValidationService}</dt>
@@ -188,31 +202,29 @@
  * <p><b>5. Money is {@code BigDecimal} at scale 2, and the rounding mode is fixed per
  * operation.</b> The migration plan's transformation rule T3 fixes the representation at every
  * hop and forbids {@code double} and {@code float} in the money path -- which the shared
- * architecture test asserts rather than requests. Two modes exist and neither is selectable:
- * {@code com.carddemo.common.money.Money#GENERAL_ROUNDING}, which is
- * {@code RoundingMode.HALF_UP}, governs every monetary reduction in this package EXCEPT the
- * accrual quotient, which uses
- * {@code com.carddemo.common.money.Money#BASELINE_INTEREST_ROUNDING},
- * {@code RoundingMode.DOWN}, because that is what the reference statement does.
- * {@code Money#monthlyInterest} takes no mode parameter, so no call site can select
- * either one.</p>
+ * architecture test asserts rather than requests. ONE mode exists and it is not selectable:
+ * {@code com.carddemo.common.money.Money#GENERAL_ROUNDING}, which is {@code RoundingMode.HALF_UP},
+ * governs every monetary reduction in this package including the accrual quotient.
+ * {@code Money#monthlyInterest} takes no mode parameter, so no call site can select another.</p>
  *
- * <p>Assumptions: this package's accrual truncates toward zero, because the reference does, and the
- * derivation is recorded here because the evidence is an ABSENCE and so cannot be read off a
- * statement. The baseline statement at {@code app/cbl/CBACT04C.cbl:464-465} reads
- * {@code COMPUTE WS-MONTHLY-INT} then {@code = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200} and
- * carries no {@code ROUNDED} phrase -- nor does any other statement in that program -- and
- * its target field declared {@code PIC S9(09)V99} at line 168 therefore discards surplus
- * digits toward zero. {@code Money.BASELINE_INTEREST_ROUNDING} is that mode, and
- * {@code InterestCalculationService.ACCRUAL_ROUNDING} names it beside the service for a reader who
- * looks for it here.</p>
+ * <p>Trade-offs: the reference accrual discards its surplus digits where this package rounds them, and
+ * the derivation is recorded here because the evidence on the reference side is an ABSENCE and so
+ * cannot be read off a statement. The baseline statement at {@code app/cbl/CBACT04C.cbl:464-465} reads
+ * {@code COMPUTE WS-MONTHLY-INT} then {@code = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200} and carries no
+ * {@code ROUNDED} phrase -- nor does any other statement in that program -- and its target field
+ * declared {@code PIC S9(09)V99} at line 168 therefore discards surplus digits toward zero. This
+ * package reduces half up instead, because transformation rule T3 names that mode for the money path
+ * and states no exception for the accrual, and the resulting cent is registered as divergence
+ * {@code C-ROUNDING} in {@code docs/architecture/cobol-to-service-traceability.md}.
+ * {@code InterestCalculationService.ACCRUAL_ROUNDING} derives from the shared constant and names the
+ * mode beside the service for a reader who looks for it here.</p>
  *
- * <p>Refactoring Rationale: this package rounded the accrual half up and the resulting cent was
- * registered as divergence C-ROUNDING. That is withdrawn: the accrual formula is one of the rules the
- * reference test suite asserts verbatim, and the cent did not stay local -- line 467 adds each
- * reduced term into the account total and line 352 adds that total to the balance, which the next
- * inclusive over-limit comparison is made against. The identifier survives only as a withdrawal
- * record in {@code docs/architecture/cobol-to-service-traceability.md} section 7.5.</p>
+ * <p>Trade-offs: the cent does not stay local, which is why the divergence is registered with parity
+ * evidence rather than merely noted -- line 467 adds each reduced term into the account total and line
+ * 352 adds that total to the balance, which the next inclusive over-limit comparison is made against.
+ * A predecessor of this paragraph described a second, truncating mode adopted to avoid the cent; that
+ * constant is withdrawn, because a frozen transformation rule outranks a parity argument that the plan
+ * itself provides a divergence register for.</p>
  *
  * <p>Assumptions: that unit of work is genuinely three writes and the baseline applies all
  * three or none. {@code app/cbl/CBTRN02C.cbl:440-442} performs
@@ -363,6 +375,28 @@
  * {@code com.carddemo.batch.dto.BatchErrorEvent}, whose own constructor refuses a success tier and
  * redacts an identifier-shaped or credential-naming component. This class serialises, sends, and
  * reports whether the send landed.</p>
+ *
+ * <p>Refactoring Rationale: a SEVENTH class, {@code DailyFeedWatermarkService}, sits beside those two
+ * on the same terms -- it transcribes no paragraph and it is not a fifth transcription -- and the
+ * reason it exists at all is a difference between the two systems rather than a rule in either. The
+ * reference's daily feed is a flat dataset REPLACED between runs, so a program reading it from the top
+ * reads exactly one night's records; this module's feed is {@code ledger.daily_transactions}, which
+ * ACCUMULATES because its rows are what the three verification passes of the migration plan's section
+ * 0.9.2 compare against. Reading that relation from the top therefore reposts every retained night,
+ * and the position consumed so far has to be durable somewhere for the second run to be correct.</p>
+ *
+ * <p>Assumptions: it holds no rule and decides nothing about a transaction. It answers one question --
+ * which feed ordinal a named consumer has already consumed through -- and records one answer, and both
+ * the read and the advance run inside the caller's transaction so the position commits with the
+ * postings it describes rather than beside them. It is here rather than in the job layer for the reason
+ * {@code BatchStepLedger} is: whether work has already been consumed is a decision, and the job layer
+ * is the layer it exists to be called BY. Trade-offs: it is the third class here with a writing
+ * surface, so the "a rule here is a function of its arguments" property does not extend to it either.
+ * Alternatives Considered: deleting consumed rows, or filtering by business date. Both were rejected in
+ * the migration it landed with, the first because the verification passes need the rows it would
+ * delete, the second because the reference's own feed carries a BLANK processing stamp on every one of
+ * the 300 records of {@code app/data/ASCII/dailytran.txt}, leaving no date on the record to filter
+ * by.</p>
  *
  * <p>Trade-offs: it is the second class in this package with a WRITING surface, alongside
  * {@code DatasetGenerationService} and the accrual's persistence noted above, so the "a rule here is a

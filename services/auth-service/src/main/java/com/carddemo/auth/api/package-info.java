@@ -152,11 +152,16 @@
  *       self-describing and therefore independently authorizable</li>
  *   <li>The browse cursor of the user list travels in the page envelope
  *       {@code com.carddemo.common.web.PageResponse}, through its first-key and last-key members,
- *       with the two availability members -- has-next and has-previous -- each settled by the read
- *       that produced the page, so the list operation positions by key and never by offset.
- *       Assumptions: has-previous is one of the envelope's five components and is not derived from
- *       the first-key member being present, which would announce an earlier page on the opening
- *       page</li>
+ *       with forward availability -- has-next -- settled by the read that produced the page, so the
+ *       list operation positions by key and never by offset. Assumptions: the envelope has FOUR
+ *       components, {@code items}, {@code firstKey}, {@code lastKey} and {@code hasNext}, and
+ *       backward availability is NOT a member of it: it is the presence of the first-key member,
+ *       which names the position a retreat resumes from, and the client refuses a backward step from
+ *       the opening page out of its own navigation state exactly as the baseline did from the page
+ *       ordinal it held between turns. Refactoring Rationale: this charter named a has-previous
+ *       member among five components. No such member exists -- the envelope is fixed at four where it
+ *       is declared and a fifth availability component was considered and rejected there -- so the
+ *       charter promised a client a value the wire never carries</li>
  *   <li>Navigation, carried by the from-program and to-program fields with their transaction
  *       counterparts at {@code app/cpy/COCOM01Y.cpy:21-24} and by the last-map pair at
  *       {@code :43-44}, is entirely client-side. No response leaving this package names a next

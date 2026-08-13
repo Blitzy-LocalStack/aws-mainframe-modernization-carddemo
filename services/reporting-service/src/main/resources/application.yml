@@ -1298,6 +1298,30 @@ carddemo:
       report-prefix: reports/transaction-detail/
       statement-prefix: statements/
 
+      # WHY : (1) Purpose: the category-balance report app/jcl/PRTCATBL.jcl
+      #       produces gets its own prefix rather than a partition under the
+      #       transaction report's, because the two are different reports with
+      #       different record lengths -- 40 bytes at PRTCATBL.jcl:61 against 133
+      #       at TRANREPT.jcl:78 -- and a fixed-width consumer reading one prefix
+      #       must find one width under it.
+      #       (2) Assumptions: the key beneath this prefix is FIXED and carries no
+      #       date or generation partition, because the reference deletes and
+      #       recreates one dataset: its DELDEF step at PRTCATBL.jcl:21-25 removes
+      #       AWS.M2.CARDDEMO.TCATBALF.REPT with DISP=(MOD,DELETE) and STEP10R
+      #       recreates it with DISP=(NEW,CATLG,DELETE) at :59. Bucket versioning
+      #       expresses that pair as a new current version over the same key, which
+      #       is the same delete-then-allocate contract the statement prefix above
+      #       relies on and is strictly more recoverable than the reference, which
+      #       retained nothing of the deleted copy.
+      #       (3) Alternatives Considered: writing this report into the tranrept
+      #       generation family beside the transaction report. Rejected because
+      #       TCATBALF.REPT has NO generation base anywhere in the baseline -- an
+      #       exhaustive search for DEFINE GENERATIONDATAGROUP matches only
+      #       app/jcl/DEFGDGB.jcl, DEFGDGD.jcl, DALYREJS.jcl and REPTFILE.jcl and
+      #       none of them defines it -- so treating it as a generation would
+      #       invent a retention contract the baseline never had for it.
+      category-balance-prefix: reports/category-balance/
+
     artifact:
 
       # WHY : (1) Purpose: a per-request statement artifact is stored under a key

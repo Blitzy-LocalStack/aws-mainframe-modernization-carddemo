@@ -50,11 +50,17 @@
 #     - AWS_REGION
 #     - CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE, CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE
 #       and CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE
-#   That list is the complete set of no-fallback placeholders in application.yml
-#   with ONE deliberate exclusion. CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD has no
-#   fallback either and is omitted on purpose: the entry point mints the keystore
-#   and exports its password itself, so a deployment that injected one would be
-#   overriding material this task generates for its own single use.
+#   That list is the complete set of no-fallback placeholders across
+#   application.yml and application-prod.yml with ONE deliberate exclusion, and the
+#   completeness is mechanically held rather than asserted: common-lib's
+#   RuntimeConfigurationContractTest re-derives that placeholder set from the two
+#   files and fails the build if any member of it is absent from this file.
+#   CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD has no
+#   fallback either and is omitted from the list on purpose: the entry point --
+#   config/docker/generate-listener-material.sh -- mints the keystore and exports
+#   its password itself, so a deployment that injected one would be overriding
+#   material this task generates for its own single use. It is named here, as
+#   entrypoint-supplied, rather than left out of the file altogether.
 #   One further input is required and is NOT a placeholder, so it does not appear
 #   in the list above and is easy to miss:
 #     - CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY, the environment form of the

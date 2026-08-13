@@ -282,16 +282,69 @@ BINARY: it either passes or it fails. There is no tolerated warning level"*
 
 ### 3.1 Module layout
 
+Refactoring Rationale: this paragraph read 41 and 52 while the directory held 44 and 55,
+and the marker above is why it cannot again. The figures were prose in a file that adding
+a class never touches, and the two production classes that made them stale —
+`security/ApprovedOriginPolicy.java` and `web/RequestBodySizeFilter.java` — were also
+missing from the tree listing below, so a reader could not have derived the right total
+from this document either. The listing is now re-measured against the module by the same
+test, name by name.
+
+<!-- source-inventory: 44 production classes + 11 charters = 55 compilation units -->
 **Eleven packages** — a root and ten flat subpackages — each with one
 `package-info.java` under `src/main/java` (see §8, they are mandatory), holding
-**41** production classes for **52** compilation units. The set is deliberately flat:
-there is no nested subpackage, and `SharedKernelInventoryTest` re-derives the root
-charter's inventory table from the directory one level deep, so a nested package would
-be reported as drift rather than folded into its parent's row. `src/test/java` holds
-twelve directories, each with its own charter.
+**44** production classes for **55** compilation units. That census is machine-checked the
+same way the test census in §10.1 is: `ServiceReadmeInventoryTest` parses the
+`source-inventory` comment below and re-measures all three figures against this module's own
+tree, so a class added without a listing edit fails the build instead of ageing quietly in
+prose.
+
+Refactoring Rationale: a second census marker stood immediately above this paragraph and is
+withdrawn. It was an HTML comment keyed on the words *main* and *inventory*, publishing a
+package count, a class count and a compilation-unit count, and it published the same census
+as `source-inventory` in another spelling — its `classes` figure is that marker's
+production types and its `units` figure is the sum of that marker's two, because a
+compilation unit here is either a production type or a package charter — so this README
+stated one census twice while nothing checked the two statements against each other. One
+marker now carries it, and `ServiceReadmeInventoryTest` fails any README that reintroduces
+the withdrawn one, since a marker no case measures is worse than the redundancy removing it
+cost.
+
+Refactoring Rationale: the three figures above read **41**, **52** and **40** across two
+sentences that disagreed with each other and with the tree, and the listing below omitted
+`RequestBodySizeFilter`, `ApprovedOriginPolicy` and six test classes while the note at the
+end of this section claimed the listing was CLOSED. That combination is the expensive kind
+of documentation defect: a listing that understates itself reads as evidence that a
+validator is untested or that a control does not exist, which sends a contributor to write
+something that is already there. The figures are now measured, the listing is complete, and
+the marker is what keeps both true.
+
+Refactoring Rationale: every figure in this subsection and in the tree below is
+**re-measured from disk together**, not adjusted by however many files a change is believed to
+have added. The counts had drifted to **41** production classes, **52** compilation units and
+**40** types in the tree caption while disk carried 44, 55 and 44 — which is the failure mode
+incrementing produces, because a caption and a listing that are edited separately fall out of
+step silently. Each caption is now derivable from the listing directly beneath it, and both are
+derivable from `find src/main/java -name '*.java'` and its `src/test/java` counterpart, so a
+reader who doubts a number can settle it in one command rather than by trusting this paragraph.
+
+⚠ Assumptions: the test-side caption is **58 `*Test` + 1 `*IT`**, so this module carries 59 test
+classes. A second draft of this paragraph stated 56 (55 plus one); that figure was measured
+before `architecture/DiagnosticRenderingRulesTest` and the two codec cases beside it were added,
+and it is not restated here, because the caption below is the copy `ServiceReadmeInventoryTest`
+re-measures and a second spelling of the same census in prose is exactly what the withdrawn
+`main-inventory` marker was.
+
+The set is deliberately flat: there is no nested subpackage, and `SharedKernelInventoryTest`
+re-derives the root charter's inventory table from the directory one level deep, so a nested
+package would be reported as drift rather than folded into its parent's row. `src/test/java`
+holds twelve directories, each with its own charter.
+
+<!-- source-inventory: 44 production types + 11 charters in 11 packages -->
+<!-- source-listing:begin -->
 
 ```text
-src/main/java/com/carddemo/common/          11 packages · 40 production types
+src/main/java/com/carddemo/common/          11 packages · 44 production types
   package-info.java
   CardDemoCommonAutoConfiguration.java
   money/          package-info.java · Money.java · MoneyModule.java
@@ -305,11 +358,12 @@ src/main/java/com/carddemo/common/          11 packages · 40 production types
   messaging/      package-info.java · MessageExpiry.java · MessagingCorrelationId.java
                   QueueClientBudget.java · RethrowingDigestErrorHandler.java
   web/            package-info.java · CorrelationIdFilter.java · PageResponse.java
-                  CursorToken.java
+                  CursorToken.java · RequestBodySizeFilter.java
   security/       package-info.java · JwtRoleConverter.java · CardNumberMasker.java
                   CognitoAccessTokenValidator.java · OpaqueIdentifier.java
                   HtmlTextEncoder.java · InternalServiceToken.java
                   MaskedCardNumber.java · SealedSelector.java
+                  ApprovedOriginPolicy.java
   observability/  package-info.java · MetricsConfig.java · LogSafeText.java
                   ThrowableDigest.java · FailureSummary.java
   time/           package-info.java · TimestampFormatter.java
@@ -323,13 +377,18 @@ src/main/resources/
   META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
   META-INF/services/tools.jackson.databind.JacksonModule
 
-src/test/java/com/carddemo/common/           12 packages · 48 *Test + 1 *IT
+src/test/java/com/carddemo/common/           12 packages · 58 *Test + 1 *IT
   package-info.java · CardDemoCommonAutoConfigurationIT.java
   architecture/   package-info.java · LayeringRulesTest.java            ← pinned, §7
+                  ApplicationContextWiringContractTest.java
+                  CrossSchemaPrivilegeContractTest.java
+                  DiagnosticRenderingRulesTest.java
                   PackageCharterInventoryTest.java
+                  PublishedContractClosureTest.java
                   RuntimeConfigurationContractTest.java
                   RuntimeDeletePrivilegeContractTest.java
                   ServiceCatalogInventoryTest.java
+                  ServiceReadmeInventoryTest.java
                   SharedKernelInventoryTest.java
   money/          package-info.java · MoneyTest.java · MoneyModuleTest.java
   codec/          package-info.java · CopybookLayoutTest.java
@@ -338,7 +397,7 @@ src/test/java/com/carddemo/common/           12 packages · 48 *Test + 1 *IT
                   AuthorizationDisclosurePolicyTest.java
                   InquiryRequestCodecTest.java
   error/          package-info.java · AbendDetailTest.java · ApiErrorTest.java
-                  ApiErrorSecurityHandlersTest.java
+                  ApiErrorSecurityHandlersTest.java · ApiErrorWireShapeTest.java
                   GlobalExceptionHandlerTest.java
                   GlobalExceptionHandlerPathMaskingTest.java
                   AbsentAndUnconvertibleValueTest.java
@@ -350,14 +409,16 @@ src/test/java/com/carddemo/common/           12 packages · 48 *Test + 1 *IT
                   MessageSinkSuppressionTest.java
   web/            package-info.java · CorrelationIdFilterTest.java
                   CursorTokenTest.java · PageResponseTest.java
+                  RequestBodySizeFilterTest.java
   security/       package-info.java · JwtRoleConverterTest.java
                   CognitoAccessTokenValidatorTest.java · CardNumberMaskerTest.java
                   OpaqueIdentifierTest.java · HtmlTextEncoderTest.java
                   InternalServiceTokenTest.java · MaskedCardNumberTest.java
-                  SealedSelectorTest.java
+                  SealedSelectorTest.java · ApprovedOriginPolicyTest.java
   observability/  package-info.java · LogSafeTextTest.java · MetricsConfigTest.java
                   StructuredLoggingDefaultsTest.java · ThrowableDigestTest.java
                   FailureSummaryTest.java
+                  SensitiveLoggingAndJsonStrictnessDefaultsTest.java
   time/           package-info.java · TimestampFormatterTest.java
   validation/     package-info.java · DateEditValidatorTest.java
                   FieldValidationFlagTest.java
@@ -365,36 +426,85 @@ src/test/java/com/carddemo/common/           12 packages · 48 *Test + 1 *IT
                   OnlineWriteGateInterceptorTest.java
 ```
 
-Two facts about that tree are worth stating rather than leaving to be inferred.
-The module publishes **two** artifacts — its jar of main classes and a
+<!-- source-listing:end -->
+
+Two facts about that tree are worth stating rather than leaving to be inferred, and one
+note about the figures above it.
+Refactoring Rationale: the first of the three is new, and it is here because the
+three figures above it were all wrong at once — the header read `40 production
+types`, the header below it read `48 *Test`, and the paragraph before the tree previously
+stated `41 production classes for 52 compilation units`. **None of those three figures is
+machine-checked, and each restates a fact that is checked somewhere else.** The
+`*Test` and `*IT` counts are gated by `ServiceReadmeInventoryTest` against the
+census marker in §12, which read the correct **55** and **1** throughout the drift;
+the per-package production counts are gated by `SharedKernelInventoryTest` against
+the charter table in `com/carddemo/common/package-info.java`, not against this
+tree. So a stale number here fails no build, which is exactly how three of them
+survived. The remedy is not a fourth gate — it is to treat every figure in this
+block as a restatement whose authority lies elsewhere, and to change it only by
+re-deriving it: `find src/main/java/com/carddemo/common -name '*.java' \!
+-name package-info.java | wc -l` for the production count, the same walk without
+the exclusion for compilation units, and the §12 census for the two test counts.
+Assumptions: the enumerated file names are now complete, verified by set-comparing
+every name in this block against the two source trees — 101 names listed, 101 on
+disk, none missing and none stale. Eight files had been absent from it:
+`ApprovedOriginPolicy` and `RequestBodySizeFilter` under main, and
+`ApiErrorWireShapeTest`, `ApplicationContextWiringContractTest`,
+`ApprovedOriginPolicyTest`, `CrossSchemaPrivilegeContractTest`,
+`RequestBodySizeFilterTest` and `ServiceReadmeInventoryTest` under test.
+The first: the module publishes **two** artifacts — its jar of main classes and a
 **test artifact** carrying the `architecture` package alone, which is how the
-eight services receive the one shared layering rule class. And **every** test
-package carries a `package-info.java` beside its classes, because §8's
+eight services receive the one shared layering rule class. And the second:
+**every** test package carries a `package-info.java` beside its classes, because §8's
 documentation gate audits test sources and requires both; a new test package is
 created together with its descriptor, never before it. Every main package now has
 a matching test package, `validation` and `control` included, so a class author
 adding a new package creates both.
 
-**Measured suite sizes.** These are execution counts read from the Surefire XML of a
-`mvn -f services/pom.xml -pl common-lib test` run, not estimates, and they sum to
-the module total. They are attributed by test SUITE rather than by the display name
-each case reports under, because several classes here report their cases under
-`@Nested` group names and one reports none under its own name at all:
+**Measured suite sizes — runtime evidence, not a statically verifiable artifact.**
+Every number in the table below is an execution count read from the Surefire XML a build
+produces, and **that XML is not committed**: `target/` is ignored, by design, so nothing in
+the repository can be diffed against these figures. They are reproducible rather than
+checkable — regenerate them and compare, do not treat them as an in-tree assertion:
+
+```bash
+# WHAT: regenerate the evidence this table reports, then re-derive the table from it.
+# WHY : the counts are attributed by test SUITE (the file the case lives in), which the
+#       console output cannot give you -- several classes here report their cases under
+#       @Nested or @DisplayName labels, so grepping the console for a class name finds a
+#       zero. One XML file is written per suite, so counting <testcase> elements per FILE
+#       attributes every case to the class that owns it.
+mvn -f services/pom.xml -pl common-lib test
+for f in services/common-lib/target/surefire-reports/TEST-*.xml; do
+  printf '%s %s\n' "$(grep -c '<testcase' "$f")" "$(basename "$f" .xml | sed 's/^TEST-//')"
+done | sort -rn
+grep -ho '<testcase' services/common-lib/target/surefire-reports/TEST-*.xml | wc -l
+```
+
+Trade-offs: the alternative was to commit the Surefire XML as a checked-in evidence
+artifact so a reviewer could verify the figures without a build. It was rejected because
+committed build output goes stale the first time a test is added and then asserts a
+falsehood with the authority of a file, whereas a figure labelled as runtime evidence with
+its regeneration command beside it can only ever be out of date, never misleading about
+what it is. Assumptions: a reader who measures a different total has added or removed
+tests, which is expected drift -- §2's commands are the authority that cannot go stale, and
+the last re-measurement of this table found each row exactly as printed and the total at
+1382:
 
 | Package | Classes | Executions |
 |---|---|---|
-| `codec` | `CopybookLayoutTest` 150 · `FixedWidthCodecTest` 149 · `CsvAuthCodecTest` 126 · `PackedDecimalCodecTest` 106 · `ZonedDecimalCodecTest` 62 · `InquiryRequestCodecTest` 16 · `AuthorizationDisclosurePolicyTest` 13 | **622** |
+| `codec` | `CopybookLayoutTest` 150 · `FixedWidthCodecTest` 150 · `CsvAuthCodecTest` 126 · `PackedDecimalCodecTest` 106 · `ZonedDecimalCodecTest` 62 · `InquiryRequestCodecTest` 16 · `AuthorizationDisclosurePolicyTest` 13 | **623** |
 | `validation` | `DateEditValidatorTest` 93 across 8 `@Nested` groups · `FieldValidationFlagTest` 29 | **122** |
-| `error` | `GlobalExceptionHandlerTest` 51 · `ApiErrorTest` 36 · `AbendDetailTest` 21 · `GlobalExceptionHandlerPathMaskingTest` 20 · `ProtocolRefusalRenderingTest` 9 · `AbsentAndUnconvertibleValueTest` 8 across 1 `@Nested` group · `ApiErrorSecurityHandlersTest` 7 · `RejectedParameterOrderingTest` 5 across 1 `@Nested` group · `ApiErrorWireShapeTest` 4 | **161** |
+| `error` | `GlobalExceptionHandlerTest` 64 · `ApiErrorTest` 36 · `AbendDetailTest` 21 · `GlobalExceptionHandlerPathMaskingTest` 20 · `ApiErrorSecurityHandlersTest` 9 · `ProtocolRefusalRenderingTest` 9 · `AbsentAndUnconvertibleValueTest` 8 across 1 `@Nested` group · `RejectedParameterOrderingTest` 5 across 1 `@Nested` group · `ApiErrorWireShapeTest` 4 | **176** |
 | `security` | `OpaqueIdentifierTest` 30 · `HtmlTextEncoderTest` 24 · `SealedSelectorTest` 18 · `ApprovedOriginPolicyTest` 15 · `CardNumberMaskerTest` 13 · `InternalServiceTokenTest` 12 · `CognitoAccessTokenValidatorTest` 11 · `MaskedCardNumberTest` 9 · `JwtRoleConverterTest` 7 | **139** |
 | `money` | `MoneyTest` 31 · `MoneyModuleTest` 10 | **41** |
-| `web` | `PageResponseTest` 16 · `CursorTokenTest` 16 · `RequestBodySizeFilterTest` 14 · `CorrelationIdFilterTest` 8 | **54** |
+| `web` | `PageResponseTest` 17 · `CursorTokenTest` 16 · `RequestBodySizeFilterTest` 14 · `CorrelationIdFilterTest` 8 | **55** |
 | `messaging` | `MessagingCorrelationIdTest` 16 · `RethrowingDigestErrorHandlerTest` 14 · `MessageExpiryTest` 11 · `QueueClientBudgetTest` 8 · `MessageSinkSuppressionTest` 6 | **55** |
-| `observability` | `FailureSummaryTest` 15 · `MetricsConfigTest` 12 · `ThrowableDigestTest` 11 · `StructuredLoggingDefaultsTest` 7 · `LogSafeTextTest` 5 | **50** |
-| `architecture` | `LayeringRulesTest` 9 · `SharedKernelInventoryTest` 7 across 1 `@Nested` group · `RuntimeConfigurationContractTest` 4 · `PackageCharterInventoryTest` 4 across 1 `@Nested` group · `ServiceCatalogInventoryTest` 4 across 1 `@Nested` group · `ApplicationContextWiringContractTest` 3 · `CrossSchemaPrivilegeContractTest` 3 across 1 `@Nested` group · `ServiceReadmeInventoryTest` 3 across 1 `@Nested` group · `RuntimeDeletePrivilegeContractTest` 2 | **39** |
-| `control` | `OnlineWriteGateTest` 15 across 5 `@Nested` groups · `OnlineWriteGateInterceptorTest` 12 across 5 `@Nested` groups | **27** |
+| `observability` | `FailureSummaryTest` 17 · `MetricsConfigTest` 12 · `ThrowableDigestTest` 11 · `StructuredLoggingDefaultsTest` 7 · `SensitiveLoggingAndJsonStrictnessDefaultsTest` 7 · `LogSafeTextTest` 5 | **59** |
+| `architecture` | `LayeringRulesTest` 10 · `PublishedContractClosureTest` 8 · `SharedKernelInventoryTest` 12 across 1 `@Nested` group · `RuntimeConfigurationContractTest` 5 · `PackageCharterInventoryTest` 4 across 1 `@Nested` group · `ServiceCatalogInventoryTest` 4 across 1 `@Nested` group · `ServiceReadmeInventoryTest` 6 across 1 `@Nested` group · `ApplicationContextWiringContractTest` 3 · `CrossSchemaPrivilegeContractTest` 3 across 1 `@Nested` group · `DiagnosticRenderingRulesTest` 3 · `RuntimeDeletePrivilegeContractTest` 2 | **60** |
+| `control` | `OnlineWriteGateTest` 16 across 5 `@Nested` groups · `OnlineWriteGateInterceptorTest` 12 across 5 `@Nested` groups | **28** |
 | `time` | `TimestampFormatterTest` 24 | **24** |
-| | **module total** | **1334** |
+| | **module total** | **1382** |
 
 Three reconciliation notes, because each looks like a discrepancy until named.
 `DateEditValidatorTest`, both `control` classes, two of the `error` classes and five
@@ -402,11 +512,65 @@ of the `architecture` classes report `Tests run: 0` against their own class name
 report their executions under `@Nested` or `@DisplayName` labels instead, so a reader
 grepping the console output for a class name finds a zero. The table above is
 therefore read from `target/surefire-reports/*.xml`, where each case still carries the
-suite it belongs to, and the console total agrees with it: 1180 executions report
-under a class name and 154 under a display name, summing to 1334.
-`CardDemoCommonAutoConfigurationIT` contributes **nothing** to the 1334: it is an
+suite it belongs to, and the console total agrees with it: 1219 executions report
+under a class name and 163 under a display name, summing to 1382.
+
+**These figures had drifted, and one class was missing from the table entirely.**
+`SensitiveLoggingAndJsonStrictnessDefaultsTest` was absent from the `observability`
+row while contributing to every run, and three other rows each understated one class
+by a single case — so the published total was eight short before the case that took it
+to nine was added. It has since moved once more, and deliberately: the case asserting that
+no service profile RAISES one of the three pinned persistence loggers or withdraws one of
+the parser refusals took `SensitiveLoggingAndJsonStrictnessDefaultsTest` from six to seven
+and the module from 1346 to 1347. Importing the shared floors is necessary and not
+sufficient — an importing document outranks an imported one — so the second case exists to
+catch a service that inherits every floor and then raises one back in its own profile.
+It moved once more for the same kind of reason. `PublishedContractClosureTest` asserted the
+correlation header on INLINE responses only and stated that the reference form was covered
+where the components are read, which it was not: six of one contract's shared refusal
+components carried no header at all, and 438 of the 555 published responses across the seven
+documents are references. The case that reads the components themselves took that class from
+five to six and the module from 1352 to 1353. A seventh followed from the same kind of
+measurement: the one schema named by the request parameter, the response header AND every
+problem document's `correlationId` member was published unnarrowed, so it granted callers an
+empty value the filter answers 400 for while having to admit the empty string the writer emits
+for an absent identity. That case took the module to 1354. An EIGHTH followed when the same review's
+required-versus-nullable findings were traced to their root: nine response schemas across four
+documents published thirty always-written members as optional, the class of defect three separate
+findings had each reported one instance of. The case that closes every response schema's `required`
+list over its own properties took the class to eight and the module to 1355.
+The rows above are now re-measured from the report XML rather than
+edited by hand, which is the same source the paragraph beside them names; the previous
+figures are recorded here rather than quietly replaced, because a census that can be
+eight adrift without anything noticing is the argument for the machine-checked marker
+in §6 rather than for a more careful edit.
+
+An earlier pass measured **1373**, and three rows moved to reach it: `FixedWidthCodecTest`
+by one, `GlobalExceptionHandlerTest` by thirteen and `FailureSummaryTest` by two, from the
+cases the same review cycle added to each. Those sixteen and the two the table was already
+carrying above its own stated total -- its rows summed to 1357 while the total beside them
+read 1355 -- account for that movement, which is stated rather than smoothed over for
+the reason the paragraph above gives: the table and the total are now read from one source,
+so they can only disagree if that source is not consulted.
+
+The current run measures **1382**, and the whole of the movement from 1373 sits in ONE row:
+`architecture` moves from 51 to **60**. Four of its cases arrived together with the rules they
+assert -- `LayeringRulesTest` gained the locale rule (nine cases to ten),
+`ServiceReadmeInventoryTest` gained two, and `RuntimeConfigurationContractTest` gained one --
+and `SharedKernelInventoryTest` gained five, which are the cases that hold this very listing and
+these very figures to the directory. Every other row is unchanged and was re-verified from
+`target/surefire-reports/*.xml` rather than assumed. ⚠️ Refactoring
+Rationale: the superseded figure was short by THREE while only one case was added in the cycle
+that superseded it, and the discrepancy is named rather than absorbed: two of the three had
+already drifted, because 1373 was written while `ServiceReadmeInventoryTest` carried two cases
+the table never gained. A total maintained as "the previous total plus what I believe I added"
+reproduces exactly that error, which is why this one is read from the report files -- the same
+argument the paragraph above makes, reached a second time by a second route.
+
+`CardDemoCommonAutoConfigurationIT` contributes **nothing** to the 1382: it is an
 `*IT`, so Failsafe runs it at `verify` and Surefire does not run it at `test`
-(§2.3). And a full `mvn -f services/pom.xml clean test` reports
+(§2.3); it reports its own **13** executions under Failsafe instead, which is why a
+`verify` console shows 1382 and 13 as two separate totals. And a full `mvn -f services/pom.xml clean test` reports
 `LayeringRulesTest` **nine** times rather than once — once through this module's own
 `default-test` execution, and once in each of the eight service modules through the
 inherited `architecture-rules` execution that scans this module's test artifact. Only
@@ -414,8 +578,11 @@ the first of those nine is counted in the execution total above, which measures 
 module.
 
 > Assumptions: the tree and the counts above are read from disk and from a build,
-> not copied from a plan. Both trees are complete as listed — eleven main packages
-> with eleven charters, twelve test directories with twelve charters, and
+> not copied from a plan — the tree from `find`, the counts from Surefire XML, and both
+> re-measured together rather than adjusted. Both trees are complete as listed: every
+> `.java` on disk appears in the tree above and nothing appears there that is not on disk —
+> eleven main packages with eleven charters, twelve test directories with twelve charters,
+> and
 > `LayeringRulesTest` present in the `architecture` package under the filename §7
 > pins. It is annotated with a pointer to §7 because its filename is a build
 > contract that a later move would break silently. The counts will drift as tests
@@ -430,12 +597,33 @@ module.
 > readings sends a contributor to write something that is already there. §2's
 > commands are the authority that cannot go stale; this section is a map of the
 > territory they measure.
-> Trade-offs: describing the tree as it is means this section needs an edit
+> Refactoring Rationale: both claims above are now **enforced by the build** rather
+> than asserted here, and they were enforced because prose alone did not hold them.
+> A code review found this section publishing 41 production classes over 52
+> compilation units where the tree held 44 over 55, and found the listing beside
+> those figures omitting eight files that exist — production
+> `web/RequestBodySizeFilter.java` and `security/ApprovedOriginPolicy.java` and six
+> test classes — while this very blockquote called the listing closed. The two
+> HTML comments above the code fence are what changed that.
+> `<!-- source-inventory: … -->` publishes the production-type, charter and package
+> counts, and `ServiceReadmeInventoryTest.eachPublishedSourceInventoryMatchesItsModule`
+> re-derives all three from `src/main/java`. `<!-- source-listing:begin -->` and
+> `<!-- source-listing:end -->` delimit the closed region, and
+> `ServiceReadmeInventoryTest.eachDelimitedSourceListingNamesExactlyTheTree` holds
+> it to `src/` in **both** directions. The delimiters are load-bearing: prose
+> outside them is free to name a file belonging to another module, and only inside
+> them does the listing claim to be complete.
+> Trade-offs: describing the tree as it is still means this section needs an edit
 > whenever a class lands, which a target list copied from a plan would not. That
 > cost is accepted because the alternative fails in the worse direction: a README
 > naming classes that do not exist sends a reader hunting for them, and one
-> omitting classes that do exist invites a duplicate of work already done. Either
-> way §2's commands are the authority a prose count cannot be.
+> omitting classes that do exist invites a duplicate of work already done. What has
+> changed is that forgetting the edit now fails the build instead of quietly
+> misinforming a reader. Alternatives Considered: generating this listing from the
+> tree, which would need no edit at all. Rejected because a generated block has to
+> be regenerated and committed to stay honest, which relocates the drift rather
+> than removing it, and because the annotations here — which class is pinned by §7,
+> which package holds which validator — are judgement a generator cannot supply.
 
 ### 3.2 Responsibility and source authority, one line each
 
@@ -695,77 +883,72 @@ not a reduced sum. Accumulating at full precision and reducing once at the end
 produces a different total, because rounding does not distribute over addition.
 Reduce each term, then add.
 
-#### 5.3.1 Two rounding modes, one per operation, neither selectable
+#### 5.3.1 One rounding mode for the whole money path, not selectable
 
-This module declares **two** rounding modes, and which one applies is a property of
-the operation rather than of the caller:
+This module declares **one** rounding mode, and it governs every reduction to cents:
 
 | Mode | Value | Operations it governs |
 |---|---|---|
-| `GENERAL_ROUNDING` | `HALF_UP` | `Money.of(BigDecimal)`, `multipliedBy`, `dividedBy` |
-| `BASELINE_INTEREST_ROUNDING` | `DOWN` | `monthlyInterest` and nothing else |
+| `GENERAL_ROUNDING` | `HALF_UP` | `Money.of(BigDecimal)`, `multipliedBy`, `dividedBy`, `monthlyInterest` |
 
-**No entry point takes a rounding mode**, so no call site can select either one.
+**No entry point takes a rounding mode**, so no call site can select one.
 
-Assumptions: the split follows the reference source, and the asymmetry is the point.
-The baseline performs exactly one monetary computation and the accrual quotient is
-it — the statement at [`app/cbl/CBACT04C.cbl` lines 464 to 465] stores its quotient
-into a field declared with two decimal places at line 168 and carries **no `ROUNDED`
-phrase**, and no statement anywhere in that program's 652 lines carries one either.
-A COBOL store into a fixed-scale item without `ROUNDED` discards the surplus digits,
-which is truncation toward zero. The three general operations have no reference
-statement at all, so nothing constrains their mode and transformation rule T3's
-half up applies to them unopposed.
+Assumptions: the single mode is transformation rule T3 applied literally — it states
+the money path as an exact decimal at scale 2 with `RoundingMode.HALF_UP` in Java and
+states no exception for any operation, while rule T4 constrains the accrual's operand
+ORDER and leaves its mode to T3. Three of the four operations have no reference
+statement to be faithful to at all. The fourth, the accrual quotient, is the one place
+the reference would reduce differently: the statement at
+[`app/cbl/CBACT04C.cbl` lines 464 to 465] stores its quotient into a field declared
+with two decimal places at line 168 and carries **no `ROUNDED` phrase**, and no
+statement anywhere in that program's 652 lines carries one either, so a COBOL store
+into a fixed-scale item discards the surplus digits — truncation toward zero.
 
-**Where the two modes part company.** On every vector the reference fixtures carry
-they agree, which is precisely why a test using only those vectors would not detect
-a wrong mode:
+**Where the target and the baseline part company.** On every vector the reference
+fixtures carry they agree, which is precisely why a test using only those vectors would
+not detect a wrong mode — and why the registered divergence is unreachable on the
+shipped interest corpus:
 
-| Balance | Annual rate | Quotient | `monthlyInterest` | Half-up counterfactual | Discriminating? |
+| Balance | Annual rate | Quotient | `monthlyInterest` | Baseline truncation | Discriminating? |
 |---|---|---|---|---|---|
 | `1000.00` | `25.00` | `20.8333…` | `20.83` | `20.83` | no |
 | `1000.00` | `2.50` | `2.0833…` | `2.08` | `2.08` | no |
-| `1000.00` | `2.71` | `2.2583…` | **`2.25`** | **`2.26`** | **yes** |
-| `1000.80` | `2.50` | `2.0850` exactly | **`2.08`** | **`2.09`** | **yes** |
-| `-1000.00` | `2.71` | `-2.2583…` | **`-2.25`** | **`-2.26`** | **yes** |
+| `1000.00` | `2.71` | `2.2583…` | **`2.26`** | **`2.25`** | **yes** |
+| `1000.80` | `2.50` | `2.0850` exactly | **`2.09`** | **`2.08`** | **yes** |
+| `-1000.80` | `2.50` | `-2.0850` exactly | **`-2.09`** | **`-2.08`** | **yes** |
 
-`MoneyTest` asserts each discriminating vector three ways — against the API, against
-independently computed reference truncation, and against a half-up counterfactual
-that **must differ** — so the mode is pinned rather than described. The negative
-vector additionally asserts against a `FLOOR` counterfactual, because `DOWN` and
-`FLOOR` agree on every positive input and part company only there, and the
+`MoneyTest` asserts each discriminating vector three ways — against the API, against an
+independently computed half-up counterfactual, and against the baseline's truncating
+arithmetic which **must differ** — so both the mode and the registered difference are
+pinned rather than described. The negative side is asserted with two vectors, because no
+single negative input separates half up from both truncation and `FLOOR`, and the
 exact-quotient claim is asserted with `RoundingMode.UNNECESSARY` so it throws rather
 than passing if a future edit makes the vector inexact.
 
-**Alternatives Considered: reducing the accrual with `HALF_UP` too, on the reading
-that rule T3's "one mode for the money path" covers it.** Rejected, and the
-identifier `C-ROUNDING` appears in
-[§7.5 of the traceability register](../../docs/architecture/cobol-to-service-traceability.md)
-as a withdrawal record rather than as a live divergence. That reading puts the letter
-of a transformation rule above the requirement it exists to serve: the plan requires
-observable behaviour to be unchanged, names the exact interest formula among the
-rules that must be preserved, and admits a behavioural change only as an authorised
-divergence. The accrual is also one of the business rules the reference test suite
-asserts verbatim, so a cent there is a parity failure in the most heavily asserted
-computation in the system — and it compounds: line 467 adds each reduced term into
-the account total and line 352 adds that total to the account balance, so a cent
-gained per transaction category reaches the balance the next **inclusive** over-limit
-comparison is made against. What rule T3 does forbid — binary floating point, and a
-caller-selectable mode — is forbidden here and asserted mechanically.
+**The one-cent difference is registered, not absorbed.** It is
+[divergence `C-ROUNDING` in §7.4 of the traceability register](../../docs/architecture/cobol-to-service-traceability.md),
+which carries the reachability measurement and the consequence: line 467 adds each
+reduced term into the account total and line 352 adds that total to the account balance,
+so a cent gained on a transaction category reaches the balance the next **inclusive**
+over-limit comparison is made against.
 
-**Why there is still no mode parameter.** Alternatives Considered: keeping the mode
-on the accrual entry point so a parity caller could ask for truncation while other
-callers kept half up. Rejected because a selectable mode is a second money contract
-in disguise — two call sites computing the same accrual could disagree by a cent
-with nothing in either one signalling that they had chosen differently. Fixing the
-mode per operation yields the same arithmetic with none of that exposure.
+**Alternatives Considered: a second mode fixed at `DOWN` for the accrual alone**, which
+this module carried for a time and which reduced the difference to nothing. Rejected on
+precedence: the plan is frozen, it admits a behavioural difference from the reference
+when the difference is registered, and it admits a departure from a transformation rule
+only where it states an exception — so matching the baseline cent for cent would satisfy
+parity by breaking the rule that exists to keep the money path uniform. Alternatives
+Considered: keeping the mode on the accrual entry point so a parity caller could ask for
+truncation while other callers kept half up. Rejected because a selectable mode is a
+second money contract in disguise — two call sites computing the same accrual could
+disagree by a cent with nothing in either one signalling that they had chosen
+differently.
 
-Trade-offs: two modes cost a reader having to know which operation is governed by
-which, where one mode cost nothing to explain and a cent in the one computation that
-matters most. The cost is paid down by there being exactly one operation on the
-truncating side, by each constant being named for the operation it governs rather
-than for a general policy, and by the discriminating vectors above being asserted
-rather than described.
+Trade-offs: one mode costs a cent against the baseline in the one computation where the
+baseline states a mode at all, where two modes cost every reader of this module having to
+know which operation takes which. The cost is paid down by the difference being bounded
+at one cent on an exact half, by its being unreachable on the shipped corpus, and by its
+being asserted in both directions rather than described.
 
 ---
 
@@ -1518,7 +1701,7 @@ need justifying.
 | Decision | Category or categories | What the comment must say |
 |---|---|---|
 | `Money` scale 2, and the multiply-then-divide helper | `Assumptions:` + `Trade-offs:` | Cite `app/cbl/CBACT04C.cbl` lines 464 to 465; state that dividing first *"yields different cents on many inputs"* and that at a 2.50 rate it yields `0.00` |
-| `GENERAL_ROUNDING` half up for general operations, `BASELINE_INTEREST_ROUNDING` truncation for the accrual | `Assumptions:` + `Trade-offs:` | State which operation each governs and why the accrual differs: the reference statement carries no `ROUNDED` phrase, and the three general operations have no reference statement at all — see §5.3.1 |
+| `GENERAL_ROUNDING` half up for every reduction, the accrual included | `Assumptions:` + `Trade-offs:` | State that rule T3 names the mode with no exception, and that the reference accrual carries no `ROUNDED` phrase so the target differs by a cent on an exact half — registered as `C-ROUNDING`; see §5.3.1 |
 | The accrual carrying no rounding-mode parameter | `Alternatives Considered:` + `Trade-offs:` | Name the mode-taking form and reject it: a selectable mode is a second money contract in disguise, so two call sites could disagree by a cent unnoticed — see §5.3.1 |
 | Money serialised as a JSON string | `Alternatives Considered:` | Name the JSON number and reject it — most clients parse it into an IEEE-754 double and destroy exactness at the boundary the user sees |
 | `ZonedDecimalCodec`'s explicit EBCDIC sign mode | `Assumptions:` | Quote `tests/README.md` lines 273 to 274 verbatim; note that EBCDIC here names a sign convention, not an encoding |
@@ -1539,8 +1722,8 @@ need justifying.
 
 ### 10.1 What each suite must cover
 
-<!-- test-inventory: 55 tests + 1 integration tests -->
-**56** test classes: **55** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
+<!-- test-inventory: 58 tests + 1 integration tests -->
+**59** test classes: **58** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
 Failsafe. That census is machine-checked — `ServiceReadmeInventoryTest` in this module parses the
 comment above and re-measures both figures against this module's own test tree, so the count fails
 the build when it drifts rather than ageing quietly in prose.
@@ -1577,6 +1760,7 @@ its unit suites, which is why they are fast enough to run on every build.
 | `CardNumberMaskerTest`, `LogSafeTextTest`, `OpaqueIdentifierTest` | masking to the last four digits; control-character stripping and truncation; opaque identifier derivation and that it is not reversible |
 | `CorrelationIdFilterTest`, `CursorTokenTest`, `PageResponseTest` | correlation id propagation; composite-key round-trip and tamper rejection; the keyset envelope of §6.1 including a final page and an empty one |
 | `MetricsConfigTest` | the common tags — service, environment and version — are applied to every meter |
+| `DiagnosticRenderingRulesTest` | that every production record carrying a protected or unbounded component declares its own `toString()`, that no source applies the card masker to an account or customer identifier, and the two floors plus the non-empty-subject guard that stop either rule passing over an empty tree |
 | `LayeringRulesTest` | the three minimum rules of §7, plus the guards that stop them passing vacuously — that the imported production graph is non-empty, that the ownership contract is exactly the nine roots, that each prohibition list still names a construct that exists, that a security chain renders its refusals, and a negative control proving the money rule rejects a planted `double` |
 
 ### 10.2 The wire shapes, so no test author re-derives them
@@ -1653,7 +1837,7 @@ files.
 | `2022-06-10 19:27:53.000000` | — | exactly **26** characters; the final four fractional digits are structurally always `0000` (§6.2) |
 | balance `1000.00` × rate `15.00` ÷ 1200 | **`12.50`** | exact; divide-first gives `10.00` |
 | balance `1000.00` × rate `2.50` ÷ 1200 | **`2.08`** | quotient `2.0833…`, and **both** rounding modes give `2.08`, so this vector does **not** discriminate them; **divide-first gives `0.00`** — the failure multiply-before-divide prevents |
-| balance `1000.80` × rate `2.50` ÷ 1200 | **`2.08`** truncated / **`2.09`** half up | quotient `2.0850` **exactly** — the only kind of vector that discriminates the two contracts of §5.3.1, and therefore the one a rounding-regression test must carry |
+| balance `1000.80` × rate `2.50` ÷ 1200 | **`2.09`** half up / **`2.08`** baseline truncation | quotient `2.0850` **exactly** — the only kind of vector on which the target and the baseline differ at all, and therefore the one a rounding-regression test must carry |
 | `'DEFAULT   '` | `DEFAULT` | a disclosure-group id arrives space-padded; **trailing blanks are padding, not data** |
 
 ⚠ **A false-positive class to avoid when hunting for negative overpunch.**

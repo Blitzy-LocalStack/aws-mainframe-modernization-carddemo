@@ -359,7 +359,7 @@ public class CustomerController {
      *     L5 of {@code app/cpy/CVCUS01Y.cpy}; must satisfy its declared constraints. The record is SHARED with
      *     the two operations above rather than duplicated, because all three constrain the same nine-digit key
      *     to the same range
-     * @return the six display fields, never {@code null}
+     * @return the nine display fields, never {@code null}
      * @throws NoSuchElementException if the customer master holds no such row, which the shared advice renders
      *     as HTTP 404 and which the consumer reads as its own absent-customer outcome
      */

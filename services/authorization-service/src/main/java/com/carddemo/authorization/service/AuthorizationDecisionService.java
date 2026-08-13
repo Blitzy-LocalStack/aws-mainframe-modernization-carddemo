@@ -213,7 +213,31 @@ public class AuthorizationDecisionService {
      */
     public record Decision(boolean approved, String responseCode, String responseReason,
             Money approvedAmount) {
-    }
+    
+        /**
+         * Renders the outcome and its two codes, WITHOUT the approved amount.
+         *
+         * <p>Purpose. The approved amount is a monetary value and is withheld by
+         * {@code docs/architecture/observability.md} L1093 to L1112. This record is produced once per
+         * consumed authorization message, so the generated rendering put an approved sum on the ordinary
+         * path of the highest-volume flow in the migration.</p>
+         *
+         * <p>Assumptions: the approval flag and the two codes are the decision. The response code and its
+         * reason are the bounded values the reference program moves into the reply, so a rendering carrying
+         * all three says exactly what was decided and why, and adds nothing by naming the figure -- the
+         * approved amount is zero on a decline and equals the requested amount otherwise, so it carries no
+         * information the flag does not already give.</p>
+         *
+         * @return a rendering naming the approval flag, the response code and the response reason, with the
+         *     approved amount omitted; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "Decision[approved=" + this.approved
+                    + ", responseCode=" + this.responseCode
+                    + ", responseReason=" + this.responseReason + ']';
+        }
+}
 
     /**
      * Decides an authorization request against the outcomes of the baseline's four lookups.

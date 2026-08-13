@@ -503,14 +503,14 @@ services, repositories and adapters as non-`package-info.java` main-source Java:
 | Maven module | main-source classes | owned Flyway migrations |
 |---|---:|---|
 | `common-lib` | 44 | none — it owns no schema |
-| `auth-service` | 29 | `V1__auth.sql`, `V2__auth_identity_sync.sql`, `V3__auth_identity_sync_operations.sql`, `V4__auth_folded_user_id.sql` |
+| `auth-service` | 29 | `V1__auth.sql`, `V2__auth_identity_sync.sql`, `V3__auth_identity_sync_operations.sql`, `V4__auth_folded_user_id.sql`, `V5__auth_folded_user_id_trim.sql`, `V6__auth_canonical_user_id.sql`, `V7__auth_identity_sync_provisioning_guard.sql` |
 | `account-service` | 43 | `V1__account.sql`, `V2__account_inquiry_reply_ledger.sql` |
 | `card-service` | 25 | `V1__card.sql`, `V2__card_num_digit_domain.sql` |
-| `transaction-service` | 37 | `V1__ledger.sql`, `V2__ledger_transaction_id_allocator.sql` |
+| `transaction-service` | 37 | `V1__ledger.sql`, `V2__ledger_transaction_id_allocator.sql`, `V3__ledger_bytewise_collation.sql` |
 | `reference-service` | 59 | `V1__reference.sql`, `V2__seed_reference.sql` |
-| `batch-service` | 60 | `V1__batch.sql` |
-| `authorization-service` | 58 | `V1__authorization.sql`, `V2__authorization_outbox_claim_version.sql`, `V3__authorization_outbox_fifo_identities.sql` |
-| `reporting-service` | 53 | none by design — it owns no table, only read-only views |
+| `batch-service` | 63 | `V1__batch.sql`, `V2__batch_feed_watermark.sql` |
+| `authorization-service` | 58 | `V1__authorization.sql`, `V2__authorization_outbox_claim_version.sql`, `V3__authorization_outbox_fifo_identities.sql`, `V4__authorization_outbox_send_acceptance.sql` |
+| `reporting-service` | 64 | none by design — it owns no table, only read-only views |
 
 Refactoring Rationale: this paragraph reported that "only `batch-service` and
 `reporting-service` contain non-`package-info.java` main-source Java" and that the
@@ -518,11 +518,28 @@ other six modules did "not yet contain their controllers, services, repositories
 adapters". That was true of the tree it was written against and is now false of
 every one of the six. It is replaced by a measured table rather than by a corrected
 sentence, because a sentence of that shape has no way to be checked and this one
-survived six modules landing. The `auth-service` figure moved from 29 to 31 when the
-create path was made usable: a runtime-created user had a pool account with a
-credential nobody could learn, so provisioning now returns that credential in a
-`ProvisionedIdentity` value and the create operation answers with a
-`CreatedUserResponse` carrying it once. Two value types in, none out. The counts exclude package charters, which are
+survived six modules landing.
+
+Refactoring Rationale: this paragraph also claimed that "the `auth-service` figure moved
+from 29 to 31 when the create path was made usable ... two value types in, none out", and
+that was wrong in both directions. `ProvisionedIdentity` and `CreatedUserResponse` already
+existed when the create path was reworked; what that work added was the durable
+provisioning intent and its reconciliation, expressed inside existing types and in one new
+migration, `V7__auth_identity_sync_provisioning_guard.sql`. The figure did not move at all
+and is 29 both before and after. The claim survived because the gate below checks the TABLE
+and not the prose beside it, which is the one thing a countable claim in a sentence cannot
+be held to.
+
+The `reporting-service` figure moved from 53 to 58 when the report and statement
+lifecycles were given a read side. A submission returned an orchestration handle that no
+operation consumed and a statement response carried a location that resolved to nothing, so
+five types landed: `ReportExecutionStatusResponse` for what became of a run,
+`ReportArtifactLocator` for the report artifact's key convention, `ArtifactStore` for the
+object-store port both lifecycles read through, and `StatementIndexEntry` with
+`StatementRunOutcome` for the run index that tells a caller which records of a run-wide
+document are its own. Five types in, none out.
+
+The counts exclude package charters, which are
 documentation rather than delivery. `ServiceCatalogInventoryTest` in `common-lib`
 asserts every count in this table against the module it names, so a figure here that
 drifts from the tree fails the build — which is what a countable claim in a document
@@ -580,15 +597,15 @@ surface and collapsing them onto the narrowest would leave the ledger with no ke
 write.
 
 The second is `com.carddemo.account.dto.CustomerDisplayView`, and it exists because a neighbouring
-context's detail screen had nowhere to read its six display fields from — a cardholder's name,
-two address lines and a telephone number. Its client obtained them by deserialising the response
+context's detail screen had nowhere to read its nine display fields from — three name members,
+three address lines, a state code, a ZIP code and one telephone number. Its client obtained them by deserialising the response
 of the customer EXISTENCE check, which answers 204 or 404 with no body at all by contract, so a
 bodiless answer deserialised to nothing and those fields rendered as absent on every request
 while nothing anywhere failed. Alternatives Considered: pointing that consumer at the
 body-bearing record read instead, which would have needed no new type. Rejected on least
 privilege — that operation answers with the whole record and is gated on
 `internal:customer-master.read`, a scope granted to no context because it reads a national
-identifier, a government-issued identifier and a credit score for any customer, so serving six
+identifier, a government-issued identifier and a credit score for any customer, so serving nine
 fields under it would be exactly the escalation the scope split was introduced to prevent. The
 projection is served under the narrower decision-read scope the consumer already holds, and it
 carries no protected value at all: the two encrypted identifiers and the credit score are absent
@@ -847,7 +864,7 @@ README files are authored.
 | `reference-service` | `services/reference-service` | `com.carddemo.reference` | `reference` | `COTRTLIC`, `COTRTUPC`, `COBTUPDT`, `CODATE01`, `CSUTLDTC` |
 | `batch-service` | `services/batch-service` | `com.carddemo.batch` | `batch`, plus scoped cross-schema grants | `CBTRN01C`, `CBTRN02C`, `CBACT04C`, `CBEXPORT`, `CBIMPORT` |
 | `authorization-service` | `services/authorization-service` | `com.carddemo.authorization` | `authorization` | `COPAUS0C`, `COPAUS1C`, `COPAUS2C`, `COPAUA0C`, `CBPAUP0C`, `PAUDBLOD`, `PAUDBUNL`, `DBUNLDGS` |
-| `reporting-service` | `services/reporting-service` | `com.carddemo.reporting` | `reporting` — **this service owns no table**, and reads seven cross-schema views; the schema itself holds exactly one table the service may not read (see below) | `CORPT00C`, `CBTRN03C`, `CBSTM03A`, `CBSTM03B` |
+| `reporting-service` | `services/reporting-service` | `com.carddemo.reporting` | `reporting` — **this service owns no table**, and reads eight cross-schema views; the schema itself holds exactly one table the service may not read (see below) | `CORPT00C`, `CBTRN03C`, `CBSTM03A`, `CBSTM03B` |
 
 **Nine Maven modules, eight bounded contexts.** A ninth module, `common-lib`
 (package root `com.carddemo.common`), sits alongside the eight. It is the **shared
@@ -1029,8 +1046,8 @@ documented business rule fails silently.
 |---|---|
 | Responsibilities | The batch chain: daily-transaction preflight, transaction posting, interest calculation, backup and combine, and the export/import round-trip |
 | Source programs | `CBTRN01C` (preflight), `CBTRN02C` (posting), `CBACT04C` (interest), `CBEXPORT` and `CBIMPORT` (round-trip) |
-| Owned schema | `batch` — the durable step ledger plus the job-repository tables |
-| Owned tables | `batch_run`, plus the batch framework's own job-repository tables |
+| Owned schema | `batch` — the durable step ledger, the feed's consumed position, plus the job-repository tables |
+| Owned tables | `batch_run`, `daily_feed_watermark`, plus the batch framework's own job-repository tables |
 | Synchronous dependencies | None on another context's HTTP surface. Jobs are argument-driven and receive their parameters, including the business date, from the orchestrator. It does reach three schemas outside its own directly — `ledger`, `account` and `reference` — under the scoped database grants described below, which is a database dependency rather than a service hop and is why no client class appears in this module. Refactoring Rationale: this counted four, because the role also held an unused `SELECT` on `card`; that grant was removed after `app/cbl/CBTRN01C.cbl` was found to open `CARD-FILE` at `:309` and close it at `:417` without ever reading it, and naming the three schemas rather than counting them keeps the claim checkable |
 | Asynchronous dependencies | None inbound: it is invoked by the orchestrator rather than by a queue, and it registers no listener. Outbound it is publish-only, sending a failed step's notification to the one terminal error sink through `com.carddemo.batch.config.SqsConfig`, which is property-gated so a job with nothing to report needs no queue |
 | Cross-schema access | **Scoped write grants on `ledger.*` and `account.*` only** — see below |
@@ -1051,6 +1068,25 @@ guarantees therefore hold together: the business date is an identifying job para
 so a repeat of a whole business date is recognised, and a resumed step within one night
 is distinguishable from a first attempt at it. The state-by-state mapping lives in
 [`batch-orchestration.md`](batch-orchestration.md).
+
+`daily_feed_watermark` is the second table this context owns and it closes a
+different gap from the step ledger's. The reference's posting job reads its feed as a
+flat sequential dataset that is REPLACED between runs
+(`app/jcl/POSTTRAN.jcl:30-31`, `app/cbl/CBTRN02C.cbl:202-219`), so reading the whole
+file *is* reading tonight's transactions. The target's feed is a table that
+accumulates, because its rows are what the three verification passes in
+[`../runbooks/data-migration.md`](../runbooks/data-migration.md) compare against — so
+a walk that began at the first row re-posted every earlier night on every later
+night, adding those amounts to account balances a second time and inserting a second
+posted row for each. Every one of those postings is individually valid, so no reject
+was written and no return code changed: the chain reported a clean night. One row per
+feed now records the highest ingestion ordinal consumed; the posting step reads it
+under a write lock, walks strictly above it, and advances it inside the same
+transaction as the postings it accounts for, and the preflight step reads the same
+position without a lock so its report describes the window posting will consume. Like
+the step ledger this is an addition rather than a port — the reference stored the same
+fact implicitly, in the lifecycle of a dataset — and it is registered in
+[`cobol-to-service-traceability.md`](cobol-to-service-traceability.md).
 
 ### `authorization-service`
 
@@ -1087,7 +1123,11 @@ its columns are specified in
 `V2__authorization_outbox_claim_version.sql`, which separates the outbox row's claim
 token from its send-attempt counter and widens the latter, and
 `V3__authorization_outbox_fifo_identities.sql`, which renames the outbox's two
-first-in-first-out identity columns to `order_group_id` and `deduplication_id`,
+first-in-first-out identity columns to `order_group_id` and `deduplication_id`, and
+`V4__authorization_outbox_send_acceptance.sql`, which adds the four columns that record
+a send the broker accepted — the send instant, the deadline the sent message carried,
+and the broker's own message identity and sequence number — so that a publication write
+failing after an accepted send is reconciled rather than sent a second time,
 together with 58 non-`package-info.java` main-source classes — the count tabulated
 for it earlier in this document.
 

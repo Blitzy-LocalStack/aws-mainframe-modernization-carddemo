@@ -41,10 +41,28 @@
 # =============================================================================
 
 # Assumptions: the build stage's Node major version matches the floor
-#   ui/package.json declares in engines.node, which is ^22.22.0 || >=24.0.0 --
-#   driven by react-router 8.3.0, the highest floor anywhere in the lock file. A
+#   ui/package.json declares in engines.node, which is ^22.23.2 || >=24.18.1. A
 #   lower image would install a tree whose own constraint it violates and report
 #   it only as an npm EBADENGINE warning.
+# Assumptions: what sets that floor is now a SECURITY release, not a package
+#   constraint. react-router 8.3.0 remains the highest floor any dependency in the
+#   lock file asks for and it only asks for ^22.12.0 || >=24.0.0; the floor is
+#   raised past it because Node's 29 July 2026 release fixed eleven CVEs, three of
+#   them HIGH, and 22.23.1 predates all three: CVE-2026-56846, in which an HTTP/2
+#   peer evades the `maxSessionMemory` accounting that is the server's only bound
+#   on per-session memory; CVE-2026-56848, a heap use-after-free reachable through
+#   bundled nghttp2; and CVE-2026-58043, in which the Permission Model treats a
+#   granted path as a radix prefix and so over-grants to sibling paths that merely
+#   share leading characters. 22.23.2 and 24.18.1 are the first releases on their
+#   respective lines carrying all three fixes, which is why the second arm of the
+#   range is >=24.18.1 and not the >=24.0.0 the dependency floor alone would allow.
+# Trade-offs: only the first two of those CVEs touch anything this stage does, and
+#   neither is reached here -- nothing in `npm ci`, `tsc` or `vite build` serves
+#   HTTP/2 or runs under the Permission Model, and the built assets this stage
+#   emits are static files served by nginx in the runtime stage below, so no Node
+#   process survives into production at all. The patch is taken regardless: the
+#   alternative is shipping a build toolchain that a scanner correctly flags, and
+#   arguing unreachability in a review every time, which costs more than one digest.
 # Refactoring Rationale: the reference is digest-pinned rather than left on the
 #   bare tag, and the digest is the MULTI-PLATFORM INDEX digest read with
 #   `docker buildx imagetools inspect`, not the platform manifest digest
@@ -52,7 +70,9 @@
 #   it. A patch-level tag reading like an exact version is the easiest kind of
 #   mutable reference to mistake for an immutable one, so two builds of one commit
 #   could otherwise ship two different toolchains with nothing in the log to say so.
-FROM node:22.23.1-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS build
+#   The digest below was re-read for 22.23.2 and its media type confirmed to be
+#   application/vnd.oci.image.index.v1+json, so it is an index digest as required.
+FROM node:22.23.2-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS build
 
 WORKDIR /build
 

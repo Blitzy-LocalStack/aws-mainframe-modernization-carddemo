@@ -41,14 +41,16 @@ import org.springframework.stereotype.Service;
  * function of its arguments: the run-scoped identifier suffix arrives as a parameter rather than as
  * a field, so two concurrent runs cannot interleave one counter.</p>
  *
- * <p>Assumptions: the accrual truncates toward zero, and the evidence is an ABSENCE rather than a
- * statement, which is why it is recorded here instead of being left to be re-derived. The reference
- * statement at {@code app/cbl/CBACT04C.cbl:464-465} reads
+ * <p>Trade-offs: the accrual rounds HALF UP where the reference discards its surplus digits, and the
+ * difference is recorded here rather than left to be re-derived because the evidence on the reference
+ * side is an ABSENCE. The reference statement at {@code app/cbl/CBACT04C.cbl:464-465} reads
  * {@code COMPUTE WS-MONTHLY-INT = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200} and carries no
- * {@code ROUNDED} phrase; no statement anywhere in that program's 652 lines carries one, so a
- * COBOL arithmetic statement storing into {@code WS-MONTHLY-INT PIC S9(09)V99} at line 168
- * discards its surplus digits toward zero. This is the one monetary reduction in the module
- * governed by that mode rather than by the shared half-up contract.</p>
+ * {@code ROUNDED} phrase; no statement anywhere in that program's 652 lines carries one, so a COBOL
+ * arithmetic statement storing into {@code WS-MONTHLY-INT PIC S9(09)V99} at line 168 discards its
+ * surplus digits toward zero. This module reduces through the shared half-up contract instead, because
+ * transformation rule T3 states that mode for the money path and states no exception for the accrual,
+ * and the resulting cent is registered as divergence {@code C-ROUNDING}. It is reachable only where the
+ * quotient lands exactly on a half cent, which no shipped interest fixture does.</p>
  *
  * <p>Assumptions: a rate of zero and an absent disclosure group are different outcomes and stay
  * different. A group carrying a genuine zero rate accrues nothing and emits nothing, because
@@ -96,21 +98,26 @@ public class InterestCalculationService {
     public static final String DEFAULT_ACCOUNT_GROUP = "DEFAULT";
 
     /**
-     * The rounding mode the reference's own accrual applies, named rather than left implicit.
+     * The rounding mode this accrual applies, named rather than left implicit.
      *
      * <p>Assumptions: this constant is DOCUMENTATION and not a parameter. The accrual reduces
      * through {@link Money#monthlyInterest(java.math.BigDecimal)}, which binds the mode to
-     * {@code Money.BASELINE_INTEREST_ROUNDING} and exposes no way to select another, so naming it
-     * beside the service records the reference's mode where a reader of this service looks for it
-     * without giving any call site the ability to apply a different one. This service's own tests
-     * assert the two are the same value, so a drift between the name and the behaviour fails the
-     * build rather than misleading a reader.</p>
+     * {@link Money#GENERAL_ROUNDING} and exposes no way to select another, so naming it beside the
+     * service records the mode where a reader of this service looks for it without giving any call
+     * site the ability to apply a different one. It is DERIVED from the shared constant rather than
+     * restated as a literal, so the two cannot drift; this service's own tests assert the identity as
+     * well, which turns a future divergence between the name and the behaviour into a build failure.</p>
      *
-     * <p>Assumptions: the mode is truncation toward zero because the reference statement at
+     * <p>Trade-offs: the mode is half up, which is what transformation rule T3 states for the money
+     * path, and it is NOT what the reference does. The reference statement at
      * {@code app/cbl/CBACT04C.cbl:464-465} carries no {@code ROUNDED} phrase, and neither does any
-     * other statement in that program, so it discards the surplus digits of its result.</p>
+     * other statement in that program, so it discards the surplus digits of its result -- a cent less
+     * than this service produces on a quotient landing exactly on a half cent. Rule T3 states no
+     * exception for the accrual, so the rule governs and the difference is registered as divergence
+     * {@code C-ROUNDING} in {@code docs/architecture/cobol-to-service-traceability.md}, which carries
+     * the parity evidence with it.</p>
      */
-    public static final RoundingMode ACCRUAL_ROUNDING = RoundingMode.DOWN;
+    public static final RoundingMode ACCRUAL_ROUNDING = Money.GENERAL_ROUNDING;
 
     /**
      * The transaction type code every generated interest transaction carries, {@code 01}.
@@ -207,6 +214,59 @@ public class InterestCalculationService {
 
     /** The merchant identifier a generated interest transaction carries, zero, per {@code :491}. */
     private static final long NO_MERCHANT = 0L;
+
+    /**
+     * Reports whether a ledger row carries the attribution this pass writes onto the rows it generates.
+     *
+     * <p>Purpose: the two flows that re-emit {@code ledger.transactions} as a fixed-width generation --
+     * the backup and combine states -- have to pad each record the way the program that WROTE it padded
+     * it, and section 6.3 of {@code services/batch-service/src/test/resources/fixtures/README.md}
+     * measures that pad as a property of the writing job rather than of the record type. A relational
+     * row carries no pad bytes, so the writer has to be recognised from the row itself, and this method
+     * is where that recognition lives: on the type that writes the attribution, so the recogniser and
+     * the writer cannot drift apart.</p>
+     *
+     * <p>Assumptions: BOTH marks are required, and requiring both is strictly safer than requiring
+     * either. {@code app/cbl/CBACT04C.cbl:484} attributes every generated row to
+     * {@link #INTEREST_SOURCE} and {@code :485-489} gives it the {@link #INTEREST_DESCRIPTION_PREFIX}
+     * description, and this pass writes both in one place, so a row it generated always matches both. A
+     * row it did NOT generate has to match both to be misclassified, which is why the conjunction
+     * reduces the chance of a wrong pad rather than doubling it.</p>
+     *
+     * <p>Alternatives Considered: a provenance column on {@code ledger.transactions}. Rejected because
+     * that table is {@code transaction-service}'s to declare, this module reaches it under a grant
+     * narrower than ownership, and the column would carry no information the record does not already
+     * carry -- the reference itself distinguishes the two writers by exactly these two fields, which is
+     * why the accrual pass sets a source literal at all.</p>
+     *
+     * <p>Alternatives Considered: recognising the writer from the description text alone. Rejected as
+     * the sole test because a description is free text a feed record can hold anything in, so a posted
+     * row whose merchant description happened to begin with the accrual prefix would be re-padded as an
+     * accrual row. The source field is a ten-character closed-domain label, which is what makes the
+     * pair a schema-carried discriminator rather than a string match.</p>
+     *
+     * <p>Assumptions: the mechanism this method exists for is registered as
+     * {@code D-TRAN-PAD-PROVENANCE} in {@code docs/architecture/cobol-to-service-traceability.md}
+     * section 7.4, which records the emitted bytes as preserved and the residual difference as a posted
+     * row that carried both of these marks.</p>
+     *
+     * @param row the ledger row about to be encoded, which may be {@code null} or may hold {@code null}
+     *     in either field, both of which are answered {@code false} rather than raising, because a
+     *     caller asking which producer wrote a row is entitled to the answer "not this one"
+     * @return {@code true} when the row carries both marks this pass writes, and {@code false} otherwise
+     */
+    public static boolean isAccrualGenerated(Transaction row) {
+        if (row == null || row.getSource() == null || row.getDescription() == null) {
+            return false;
+        }
+
+        // WHY : Assumptions: the source is compared with its trailing blanks stripped, because the
+        //       column is declared CHAR(10) and a driver reading a CHAR column hands back the padded
+        //       form -- so an equality test against the six-character literal would answer false for
+        //       every row read out of the database while answering true for one built in memory.
+        return INTEREST_SOURCE.equals(row.getSource().strip())
+                && row.getDescription().startsWith(INTEREST_DESCRIPTION_PREFIX);
+    }
 
     /**
      * The value the three merchant text fields are cleared to, per {@code :492-494}.
@@ -505,11 +565,12 @@ public class InterestCalculationService {
      * discards two digits the division would have consumed, which on a balance of 1000.80 at a rate
      * of 2.50 is a two-cent difference.</p>
      *
-     * <p>Assumptions: the helper truncates toward zero rather than rounding, because the reference
-     * statement carries no {@code ROUNDED} phrase. Truncation is NOT the same as flooring here: the
-     * receiving field is declared SIGNED, so a negative balance is reachable, and flooring a negative
-     * quotient moves it away from zero by a cent where truncation does not. {@link #ACCRUAL_ROUNDING}
-     * names the mode beside this service and the shared helper is what applies it.</p>
+     * <p>Assumptions: the helper reduces the quotient half up, on MAGNITUDE, and the sign matters
+     * because the receiving field is declared SIGNED and a negative balance is therefore reachable.
+     * Half up and flooring part company on a negative quotient -- flooring moves it away from zero
+     * where half up rounds to the nearer cent -- so the mode is not interchangeable with either
+     * flooring or the reference's truncation. {@link #ACCRUAL_ROUNDING} names it beside this service
+     * and the shared helper is what applies it.</p>
      *
      * @param categoryBalance the balance to accrue on, standing for
      *     {@code TRAN-CAT-BAL PIC S9(09)V99} at {@code app/cpy/CVTRA01Y.cpy:9}; must not be
@@ -518,7 +579,7 @@ public class InterestCalculationService {
      *     {@code DIS-INT-RATE PIC S9(04)V99} at {@code app/cpy/CVTRA02Y.cpy:9}; must not be
      *     {@code null}
      * @return one month's interest on that balance at that rate, exact at two decimal places and
-     *     truncated toward zero; never {@code null}
+     *     reduced half up; never {@code null}
      * @throws NullPointerException if either argument is {@code null}
      */
     public Money monthlyInterest(Money categoryBalance, InterestRateLookup lookup) {
@@ -576,7 +637,7 @@ public class InterestCalculationService {
      *     declared eleven digits; must not be {@code null}
      * @param cardNumber the card number from the by-account cross-reference, which {@code :495}
      *     stamps into {@code TRAN-CARD-NUM}; must not be {@code null}
-     * @param accruedInterest the already-truncated interest this row accrued, which {@code :490}
+     * @param accruedInterest the already-reduced interest this row accrued, which {@code :490}
      *     moves into {@code TRAN-AMT}; must not be {@code null}
      * @param businessDate the injected business date whose raw token opens the generated identifier;
      *     must not be {@code null}
@@ -727,7 +788,8 @@ public class InterestCalculationService {
      *
      * @param account the account whose accumulated interest is being applied, read once for this
      *     account group at {@code :203}; must not be {@code null}
-     * @param accumulatedInterest the sum of the truncated per-category accruals for this account,
+     * @param accumulatedInterest the sum of the per-category accruals for this account, each already
+     *     reduced to cents before it joined the sum,
      *     which is zero when no category qualified; must not be {@code null}
      * @return the stored account, returned so a caller can assert on the applied balance without
      *     reading it back; never {@code null}

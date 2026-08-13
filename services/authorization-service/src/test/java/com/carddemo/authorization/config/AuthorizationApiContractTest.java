@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.carddemo.authorization.dto.PendingAuthDetailResponse;
 import com.carddemo.authorization.dto.PendingAuthRowView;
 import com.carddemo.authorization.dto.PendingAuthSummaryView;
+import com.carddemo.authorization.service.PendingAuthDetailService;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.error.GlobalExceptionHandler;
@@ -23,6 +24,7 @@ import java.util.stream.Collectors;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.yaml.snakeyaml.Yaml;
 
 /**
@@ -45,9 +47,16 @@ import org.yaml.snakeyaml.Yaml;
  * this module packages rather than against a source file that may not be the one shipped.
  *
  * <p>Alternatives Considered: asserting these properties with a running application context and a request
- * per route, which is the stronger form. Not available at this checkpoint — no controller is authored — and
- * deferring the comparison until one is would leave the contract unchecked over exactly the interval in
- * which these corrections were made.
+ * per route, which is the stronger form. Reading the document keeps the comparison anchored to the
+ * PUBLISHED artifact, which is what a generated client is built from, and a request-per-route assertion
+ * cannot observe a facet -- a bound, a pattern, a required list -- that the server never exercises.
+ *
+ * <p>⚠️ Refactoring Rationale: this paragraph said the stronger form was "not available at this checkpoint
+ * — no controller is authored". Two controllers are authored and
+ * {@code com.carddemo.authorization.api.PendingAuthControllerTest} asserts their sent bodies, so the
+ * sentence would send a reader looking for an absent test rather than to the sibling that holds the other
+ * half. The two halves are deliberately paired: this class asserts what the document PROMISES and that
+ * class asserts what the service SENDS, and a member is only settled when both agree.
  */
 class AuthorizationApiContractTest {
 
@@ -571,10 +580,29 @@ class AuthorizationApiContractTest {
      * declaring a property the view cannot emit is the same class of disagreement seen from the other side:
      * a client would provision for a member that never arrives, and the closed flag would not catch it.</p>
      *
-     * <p>Assumptions: the four display members are additionally asserted to be OPTIONAL, because they are
-     * read from the account context rather than stored on this segment. A customer the master no longer holds
-     * yields a summary whose segment columns are all present and whose display members are absent, and a
-     * required display member would turn that neighbouring absence into a failure of this response.</p>
+     * <p>⚠️ Refactoring Rationale: the four display members are asserted REQUIRED, and this case asserted
+     * the opposite. It said they must be optional "because they are read from a neighbouring context", which
+     * confuses a null value with an absent member. The services pin
+     * {@code default-property-inclusion: always} in
+     * {@code services/common-lib/src/main/resources/carddemo-common-defaults.yml}, so Jackson writes every
+     * record component of this view on every response: an unresolved customer yields four members present and
+     * NULL, never four members missing. Publishing them as optional described an omission the writer cannot
+     * produce, and a generated type then declared them optional AND nullable, obliging a caller to
+     * distinguish two states that are one state. The sibling case on the forward-move body already states the
+     * correct rule -- require every member the writer always sends, and admit null where it sends null -- so
+     * this file previously contradicted itself across two cases.</p>
+     *
+     * <p>Assumptions: the required set is asserted to equal the emitted set rather than merely to contain the
+     * four display members, because the reason applies to every member of a record-backed body and a rule
+     * naming four would leave the next one to be argued again.</p>
+     *
+     * <p>Assumptions: required and nullable are asserted TOGETHER for those four, because either alone is
+     * the wrong claim -- required without the type union would say a summary always carries a customer
+     * name, and the union without required would leave the key optional again. That the writer really does
+     * send the key with a null value is exercised directly by
+     * {@code PendingAuthSummaryServiceTest.anUnresolvedCustomerLeavesTheDisplayFieldsBlankAndStillPublishesTheTotals},
+     * so this document's claim and the service's behaviour are pinned to one another rather than each
+     * asserted alone.</p>
      */
     @Test
     @DisplayName("the summary schema publishes exactly the members the summary view emits")
@@ -595,16 +623,48 @@ class AuthorizationApiContractTest {
 
         @SuppressWarnings("unchecked")
         List<String> required = (List<String>) schema("PendingAuthSummary").get("required");
+        assertThat(required)
+                .as("every component the view emits is serialised, so every member is always present")
+                .containsExactlyInAnyOrderElementsOf(emitted);
         for (String display : DISPLAY_MEMBERS) {
             assertThat(emitted)
                     .as("the view must still emit display member %s, which the reference screen renders",
                             display)
                     .contains(display);
-            assertThat(required)
-                    .as("display member %s is read from a neighbouring context, so it must be optional",
-                            display)
-                    .doesNotContain(display);
+            assertThat(nullableMemberTypes("PendingAuthSummary", display))
+                    .as("display member %s is read from a neighbouring context, so its value must be able"
+                            + " to be null even though the key is always sent", display)
+                    .contains("null");
         }
+        assertThat(required)
+                .as("the writer emits every record component on every response, so a member left out of"
+                        + " required describes an omission it cannot produce")
+                .containsExactlyInAnyOrderElementsOf(emitted);
+    }
+
+    /**
+     * Reads the type union one schema member declares, so a nullability claim can be asserted on it.
+     *
+     * <p>Assumptions: the union is read from the {@code type} keyword of the member itself, which is the
+     * 3.1 spelling this document uses throughout and the one {@link #noThreeZeroNullabilityKeywordSurvives}
+     * holds it to. A member declaring a scalar type yields a single-element list, so a caller asserting on
+     * {@code "null"} fails against it rather than passing vacuously.</p>
+     *
+     * @param schemaName the schema to read
+     * @param member the member whose declared type is wanted
+     * @return the declared type tokens, never {@code null} and never empty
+     * @throws IllegalStateException if the member declares no {@code type} keyword at all
+     */
+    private static List<String> nullableMemberTypes(String schemaName, String member) {
+        Object declared = mapping(mapping(schema(schemaName), "properties"), member).get("type");
+        if (declared instanceof List<?> union) {
+            return union.stream().map(String::valueOf).toList();
+        }
+        if (declared instanceof String scalar) {
+            return List.of(scalar);
+        }
+        throw new IllegalStateException(
+                schemaName + "." + member + " declares no type keyword, so its nullability cannot be read");
     }
 
     /**
@@ -624,6 +684,18 @@ class AuthorizationApiContractTest {
      * <p>Assumptions: the required set is asserted as a whole rather than member by member, and it is asserted
      * to be a SUBSET of the emitted members as well. A required name the record does not emit is a member a
      * client would wait for and never receive, and no closed-schema check catches it.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the required set must now EQUAL the emitted set, and this case asserted
+     * that {@code message} was excluded from it "because the message line is null on this route". That is a
+     * null value, not an absent member: the pinned {@code default-property-inclusion: always} makes the writer
+     * emit all twenty-seven components on every response, so thirteen of them were published as optional while
+     * arriving on every body. Fourteen members moved into the required list for that reason -- the nullability
+     * each already declared is untouched, and it is the nullability that carries the fact a value may be
+     * absent from the authorizer's message.</p>
+     *
+     * <p>Assumptions: the claim is EQUALITY and not containment, which is the stronger of the two and the
+     * one the wire supports: a member added to the record and left out of the required list now fails here
+     * rather than being published as optional and quietly waited for by a generated client.</p>
      */
     @Test
     @DisplayName("the screen schema publishes exactly the members the screen record emits and is closed")
@@ -654,8 +726,95 @@ class AuthorizationApiContractTest {
                 .contains("cardNumber", "authResponse", "authResponseReason", "approvedAmount",
                         "transactionId", "matchStatus", "fraudMark");
         assertThat(required)
-                .as("the message line is null on this route, so it must not be required")
-                .doesNotContain("message");
+                .as("the writer emits every record component on every response, so a member left out of"
+                        + " required -- including the message line, which arrives null rather than absent --"
+                        + " describes an omission it cannot produce")
+                .containsExactlyInAnyOrderElementsOf(emitted);
+    }
+
+    /**
+     * Reaches the inline schema of the forward-move success body.
+     *
+     * <p>Assumptions: the schema is inline rather than a named component, so it is reached through the path
+     * item instead of through {@code components/schemas}. It is reached by NAVIGATION rather than restated
+     * here, because a copy of the shape in this file would agree with itself while the document drifted.</p>
+     *
+     * @return the {@code 200} response schema of the forward-move operation, never {@code null}
+     * @throws AssertionError if any step of the path is absent or is not a mapping
+     */
+    private static Map<String, Object> nextResponseSchema() {
+        Map<String, Object> operation = mapping(mapping(mapping(CONTRACT, "paths"),
+                "/api/v1/authorizations/{key}/next"), "get");
+        return mapping(mapping(mapping(mapping(mapping(operation, "responses"), "200"),
+                "content"), "application/json"), "schema");
+    }
+
+    /**
+     * The forward-move body requires every member it always sends, and admits null where it sends null.
+     *
+     * <p>⚠️ Refactoring Rationale: this case exists because the published shape and the sent shape
+     * disagreed in the one direction no closed-schema check can catch. The response is the
+     * {@code NextAuthorization} record serialised under a shared inclusion policy of {@code always}, so all
+     * three of its members are present on both moves and the exhausted move sends
+     * {@code "authorization": null}. The document declared that member OPTIONAL and, through an
+     * {@code allOf} over the detail schema, NON-nullable -- so a conforming client validating responses
+     * rejected the documented end-of-data body, and a client generated from the document treated an absent
+     * key as an answer it will never receive. Both halves are now asserted: the required set is the whole
+     * record, and the member carries an explicit null branch.</p>
+     *
+     * <p>Assumptions: the required set is compared for EQUALITY with the record's components rather than
+     * for containment. Containment in one direction admits a required name the record cannot emit, and in
+     * the other admits an always-sent member published as optional, which is the defect this case was
+     * written for.</p>
+     *
+     * <p>Assumptions: the null branch is asserted as a {@code oneOf} member with {@code type: 'null'},
+     * which is 3.1's only expression for it -- the sibling case below refuses the 3.0 keyword document
+     * wide, so an implementation could not satisfy this by reintroducing {@code nullable}.</p>
+     *
+     * <p>Trade-offs: this body's members are required while the members of {@code PendingAuthScreen} and
+     * {@code PendingAuthSummary} that are null on their route are optional, and the difference is
+     * deliberate rather than drift. Those members each publish an explicit null branch, so the always-sent
+     * key validates against them and "optional" is merely permissive; this member published NO null
+     * branch, so its body was rejected outright, and the required list is tightened alongside the type so
+     * the shape is described once and exactly. The nullability is the correctness half; requiredness is
+     * the precision half.</p>
+     */
+    @Test
+    @DisplayName("the forward-move body requires every member it sends and admits null for the absent one")
+    void forwardMoveBodyRequiresEveryMemberItSends() {
+        Map<String, Object> schema = nextResponseSchema();
+        Set<String> declared = mapping(schema, "properties").keySet();
+        Set<String> emitted = Arrays.stream(
+                        PendingAuthDetailService.NextAuthorization.class.getRecordComponents())
+                .map(RecordComponent::getName)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+
+        assertThat(declared)
+                .as("the body must be described member for member, not as an open object")
+                .containsExactlyInAnyOrderElementsOf(emitted);
+        assertThat(schema.get("additionalProperties"))
+                .as("an open shape lets a member added on the server reach a client never told about it")
+                .isEqualTo(Boolean.FALSE);
+
+        @SuppressWarnings("unchecked")
+        List<String> required = (List<String>) schema.get("required");
+        assertThat(required)
+                .as("every member of the record is sent on every move, so every one of them is required")
+                .containsExactlyInAnyOrderElementsOf(emitted);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> branches = (List<Map<String, Object>>)
+                mapping(mapping(schema, "properties"), "authorization").get("oneOf");
+        assertThat(branches)
+                .as("the exhausted move sends this member as null, so a null branch must be published")
+                .anySatisfy(branch -> assertThat(branch.get("type")).isEqualTo("null"));
+        assertThat(branches)
+                .as("the ordinary move sends the detail shape, which must still be reachable")
+                .anySatisfy(branch -> assertThat(branch.get("$ref"))
+                        .isEqualTo("#/components/schemas/PendingAuthDetail"));
+        assertThat(mapping(mapping(schema, "properties"), "message").get("type"))
+                .as("the message member is null on every move that found an authorization")
+                .isEqualTo(List.of("string", "null"));
     }
 
     /**
@@ -745,6 +904,18 @@ class AuthorizationApiContractTest {
      * and the absence half is asserted as well. A body-less operation cannot produce a media-type refusal --
      * there is no body to negotiate a type for -- so publishing 415 on one would document a response the
      * service cannot send, which is the same class of defect in the opposite direction.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the 406 obligation was missing from this loop, and its absence is the
+     * reason the document was able to omit that response from all five operations while this class passed.
+     * The shared advice renders 406 for a request whose {@code Accept} header admits nothing this service
+     * produces, which a browser reaches with its default header, so it was a status every operation could
+     * answer with and none declared.</p>
+     *
+     * <p>⚠️ Assumptions: the 406 obligation is UNCONDITIONAL, unlike the 415 obligation beside it, and the
+     * asymmetry is the point rather than an oversight. The two refusals run in opposite directions: a 415
+     * refuses the media type of a body the caller SENT, so an operation that consumes none cannot produce
+     * it, while a 406 refuses the media type of the representation the caller asked to RECEIVE, and every
+     * operation here produces a representation.</p>
      */
     @Test
     @DisplayName("every operation publishes the dispatch refusals the framework can answer with")
@@ -765,6 +936,10 @@ class AuthorizationApiContractTest {
                         .as("%s %s must publish 405 -- the dispatcher answers it for any other verb on this path",
                                 method, path)
                         .containsKey("405");
+                assertThat(responses)
+                        .as("%s %s produces a representation, so a request accepting none is refused 406",
+                                method, path)
+                        .containsKey("406");
                 if (operation.containsKey("requestBody")) {
                     assertThat(responses)
                             .as("%s %s consumes a body, so the media-type refusal is reachable and must be published",
@@ -781,33 +956,68 @@ class AuthorizationApiContractTest {
     }
 
     /**
-     * The two dispatch-refusal responses declare the header a client needs to recover from each.
+     * The three dispatch-refusal responses declare each recovery header on the terms the renderer keeps.
      *
-     * <p>Purpose: neither refusal is actionable from its body alone. A 405 tells a caller its verb was wrong
-     * and the {@code Allow} header tells it which verb to use; a 415 tells it its media type was wrong and
-     * the {@code Accept} header tells it which type to send. Both headers are marked required, because the
-     * shared advice composes each from the dispatcher's own handler mappings and omits it only when the
-     * framework reports no alternatives at all -- a state this service's mappings cannot produce.</p>
+     * <p>Purpose: two of the three are not actionable from their body alone. A 405 tells a caller its verb
+     * was wrong and the {@code Allow} header tells it which verb to use; a 415 tells it its media type was
+     * wrong and the {@code Accept} header tells it which type to send. The third needs no header, because
+     * the one representation this service produces is named in the sentence itself.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this case asserted both headers {@code required: true} and justified it
+     * on the ground that the renderer omits them "only when the framework reports no alternatives at all --
+     * a state this service's mappings cannot produce". Two things were wrong with that. It is a claim about
+     * the internals of a framework this contract cannot see, load-bearing in a published promise; and it is
+     * contradicted by the shared kernel's own suite, which asserts both omission branches directly -- the
+     * absent {@code Allow} and the absent {@code Accept} are specified, tested behaviour of the very
+     * renderer that produces these responses. A contract may not promise a header its renderer is tested to
+     * withhold, so the requiredness is inverted and the CONDITION is asserted published in its place. This
+     * also removes a contradiction between two of this repository's contracts, the sibling card document
+     * having declared {@code Allow} optional with the same reasoning all along.</p>
+     *
+     * <p>⚠️ Assumptions: {@code required: false} is asserted as an explicit {@code Boolean.FALSE} rather
+     * than by asserting the key merely absent. Absent and false mean the same thing to a generator, but only
+     * the explicit value carries the description that says WHEN the header arrives, and it is that
+     * description a client author acts on.</p>
+     *
+     * <p>⚠️ Assumptions: the 406 is asserted to declare NO {@code Accept} header. On a response that header
+     * names the media types the server accepts in a request body, so using it to advertise producible
+     * representations would say something the specification gives it no meaning for -- and a client reading
+     * it as a list of producible types would draw exactly the wrong conclusion.</p>
      *
      * <p>Refactoring Rationale: the code constants are compared rather than restated, so a code renumbered
      * in the shared kernel fails here instead of leaving the document describing a body no client will
-     * match. This is the same guard the 401 and 403 descriptions already carry, extended to the two statuses
-     * that were previously answered as 500 with a code naming an abend.</p>
+     * match. This is the same guard the 401 and 403 descriptions already carry, extended to the three
+     * statuses that were previously answered as 500 with a code naming an abend.</p>
      */
     @Test
-    @DisplayName("the dispatch refusals declare the recovery header each one needs")
+    @DisplayName("the dispatch refusals declare each recovery header on the terms the renderer keeps")
     void dispatchRefusalsDeclareTheirRecoveryHeaders() {
         Map<String, Object> methodHeaders = mapping(response("MethodNotAllowed"), "headers");
         Map<String, Object> mediaTypeHeaders = mapping(response("UnsupportedMediaType"), "headers");
+        Map<String, Object> negotiationHeaders = mapping(response("NotAcceptable"), "headers");
 
         assertThat(methodHeaders).containsKeys(CorrelationIdFilter.CORRELATION_ID_HEADER, HttpHeaders.ALLOW);
         assertThat(mapping(methodHeaders, HttpHeaders.ALLOW).get("required"))
-                .as("a 405 without Allow leaves a client no way to learn which verb to send")
-                .isEqualTo(Boolean.TRUE);
+                .as("the renderer is tested to omit Allow when no set was reported, so it cannot be promised")
+                .isEqualTo(Boolean.FALSE);
+        assertThat(String.valueOf(mapping(methodHeaders, HttpHeaders.ALLOW).get("description")))
+                .as("an optional header is only usable if the document says when it arrives")
+                .contains("Present whenever")
+                .contains("omitted rather than sent empty");
+
         assertThat(mediaTypeHeaders).containsKeys(CorrelationIdFilter.CORRELATION_ID_HEADER, HttpHeaders.ACCEPT);
         assertThat(mapping(mediaTypeHeaders, HttpHeaders.ACCEPT).get("required"))
-                .as("a 415 without Accept leaves a client no way to learn which media type to send")
-                .isEqualTo(Boolean.TRUE);
+                .as("the renderer is tested to omit Accept when no type was reported, so it cannot be promised")
+                .isEqualTo(Boolean.FALSE);
+        assertThat(String.valueOf(mapping(mediaTypeHeaders, HttpHeaders.ACCEPT).get("description")))
+                .as("an optional header is only usable if the document says when it arrives")
+                .contains("Present whenever")
+                .contains("omitted rather than sent empty");
+
+        assertThat(negotiationHeaders)
+                .as("the 406 carries the correlation identity and must not borrow Accept to list what it produces")
+                .containsKey(CorrelationIdFilter.CORRELATION_ID_HEADER)
+                .doesNotContainKey(HttpHeaders.ACCEPT);
 
         assertThat(String.valueOf(response("MethodNotAllowed").get("description")))
                 .as("the 405 description must name the code and sentence the shared advice renders")
@@ -817,12 +1027,54 @@ class AuthorizationApiContractTest {
                 .as("the 415 description must name the code and sentence the shared advice renders")
                 .contains(ApiError.CODE_UNSUPPORTED_MEDIA_TYPE)
                 .contains(GlobalExceptionHandler.MESSAGE_UNSUPPORTED_MEDIA_TYPE);
+        assertThat(String.valueOf(response("NotAcceptable").get("description")))
+                .as("the 406 description must name the code and sentence the shared advice renders")
+                .contains(GlobalExceptionHandler.CODE_NOT_ACCEPTABLE)
+                .contains(GlobalExceptionHandler.MESSAGE_NOT_ACCEPTABLE);
 
         assertThat(mapping(mapping(response("MethodNotAllowed"), "content"), "application/json").toString())
-                .as("both refusals carry the shared problem body rather than a bespoke shape")
+                .as("all three refusals carry the shared problem body rather than a bespoke shape")
                 .contains("ApiError");
         assertThat(mapping(mapping(response("UnsupportedMediaType"), "content"), "application/json").toString())
                 .contains("ApiError");
+        assertThat(mapping(mapping(response("NotAcceptable"), "content"), "application/json").toString())
+                .as("the 406 body is itself JSON, which is the type the caller just refused, deliberately")
+                .contains("ApiError");
+    }
+
+    /**
+     * The published 406 example is the body the shared renderer actually emits for that refusal.
+     *
+     * <p>Purpose: the example is what a client author reads before writing a branch, and an example that
+     * disagrees with the emitter teaches the wrong shape more effectively than no example at all. Review
+     * reported this response missing from the document entirely, so every one of its members is new and none
+     * of it has ever been reconciled against the emitter.</p>
+     *
+     * <p>Assumptions: the status member is asserted as the NUMBER 406 rather than as a string, because the
+     * shared problem type carries it as an integer and a quoted example would generate a client that
+     * compares a string to a number and never matches.</p>
+     *
+     * <p>Assumptions: the per-field array is asserted EMPTY. The refusal is raised before any body is bound
+     * -- indeed the request may carry no body at all -- so a client must not be led to expect a field entry
+     * to explain it, which is the same property the 405 and 415 examples beside it publish.</p>
+     */
+    @Test
+    @DisplayName("the published 406 example matches the body the shared renderer emits")
+    void published406ExampleMatchesTheRenderedBody() {
+        Map<String, Object> example = mapping(
+                mapping(mapping(response("NotAcceptable"), "content"), "application/json"), "example");
+
+        assertThat(example.get("code")).isEqualTo(GlobalExceptionHandler.CODE_NOT_ACCEPTABLE);
+        assertThat(example.get("message")).isEqualTo(GlobalExceptionHandler.MESSAGE_NOT_ACCEPTABLE);
+        assertThat(example.get("status"))
+                .as("the shared problem type carries the status as a number, so a quoted example misleads")
+                .isEqualTo(HttpStatus.NOT_ACCEPTABLE.value());
+        assertThat(example.get("fieldErrors"))
+                .as("nothing was bound, so no field entry can explain this refusal")
+                .isEqualTo(List.of());
+        assertThat(example.get("abend"))
+                .as("a negotiation refusal is a client-correctable outcome and carries no abend block")
+                .isNull();
     }
 
 
@@ -860,5 +1112,70 @@ class AuthorizationApiContractTest {
      */
     private static Map<String, Object> parameter(String name) {
         return mapping(mapping(mapping(CONTRACT, "components"), "parameters"), name);
+    }
+
+    /**
+     * Asserts that every published operation declares the transport refusals this service can produce,
+     * and that each of the three has a shape a client can bind to.
+     *
+     * <p>⚠️ Refactoring Rationale: all three were reachable and UNDECLARED. The shared advice in
+     * {@code services/common-lib} answers a wrong method with 405, a body in the wrong media type with
+     * 415 and an unsatisfiable {@code Accept} header with 406, on every route of every service, and this
+     * contract declared none of them. A client generated from it had no branch for any of the three and a
+     * hand-written one, {@code ui/src/api/client.ts}, could only report each as an unrecognised body. The
+     * census is written as a loop rather than as a list of paths so that an operation added later is
+     * covered without this case being edited.</p>
+     *
+     * <p>Assumptions: the operation count is asserted so the loop cannot pass vacuously. A scanner that
+     * matched nothing -- because a path item gained a member, or because the document was restructured --
+     * would otherwise assert nothing at all while reading as though it had checked every route.</p>
+     */
+    @Test
+    @DisplayName("every operation declares the transport refusals the shared advice can produce")
+    void theTransportRefusalsAreDeclaredWhereTheyCanOccur() {
+        Map<String, Object> document = CONTRACT;
+        Map<String, Object> paths = mapping(document, "paths");
+        int operations = 0;
+
+        for (String path : paths.keySet()) {
+            Map<String, Object> methods = mapping(paths, path);
+            for (String method : methods.keySet()) {
+
+                // WHY : Assumptions: a path item carries members that are not operations -- a shared
+                //       description, a shared parameter list -- so an operation is identified by carrying
+                //       an operationId rather than by the key not being one of those. Naming the
+                //       exclusions instead would need amending every time a path item gained a member.
+                if (!(methods.get(method) instanceof Map)) {
+                    continue;
+                }
+                Map<String, Object> operation = mapping(methods, method);
+                if (!operation.containsKey("operationId")) {
+                    continue;
+                }
+                operations++;
+                Map<String, Object> responses = mapping(operation, "responses");
+                assertThat(responses)
+                        .as("%s %s must declare both refusals every route can produce", method, path)
+                        .containsKeys("405", "406");
+                if (operation.containsKey("requestBody")) {
+                    assertThat(responses)
+                            .as("%s %s accepts a body, so it can refuse the body's media type",
+                                    method, path)
+                            .containsKey("415");
+                }
+            }
+        }
+
+        assertThat(operations)
+                .as("the census is not vacuous; every published operation was examined")
+                .isEqualTo(5);
+
+        Map<String, Object> declared = mapping(mapping(document, "components"), "responses");
+        assertThat(declared)
+                .as("each refusal is declared once and referenced, so the three cannot drift apart")
+                .containsKeys("MethodNotAllowed", "NotAcceptable", "UnsupportedMediaType");
+        assertThat(mapping(mapping(declared, "MethodNotAllowed"), "headers"))
+                .as("a 405 names the methods the route does publish, which is what a client acts on")
+                .containsKey("Allow");
     }
 }

@@ -5,7 +5,8 @@
 #   The `dev` profile overlay for the CardDemo account bounded context - the
 #   migration target of COBOL programs COACTVWC, COACTUPC, CBACT01C, CBACT03C,
 #   CBCUS01C and app/app-vsam-mq/cbl/COACCT01.cbl, owning the PostgreSQL schema
-#   `account` and its three tables accounts, customers and card_xref.
+#   `account` and its four tables accounts, customers, card_xref and
+#   inquiry_reply_ledger.
 #
 #   It is layered over application.yml beside it when SPRING_PROFILES_ACTIVE=dev
 #   is set on the ECS task definition. It is never selected from inside the

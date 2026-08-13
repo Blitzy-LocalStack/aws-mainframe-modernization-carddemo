@@ -24,6 +24,9 @@ import java.security.Principal;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import org.springframework.dao.ConcurrencyFailureException;
+import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -189,6 +192,64 @@ public class CardController {
      * places and let them disagree.</p>
      */
     public static final String DIRECTION_PREVIOUS = "previous";
+
+    /**
+     * The subordinate code the published contract assigns to the caller-detected staleness.
+     *
+     * <p>Refactoring Rationale: the three codes below are declared here because the contract at
+     * {@code src/main/resources/openapi/card-api.yaml} says of this status that "Each carries its own
+     * subordinate code", names all three values in its examples, and states that the code is what
+     * distinguishes the conditions -- while every 409 this context sent carried the empty subordinate
+     * code, because the shared renderer emits {@link ApiError#NO_SECONDARY_CODE} and this class copied
+     * whatever it emitted. A client following the document to tell the three conditions apart therefore
+     * read an empty string on all three. The values are constants rather than literals at the emitting
+     * switch so that {@code CardApiContractGateTest} can compare them against the document's own
+     * examples; a literal would let the two drift with nothing to notice.
+     *
+     * <p>Assumptions: this code accompanies {@link CardUpdateService#MESSAGE_RECORD_CHANGED} and is the
+     * only one of the three whose body carries the refreshed card, which is what the contract says of
+     * it and what {@link #onCardRecordConflict} produces. It corresponds to
+     * {@code 88 DATA-WAS-CHANGED-BEFORE-UPDATE} at {@code app/cbl/COCRDUPC.cbl:207-208}: the condition
+     * this service detects ITSELF by comparing the submitted token against the stored one, before any
+     * write is attempted.
+     */
+    public static final String CONFLICT_CODE_DATA_CHANGED = "CARD-DATA-CHANGED";
+
+    /**
+     * The subordinate code the published contract assigns to a row that could not be taken for update.
+     *
+     * <p>Assumptions: this code accompanies {@link CardUpdateService#MESSAGE_COULD_NOT_LOCK} and
+     * corresponds to {@code 88 COULD-NOT-LOCK-FOR-UPDATE} at
+     * {@code app/cbl/COCRDUPC.cbl:205-206}. Two paths reach it, and neither is this service asking for a
+     * hold, because it asks for none: a collaborator raising the contention with
+     * {@link RecordConflictException.Kind#LOCK_UNAVAILABLE}, and the persistence provider reporting that
+     * the row itself could not be acquired. The body carries no refreshed card, because a row that could
+     * not be read has no current representation to return -- which is exactly what the contract's own
+     * example for this condition shows.
+     */
+    public static final String CONFLICT_CODE_LOCK_NOT_ACQUIRED = "CARD-LOCK-NOT-ACQUIRED";
+
+    /**
+     * The subordinate code the published contract assigns to a write that did not take effect.
+     *
+     * <p>Assumptions: this code accompanies {@link CardUpdateService#MESSAGE_UPDATE_FAILED} and
+     * corresponds to {@code 88 LOCKED-BUT-UPDATE-FAILED} at {@code app/cbl/COCRDUPC.cbl:209-210}, which
+     * the reference sets when the row was held, the before-image comparison passed, and the REWRITE
+     * itself returned other than normal, tested at {@code :1488-1491}. The target reaches the same state
+     * when the flush inside {@code CardUpdateService.writeProcessing} raises an optimistic-lock failure:
+     * the row was read, this service's own comparison passed, and the write did not apply.
+     *
+     * <p>Refactoring Rationale: before this handler existed, that failure was answered by the shared
+     * advice as {@link CardUpdateService#MESSAGE_RECORD_CHANGED}, so the one condition the contract
+     * spells "the write itself did not succeed" was reported with the sentence and the meaning of a
+     * different condition -- and no code path anywhere produced this value at all, leaving a third of the
+     * published conflict contract unreachable. Alternatives Considered: leaving it unreachable and
+     * withdrawing it from the document. Rejected because the condition is real -- a concurrent writer
+     * committing between this service's comparison and its flush produces exactly it -- so withdrawing
+     * the code would have removed a client's only way to distinguish a retryable write failure from a
+     * stale read.
+     */
+    public static final String CONFLICT_CODE_WRITE_NOT_APPLIED = "CARD-WRITE-NOT-APPLIED";
 
     /**
      * The criteria an absent request body stands for.
@@ -613,11 +674,27 @@ public class CardController {
      * promised.</p>
      *
      * <p>Assumptions: the shared renderer composes the whole of the shared half, and this method changes
-     * exactly two things about the result. That division is the point of injecting the advice rather than
+     * exactly three things about the result. That division is the point of injecting the advice rather than
      * assembling a body here: the code, the sentence selection, the relational subsystem, the correlation
      * identity, the masked path and the timestamp all stay stated once, in the class every other context
      * answers a conflict through, so this handler cannot drift from them. What it changes is the field
-     * entry's message -- to the sentence the contract shows -- and the addition of the card.</p>
+     * entry's message -- to the sentence the contract shows -- the addition of the card, and the
+     * subordinate code, which the shared renderer leaves empty because six of the seven published
+     * contracts declare one conflict condition and admit no value for it.</p>
+     *
+     * <p>Refactoring Rationale: the subordinate code was copied from the shared renderer and was therefore
+     * always the empty string, while this context's contract names three values and says the code is what
+     * distinguishes the three conditions. A client following the document to tell them apart had nothing to
+     * read. The code is now selected from the refusal's own kind, in a switch the compiler holds
+     * exhaustive.</p>
+     *
+     * <p>Measured: restoring the copy -- passing {@code shared.secondaryCode()} in place of the selected
+     * code -- fails exactly two cases of
+     * {@code CardControllerTest.eachConflictConditionPublishesItsOwnSubordinateCode}, the stale-version arm
+     * reporting {@code expected:<CARD-DATA-CHANGED> but was:<>} and the lock-unavailable arm reporting
+     * {@code expected:<CARD-LOCK-NOT-ACQUIRED> but was:<>}, with the other thirty-seven cases of that class
+     * still passing. The two arms for the conditions this contract publishes no value for do not move,
+     * which is what shows the empty code there is asserted deliberately rather than by default.</p>
      *
      * <p>Trade-offs: the entry's message becomes the sentence, so the version no longer appears in it.
      * That is the point rather than a loss: the version moves to {@code card.version}, where it is typed
@@ -634,21 +711,23 @@ public class CardController {
      * null}, so claiming the base type is what makes the document literally true of every conflict a
      * caller can receive here.</p>
      *
-     * <p>Trade-offs: one condition still returns the shared shape without the member, and it is worth
-     * naming rather than leaving as a surprise. A conflict the STORE reports -- a provider optimistic-lock
-     * failure raised by the flush rather than by this context's own comparison -- is converted to a
-     * conflict inside the shared advice and answered there, so it never propagates to this handler. The
-     * member is optional in the schema, so such a body is still a valid response; what it loses is the
-     * refreshed card, which the advice has no way to obtain because a provider exception does not carry
-     * the row. Closing that would mean the advice re-reading a row it knows nothing about.</p>
+     * <p>Refactoring Rationale: a conflict the STORE reports -- a provider optimistic-lock or
+     * pessimistic-lock failure raised by the flush rather than by this context's own comparison -- is not
+     * a {@link RecordConflictException} and so cannot reach this handler at all. It used to be answered by
+     * the shared advice, which returns a body with no {@code card} member and no subordinate code, so two
+     * of the three published conditions were unreachable in the shape the document describes. Those two
+     * are now claimed by {@link #onStoreDetectedConflict}, which composes the same extended body through
+     * the same private composer; the member is present and null there, which is what the contract's own
+     * examples for those two conditions show.</p>
      *
      * @param failure the contention this context raised. When it is the card-specific subtype it carries
      *     the card as it stood at detection; for any other kind it carries none, and the member is
      *     rendered null
      * @param request the request being answered, passed through to the shared renderer for its path and
      *     nothing else
-     * @return HTTP 409 carrying the shared problem shape with the reference sentence in its version entry,
-     *     and the refreshed card where the condition has one; never {@code null}
+     * @return HTTP 409 carrying the shared problem shape with the subordinate code its kind selects, the
+     *     reference sentence in its version entry, and the refreshed card where the condition has one;
+     *     never {@code null}
      * @throws IllegalStateException if the shared renderer returns no body, which no path produces and
      *     which would mean the shared conflict contract had changed underneath this method
      */
@@ -656,34 +735,24 @@ public class CardController {
     public ResponseEntity<CardConflictError> onCardRecordConflict(
             RecordConflictException failure, HttpServletRequest request) {
 
-        ApiError shared = this.conflicts.onRecordConflict(failure, request).getBody();
-        if (shared == null) {
-            throw new IllegalStateException(
-                    "the shared conflict renderer returned no body, so no conflict body can be composed");
-        }
+        ApiError shared = requireSharedBody(this.conflicts.onRecordConflict(failure, request));
 
-        // WHY : Assumptions: the entry is REPLACED rather than appended to, so the array still carries
-        //       exactly one entry for one field. Two entries for the version -- one holding the number the
-        //       shared renderer wrote and one holding the sentence -- would make an array length no longer
-        //       equal the count of faulted fields, which is the property every consumer of this member
-        //       relies on.
-        // WHY : Assumptions: the field NAME is taken from the entry the shared renderer produced rather
-        //       than written here, so the two cannot disagree about what the entry is keyed on. The
-        //       renderer owns that key, and a literal here would be a second declaration of it.
-        List<ApiError.FieldError> fieldErrors = shared.fieldErrors().stream()
-                .map(entry -> new ApiError.FieldError(entry.field(), entry.state(),
-                        CardUpdateService.MESSAGE_RECORD_CHANGED))
-                .toList();
-
-        // WHY : Trade-offs: the shape is rebuilt through its canonical constructor with the SAME
-        //       timestamp the shared renderer stamped, rather than through a factory that would stamp a
-        //       new one. Two timestamps for one refusal is the kind of difference that costs an hour when
-        //       a support conversation compares a client's copy of a body against a log line; reusing the
-        //       stamped value also means this method needs no clock of its own to keep in step with the
-        //       one the advice holds.
-        ApiError body = new ApiError(shared.code(), shared.secondaryCode(), shared.message(),
-                shared.severity(), shared.subsystem(), shared.status(), shared.correlationId(),
-                shared.path(), shared.timestamp(), fieldErrors, shared.abend());
+        // WHY : Assumptions: the switch yields a value and declares no default arm, so the compiler
+        //       requires every constant of the enumeration to be covered -- which is what makes a fifth
+        //       condition impossible to add without this method failing to compile rather than silently
+        //       emitting an empty code for it.
+        // WHY : Trade-offs: two of the four arms answer NO_SECONDARY_CODE, and that is a statement about
+        //       this CONTRACT rather than an omission. A referenced-row breach and a duplicate key are
+        //       conditions of a context that owns dependent rows or a caller-supplied key; this context
+        //       owns neither -- one table, one system-assigned key, no dependents -- so no card path can
+        //       raise them, and card-api.yaml publishes no value for either. Minting a code the document
+        //       does not admit would put a value into a body no schema of this service allows, which is
+        //       the defect being corrected here in the other direction.
+        String secondaryCode = switch (failure.kind()) {
+            case STALE_VERSION -> CONFLICT_CODE_DATA_CHANGED;
+            case LOCK_UNAVAILABLE -> CONFLICT_CODE_LOCK_NOT_ACQUIRED;
+            case REFERENCED_ROW, DUPLICATE_KEY -> ApiError.NO_SECONDARY_CODE;
+        };
 
         // WHY : Assumptions: the card is taken from the refusal by a TYPE test, so a condition that
         //       carries no refreshed row renders the member as null rather than this method having to know
@@ -693,8 +762,153 @@ public class CardController {
                 ? carrying.card()
                 : null;
 
+        return conflictBody(shared, secondaryCode, shared.message(), refreshed);
+    }
+
+    /**
+     * Renders a contention the persistence provider reported as the conflict body this contract declares.
+     *
+     * <p>Refactoring Rationale: this handler exists because two of the three conditions the contract
+     * publishes under this status are detected by the STORE rather than by this context, and neither could
+     * reach {@link #onCardRecordConflict}: a provider failure is not a
+     * {@link RecordConflictException}, so the shared advice answered it with the shared shape, the empty
+     * subordinate code, and no {@code card} member. One of the two was additionally answered with the
+     * WRONG sentence -- an optimistic-lock failure raised by the flush was reported as
+     * {@link CardUpdateService#MESSAGE_RECORD_CHANGED}, the sentence belonging to the comparison this
+     * service performs before it writes -- and {@link #CONFLICT_CODE_WRITE_NOT_APPLIED} was produced by
+     * nothing at all.
+     *
+     * <p>Assumptions: the two claimed types are siblings under the abstraction's concurrency family
+     * rather than one being a subclass of the other, so the parameter is typed as their common supertype
+     * while the annotation names exactly the two this method is willing to answer for. A third
+     * concurrency failure added to that family in a future version therefore reaches the shared advice, as
+     * it does today, instead of being silently relabelled as one of these two.
+     *
+     * <p>Assumptions: the mapping follows the reference's own three-way split. The optimistic failure is
+     * {@code 88 LOCKED-BUT-UPDATE-FAILED} at {@code app/cbl/COCRDUPC.cbl:209-210}: the row was read, this
+     * service's own comparison passed, and the write did not apply -- which is precisely a concurrent
+     * writer committing in the window between the check and the flush. The pessimistic failure is
+     * {@code 88 COULD-NOT-LOCK-FOR-UPDATE} at {@code :205-206}: the row could not be taken at all.
+     *
+     * <p>Trade-offs: neither body carries a refreshed card, and the contract's own examples for both
+     * conditions show the member as null. Obtaining one would mean re-reading the row from inside an
+     * exception handler after the transaction that failed has been marked for rollback, which would either
+     * read through a doomed transaction or open a second one to answer a refusal.
+     *
+     * <p>Measured: removing this method's {@code @ExceptionHandler} annotation, so the two failures reach
+     * the shared advice as they did before, fails exactly the two cases that exercise them --
+     * {@code aProviderOptimisticLockFailureAnswersTheRewriteFailureCondition} and
+     * {@code aProviderPessimisticLockFailureAnswersTheLockAcquisitionCondition} -- each reporting the empty
+     * subordinate code where a published value was expected, and moves nothing else in the class. That is
+     * the defect this handler corrects, reproduced on demand.
+     *
+     * @param failure the concurrency failure the provider raised; only its type is read, never its text,
+     *     because a provider message names tables and columns a caller has no business seeing
+     * @param request the request being answered, passed through to the shared renderer for its path
+     * @return HTTP 409 carrying the subordinate code and the reference sentence its condition selects,
+     *     with the card member present and null; never {@code null}
+     * @throws IllegalStateException if the shared renderer answers with no body or with a status other
+     *     than 409, either of which would mean the shared classification of these two types had changed
+     *     underneath this method and that this handler was about to relabel a different refusal
+     */
+    @ExceptionHandler({OptimisticLockingFailureException.class,
+            PessimisticLockingFailureException.class})
+    public ResponseEntity<CardConflictError> onStoreDetectedConflict(
+            ConcurrencyFailureException failure, HttpServletRequest request) {
+
+        ApiError shared = requireSharedBody(this.conflicts.onRuntimeFailure(failure, request));
+        if (shared.status() != HttpStatus.CONFLICT.value()) {
+            throw new IllegalStateException(
+                    "the shared renderer no longer answers a provider concurrency failure with 409, so "
+                            + "this handler can no longer name which conflict condition it is rendering");
+        }
+
+        // WHY : Assumptions: the discrimination is a type test on the failure and not a reading of the
+        //       sentence the shared renderer chose, because the sentence is what this method may need to
+        //       REPLACE and deriving the code from a value being replaced would couple the two the wrong
+        //       way round. The optimistic branch replaces it; the pessimistic branch keeps it, because the
+        //       shared renderer's own sentence for that type is already this context's.
+        boolean writeNotApplied = failure instanceof OptimisticLockingFailureException;
+        String secondaryCode = writeNotApplied
+                ? CONFLICT_CODE_WRITE_NOT_APPLIED
+                : CONFLICT_CODE_LOCK_NOT_ACQUIRED;
+        String message = writeNotApplied
+                ? CardUpdateService.MESSAGE_UPDATE_FAILED
+                : shared.message();
+
+        return conflictBody(shared, secondaryCode, message, null);
+    }
+
+    /**
+     * Composes the one conflict body every 409 this class answers is built from.
+     *
+     * <p>Refactoring Rationale: the two handlers above differ in exactly three values -- the subordinate
+     * code, the sentence and whether a refreshed card exists -- so everything else is stated once here.
+     * That division is the point of injecting the shared advice rather than assembling a body from
+     * scratch: the code, the severity, the relational subsystem, the correlation identity, the masked path
+     * and the timestamp all remain owned by the class every other context answers a conflict through, and
+     * a third condition cannot be added to this context with a differently-shaped body.
+     *
+     * <p>Trade-offs: the shape is rebuilt through its canonical constructor with the SAME timestamp the
+     * shared renderer stamped, rather than through a factory that would stamp a new one. Two timestamps
+     * for one refusal is the kind of difference that costs an hour when a support conversation compares a
+     * client's copy of a body against a log line; reusing the stamped value also means this class needs no
+     * clock of its own to keep in step with the one the advice holds.
+     *
+     * @param shared the body the shared renderer composed, read for every value not listed below
+     * @param secondaryCode the subordinate code this condition publishes; one of the three constants
+     *     above, or {@link ApiError#NO_SECONDARY_CODE} for a condition this contract names no value for
+     * @param message the user-visible sentence, carried verbatim from its baseline source
+     * @param refreshed the card as it now stands, or {@code null} when the condition has no current
+     *     representation to return
+     * @return the composed 409 response; never {@code null}
+     */
+    private static ResponseEntity<CardConflictError> conflictBody(ApiError shared,
+            String secondaryCode, String message, CardDetail refreshed) {
+
+        // WHY : Assumptions: the entry is REPLACED rather than appended to, so the array still carries
+        //       exactly one entry for one field. Two entries for the version -- one holding the number the
+        //       shared renderer wrote and one holding the sentence -- would make an array length no longer
+        //       equal the count of faulted fields, which is the property every consumer of this member
+        //       relies on.
+        // WHY : Assumptions: the field NAME is taken from the entry the shared renderer produced rather
+        //       than written here, so the two cannot disagree about what the entry is keyed on. The
+        //       renderer owns that key, and a literal here would be a second declaration of it.
+        // WHY : Refactoring Rationale: the replacement text is the sentence this refusal carries rather
+        //       than the record-changed constant it used to name unconditionally. The two agree for the
+        //       one condition that carries a version entry today, so the literal was not wrong; it was a
+        //       second statement of which sentence belongs to which condition, sited where a reader would
+        //       not think to keep it in step.
+        List<ApiError.FieldError> fieldErrors = shared.fieldErrors().stream()
+                .map(entry -> new ApiError.FieldError(entry.field(), entry.state(), message))
+                .toList();
+
+        ApiError body = new ApiError(shared.code(), secondaryCode, message, shared.severity(),
+                shared.subsystem(), shared.status(), shared.correlationId(), shared.path(),
+                shared.timestamp(), fieldErrors, shared.abend());
+
         return ResponseEntity.status(HttpStatus.CONFLICT)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(new CardConflictError(body, refreshed));
+    }
+
+    /**
+     * Reads the body out of a shared renderer's response, refusing an empty one.
+     *
+     * <p>Assumptions: an absent body is treated as a broken contract with the shared kernel rather than
+     * rendered as an empty conflict, because every path through that renderer returns one and a null here
+     * would mean the shared conflict contract had changed underneath this class.</p>
+     *
+     * @param rendered the response the shared renderer produced; may itself be {@code null}
+     * @return its body; never {@code null}
+     * @throws IllegalStateException if the response or its body is absent
+     */
+    private static ApiError requireSharedBody(ResponseEntity<ApiError> rendered) {
+        ApiError body = rendered == null ? null : rendered.getBody();
+        if (body == null) {
+            throw new IllegalStateException(
+                    "the shared conflict renderer returned no body, so no conflict body can be composed");
+        }
+        return body;
     }
 }

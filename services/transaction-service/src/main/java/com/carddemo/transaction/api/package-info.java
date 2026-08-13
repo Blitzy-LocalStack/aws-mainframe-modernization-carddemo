@@ -142,11 +142,17 @@
  *       authorizable</li>
  *   <li>The browse cursor of the transaction list travels in the page envelope
  *       {@code com.carddemo.common.web.PageResponse}, through its first-key and last-key members,
- *       with its has-next and has-previous members each settled by a surplus row read in that
- *       direction, so the list operation positions by key and never by offset. Assumptions:
- *       has-previous is one of the envelope's five components and is not read off the first-key
- *       member, whose presence answers where a retreat resumes from rather than whether one
- *       exists. Sealing and opening
+ *       with forward availability settled by a surplus row read beyond the page, so the list
+ *       operation positions by key and never by offset. Assumptions: the envelope has FOUR
+ *       components -- {@code items}, {@code firstKey}, {@code lastKey} and {@code hasNext} -- and
+ *       there is NO has-previous member: backward availability is the presence of the first-key
+ *       member, which is the position a retreat resumes from, and the client holds the page ordinal
+ *       the baseline held in the communication area at {@code app/cbl/COCRDLIC.cbl:237-238} and
+ *       refuses the backward step itself. Refactoring Rationale: this charter described a
+ *       five-component envelope with a server-settled has-previous member. That member does not
+ *       exist and was explicitly rejected where the envelope is declared, so the charter was
+ *       describing a design the wire does not carry; it now describes the shipped four. Sealing and
+ *       opening
  *       that cursor is {@code com.carddemo.common.web.CursorToken}, held by the adapter rather than
  *       by the service beneath it, because the token's key material is infrastructure the service
  *       layer must not reach for. That is binding work rather than a business rule</li>

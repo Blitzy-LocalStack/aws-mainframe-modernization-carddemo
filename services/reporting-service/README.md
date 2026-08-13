@@ -38,7 +38,7 @@
 > **Return values — what this module delivers and who consumes it.** One bootable Spring Boot
 > jar published as `com.carddemo:reporting-service`, rooted at the Java package
 > `com.carddemo.reporting`, parented by `com.carddemo:carddemo-services:1.0.0-SNAPSHOT` and
-> depending on exactly one sibling, `common-lib`. It serves five HTTP operations declared by
+> depending on exactly one sibling, `common-lib`. It serves eight HTTP operations declared by
 > [`src/main/resources/openapi/reporting-api.yaml`](src/main/resources/openapi/reporting-api.yaml),
 > consumed by the browser client `ui/src/api/reporting.ts` through the edge; and it writes
 > report and statement artifacts to object storage, consumed by the batch state machine's
@@ -142,7 +142,7 @@ services/reporting-service/
     │
     │   ⚠ THERE IS NO src/main/resources/db/migration/ DIRECTORY, AND THERE MUST NOT BE.
     │     Its absence is a designed boundary, not an omission: this module owns no
-    │     relational object, and the seven views it reads are created by an ETL step
+    │     relational object, and the eight views it reads are created by an ETL step
     │     ordered AFTER the per-service migrations. A Flyway history here would order
     │     that DDL against the wrong baseline and fail whenever reporting migrated
     │     before the four services whose tables the views are built over. See §3.2 and §4.
@@ -245,7 +245,7 @@ would leave the more tempting one unaddressed.
    benefit."* A figure this module reports therefore cannot disagree with the ledger it
    reports on because of replication lag.
 
-The readable surface is **seven read-only views** in the `reporting` schema, created by
+The readable surface is **eight read-only views** in the `reporting` schema, created by
 [`data-migration/sql/V1__reporting_views.sql`](../../data-migration/sql/V1__reporting_views.sql)
 as an ETL step ordered *after* the per-service migrations, and owned by a role separate from
 the login role this module connects as. The login role holds `USAGE` on that one schema and
@@ -335,6 +335,16 @@ it, which is why the transport is replaced rather than reimplemented.
 
 `states:StartExecution` returns an execution identifier and **fails loudly**, which is what
 gives the caller a handle to observe, address or retry a run.
+
+⚠ Refactoring Rationale: that handle was returned and **consumed by nothing** — a caller could
+not tell a run still going from one that had failed, and could not reach the document a
+succeeded run produced. `GET /api/v1/reports/executions/{executionName}` now answers both, and
+`GET /api/v1/reports/transaction-report/artifact` streams the document. Assumptions: the status
+operation takes the execution **name** and never an ARN, and composes the ARN from the
+configured state machine, so describing an execution of another machine, account or environment
+is impossible by construction rather than by a prefix check. The three coordinates it reports
+are recovered from the execution's own input rather than asked of the caller again, so a
+location it publishes always names the run it describes.
 
 ⚠ Cite this stanza as **L499 to L505, with `DDNAME(INREADER)` at L501**. The commonly-quoted
 "L502" alone does not contain it — L502 carries `RECORDSIZE(80)`.
@@ -555,6 +565,26 @@ stanza at **L67 to L71** is inert because `IEFBR14` never writes data; and
 **HTML is the baseline's own second output format, not a redesign.** Both artifacts are
 written to object storage.
 
+A statement run publishes a **third** object, `statements-index.txt`, and it is not a baseline
+output. Assumptions: both baseline artifacts are **run-wide** — one document covering every card
+the run rendered — so a location alone would point a caller asking about one card at the whole
+portfolio. The index carries one fixed-width 88-byte row per card (a keyed fingerprint, the
+first record and the record count), sorted, so the response for one card carries the range its
+statement occupies and the read path fetches exactly that range. Alternatives Considered:
+per-card artifacts, which would answer the same question without an index and were rejected
+because they change what the batch job writes; and holding the index in a relation, rejected
+because this context owns no table and its login is `SELECT`-only. Trade-offs: the index is
+searched by **bisection over ranged reads**, roughly twenty 88-byte probes for a million-card
+portfolio, so the cost of one statement read does not grow with the run.
+
+Both artifacts are reachable only through an authenticated operation —
+`GET /api/v1/reports/statements/artifacts/{selector}` — which streams them as an
+`application/octet-stream` attachment. Assumptions: the selector is a **minted opaque token**
+rather than an object name, and the markup artifact is served as a download rather than as
+renderable HTML, because its content is cardholder-derived. Neither a presigned URL nor a
+content-delivery distribution is used: the bucket policy refuses every request that does not
+arrive through the VPC endpoint, so the service is the only reachable path.
+
 ### 3.20 A rerun REPLACES, never appends
 
 Assumptions: [`app/jcl/CREASTMT.JCL`](../../app/jcl/CREASTMT.JCL) `STEP030` runs `IEFBR14`
@@ -679,6 +709,13 @@ target preserves an explicit-confirmation semantic before an execution starts, a
 **not** silently drop it: a declining answer is a successful request that starts nothing,
 which is a different outcome from a failed request and is reported as such.
 
+⚠ Refactoring Rationale: the response carries a three-valued `outcome` member — `STARTED`,
+`DECLINED`, `UNANSWERED` — where it carried a boolean `submitted`. Two of the three turns share
+HTTP 200, so a status **cannot** separate a caller that cancelled from one that has not answered
+yet; the browser client inferred the outcome from the status alone and labelled an unanswered
+turn a cancellation. An unanswered turn is not a fault either: the reference composes a prompt
+naming the report and re-displays the screen, so it answers 200 with that prompt and never 400.
+
 ### 3.28 Six screen date components consolidate to one ISO string per bound
 
 Trade-offs: the 3270 screen takes each bound as **six separate fields** — `2/2/4` per bound,
@@ -773,7 +810,7 @@ This section is as load-bearing as §3. Every entry is a boundary that has alrea
 reasoned about, and each one is reachable by a plausible, well-intentioned edit.
 
 1. ⭐ **No schema, table, index, view, constraint or grant — and no `db/migration/` directory
-   and no Flyway migration**, anywhere in this module. Assumptions: the seven views this
+   and no Flyway migration**, anywhere in this module. Assumptions: the eight views this
    module reads are built over tables that four *other* services' migrations create, and the
    views are an ETL step ordered after those migrations. A Flyway history here would order
    that DDL against the wrong baseline and fail whenever reporting migrated first (§3.2).
@@ -895,8 +932,19 @@ mvn -f services/pom.xml -pl reporting-service -am clean verify
 
 ```bash
 # WHAT: fire the Checkstyle documentation gate on its own, without compiling or testing
-# WHY : Assumptions: the parent binds Checkstyle to the validate phase, which runs before compile,
-#       so validate alone is sufficient to prove Rule 1 compliance
+# WHY : Assumptions: the parent binds Checkstyle to the validate phase, which runs before compile, so
+#       validate alone runs the gate. What it proves is bounded and worth stating exactly: Checkstyle
+#       checks that a Javadoc comment is PRESENT on every type, method and field the rules cover, and
+#       that a present one declares every parameter, the return and each thrown type. It cannot read
+#       what those declarations say. A @param whose text is the parameter's own name, an
+#       Assumptions: paragraph that is false, and a WHY comment that restates the line beneath it all
+#       pass this command untouched, and each is a Rule 1 violation.
+# WHY : Trade-offs: a green run here is therefore a NECESSARY and not a sufficient condition for Rule 1
+#       compliance. The semantic half -- whether each rationale is truthful, specific and one of the four
+#       admitted justification categories -- is settled by human review against
+#       docs/CODE_DOCUMENTATION_STANDARD.md, and by the cross-language label gate
+#       config/rule1/rule1_gate.py, which checks that rationale labels are spelled as the convention
+#       spells them. Neither substitutes for reading the prose.
 mvn -f services/reporting-service/pom.xml validate
 ```
 
@@ -928,14 +976,82 @@ overrides, which is why the accepted job names and their required date options a
 rather than a convenience. Operating those runs is documented in
 [the batch runbook](../../docs/runbooks/batch-operations.md).
 
+#### The three accepted `--job=` names
+
+`ReportingTaskRunner` accepts exactly three, and it validates the option set **per name** rather
+than against a union — so a nightly command carrying a report type is rejected, as is an
+on-demand command carrying a business date.
+
+| `--job=` | Required options | Bean that takes the run | Invoked by |
+|---|---|---|---|
+| `generate-statements` | `--business-date=<yyyy-mm-dd>` | `task/GenerateStatementsTask` | the nightly `carddemo-daily-batch` statement state |
+| `generate-reports` | `--business-date=<yyyy-mm-dd>` | `task/GenerateReportsTask` | the nightly `carddemo-daily-batch` report state |
+| `generate-report` | `--start-date=<yyyy-mm-dd>` **and** `--end-date=<yyyy-mm-dd>` **and** `--report-type=<type>` | `task/GenerateAdHocReportTask` | the on-demand chain an accepted report submission starts (§3.4) |
+
+Assumptions: each date option is checked for a **width of exactly ten characters** and nothing
+more — the runner deliberately parses no calendar, because a task that resolved a date would need
+a clock and the whole point of passing the date in is that a rerun over the same date reproduces
+the same output. `--report-type=` is checked only for being non-blank by the runner; the artifact
+publisher accepts `monthly`, `yearly` and `custom`, compared case-insensitively because the value
+travels through a command line an operator can type. The nightly runs publish under their own
+`daily` token instead, so a one-day report is never confusable in an object key with a
+calendar-month one.
+
+```bash
+# WHAT: the nightly statement run, over one business date
+# WHY : Assumptions: the date is a PARAMETER and never a clock read, which is what makes a rerun
+#       over the same date byte-reproducible -- the property the golden-master comparison depends on
+docker run --rm carddemo/reporting-service:local \
+  --job=generate-statements --business-date=2022-07-18
+```
+
+```bash
+# WHAT: the nightly transaction-report run, over one business date
+docker run --rm carddemo/reporting-service:local \
+  --job=generate-reports --business-date=2022-07-18
+```
+
+```bash
+# WHAT: the on-demand report run, over an explicit range and one of the three types
+# WHY : Assumptions: all three options are MANDATORY. Omitting any one of them exits 8 with the
+#       usage text on standard error and code CARDDEMO-REPORT-0001, rather than defaulting a range
+#       -- a report silently produced over a range nobody asked for is worse than no report
+docker run --rm carddemo/reporting-service:local \
+  --job=generate-report --start-date=2022-07-01 --end-date=2022-07-31 --report-type=monthly
+```
+
+| Exit status | Meaning | Diagnostic code |
+|---|---|---|
+| **0** | the task completed | — |
+| **8** | the command line was malformed, or no bean carried the job name, or the task failed, or the run raised | `CARDDEMO-REPORT-0001` usage · `CARDDEMO-REPORT-0002` unresolved task · `CARDDEMO-REPORT-0003` task failed · `CARDDEMO-REPORT-0004` fatal |
+
+Assumptions: eight rather than one, and the runner records why at its own constant: every
+orchestrator gate that consumes this status tests for equality with zero and routes everything
+else to failure, so any non-zero value would be refused correctly — but the batch context already
+publishes eight for the same tier, and one repository-wide value for "this run failed" is what
+lets a single dashboard alarm cover both contexts.
+
+Assumptions: omitting `--job=` entirely is not an error and is not a fourth job. It is the service
+mode in the table above, and the usage text says so, because an operator who reaches the usage
+text has usually mistyped a job name rather than intended to start a listener.
+
 ---
 
 ## 7. Configuration and environment
 
-**Names and provenance only. No value of any setting appears anywhere in this repository**, and
-that is a structural property rather than an observed one: credentials are generated at
-provisioning time into a managed store, the environment parameter files carry sizing and
-retention values only, and deployment authenticates by short-lived federated role assumption.
+**No secret, and no deployment-specific identifier or endpoint, appears anywhere in this
+repository**, and that is a structural property rather than an observed one: credentials are
+generated at provisioning time into a managed store, the environment parameter files carry sizing
+and retention values only, and deployment authenticates by short-lived federated role assumption.
+
+Refactoring Rationale: this sentence read "no value of any setting appears anywhere in this
+repository", which was false as written and was contradicted three paragraphs below by its own
+pointer to the documented defaults in `application.yml`. Plenty of non-secret values are committed
+and should be — group names, the database trust-anchor path, an API call timeout, a cache period,
+a page size. What is genuinely absent is the two classes named above, and stating the narrow claim
+is what makes it checkable: a reviewer can grep for a credential or an endpoint and get a
+definite answer, where the broad claim invited a reader to find any default at all and conclude
+the whole paragraph was decorative.
 
 Every setting arrives as an environment variable, supplied by the ECS task definition from
 **Terraform outputs via AWS Systems Manager Parameter Store and AWS Secrets Manager**, because
@@ -963,14 +1079,40 @@ environment and version tags — carries a documented default in
 
 Assumptions: two of those names are **not** written as `${...}` placeholders in any profile, so
 a reader auditing the YAML for placeholders will not find them and could reasonably conclude
-they are optional. They are not. Relaxed binding maps them onto properties declared in the
-shared kernel's auto-configuration, and their absence fails differently in each case — one
-stops context refresh with a missing-bean report, the other removes a conditional bean
-silently. The infrastructure module therefore makes the second name biconditional for the web
-workloads, so a root that omits it fails at plan time rather than producing a task that starts
-and then behaves as though the feature were switched off.
+they are optional. They are `CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY` and
+`CARDDEMO_ONLINE_WRITES_PARAMETER`, and neither is optional. Relaxed binding maps them onto
+properties declared in the shared kernel's auto-configuration —
+`carddemo.pagination.cursor-signing-key` and `carddemo.online-writes.parameter` — and their
+absence fails differently: the first stops context refresh with a missing-bean report, the second
+removes a conditional bean silently.
 
-### 7.1 Profiles
+### 7.1 The settings whose absence does NOT stop start-up
+
+The two rows below are separated from the table above deliberately. Every setting there fails
+LOUDLY when absent; each of these fails quietly, which is why each needs its own sentence rather
+than a row in a list a reader skims.
+
+| Setting | What it selects | Provenance | What its absence does |
+|---|---|---|---|
+| `CARDDEMO_ONLINE_WRITES_PARAMETER` | names the Systems Manager parameter carrying the read-only flag that closes writes for the batch window | ECS task definition, from `aws_ssm_parameter.online_writes_enabled.name` in `infra/envs/{dev,prod}/main.tf` | **no effective fallback.** The write-gate beans are conditional on the property, so they remove themselves and the service keeps accepting write traffic through the window with nothing in the log to say the gate is gone |
+| `CARDDEMO_BATCH_RUN_ID` | ties an artifact record to the orchestrator execution that produced it, in `--job=` mode only | ECS container override, from the Step Functions execution | falls back to the literal `unidentified`, so the run completes and the record simply cannot be joined to an execution |
+
+Assumptions: the online-write gate matters here even though this module owns no table and its
+database role cannot write. Its report-submission endpoint STARTS a batch execution, which is a
+state change the window is meant to hold; the statement endpoints are exempt by an explicit
+`@OnlineWriteGateExempt` on `StatementController` because they render already-posted data and
+persist nothing, and that exemption is declared in the code with its reason rather than being
+inferred from a URL shape.
+
+Assumptions: because a missing gate is silent, the guard is placed in the infrastructure rather
+than in the service. `infra/modules/ecs-service/main.tf` carries a lifecycle precondition making
+the variable **biconditional** with membership of the seven online workloads — of which
+`reporting` is one — and a second precondition tying its presence to
+`create_online_write_gate_policy`, so a root that injects the variable without granting
+`ssm:GetParameter`, or grants without injecting, fails at plan time. A root that omits both fails
+the first precondition. Neither mistake can reach a running task.
+
+### 7.2 Profiles
 
 | File | Role |
 |---|---|
@@ -982,7 +1124,7 @@ and then behaves as though the feature were switched off.
 Assumptions: `dev` and `prod` differ only in sizing and retention and never in topology, which
 is what makes a defect reproducible in `dev` rather than only observable in `prod`.
 
-### 7.2 Actuator health serves two probes, not one
+### 7.3 Actuator health serves two probes, not one
 
 Assumptions: the Actuator health endpoint is polled by **two** independent consumers that fail
 in different places — the container `HEALTHCHECK` declared in
@@ -1155,12 +1297,29 @@ target behaviour.
 
 ### 10.2 Test inventory
 
-<!-- test-inventory: 27 tests + 1 integration tests -->
-**28** test classes across nine subpackages and the module root: **27** matching `*Test`, run
-by Surefire, and **1** matching `*IT` — `repository/ReportingQueryBootstrapIT` — run by
-Failsafe against a Testcontainers-backed PostgreSQL, with the Testcontainers BOM at **2.0.5**
-managed by the parent. Every test package carries a `package-info.java`, because the
-documentation gate audits test sources (§8.2).
+<!-- test-inventory: 33 tests + 2 integration tests -->
+**35** test classes across nine subpackages and the module root: **33** matching `*Test`, run
+by Surefire, and **2** matching `*IT` — `repository/ReportingQueryBootstrapIT` and
+`repository/StatementHeadingChunkIT` — run by Failsafe against a Testcontainers-backed
+PostgreSQL, with the Testcontainers BOM at **2.0.5** managed by the parent. Every test package
+carries a `package-info.java`, because the documentation gate audits test sources (§8.2).
+
+Refactoring Rationale: the census reached 35 by two independent additions, and both are stated
+because each is a different kind of change. It moved from 30 to 34 with the category-balance
+report, which landed as four new classes — `mapper/CategoryBalanceLineLayoutTest` pinning the
+40-byte line against `app/jcl/PRTCATBL.jcl`, `service/CategoryBalanceReportServiceTest` pinning
+the generation pass, `task/CategoryBalanceArtifactPublisherTest` pinning the fixed object key,
+and `task/GenerationKeysTest` pinning the generation-key convention the nightly transaction
+report's second destination is numbered under.
+
+Refactoring Rationale: it then moved from 34 to 35 with a second integration test, added with
+the correction of the statement heading walk's keyset continuation, which paged on one
+component of a two-component ordering and so skipped and repeated cards. It needs an engine and
+it needs ROWS — the defective predicate parsed, so the parse-only class beside it passed, and
+the service's unit tests stub the repository, so a stand-in answered whatever it was arranged
+to answer. It supplies three relations as plain tables through a Testcontainers init script
+under `src/test/resources/db/testharness`, which records why a stand-in is used rather than the
+real views: those views read base tables four other services' migrations create.
 
 Assumptions: the marker comment above this paragraph is **machine-checked**, not decorative.
 `ServiceReadmeInventoryTest` in `common-lib` parses it, re-measures both figures against this
@@ -1170,15 +1329,15 @@ fails the build in `common-lib` rather than here.
 
 | Package | Classes |
 |---|---|
-| `mapper` | 8 |
-| `config` | 5 |
+| `mapper` | 9 |
+| `config` | 6 |
 | `api` | 3 |
-| `service` | 4 |
+| `service` | 6 |
 | `dto` | 3 |
 | `domain` | 1 |
 | `fixtures` | 1 |
-| `task` | 1 |
-| `repository` | 1 (`ReportingQueryBootstrapIT`) |
+| `task` | 3 |
+| `repository` | 2 (`ReportingQueryBootstrapIT`, `StatementHeadingChunkIT`) |
 | module root | 1 |
 
 ### 10.3 What the suites must cover
@@ -1190,7 +1349,10 @@ fails the build in `common-lib` rather than here.
 | two arity-removal statement tests | assertions 2 and 3 — correct output past both former thresholds |
 | date-range test | the range comes from the request or job parameter and a **fixed** range yields reproducible output (§3.7), which also exercises the added secondary sort key of §3.8 |
 | execution-start test | `ReportExecutionService` **starts the state machine and does not run the report inline** (§3.4) |
+| execution-describe tests | the handle is composed from the configured machine and never from the caller, the coordinates are recovered from the execution's own input, an unknown run reads as absent, and a run started outside this surface reports its status with no coordinates (§3.4) |
+| artifact-resolution tests | a published location **resolves** — the key is looked up and never composed from the selector — an absent artifact publishes no location and no production instant, and the run index is searched by bisection over ranged reads (§3.19) |
 | `*RepositoryIT` | the read-only role **cannot write**, and the views return the expected **card-then-date** ordering |
+| `StatementHeadingChunkIT` | the statement heading walk's keyset continuation reproduces its whole `ORDER BY`, so a chunked run visits every card **exactly once** and in the declared order — plus a companion case proving the seeded cards distinguish that order from fingerprint order, without which the first would hold vacuously |
 
 Assumptions: the execution-start test asserts an absence as well as a presence. Asserting only
 that the state machine was called would still pass if the handler also assembled the report

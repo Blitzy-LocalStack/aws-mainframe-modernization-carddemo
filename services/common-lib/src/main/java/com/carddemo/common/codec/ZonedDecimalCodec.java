@@ -509,7 +509,36 @@ public final class ZonedDecimalCodec {
                         value.toPlainString());
             }
         }
-    }
+    
+        /**
+         * Renders the SIGN and the scale, never the decoded value.
+         *
+         * <p>Purpose. Every money field in the ten base master records is zoned decimal with a sign
+         * overpunch -- an account balance, a credit limit, a transaction amount -- so the value this
+         * record carries is a monetary amount in the overwhelming majority of decodes.
+         * {@code docs/architecture/observability.md} L1093 to L1112 withholds those, and a codec has no way
+         * to know which field produced the span it decoded.</p>
+         *
+         * <p>Assumptions: the sign flag and the scale are kept for the reason the sibling packed codec
+         * keeps its nibble. The reference harness documents that compiling with the default sign
+         * convention silently corrupts negative balances, so a sign question is the fault this format
+         * actually produces, and it is answerable from the flag and the value's own sign alone.</p>
+         *
+         * <p>Trade-offs: a decode that produced the wrong MAGNITUDE cannot be diagnosed from this
+         * rendering, only one that produced the wrong sign or scale. That is accepted: a magnitude fault is
+         * diagnosed from the encoded bytes and the layout, both of which a caller holds, whereas a log
+         * line is the one place the value must not come to rest.</p>
+         *
+         * @return a rendering naming the overpunch flag, whether the value is negative and its scale, with
+         *     the magnitude omitted; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "SignedZoned[negativeSign=" + this.negativeSign
+                    + ", negativeValue=" + (this.value.signum() < 0)
+                    + ", scale=" + this.value.scale() + ']';
+        }
+}
 
     /**
      * Decodes one fixed-width zoned-decimal span, keeping the overpunch its final byte carried.

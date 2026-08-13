@@ -1,6 +1,5 @@
 package com.carddemo.card.dto;
 
-import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.security.MaskedCardNumber;
 import com.carddemo.common.security.SealedSelector;
 
@@ -418,31 +417,51 @@ public record CardSummary(
      * relied upon.</p>
      *
      * <p>Trade-offs: the selector and the masked rendering print in full and the account number is
-     * MASKED. The first two disclose nothing by construction -- one is opaque without the deployment key
-     * and the other is already masked -- and printing the selector is what keeps the rendering useful,
-     * because it is the value that correlates the line with a request. The account number is an
-     * identifier rather than a secret, so masking it leaves enough to correlate two lines about the same
-     * account while disclosing no complete locator.</p>
+     * WITHHELD. The first two disclose nothing by construction -- one is opaque without the deployment
+     * key and the other is already masked -- and printing the selector is what keeps the rendering
+     * useful, because it is the value that correlates the line with a request.</p>
      *
-     * <p>Alternatives Considered: withholding the account number entirely, as {@link CardDetail} once did.
-     * Rejected once both shapes were considered together: this row carries no personal component at all,
-     * so its identifier is a pure row locator with nothing to be joined to, and full redaction on one
-     * card shape beside full disclosure on the other was the incoherence worth removing rather than a
-     * position worth keeping on one of them.</p>
+     * <p>Refactoring Rationale: the account number was MASKED here, through
+     * {@code com.carddemo.common.security.CardNumberMasker}, and the argument made for that in this place
+     * was that "the account number is an identifier rather than a secret". Both halves of that were
+     * wrong, and {@code docs/architecture/observability.md} L1093 to L1112 refutes each separately. Its
+     * first clause names the account identifier among the values a diagnostic rendering must OMIT and
+     * requires omission rather than abbreviation, precisely so that one value cannot acquire a second
+     * masking rule outside the {@code mapper} package that owns masking for this context. Its second
+     * clause confines that masker to a PRIMARY ACCOUNT NUMBER, so applying it to an eleven-digit account
+     * identifier reused a card rule on a non-card value -- and because the masker preserves input width
+     * and keeps the last four characters, the rendering disclosed the final four digits of the account
+     * every time it ran.</p>
+     *
+     * <p>Alternatives Considered: keeping the mask for consistency with {@link CardDetail}, which carried
+     * the same defect. Rejected because consistency with a second copy of the same error is not an
+     * argument; both shapes are corrected together, and the three card shapes now give one answer for
+     * this value instead of the three they gave before -- full disclosure, a mask and a placeholder.</p>
      *
      * <p>Assumptions: only the string form is narrowed. Component equality and hashing are untouched, the
      * accessors return exactly what the mapper supplied, and the serialised body is unchanged -- the
      * framework writes a response from the accessors and never from this method.</p>
      *
-     * @return a rendering naming the type, the selector, the masked card rendering, a masked account
-     *     number and the status, and disclosing no unmasked identifier
+     * @return a rendering naming the type, the selector, the masked card rendering, a placeholder in
+     *     place of the account number and the status, and disclosing no part of any account identifier
      */
     @Override
     public String toString() {
         return "CardSummary[key=" + key
                 + ", displayCardNumber=" + displayCardNumber
-                + ", accountId=" + CardNumberMasker.mask(accountId)
+                + ", accountId=" + REDACTED_PERSONAL
                 + ", activeStatus=" + activeStatus + "]";
     }
+
+    /**
+     * The stand-in printed in place of the withheld account identifier.
+     *
+     * <p>Assumptions: the literal is the one {@link CardDetail} and {@code CardUpdateRequest} already
+     * declare in this package, so the three card shapes print one placeholder vocabulary rather than one
+     * each. It is named for the class of data it hides rather than for the literal, because a reader of
+     * this file needs to know which component is withheld and a reader of a log line needs only to know
+     * that one was.</p>
+     */
+    private static final String REDACTED_PERSONAL = "REDACTED";
 
 }

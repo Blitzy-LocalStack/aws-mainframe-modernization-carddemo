@@ -2,6 +2,10 @@ package com.carddemo.common.observability;
 
 import com.carddemo.common.security.CardNumberMasker;
 import java.sql.SQLException;
+import java.util.Locale;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Renders the one sentence a failure carries about itself, safe to write into a log line.
@@ -125,6 +129,139 @@ public final class FailureSummary {
      * a log query written against one field's absence matches the other's.</p>
      */
     public static final String NO_SQL_STATE = "(absent)";
+
+    /**
+     * Rendered by {@link #databaseConditionOf(Throwable)} for a state code it does not classify.
+     *
+     * <p>⚠️ Assumptions: an unclassified state is reported as a NAMED outcome rather than by echoing the
+     * code, because the code is already a field of its own at both call sites and repeating it inside this
+     * one would say nothing new. What the token does say is that the state was read and not recognised,
+     * which is the signal that the map below is missing an entry -- a query counting this value is how that
+     * gap becomes visible instead of staying silent.</p>
+     */
+    public static final String UNCLASSIFIED_CONDITION = "unclassified-condition";
+
+    /**
+     * The separator between the condition name and each identifier {@link #databaseConditionOf(Throwable)}
+     * appends.
+     *
+     * <p>⚠️ Assumptions: a comma and NOT a space. Both call sites render this value into a
+     * {@code key=value} log line beside other fields, so a space inside it would make
+     * {@code constraint=users_pkey} look like a top-level field of the line rather than part of the
+     * {@code detail} field, and a query selecting on {@code detail} would silently match a prefix. The
+     * comma keeps the whole rendering one token.</p>
+     */
+    public static final String CONDITION_PART_SEPARATOR = ",";
+
+    /**
+     * The maximum length of a PostgreSQL identifier, and the cap on every name this class will emit.
+     *
+     * <p>⚠️ Assumptions: 63 is the engine's own {@code NAMEDATALEN - 1} limit, so a captured token longer
+     * than this cannot be an identifier the engine issued and is refused rather than truncated. Truncating
+     * it would turn a value that failed the shape test into one that passes.</p>
+     */
+    public static final int MAX_IDENTIFIER_LENGTH = 63;
+
+    /**
+     * The closed set of database state codes this class is willing to name, keyed by the full five
+     * characters.
+     *
+     * <p>⚠️ Refactoring Rationale: this map is the substance of the fix that replaced message echoing at
+     * this method. The previous rendering returned the driver's own message with digit runs masked, on the
+     * stated reasoning that "the names are letters and survive, the values are digit runs and are
+     * replaced". That reasoning does not hold: the PostgreSQL driver includes the server's {@code DETAIL}
+     * field by default, and a check violation's detail enumerates EVERY column of the rejected row, so a
+     * cardholder's given name and surname are letters too and survived the digit rule exactly as the
+     * identifiers did. Measured against the migrated identity table, the rendering carried
+     * {@code Failing row contains (admin001, grace, nightingale, x, ...)}. Naming the condition from a
+     * closed map cannot disclose anything the map does not contain.</p>
+     *
+     * <p>⚠️ Assumptions: the names are the engine's own condition names from its error-code appendix, not
+     * invented labels, so an operator can search the engine documentation for what this field says. The set
+     * covers the conditions this schema's own constraints, transactions and connection handling can raise;
+     * anything outside it resolves through {@link #CONDITION_CLASSES} and then to
+     * {@link #UNCLASSIFIED_CONDITION}, and neither fallback consults the message.</p>
+     */
+    private static final Map<String, String> CONDITION_NAMES = Map.ofEntries(
+            Map.entry("08001", "sqlclient_unable_to_establish_sqlconnection"),
+            Map.entry("08003", "connection_does_not_exist"),
+            Map.entry("08006", "connection_failure"),
+            Map.entry("08007", "transaction_resolution_unknown"),
+            Map.entry("22001", "string_data_right_truncation"),
+            Map.entry("22003", "numeric_value_out_of_range"),
+            Map.entry("22007", "invalid_datetime_format"),
+            Map.entry("22012", "division_by_zero"),
+            Map.entry("22P02", "invalid_text_representation"),
+            Map.entry("23502", "not_null_violation"),
+            Map.entry("23503", "foreign_key_violation"),
+            Map.entry("23505", "unique_violation"),
+            Map.entry("23514", "check_violation"),
+            Map.entry("23P01", "exclusion_violation"),
+            Map.entry("25006", "read_only_sql_transaction"),
+            Map.entry("40001", "serialization_failure"),
+            Map.entry("40P01", "deadlock_detected"),
+            Map.entry("42501", "insufficient_privilege"),
+            Map.entry("42601", "syntax_error"),
+            Map.entry("42703", "undefined_column"),
+            Map.entry("42P01", "undefined_table"),
+            Map.entry("53300", "too_many_connections"),
+            Map.entry("55P03", "lock_not_available"),
+            Map.entry("57014", "query_canceled"));
+
+    /**
+     * The fallback classification, keyed by the two-character class prefix of a state code.
+     *
+     * <p>⚠️ Assumptions: a class-level fallback exists because the standard assigns MEANING to the first
+     * two characters, so an unlisted code within a known class is still informative -- an unrecognised
+     * {@code 23xxx} is certainly an integrity-constraint violation whatever its subclass. Without this
+     * tier every code absent from the map above would render identically, which would lose the one
+     * distinction an operator most needs at a glance: whether the failure was the data, the transaction or
+     * the connection.</p>
+     */
+    private static final Map<String, String> CONDITION_CLASSES = Map.ofEntries(
+            Map.entry("08", "connection_exception"),
+            Map.entry("0A", "feature_not_supported"),
+            Map.entry("22", "data_exception"),
+            Map.entry("23", "integrity_constraint_violation"),
+            Map.entry("25", "invalid_transaction_state"),
+            Map.entry("28", "invalid_authorization_specification"),
+            Map.entry("40", "transaction_rollback"),
+            Map.entry("42", "syntax_error_or_access_rule_violation"),
+            Map.entry("53", "insufficient_resources"),
+            Map.entry("54", "program_limit_exceeded"),
+            Map.entry("55", "object_not_in_prerequisite_state"),
+            Map.entry("57", "operator_intervention"),
+            Map.entry("58", "system_error"),
+            Map.entry("XX", "internal_error"));
+
+    /**
+     * Captures the name of the constraint a refused write broke.
+     *
+     * <p>⚠️ Assumptions: the pattern is anchored on the engine's own literal KEYWORD, and the anchor is the
+     * control that makes this safe -- not the identifier shape test that follows it. The engine quotes an
+     * identifier after {@code constraint}, {@code relation} and {@code column} and quotes a VALUE after
+     * other lead-ins, as in {@code invalid input syntax for type integer: "abc"}. A shape test alone would
+     * accept that value, since a value can look exactly like an identifier; requiring the keyword
+     * immediately before the quote is what excludes it.</p>
+     */
+    private static final Pattern CONSTRAINT_NAME = Pattern.compile("constraint\\s+\"([^\"\\n]{1,80})\"");
+
+    /** Captures the relation a refused write named; anchored for the reason {@link #CONSTRAINT_NAME} is. */
+    private static final Pattern RELATION_NAME = Pattern.compile("relation\\s+\"([^\"\\n]{1,80})\"");
+
+    /** Captures the column a refused write named; anchored for the reason {@link #CONSTRAINT_NAME} is. */
+    private static final Pattern COLUMN_NAME = Pattern.compile("column\\s+\"([^\"\\n]{1,80})\"");
+
+    /**
+     * The shape every captured name must match before it is emitted.
+     *
+     * <p>⚠️ Assumptions: this is the engine's unquoted-identifier grammar -- a letter or underscore, then
+     * letters, digits, underscores or dollar signs. It is a SECOND gate behind the keyword anchor rather
+     * than the primary one: its job is to refuse a capture that is structurally impossible as a name, such
+     * as one carrying a space, a quote or punctuation, which is what a quoted free-text value inside an
+     * unexpected message shape would look like.</p>
+     */
+    private static final Pattern SQL_IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_$]*");
 
     /**
      * Prevents instantiation of this utility holder.
@@ -339,43 +476,141 @@ public final class FailureSummary {
     }
 
     /**
-     * Renders the redacted condition of a DATABASE failure, and withholds the message of anything else.
+     * Names the CONDITION of a database failure from a closed vocabulary, and withholds everything else.
      *
      * <p>⚠️ Purpose: this is the rendering for a log site that does not know what kind of failure will
      * reach it. A generic handler — a queue error handler, a job runner — receives whatever the work it
      * wrapped happened to raise, so it cannot reason about who composed the message it is holding. This
-     * method makes that decision for it on the one piece of evidence available: a chain carrying a database
-     * state code was composed by a JDBC driver, whose messages quote DDL names and record values, and both
-     * of those are handled — the names are letters and survive, the values are digit runs and are replaced.
-     * A chain carrying no state code could have been composed by anything, including a cloud SDK, and those
-     * messages quote credentials and signed locations that no digit rule can recognise.</p>
+     * method answers the one question such a site needs answered — WHICH RULE DID THE DATABASE APPLY — from
+     * evidence that cannot carry record data: the state code, mapped through {@link #CONDITION_NAMES}, plus
+     * the constraint, relation and column names the engine quotes after its own keywords. No message text
+     * is rendered. A chain carrying no state code is described as {@value #WITHHELD}.</p>
      *
-     * <p>⚠️ Refactoring Rationale: this gate exists because adding the message to a generic handler without
-     * one broke a security property a sibling test already held: a transport failure reporting
-     * {@code connect failed to https://... using key AKIA...} carries an access-key identifier, which
-     * contains no digit run at all and would therefore have passed through the redaction untouched into an
-     * operational log. Withholding by default and admitting on evidence is the direction that cannot fail
-     * open, and the digest beside this field still names every type in the chain, so a withheld message
-     * never leaves a reader with nothing.</p>
+     * <p>⚠️ Refactoring Rationale: this method previously returned {@link #redactedOf(Throwable)} — the
+     * driver's own message with runs of three or more digits masked — and the reasoning recorded for that
+     * was "the names are letters and survive, the values are digit runs and are replaced". That reasoning
+     * was wrong in a way that mattered. The PostgreSQL driver sets {@code logServerErrorDetail} to true by
+     * default, which folds the server's {@code DETAIL} field into the exception message, and a check
+     * violation's detail enumerates every column of the rejected row. Cardholder names, addresses and
+     * merchant free text are letters, so they survived the digit rule exactly as identifiers did. Measured
+     * against the migrated identity table, the previous rendering carried
+     * {@code Failing row contains (admin001, grace, nightingale, x, ...)} — the person's given name and
+     * surname, in an operational log. The driver property is now set to false in
+     * {@code carddemo-common-defaults.yml}, and this method is the second, independent control: the
+     * property governs only PostgreSQL connections, while an emitted allowlist governs every throwable
+     * that reaches here, including one composed by some other driver or wrapped by a framework that
+     * re-renders text of its own.</p>
      *
-     * <p>⚠️ Alternatives Considered: an allowlist of exception types whose messages are known safe.
-     * Rejected because it has to be maintained against every library on the classpath, and the failure mode
-     * of a stale allowlist is silent disclosure rather than a missing line. Also considered: rendering the
-     * message for every failure and relying on the redaction. Rejected for the measured reason above.</p>
+     * <p>⚠️ Assumptions: the two controls are deliberately BOTH present and neither is redundant. Turning
+     * the driver detail off does not stop a future site from being handed a message that quotes a value,
+     * and refusing to render text here does not remove that value from the stack traces, framework log
+     * lines and stored last-error columns the driver would have populated. Each closes what the other
+     * cannot reach.</p>
      *
-     * <p>⚠️ Trade-offs: a diagnostic message from a non-database failure is lost at these sites, and the
-     * site that knows its own failure's provenance should call {@link #of(Throwable)} or
-     * {@link #redactedOf(Throwable)} directly instead of this method. Two such sites exist and both do:
-     * the authorization listener's wire-format refusal renders the codec's own message, which that codec
-     * gates field by field, and the extract loader renders its mapper's, which it redacts.</p>
+     * <p>⚠️ Alternatives Considered: keeping the message and extending redaction to cover free text.
+     * Rejected as unbounded — free text has no shape to match, so any such rule is a denylist of the
+     * values someone thought of, and its failure mode is silent disclosure. Also considered: rendering the
+     * state code alone with no identifiers. Rejected because both call sites already log the code in a
+     * field of its own, so that would have made this field say nothing new, and the constraint name is the
+     * part that turns "an integrity rule refused the write" into "the folded-key rule refused the write".
+     * Also considered: an allowlist of exception types whose messages are known safe. Rejected because it
+     * has to be maintained against every library on the classpath.</p>
+     *
+     * <p>⚠️ Trade-offs: a diagnostic sentence is lost — including from a database failure whose message
+     * was genuinely safe, which is a real cost when the condition is one the map cannot narrow, such as an
+     * unclassified {@code 42xxx}. What is kept is the part that identifies the rule and the object it
+     * guards; recovering the offending ROW is a governed database query rather than a log read. A site that
+     * knows its own failure's provenance should call {@link #of(Throwable)} or
+     * {@link #redactedOf(Throwable)} directly instead of this method, and the two that do both gate their
+     * own text: the authorization listener's wire-format refusal renders a codec message the codec gates
+     * field by field, and the extract loader renders its mapper's, redacted.</p>
      *
      * @param failure the throwable to describe, which may be {@code null}
-     * @return {@link #redactedOf(Throwable)} when some link in the chain is a database failure carrying a
-     *     state code; {@value #WITHHELD} otherwise, including when {@code failure} is {@code null}. Never
-     *     {@code null}
+     * @return the engine's condition name for the chain's state code, followed by any constraint, relation
+     *     and column names recovered from the chain, each separated by {@value #CONDITION_PART_SEPARATOR};
+     *     {@value #UNCLASSIFIED_CONDITION} in place of the name when the code is not classified;
+     *     {@value #WITHHELD} when no link in the chain is a database failure carrying a state code,
+     *     including when {@code failure} is {@code null}. Never {@code null}, and never any part of a
+     *     failure's message text
      */
     public static String databaseConditionOf(Throwable failure) {
-        return sqlStateOf(failure) == null ? WITHHELD : redactedOf(failure);
+        String state = sqlStateOf(failure);
+        if (state == null) {
+            return WITHHELD;
+        }
+        StringBuilder condition = new StringBuilder(conditionNameOf(state));
+        appendQuotedName(condition, failure, CONSTRAINT_NAME, "constraint");
+        appendQuotedName(condition, failure, RELATION_NAME, "relation");
+        appendQuotedName(condition, failure, COLUMN_NAME, "column");
+        return bounded(condition.toString());
+    }
+
+    /**
+     * Classifies a database state code through the closed maps, narrowest tier first.
+     *
+     * <p>⚠️ Assumptions: the code is upper-cased before lookup and its length is checked rather than
+     * assumed. It arrives from a driver by way of {@link #sqlStateOf(Throwable)}, which sanitises and
+     * bounds it but does not and should not validate its shape, so this method treats anything that is not
+     * five characters as unclassifiable rather than indexing into it and risking an exception on the
+     * failure path — the one path that must not raise.</p>
+     *
+     * @param state the state code as {@link #sqlStateOf(Throwable)} rendered it; must not be {@code null}
+     * @return the engine's condition name for the exact code, else the name of its two-character class,
+     *     else {@value #UNCLASSIFIED_CONDITION}; never {@code null}
+     */
+    private static String conditionNameOf(String state) {
+        String normalised = state.toUpperCase(Locale.ROOT);
+        if (normalised.length() != 5) {
+            return UNCLASSIFIED_CONDITION;
+        }
+        String exact = CONDITION_NAMES.get(normalised);
+        if (exact != null) {
+            return exact;
+        }
+        return CONDITION_CLASSES.getOrDefault(normalised.substring(0, 2), UNCLASSIFIED_CONDITION);
+    }
+
+    /**
+     * Appends the first identifier in the cause chain that one keyword-anchored pattern captures.
+     *
+     * <p>⚠️ Assumptions: the whole CHAIN is scanned rather than only the deepest message, because the link
+     * that names the constraint is frequently not the deepest one. A persistence failure typically arrives
+     * as a framework exception wrapping a provider exception wrapping the driver's, and the provider's own
+     * message often names the constraint while the driver's names the relation. Scanning only one link
+     * would drop whichever the wrapping happened to hide.</p>
+     *
+     * <p>⚠️ Assumptions: only the FIRST match per kind is appended. A single failure names one constraint;
+     * repeated matches come from a chain restating the same message at several depths, and appending each
+     * would spend the length bound on duplicates of one fact.</p>
+     *
+     * @param condition the rendering being assembled; must not be {@code null}
+     * @param failure the throwable whose chain is scanned, which may be {@code null}
+     * @param pattern the keyword-anchored pattern whose first group is the candidate name; must not be
+     *     {@code null}
+     * @param label the field name to render before the captured value; must not be {@code null}
+     */
+    private static void appendQuotedName(StringBuilder condition, Throwable failure, Pattern pattern,
+            String label) {
+        Throwable walk = failure;
+        int depth = 0;
+        while (walk != null && depth < ThrowableDigest.MAX_CAUSE_DEPTH) {
+            String message = walk.getMessage();
+            if (message != null) {
+                Matcher matcher = pattern.matcher(message);
+                while (matcher.find()) {
+                    String candidate = matcher.group(1);
+                    if (candidate.length() <= MAX_IDENTIFIER_LENGTH
+                            && SQL_IDENTIFIER.matcher(candidate).matches()) {
+                        condition.append(CONDITION_PART_SEPARATOR).append(label).append('=')
+                                .append(candidate);
+                        return;
+                    }
+                }
+            }
+            Throwable cause = walk.getCause();
+            walk = cause == walk ? null : cause;
+            depth++;
+        }
     }
 
     /**

@@ -88,6 +88,12 @@ class TransactionRecordMapperTest {
     /** Declared width of the trailing pad. */
     private static final int PAD_LENGTH = 20;
 
+    /** Zero-based offset of the description, the one span whose pad the named layout decides. */
+    private static final int DESC_OFFSET = 32;
+
+    /** Declared width of the description, from {@code TRAN-DESC PIC X(100)}. */
+    private static final int DESC_LENGTH = 100;
+
     /**
      * The 330 populated bytes of {@code tests/golden/posting/happy_path/tranfile.expected}.
      *
@@ -290,23 +296,33 @@ class TransactionRecordMapperTest {
     }
 
     /**
-     * Asserts that the plain encode differs from the parity record only in the trailing pad.
+     * Asserts that the plain encode reproduces the parity record, trailing pad included.
+     *
+     * <p>Refactoring Rationale: this case asserted the opposite -- that the plain encode differed from
+     * the committed record in exactly the twenty pad bytes, because the encode rebuilt them with the
+     * charset's blank. That difference is now closed at its source: the mapper writes the low value the
+     * reference's own record area holds, measured in the pad slice of every non-empty
+     * {@code tests/golden/posting/}{@code *}{@code /tranfile.expected} and of all three
+     * {@code tests/golden/interest/}{@code *}{@code /transact.expected}. The case is rewritten rather
+     * than deleted because the property it pins is the one that matters most here, and it is now
+     * stronger: an entity alone reproduces the whole record.</p>
      */
     @Test
-    @DisplayName("the plain encode differs from the parity record only in the trailing pad")
-    void thePlainEncodeDiffersFromTheParityRecordOnlyInThePad() {
+    @DisplayName("the plain encode reproduces the parity record, trailing pad included")
+    void thePlainEncodeReproducesTheParityRecordIncludingItsPad() {
         byte[] image = postedImage();
 
         byte[] encoded = TransactionRecordMapper.toRecord(TransactionRecordMapper.toEntity(image));
 
-        // WHY : Assumptions: the difference is confined to the pad and asserting its confinement is
-        //       what makes the two encode entry points comparable. The plain encode rebuilds a
-        //       registered pad with the charset's blank byte; the committed expectation holds low
-        //       values there. Every populated byte before offset 330 agrees, so the choice between the
-        //       two entry points is a choice about twenty bytes and nothing else.
-        assertThat(encoded).hasSize(RECORD_LENGTH).isNotEqualTo(image);
+        // WHY : Assumptions: the whole record is compared and the pad is ALSO asserted separately, and
+        //       the pair is not redundant. Whole-record equality is the property a parity comparison
+        //       needs; naming the pad byte is what tells a reader which of the two candidate bytes this
+        //       record carries, so a future change that reintroduced the blank would fail with a
+        //       message that says which span and which byte rather than only that 350 bytes differ.
+        assertThat(encoded).hasSize(RECORD_LENGTH).isEqualTo(image);
         assertThat(Arrays.copyOf(encoded, PAD_OFFSET)).isEqualTo(Arrays.copyOf(image, PAD_OFFSET));
-        assertThat(span(encoded, PAD_OFFSET, PAD_LENGTH)).isEqualTo(" ".repeat(PAD_LENGTH));
+        assertThat(Arrays.copyOfRange(encoded, PAD_OFFSET, RECORD_LENGTH))
+                .containsOnly((byte) 0x00);
     }
 
     /**
@@ -358,10 +374,20 @@ class TransactionRecordMapperTest {
     }
 
     /**
-     * Asserts that both layouts place every field identically and emit the same bytes.
+     * Asserts that both layouts place every field identically and differ only in the description pad.
+     *
+     * <p>Refactoring Rationale: this case asserted that the two layouts emit the SAME bytes, which was
+     * true while the layout carried nothing but a comparator's normalisation marker and is no longer.
+     * Section 6.3 of {@code services/batch-service/src/test/resources/fixtures/README.md} measures the
+     * description pad as a property of the writing job -- {@code STRING} at
+     * {@code app/cbl/CBACT04C.cbl:485-489} leaves the tail of the field untouched while the
+     * {@code MOVE} at {@code app/cbl/CBTRN02C.cbl:429} blank-pads it -- so the layout now decides that
+     * byte. What still holds, and what is asserted, is that every FIELD is placed identically: the two
+     * differ inside one field's pad and nowhere else, which is why a wrongly named layout shifts
+     * nothing.</p>
      */
     @Test
-    @DisplayName("both layouts place every field identically and emit the same bytes")
+    @DisplayName("both layouts place every field identically and differ only in the description pad")
     void bothLayoutsPlaceEveryFieldIdentically() {
         byte[] image = postedImage();
         Transaction fromPosted =
@@ -378,10 +404,25 @@ class TransactionRecordMapperTest {
         //       it closed.
         assertThat(fromInterest.getTransactionId()).isEqualTo(fromPosted.getTransactionId());
         assertThat(fromInterest.getAmount()).isEqualByComparingTo(fromPosted.getAmount());
-        assertThat(TransactionRecordMapper.toRecord(fromInterest,
-                TransactionRecordMapper.Layout.INTEREST_GENERATED, image))
-                .isEqualTo(TransactionRecordMapper.toRecord(fromPosted,
-                        TransactionRecordMapper.Layout.POSTED_MASTER, image));
+
+        byte[] underInterest = TransactionRecordMapper.toRecord(fromInterest,
+                TransactionRecordMapper.Layout.INTEREST_GENERATED, image);
+        byte[] underPosting = TransactionRecordMapper.toRecord(fromPosted,
+                TransactionRecordMapper.Layout.POSTED_MASTER, image);
+
+        // WHY : Assumptions: the two images are compared span by span rather than as wholes, because
+        //       the ONE span they may differ in is the description's tail and every other byte must
+        //       agree. Comparing the wholes would report a difference without saying where, which is
+        //       precisely the failure a reader of this case needs located: a geometry drift and a pad
+        //       rule change would look the same.
+        assertThat(Arrays.copyOf(underInterest, DESC_OFFSET))
+                .isEqualTo(Arrays.copyOf(underPosting, DESC_OFFSET));
+        assertThat(Arrays.copyOfRange(underInterest, DESC_OFFSET + DESC_LENGTH, RECORD_LENGTH))
+                .isEqualTo(Arrays.copyOfRange(underPosting, DESC_OFFSET + DESC_LENGTH,
+                        RECORD_LENGTH));
+        assertThat(TransactionRecordMapper.Layout.POSTED_MASTER.descriptionPad()).isEqualTo((byte) ' ');
+        assertThat(TransactionRecordMapper.Layout.INTEREST_GENERATED.descriptionPad())
+                .isEqualTo((byte) 0x00);
         assertThat(TransactionRecordMapper.Layout.values()).hasSize(2);
         assertThat(TransactionRecordMapper.Layout.POSTED_MASTER.registryName()).isEqualTo("TRAN");
         assertThat(TransactionRecordMapper.Layout.INTEREST_GENERATED.registryName())
@@ -391,10 +432,15 @@ class TransactionRecordMapperTest {
     }
 
     /**
-     * Asserts that naming a layout without a source image encodes the same bytes as the default.
+     * Asserts that naming a layout without a source image encodes that producer's own bytes.
+     *
+     * <p>Refactoring Rationale: this case asserted that naming either layout produced the DEFAULT
+     * bytes, which held while the layout reached no byte of the output. It now decides the description
+     * pad, so the posting layout is asserted to equal the default -- it IS the default -- and the
+     * accrual layout is asserted to differ from it in exactly that one span.</p>
      */
     @Test
-    @DisplayName("naming a layout without a source image encodes the same bytes as the default")
+    @DisplayName("naming a layout without a source image encodes that producer's own bytes")
     void namingALayoutWithoutASourceImageEncodesTheDefaultBytes() {
         Transaction transaction = TransactionRecordMapper.toEntity(postedImage());
 
@@ -408,29 +454,37 @@ class TransactionRecordMapperTest {
         assertThat(TransactionRecordMapper.toRecord(transaction,
                 TransactionRecordMapper.Layout.POSTED_MASTER))
                 .isEqualTo(TransactionRecordMapper.toRecord(transaction));
-        assertThat(TransactionRecordMapper.toRecord(transaction,
-                TransactionRecordMapper.Layout.INTEREST_GENERATED))
-                .isEqualTo(TransactionRecordMapper.toRecord(transaction));
 
         byte[] generated = TransactionRecordMapper.toRecord(transaction,
                 TransactionRecordMapper.Layout.INTEREST_GENERATED);
+        byte[] posted = TransactionRecordMapper.toRecord(transaction);
 
-        // WHY : Assumptions: the overload's own documented contract is that it rebuilds the pad as
-        //       blanks and renders a present timestamp in the TARGET form, because it has no image to
-        //       copy from. Both are asserted here rather than inferred from the one-argument tests,
-        //       since a caller reaching this overload for the interest layout is relying on THIS
-        //       method's contract. The pad is the discriminating assertion: the committed parity
-        //       record carries low values there, so blanks prove the rebuild happened.
+        // WHY : Assumptions: the overload's own documented contract is that it rebuilds the trailing
+        //       pad with the low value a producer's record area holds and renders a present timestamp
+        //       in the TARGET form, because it has no image to copy from. Both are asserted here rather
+        //       than inferred from the one-argument tests, since a caller reaching this overload for
+        //       the interest layout is relying on THIS method's contract.
         assertThat(generated).hasSize(RECORD_LENGTH);
-        assertThat(span(generated, PAD_OFFSET, PAD_LENGTH)).isEqualTo(" ".repeat(PAD_LENGTH));
+        assertThat(Arrays.copyOfRange(generated, PAD_OFFSET, RECORD_LENGTH))
+                .containsOnly((byte) 0x00);
         assertThat(span(generated, ORIG_TS_OFFSET, TIMESTAMP_LENGTH))
                 .isEqualTo("2022-06-10 19:27:53.000000");
 
-        // WHY : Trade-offs: the processing span and the pad both come back as blanks, and stating the
-        //       two separately looks redundant until the reasons are named -- the pad is blank because
-        //       it was REBUILT with no member behind it, whereas this span is blank because the parity
-        //       record is an UNPOSTED row whose member decodes as absent. Collapsing them into one
-        //       assertion would let a regression that dropped a populated timestamp still pass.
+        // WHY : Assumptions: the accrual layout's own difference is asserted at the description and
+        //       NOWHERE else, which is what makes the two overloads' relationship legible: the layout
+        //       argument reaches one span. The parity record's description is the posting one, so the
+        //       accrual encode pads its tail with low values while the posting encode pads it with
+        //       blanks, and every byte outside that field is identical.
+        assertThat(Arrays.copyOfRange(generated, DESC_OFFSET + DESC_LENGTH, RECORD_LENGTH))
+                .isEqualTo(Arrays.copyOfRange(posted, DESC_OFFSET + DESC_LENGTH, RECORD_LENGTH));
+        assertThat(Arrays.copyOf(generated, DESC_OFFSET)).isEqualTo(Arrays.copyOf(posted, DESC_OFFSET));
+        assertThat(generated).isNotEqualTo(posted);
+
+        // WHY : Trade-offs: the processing span is asserted separately from the pad, and stating the
+        //       two separately looks redundant until the reasons are named -- the pad holds low values
+        //       because it was REBUILT with no member behind it, whereas this span is blank because the
+        //       parity record is an UNPOSTED row whose member decodes as absent. Collapsing them into
+        //       one assertion would let a regression that dropped a populated timestamp still pass.
         assertThat(span(generated, PROC_TS_OFFSET, TIMESTAMP_LENGTH))
                 .isEqualTo(" ".repeat(TIMESTAMP_LENGTH));
     }

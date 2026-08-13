@@ -82,9 +82,9 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
  * the three statements are consistent and a reader who finds a fourth claiming otherwise should
  * prefer the job control itself.
  *
- * <p><b>It is nonetheless unscheduled.</b> The eleven states of {@code carddemo-daily-batch} are
- * quiesce, stage, preflight, post, interest, backup, combine, statements, reports, analyze and
- * resume; export and import are not among them. Assumptions: this job is reachable only through the
+ * <p><b>It is nonetheless unscheduled.</b> The twelve states of {@code carddemo-daily-batch} are
+ * quiesce, stage, verify, preflight, post, interest, backup, combine, statements, reports, analyze
+ * and resume; export and import are not among them. Assumptions: this job is reachable only through the
  * container's {@code --job=} argument and nothing schedules it, which is exactly what the job control
  * header above implies -- a branch migration is an operator event, not a nightly one. A reader who
  * conflates <em>unscheduled</em> with <em>undriven</em> will look for a scheduling dependency that

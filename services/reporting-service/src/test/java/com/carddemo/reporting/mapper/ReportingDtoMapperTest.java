@@ -1095,6 +1095,32 @@ final class ReportingDtoMapperTest {
                                     + ", which the payload wire format does not admit")
                     .isTrue();
         }
+
+        // WHY : ⚠️ Refactoring Rationale: this half is what keeps the admitted set above from being a
+        //       loophole. Two boxed whole-number types were added to it so that an absent magnitude can
+        //       be expressed without a sentinel, and a boxed number is exactly what a monetary member
+        //       would be declared as by a well-meaning edit -- it compiles, it serialises, and it emits
+        //       a bare JSON number a client parses into a binary floating-point value. Asserting the
+        //       type by NAME closes that: the vocabulary is the same one the mapper half of this class
+        //       uses, so the two halves refuse the same mistake on both sides of the boundary.
+        for (RecordComponent component : componentsOf(discovered)) {
+            String normalised = component.getName().toLowerCase(Locale.ROOT);
+            // WHY : Assumptions: the rule applies to SCALAR components only, and a component whose type
+            //       is itself a payload record is passed over rather than failed. A monetary NAME on a
+            //       group is describing what the group is about -- TransactionDetailReport.totals is a
+            //       band of three money members -- and its members are reached by this same sweep, so
+            //       the money type is still asserted where a money VALUE actually lives. Failing the
+            //       group would have forced a rename that made the payload read worse for no gain.
+            if (moneyTokens().stream().anyMatch(normalised::contains)
+                    && !component.getType().isRecord()
+                    && component.getType() != List.class) {
+                assertThat(component.getType())
+                        .as(component.getDeclaringRecord().getSimpleName() + "."
+                                + component.getName()
+                                + " names a monetary quantity, so it must be the money type")
+                        .isEqualTo(Money.class);
+            }
+        }
     }
 
     /**
@@ -1187,7 +1213,19 @@ final class ReportingDtoMapperTest {
                 || raw.isEnum()
                 || raw == int.class
                 || raw == long.class
-                || raw == boolean.class) {
+                || raw == boolean.class
+                // WHY : ⚠️ Refactoring Rationale: the BOXED whole numbers are admitted, where only the
+                //       primitives were. A payload member that is a whole-number magnitude AND can be
+                //       absent has no primitive spelling -- the statement position pair is null exactly
+                //       when the run's index does not name the card, and a primitive would have forced
+                //       a sentinel such as -1 to stand for absence, which is the shape every other
+                //       refusal in this module exists to avoid. Trade-offs: the admitted set grows by
+                //       two types, and what stops that weakening the money guarantee is the assertion
+                //       below -- a member whose NAME names a monetary quantity must still be the money
+                //       type, so a total spelled as a boxed number fails there rather than passing
+                //       here.
+                || raw == Long.class
+                || raw == Integer.class) {
             return true;
         }
         if (!raw.isRecord() || !DTO_RESOURCE_PATH.replace('/', '.').equals(raw.getPackageName())) {

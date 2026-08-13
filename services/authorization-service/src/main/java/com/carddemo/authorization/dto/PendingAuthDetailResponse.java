@@ -714,4 +714,50 @@ public record PendingAuthDetailResponse(
      * and L344, and {@code cpy-bms/COPAU00.cpy} corroborates that width at L390 and L764.
      */
     private static final int MESSAGE_WIDTH = 78;
+
+    /**
+     * Renders this screen shape as its identity and its decision, omitting the other eighteen components.
+     *
+     * <p>Purpose. Nine of the twenty-seven components are prohibited from a diagnostic rendering by
+     * {@code docs/architecture/observability.md} L1093 to L1112: the approved amount as a monetary value,
+     * the four merchant free-text fields, the merchant identifier for the reason below, the card expiry,
+     * and the two screen clock fields, which are not protected but state when a screen was rendered
+     * rather than anything about the authorization. The compiler-generated rendering printed all
+     * twenty-seven, including the approved sum beside the merchant it was approved at.</p>
+     *
+     * <p>Assumptions: the card number is RENDERED, and this is not an exception to the rule. The
+     * component receives an ALREADY-MASKED value -- {@code PendingAuthDetailMapper} masks it through
+     * {@code com.carddemo.common.security.CardNumberMasker} before this record is built, and the
+     * component's own documentation records that it is deliberately not constrained to digits for that
+     * reason. Rendering it therefore performs no abbreviation here; it prints a value that is already the
+     * one form the rule's second clause sanctions.</p>
+     *
+     * <p>Assumptions: the merchant identifier is omitted together with the four free-text merchant
+     * fields rather than kept as a bounded code, because this migration stores no merchant table: the
+     * identifier's meaning comes entirely from the name, city, state and postal code stored beside it, so
+     * keeping it alone would let a reader recover the four omitted values from the row it points at.</p>
+     *
+     * <p>Trade-offs: what remains is the screen's own identity, the transaction identifier, the masked
+     * card number and the four bounded outcome codes -- enough to say WHICH authorization was displayed
+     * and WHAT was decided about it, and not enough to say what it was worth or where it was made. The
+     * cost is that a disputed amount cannot be read from a log line; it is one detail read away, and the
+     * correlation identifier on the same line ties the two together.</p>
+     *
+     * @return a rendering carrying the transaction and program names, the transaction identifier, the
+     *     masked card number, the authorization type, the response code and reason, the match status and
+     *     the fraud mark, with the remaining eighteen components omitted; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "PendingAuthDetailResponse[transactionName=" + this.transactionName
+                + ", programName=" + this.programName
+                + ", transactionId=" + this.transactionId
+                + ", maskedCardNumber=" + this.cardNumber
+                + ", authType=" + this.authType
+                + ", authResponse=" + this.authResponse
+                + ", authResponseReason=" + this.authResponseReason
+                + ", matchStatus=" + this.matchStatus
+                + ", fraudMark=" + this.fraudMark
+                + ", omitted=18 components]";
+    }
 }

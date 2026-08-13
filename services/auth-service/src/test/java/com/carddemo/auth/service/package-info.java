@@ -53,7 +53,21 @@
  *       managed user pool -- which provider call each intention issues, what a provider fault records,
  *       what a second applier sees, and that the provider is called only after the transaction that
  *       recorded the intention has ended.</li>
+ *   <li>{@code FirstSignOnHandoverTest}, over the one property that belongs to NO single class here:
+ *       that the credential a creation hands back is the credential the same account's first sign-on
+ *       accepts, through to a token set. It builds both services over one substituted provider,
+ *       because two would let the create be made against one pool and the sign-on against another and
+ *       the linkage under assertion is that they are the same account.</li>
  * </ul>
+ *
+ * <p>Refactoring Rationale: this roster named FOUR classes while the directory held FIVE, and the
+ * omitted one was {@code FirstSignOnHandoverTest} -- which the exclusion list below did not mention
+ * either, so it was neither claimed nor disclaimed. That is the failure mode a roster exists to
+ * prevent: a reader auditing coverage of the credential handover found no owner for it here and would
+ * reasonably have added a second class asserting the same journey. The roster is re-derived from the
+ * directory rather than extended by hand -- {@code find src/test/java/com/carddemo/auth/service
+ * -maxdepth 1 -name '*Test.java'} reports the five above -- because a list maintained by appending is
+ * a list that skips exactly the class added alongside other work.</p>
  *
  * <h2>What this package deliberately does not hold</h2>
  *

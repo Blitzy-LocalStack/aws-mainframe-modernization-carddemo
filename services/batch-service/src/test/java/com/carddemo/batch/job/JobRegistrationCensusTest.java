@@ -14,6 +14,7 @@ import com.carddemo.batch.repository.TransactionCategoryBalanceRepository;
 import com.carddemo.batch.repository.TransactionRejectRepository;
 import com.carddemo.batch.repository.TransactionRepository;
 import com.carddemo.batch.service.BatchStepLedger;
+import com.carddemo.batch.service.DailyFeedWatermarkService;
 import com.carddemo.batch.service.CategoryBalanceService;
 import com.carddemo.batch.service.DatasetGenerationService;
 import com.carddemo.batch.service.InterestCalculationService;
@@ -24,7 +25,6 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import jakarta.persistence.EntityManager;
 import org.springframework.batch.core.job.Job;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -71,6 +71,12 @@ class JobRegistrationCensusTest {
                         () -> mock(PlatformTransactionManager.class))
                 .withBean(DailyTransactionRepository.class,
                         () -> mock(DailyTransactionRepository.class))
+                // WHY : Assumptions: the watermark SERVICE is contributed rather than its repository,
+                //       because that is the collaborator the two feed-reading jobs declare. It carries
+                //       no stub behaviour for the same reason the export sources above carry none:
+                //       this census asserts which beans are REGISTERED and never runs a job body.
+                .withBean(DailyFeedWatermarkService.class,
+                        () -> mock(DailyFeedWatermarkService.class))
                 .withBean(CardXrefRepository.class, () -> mock(CardXrefRepository.class))
                 // WHY : Assumptions: the customer and card projections are contributed here because
                 //       ExportJob's bean method takes all five export sources. They carry no stub
@@ -97,12 +103,14 @@ class JobRegistrationCensusTest {
                         () -> mock(InterestCalculationService.class))
                 .withBean(DatasetGenerationService.class, () -> mock(DatasetGenerationService.class))
                 .withBean(S3Client.class, () -> mock(S3Client.class))
-                // WHY : Refactoring Rationale: the persistence context is supplied as a mock because
-                //       PostTransactionsJob takes one through its constructor, to flush the unit of work
-                //       at the point the reference program commits rather than at the end of the chunk.
-                //       This census registers every job configuration by type, so a collaborator absent
-                //       from the runner fails the whole context rather than the one job that needs it.
-                .withBean(EntityManager.class, () -> mock(EntityManager.class))
+                // WHY : Refactoring Rationale: a mocked persistence context used to be contributed here
+                //       because PostTransactionsJob took one through its constructor to flush a
+                //       pass-wide unit of work. That job now opens ONE transaction per feed record
+                //       through a TransactionTemplate over the registered transaction manager, and a
+                //       transaction of its own is its own persistence context, so no job in this module
+                //       takes an EntityManager and the contribution is withdrawn. Leaving it would
+                //       register a bean this census claims a job needs, which is the kind of stale
+                //       fixture that lets a genuinely missing collaborator pass unnoticed.
                 .withPropertyValues(
                         "carddemo.dataset.bucket=carddemo-datasets-test",
                         "CARDDEMO_BATCH_RUN_ID=census-run");

@@ -271,14 +271,35 @@
  *
  * <h2>{@code FILLER} is asymmetric, and two cases invert the intuition</h2>
  *
- * <p>Assumptions: <b>{@code FILLER} is dropped on decode and padded back as blanks on encode.</b>
- * The asymmetry is the ruling, and treating the two directions alike is the error. Dropping it on
- * decode follows from transformation rule T1, under which trailing filler is padding to a fixed
- * record length rather than data, so it becomes no field of any target; the plan requires the drop
- * be recorded, and each mapper records the width it dropped so that its field set plus that width
- * reconciles to the declared record length. Restoring it on encode is what makes an encoded record
- * byte-identical to the baseline at its full declared length rather than merely correct in its
- * populated prefix.</p>
+ * <p>Assumptions: <b>{@code FILLER} is dropped on decode and padded back on encode with the byte the
+ * writing program's own record area held.</b> The asymmetry is the ruling, and treating the two
+ * directions alike is the error. Dropping it on decode follows from transformation rule T1, under
+ * which trailing filler is padding to a fixed record length rather than data, so it becomes no field
+ * of any target; the plan requires the drop be recorded, and each mapper records the width it dropped
+ * so that its field set plus that width reconciles to the declared record length. Restoring it on
+ * encode is what makes an encoded record byte-identical to the baseline at its full declared length
+ * rather than merely correct in its populated prefix.</p>
+ *
+ * <p>Assumptions: <b>the byte is per record and is measured, not derived</b>, and section 6.1 of
+ * {@code services/batch-service/src/test/resources/fixtures/README.md} is the measurement table. The
+ * shared codec rebuilds a dropped pad with the charset's blank, which is the right default for a
+ * codec holding no record-specific knowledge, and it is correct for the account, feed and
+ * cross-reference records whose measured pad IS the blank. It is not correct for the two records a
+ * migrated job writes from scratch: the 350-byte transaction and the 50-byte category balance both
+ * carry LOW VALUES in the pad of a freshly written record, because no {@code MOVE} in either producer
+ * names the item and {@code INITIALIZE} does not reach one. Those two mappers therefore overwrite the
+ * codec's blank with the measured byte after encoding, and the rest do not. Trade-offs: two rules in
+ * one package reads as an inconsistency until the measurement is checked, which is why the table is
+ * cited here rather than the rule being harmonised -- harmonising it would fix two records by
+ * breaking three.</p>
+ *
+ * <p>Assumptions: <b>a record RE-EMITTED from an image it was read from takes its pad from that
+ * image</b>, through the source-image overload each such mapper publishes, because that is what the
+ * baseline's read-then-rewrite path does -- the pad it writes back is the pad it read. The measured
+ * consequence is visible in one pair of committed files: the category-balance expectation carries
+ * ASCII zeros in the eight posting scenarios whose fixture already held the row, and low values in
+ * {@code tests/golden/posting/zero_balance/tcatbal.expected}, whose fixture held none so the create
+ * arm wrote a fresh record area.</p>
  *
  * <p>Assumptions: the restoration is not tidiness, and the reason is the parity oracle. The
  * committed expectation files are compared byte for byte after timestamp normalisation, so a

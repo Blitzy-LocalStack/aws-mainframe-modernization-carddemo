@@ -15,6 +15,7 @@ import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.security.MaskedCardNumber;
 import com.carddemo.common.security.SealedSelector;
+import com.carddemo.common.web.CorrelationIdFilter;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
 import java.io.IOException;
@@ -32,6 +33,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.json.JsonMapper;
@@ -124,6 +126,15 @@ class CardMapperTest {
 
     /** Half-open end of {@code CARD-NUM}, declared {@code PIC X(16)} at {@code CVACT02Y.cpy:5}. */
     private static final int CARD_NUM_END = 16;
+
+    /**
+     * The correlation identity the omission-record cases put on the logging context.
+     *
+     * <p>Assumptions: letters only and no digits, so that an assertion excluding the account
+     * identifier's digits from the line cannot be satisfied or defeated by digits this token
+     * contributed.</p>
+     */
+    private static final String CORRELATION_PROBE = "CARDMAPPERPROBE";
 
     /** Half-open end of {@code CARD-ACCT-ID}, declared {@code PIC 9(11)} at {@code :6}. */
     private static final int ACCOUNT_ID_END = 27;
@@ -1132,62 +1143,195 @@ class CardMapperTest {
     }
 
     /**
-     * Confirms the record of an omitted row carries no part of the stored key.
+     * Confirms the record of an omitted row carries no protected identifier, no width and no part of
+     * the key.
      *
-     * <p>Purpose: a value reaching that branch is not a card number, but it is a value from the card
-     * master and may be a mistyped or mis-offset one, so a record quoting it would write cardholder
-     * credential material into the one destination the masking everywhere else in this class exists to
-     * keep it out of.</p>
+     * <p>Purpose: a log group is durable, operator-facing and exported, so anything written to one has
+     * left the boundary every mask in {@link CardMapper} exists to hold. Three classes of value are at
+     * stake and all three are asserted absent. The stored key is one: a value reaching that branch is not
+     * a card number, but it is a value from the card master and may be a mistyped or mis-offset one. The
+     * eleven-digit ACCOUNT IDENTIFIER is the second. The invalid key's stored WIDTH is the third, and
+     * {@code docs/architecture/observability.md} prohibits it in a durable record on identical terms to
+     * the identifier -- a protected value's length is prohibited exactly as its content is.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this case previously REQUIRED {@code accountId=} in the clear and
+     * {@code storedWidth=}, on the ground that an operator needs them to find the row. It therefore
+     * enshrined a violation of the sensitive-data logging contract in
+     * {@code docs/architecture/observability.md}, whose target prohibition names account and customer
+     * identifiers explicitly, and it did so in the one class of this module whose entire purpose is
+     * withholding. The operational need it cited is real and is not a permission, so the assertions are
+     * INVERTED rather than removed: what an operator now gets is the correlation identity, the row's
+     * position within the page and the proportion of the page affected, and all three are asserted
+     * present here so that withdrawing the two prohibited values could not be satisfied by a line that
+     * reports an omission and locates nothing. The identifier's own operational use is met elsewhere and
+     * better: {@code src/main/resources/db/migration/V2__card_num_digit_domain.sql} publishes the query
+     * that lists exactly these rows, and a person diagnosing the condition runs that query rather than
+     * reconstructing a row set from a log stream.</p>
      *
      * @throws IOException if the positive-control fixture cannot be read from the classpath
      */
-    // WHY : Assumptions: the account identifier and the stored width ARE asserted present, rather than
-    //       the record merely being asserted free of the key. An operator has to be able to find the row
-    //       with the query the migration's own header states, and a warning naming neither would report
-    //       that something was dropped without saying which row -- which is a record that costs
-    //       retention and buys nothing.
+    // WHY : Assumptions: the counts, the position and the correlation identifier ARE asserted present,
+    //       rather than the record merely being asserted free of the identifier. A line that named
+    //       nothing would report that something was dropped without saying how much of the page, which
+    //       row, or under which request -- a record that costs retention and buys nothing -- so the case
+    //       pins what replaced the identifier as well as its absence.
+    // WHY : Assumptions: TWO rows are converted, one renderable and one not, so `selected` and
+    //       `omitted` are DIFFERENT numbers and the position is not the only figure on the line that
+    //       could be one. A single-row page would let an implementation that reported the same figure
+    //       three times pass, which is precisely the confusion the proportion exists to remove.
+    // WHY : Assumptions: the account identifier is asserted absent by its VALUE as well as by its key
+    //       name. Dropping only the `accountId=` label while still rendering the digits somewhere on the
+    //       line would satisfy a key-name assertion and disclose the identifier just the same.
     // WHY : Assumptions: the appender is attached and detached inside this case rather than in the
-    //       shared setup, because it is the only case that reads the operational record and a shared
-    //       appender would collect events from every other one.
+    //       shared setup, because it is the only family of cases that reads the operational record and a
+    //       shared appender would collect events from every other one. The correlation identity is put
+    //       on the context and removed in the same guarded block for the same reason -- a leaked context
+    //       key would be read by any later case that logs.
     @Test
-    @DisplayName("the record of an omitted row names the account and no part of the key")
-    void theRecordOfAnOmittedRowNamesTheAccountAndNoPartOfTheKey() throws IOException {
+    @DisplayName("the record of an omitted row names neither the account, its width nor the key")
+    void theRecordOfAnOmittedRowNamesNeitherTheAccountItsWidthNorTheKey() throws IOException {
         String poisonKey = "ABCDEFGHIJKLMNOP";
+        List<String> records = recordsFrom(POSITIVE_CONTROL);
+        Card unrenderable = cardFrom(poisonKey + records.get(0).substring(CARD_NUM_END));
+        Card renderable = cardFrom(records.get(0));
+
+        List<String> rendered =
+                warningsWhileConverting(List.of(renderable, unrenderable), CORRELATION_PROBE);
+
+        assertThat(rendered)
+                .as("the omission is recorded ONCE for the page, naming the proportion it affected,"
+                        + " the position it was at and the correlation identity")
+                .hasSize(1)
+                .allSatisfy(line -> assertThat(line)
+                        .contains("reason=card-number-outside-domain")
+                        .contains("omitted=1")
+                        .contains("selected=2")
+                        .contains("rowOrdinal=2")
+                        .contains("correlationId=" + CORRELATION_PROBE));
+        assertThat(rendered)
+                .as("neither the account identifier nor any measurement of the stored key is recorded")
+                .allSatisfy(line -> assertThat(line)
+                        .doesNotContain("accountId")
+                        .doesNotContain(String.valueOf(unrenderable.getAccountId()))
+                        .doesNotContain("storedWidth")
+                        .doesNotContain("Width")
+                        .doesNotContain("length"));
+        assertThat(rendered)
+                .as("no account identifier of either row reaches the operational record")
+                .allSatisfy(line -> assertThat(line)
+                        .doesNotContain(String.valueOf(unrenderable.getAccountId()))
+                        .doesNotContain(String.valueOf(renderable.getAccountId()))
+                        .doesNotContain("accountId"));
+        assertThat(rendered)
+                .as("no substring of either stored key of four characters or more is quoted")
+                .allSatisfy(line -> {
+                    for (int start = 0; start + 4 <= poisonKey.length(); start++) {
+                        assertThat(line).doesNotContain(poisonKey.substring(start, start + 4));
+                    }
+                    String storedKey = renderable.getCardNum();
+                    for (int start = 0; start + 4 <= storedKey.length(); start++) {
+                        assertThat(line).doesNotContain(storedKey.substring(start, start + 4));
+                    }
+                });
+    }
+
+    /**
+     * Confirms the recorded position is the omitted row's own place in the page it was served from.
+     *
+     * <p>Purpose: the position is what replaces the withdrawn account identifier as the operator's route
+     * back to the row, so it has to be the offending row's position and not merely some number. This
+     * case puts the unrenderable row second of three, which is a position no off-by-one and no constant
+     * can produce: a zero-based count reports one, a count of the page reports three, and a count of the
+     * rows served reports two only by accident of this fixture, which the third assertion excludes by
+     * checking the two conforming rows survived.</p>
+     *
+     * @throws IOException if the boundary fixture cannot be read from the classpath
+     */
+    // WHY : Assumptions: the position counts rows of the STORED page and not rows of the answer, which
+    //       is the only count an operator can reproduce -- re-running the correlated listing returns the
+    //       stored page, and the answer is what the omission already changed.
+    @Test
+    @DisplayName("the recorded position is the omitted row's place in the page it came from")
+    void theRecordedPositionIsTheOmittedRowsPlaceInThePageItCameFrom() throws IOException {
+        List<String> records = recordsFrom(EXPIRY_BOUNDS);
+        assertThat(records).hasSizeGreaterThan(1);
+        Card unrenderable = cardFrom("ABCDEFGHIJKLMNOP" + records.get(0).substring(CARD_NUM_END));
+        List<Card> stored = List.of(cardFrom(records.get(0)), unrenderable, cardFrom(records.get(1)));
+
+        List<String> rendered = warningsWhileConverting(stored, CORRELATION_PROBE);
+
+        assertThat(rendered)
+                .as("the second row of three is reported at position two")
+                .hasSize(1)
+                .allSatisfy(line -> assertThat(line).contains("rowOrdinal=2"));
+        assertThat(this.mapper.toSummaryPage(PageResponse.ofRows(stored,
+                        sealedCursor(sealablePositionOf(stored.get(0))),
+                        sealedCursor(sealablePositionOf(stored.get(2))), false)).items())
+                .as("the two conforming rows either side of the omission are still served")
+                .hasSize(2);
+    }
+
+    /**
+     * Confirms an omission reached outside a correlated request reports the absence rather than a null.
+     *
+     * <p>Purpose: the conversion is reachable from a batch path and from a test, neither of which passes
+     * through the filter that puts the correlation identity on the context. The line still has to be
+     * readable, and it must not render the four characters {@code null}, which a search for a real
+     * identity could match.</p>
+     *
+     * @throws IOException if the positive-control fixture cannot be read from the classpath
+     */
+    @Test
+    @DisplayName("an omission outside a correlated request records the absence, not a null")
+    void anOmissionOutsideACorrelatedRequestRecordsTheAbsenceNotANull() throws IOException {
         Card unrenderable = cardFrom(
-                poisonKey + recordsFrom(POSITIVE_CONTROL).get(0).substring(CARD_NUM_END));
+                "ABCDEFGHIJKLMNOP" + recordsFrom(POSITIVE_CONTROL).get(0).substring(CARD_NUM_END));
+
+        List<String> rendered = warningsWhileConverting(List.of(unrenderable), null);
+
+        assertThat(rendered)
+                .as("the absent correlation identity is reported as a token and never as a null")
+                .hasSize(1)
+                .allSatisfy(line -> assertThat(line)
+                        .contains("correlationId=(none)")
+                        .doesNotContain("null"));
+    }
+
+    /**
+     * Converts one stored page under a nominated correlation identity and returns the warnings recorded.
+     *
+     * @param stored the stored rows to convert, which must not be {@code null}
+     * @param correlationId the correlation identity to put on the logging context for the conversion, or
+     *     {@code null} to convert with no identity on the context at all
+     * @return the formatted message of every warning the mapper recorded during the conversion, in the
+     *     order recorded; never {@code null}
+     */
+    // WHY : Assumptions: the context key is removed in a finally block and the appender detached in the
+    //       same one, so a case that fails part way through leaves neither behind for the next case.
+    private List<String> warningsWhileConverting(List<Card> stored, String correlationId) {
         ch.qos.logback.classic.Logger mapperLogger =
                 (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(CardMapper.class);
         ListAppender<ILoggingEvent> captured = new ListAppender<>();
         captured.start();
         mapperLogger.addAppender(captured);
+        if (correlationId != null) {
+            MDC.put(CorrelationIdFilter.CORRELATION_ID_MDC_KEY, correlationId);
+        }
 
         try {
-            this.mapper.toSummaryPage(
-                    PageResponse.ofRows(List.of(unrenderable),
-                            sealedCursor(sealablePositionOf(unrenderable)),
-                            sealedCursor(sealablePositionOf(unrenderable)), false));
+            this.mapper.toSummaryPage(PageResponse.ofRows(stored,
+                    sealedCursor(sealablePositionOf(stored.get(0))),
+                    sealedCursor(sealablePositionOf(stored.get(stored.size() - 1))), false));
         } finally {
+            MDC.remove(CorrelationIdFilter.CORRELATION_ID_MDC_KEY);
             mapperLogger.detachAppender(captured);
             captured.stop();
         }
 
-        List<String> rendered = captured.list.stream()
+        return captured.list.stream()
                 .filter(event -> event.getLevel() == Level.WARN)
                 .map(ILoggingEvent::getFormattedMessage)
                 .toList();
-        assertThat(rendered)
-                .as("the omission is recorded once, naming the account and the stored width")
-                .hasSize(1)
-                .allSatisfy(line -> assertThat(line)
-                        .contains("accountId=" + unrenderable.getAccountId())
-                        .contains("storedWidth=" + poisonKey.length()));
-        assertThat(rendered)
-                .as("no substring of the stored key of four characters or more is quoted")
-                .allSatisfy(line -> {
-                    for (int start = 0; start + 4 <= poisonKey.length(); start++) {
-                        assertThat(line).doesNotContain(poisonKey.substring(start, start + 4));
-                    }
-                });
     }
 
     /**

@@ -121,6 +121,26 @@ public final class CardNumberMasker {
     private static final int CARD_NUMBER_LENGTH = 16;
 
     /**
+     * The shortest digit run {@link #maskEmbeddedIdentifiers(String)} treats as a protected identifier.
+     *
+     * <p>Assumptions: nine, the declared width of the baseline's customer identifier -- the narrowest
+     * protected identifier the platform issues. The account identifier is eleven and the card number is
+     * sixteen, so one threshold at nine covers all three, and a run of eight or fewer digits stays legible
+     * because no protected identifier is that short. Path values such as a page size, an ordinal or a date
+     * component are therefore unaffected.</p>
+     *
+     * <p>Alternatives Considered: three exact-width tests, for runs of exactly nine, eleven or sixteen
+     * digits. Rejected because it fails open between and beyond those widths -- a ten-, twelve-,
+     * seventeen- or nineteen-digit run would pass unmasked -- and a caller cannot tell from the output
+     * that it did.</p>
+     *
+     * <p>Assumptions: the constant is published rather than private so that a test can assert against the
+     * rule instead of restating the number, and so a caller reading a masked value can see which rule
+     * produced it.</p>
+     */
+    public static final int IDENTIFIER_REDACTION_THRESHOLD = 9;
+
+    /**
      * The regular expression a fully masked card number matches, and no unmasked one does.
      *
      * <p>Refactoring Rationale: this is published so that a response type carrying a masked rendering can
@@ -406,6 +426,90 @@ public final class CardNumberMasker {
                 digitsToMask--;
             }
         }
+    }
+
+    /**
+     * Withholds every protected identifier in text, preserving the text's length.
+     *
+     * <p>Purpose: this is the ONE identifier-aware sanitizer, and it exists because there were two rules
+     * where there should have been one. {@link #maskEmbeddedCardNumbers(String)} recognises a card number
+     * -- a contiguous run of {@value #CARD_NUMBER_LENGTH} digits, or four uniformly separated groups --
+     * and nothing shorter, while the shared exception advice narrowed a request path at a run of
+     * {@value #IDENTIFIER_REDACTION_THRESHOLD}. Every site that logged or rendered a request path chose
+     * between them by hand, and the sites that chose the card rule let a nine-digit customer identifier
+     * and an eleven-digit account identifier through in the clear -- into a retained log line and into a
+     * problem body.</p>
+     *
+     * <p>Assumptions: the two rules are COMPOSED rather than one replacing the other, and the card rule
+     * runs FIRST. That order is what keeps both properties. Running the card rule first preserves the
+     * last-four rendering the platform already publishes for a card number, and preserves its recognition
+     * of uniformly SEPARATED groups, which the identifier rule cannot see because those runs are each
+     * four digits long. The identifier rule then sees a card number already reduced to a four-digit tail,
+     * which is below its own threshold, so it leaves it alone and acts only on the runs the card rule did
+     * not claim. Running them the other way round would let the identifier rule withhold a contiguous
+     * card number WHOLE, discarding the four digits every card response already shows.</p>
+     *
+     * <p>Assumptions: a run the identifier rule claims keeps NO digit at all. It can only be a customer
+     * or an account identifier -- a longer run would have been claimed by the card rule -- and the
+     * platform publishes no partial rendering of either anywhere, so nothing justifies retaining part of
+     * one.</p>
+     *
+     * <p>Assumptions: the withheld digits are overwritten in place rather than the run being replaced by a
+     * fixed marker, so the narrowed text is exactly as long as the value the caller supplied. That is what
+     * lets a reader line a diagnostic path up against an access record without either having to be
+     * re-parsed.</p>
+     *
+     * <p>Assumptions: the operation is idempotent, and callers rely on it rather than hoping for it. A run
+     * this method withholds leaves no digits, and one the card rule withholds leaves four -- below the
+     * threshold -- so applying the method to its own output changes nothing. Several layers narrow the
+     * same path on one failed request, and idempotence is what makes that harmless.</p>
+     *
+     * <p>Assumptions: the value is SCANNED and never parsed. This is reached from every service and must
+     * not know which path shapes exist, so no segment position, prefix or route template appears here.
+     * Alternatives Considered: narrowing only the paths known to carry an identifier; rejected because it
+     * fails open -- a path added later carries its identifier in the clear until somebody remembers to
+     * extend the list, and the failure is silent.</p>
+     *
+     * @param text the value to narrow, which may be {@code null}; a value whose longest digit run is
+     *     shorter than {@value #IDENTIFIER_REDACTION_THRESHOLD} and which carries no card number is
+     *     returned unchanged
+     * @return the value with every card number reduced to its final {@value #VISIBLE_TAIL_LENGTH} digits
+     *     and every other qualifying run withheld whole, of identical length to {@code text}, or
+     *     {@code null} when {@code text} is {@code null}
+     */
+    public static String maskEmbeddedIdentifiers(String text) {
+        String cardsMasked = maskEmbeddedCardNumbers(text);
+        if (cardsMasked == null) {
+            return null;
+        }
+
+        StringBuilder masked = null;
+        int scanned = 0;
+        int length = cardsMasked.length();
+        while (scanned < length) {
+            if (!isDigit(cardsMasked.charAt(scanned))) {
+                scanned++;
+                continue;
+            }
+            int runEnd = scanned;
+            while (runEnd < length && isDigit(cardsMasked.charAt(runEnd))) {
+                runEnd++;
+            }
+            if (runEnd - scanned >= IDENTIFIER_REDACTION_THRESHOLD) {
+                // WHY : Refactoring Rationale: the builder is created on first match rather than up
+                //       front, for the reason recorded on the card rule -- this runs on every failed
+                //       request, so the no-match case is left allocation-free and a diagnostic measure
+                //       does not become a cost on the failure path it exists to make safe.
+                if (masked == null) {
+                    masked = new StringBuilder(cardsMasked);
+                }
+                for (int position = scanned; position < runEnd; position++) {
+                    masked.setCharAt(position, MASK_CHARACTER);
+                }
+            }
+            scanned = runEnd;
+        }
+        return masked == null ? cardsMasked : masked.toString();
     }
 
     /**

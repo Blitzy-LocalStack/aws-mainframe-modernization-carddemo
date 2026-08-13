@@ -338,12 +338,30 @@ class ReferenceWireContractTest {
         //       environment is not accepting mutating work -- so the operation is refused before any
         //       action is read and there is no per-action outcome to report. The set stays exact so
         //       that a 409 added here later still fails.
+        // WHY : ⚠️ Refactoring Rationale: 405, 406 and 415 joined this set when the three transport
+        //       refusals were declared on every operation of this contract, and the claim above
+        //       survives them for the same reason it survived the 503. Each is raised by the shared
+        //       advice in services/common-lib before a handler is entered -- an unpublished verb, an
+        //       Accept header naming nothing this service produces, a body in a media type it does
+        //       not read -- so not one of them describes a batch outcome, and none of them can stand
+        //       for a partially applied run. The set stays exact, and the batch-level 409 stays
+        //       absent, which is the property this case protects.
         Map<String, Object> batch =
                 mapping(mapping(contract(), "paths"), "/api/v1/reference/maintenance-actions");
         Map<String, Object> responses = mapping(mapping(batch, "post"), "responses");
 
+        // WHY : ⚠️ Refactoring Rationale: the four PROTOCOL refusals joined this set when every
+        //       contract in this system began publishing the outcomes its shared runtime already
+        //       produced -- 405 on every operation, 406 wherever a body is returned, and 413 and 415
+        //       wherever one is accepted. The load-bearing claim of this assertion is unchanged and is
+        //       the continued absence of a batch-level 404 and 409, which would describe an
+        //       all-or-nothing run the baseline does not have. None of the four says anything about the
+        //       batch: each is raised before an action is read, so no per-action outcome exists to
+        //       report. The set stays EXACT rather than loosened to "contains", because an exact set is
+        //       what would catch a 409 being added here later -- which is the whole point of the case.
         assertThat(responses.keySet())
-                .containsExactlyInAnyOrder("200", "400", "401", "403", "500", "503");
+                .containsExactlyInAnyOrder("200", "400", "401", "403", "405", "406", "413", "415",
+                        "500", "503");
 
         Map<String, Object> response = mapping(mapping(mapping(contract(), "components"), "schemas"),
                 "MaintenanceActionBatchResponse");

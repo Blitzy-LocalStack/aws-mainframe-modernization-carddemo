@@ -325,4 +325,32 @@ public record TransactionListItemResponse(
     //       row derived from that paragraph. The value arrives already formatted from the mapper;
     //       nothing here reads a clock.
     String originTimestamp) {
+
+    /**
+     * Renders this row WITHOUT its amount or its description.
+     *
+     * <p>Purpose. The amount is a monetary value and the description is free text a submitter authors;
+     * both are withheld from a diagnostic rendering by {@code docs/architecture/observability.md} L1093
+     * to L1112, the first by name and the second because nothing in this type constrains its content.
+     * This shape matters more than its size suggests: it is the element type of a page, so one logged
+     * page rendered as many amounts and narratives as it carried rows.</p>
+     *
+     * <p>Assumptions: the page envelope's own rendering does not make this one unnecessary.
+     * {@code com.carddemo.common.web.PageResponse} reports a row COUNT rather than its rows, so a page
+     * logged through the envelope never reaches this method -- but a row reaches a diagnostic on its own
+     * whenever one is logged individually, and the envelope's discipline cannot cover that.</p>
+     *
+     * <p>Trade-offs: the identifier and the origin instant are kept, which is what a paging question is
+     * actually debugged with: whether the page boundaries and the ordering are what the cursor asked
+     * for is answered by the keys and the timestamps of the rows returned, and neither the amount nor
+     * the narrative contributes to it.</p>
+     *
+     * @return a rendering carrying the transaction identifier and the origin timestamp, with the amount
+     *     and the description omitted entirely; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "TransactionListItemResponse[transactionId=" + this.transactionId
+                + ", originTimestamp=" + this.originTimestamp + ']';
+    }
 }

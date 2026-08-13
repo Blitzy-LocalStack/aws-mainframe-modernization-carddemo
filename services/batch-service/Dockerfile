@@ -14,6 +14,41 @@
 #     business date; the orchestrated API uses ISO while the application forwards
 #     either ISO or compact yyyyMMdd00 input verbatim. The calculate-interest job
 #     requires it and the image supplies no default.
+#   Everything that is not one of those two run tokens arrives as an environment
+#   variable, supplied by the Step Functions container override that starts this task
+#   from Parameter Store and Secrets Manager. The variables whose placeholders in
+#   application.yml and application-prod.yml declare NO fallback, so no job can start
+#   without them, are:
+#     - SPRING_DATASOURCE_URL, SPRING_DATASOURCE_USERNAME, SPRING_DATASOURCE_PASSWORD
+#     - SPRING_FLYWAY_USER, SPRING_FLYWAY_PASSWORD -- the migration identity is
+#       SEPARATE from the runtime identity above and is not defaulted to it, so the
+#       schema owner's credential is never the credential a job step holds. It
+#       matters more here than in a listener image: this identity is the one that
+#       carries the scoped cross-schema write grants the posting unit of work needs.
+#     - AWS_REGION -- required to START, not merely to reach AWS, which is the
+#       non-obvious part. This module's POM puts the two AWS starters on the
+#       classpath and their auto-configuration builds its clients EAGERLY, so the
+#       parameter-store client is constructed while configuration is still loading
+#       and a client cannot be built without a region. A context with no region
+#       therefore aborts even when no parameter is ever read. It is declared as a
+#       placeholder rather than left to the SDK's own resolution chain -- which
+#       consults this same variable first, so nothing about a deployed task's
+#       resolution changes -- purely so the failure NAMES the missing variable
+#       instead of reporting an unreachable instance-metadata service.
+#   That list is COMPLETE, and its completeness is mechanically held rather than
+#   asserted: common-lib's RuntimeConfigurationContractTest re-derives the
+#   no-fallback placeholder set from those two files and fails the build if any
+#   member of it is absent from this file.
+#   Two names that every SIBLING service image documents are absent here, and their
+#   absence is a property of this image rather than an omission:
+#     - CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD is not required, because this image
+#       binds no listener. Its ENTRYPOINT is the bare JVM invocation rather than the
+#       shared listener-material script, so there is no keystore to unlock.
+#     - CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY is not required, because no batch job
+#       serves an HTTP page. The shared kernel's keyset-cursor signer is published
+#       only when that property is set, and nothing in this module asks for one.
+#   Every entry above is a variable NAME. No value, and therefore no credential,
+#   connection string or bucket name, appears anywhere in this file.
 #
 # Return values:
 #   The process status preserves three observable tiers, and the ENTRYPOINT below

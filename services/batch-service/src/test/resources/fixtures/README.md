@@ -43,9 +43,20 @@
 
 This directory holds **fixed-width, positional record files** that stand in for the
 VSAM datasets and sequential inputs that `batch-service` was migrated from. They are
-the *data-in* side of parity verification: a test loads a scenario's records, exercises
-the migrated Spring Batch job, and compares the result against the expectation that the
-scenario's own `README.md` states.
+the *data-in* side of parity verification, and they serve it in **two distinct ways**
+that section 1.5 separates file by file. In the first, a test loads a scenario's records,
+exercises the migrated Spring Batch job, and compares the result against the expectation
+that the scenario's own `README.md` states. In the second, the records are a **mirror**
+of a corpus the parity run reads elsewhere, held to their declared geometry and to the
+discriminating values their scenario README states, so that an edit here is still
+detected even though no job in this module consumes them.
+
+Assumptions: the distinction is stated because reading the first sentence as universal is
+the specific mistake it invites. Of the **51** record files in this tree, **five** are
+opened as job input by a test in this module; the rest are mirrors. Presenting all of them
+as driven would make every scenario README's expected-outcome section read as an assertion
+some test performs, and for twelve of the sixteen scenarios it is instead a statement of
+what the reference produces and what the migrated rule is asserted to produce elsewhere.
 
 Every record file in this tree is **derived**: it is a copy or a subset of an ASCII seed
 dataset under `app/data/ASCII/`, reshaped in non-identity business-rule fields for the
@@ -146,6 +157,45 @@ Validation gate, per Rule 1 line 43: a contribution to this tree missing **eithe
 documentation **or** the decision rationale fails review. Line 43 is conjunctive and
 states the obligation as a requirement; line 29's softer phrasing is not the operative
 wording and is not cited here.
+
+### 1.5 Which scenarios drive a job in this module, and which are mirrors
+
+Measured from the consuming classes rather than asserted:
+
+| Scenario | Files this module opens as job input | Consumer |
+|---|---|---|
+| `preflight/happy_path` | `dailytran.txt` | `PreflightDailyTransactionsJobTest`, which seeds the feed from these bytes and seeds a cross-reference row resolving the card to an account that exists |
+| `preflight/unmatched_account` | `dailytran.txt` | the same class, seeding the card to an account it deliberately does not create |
+| `preflight/unmatched_card` | `dailytran.txt`, `acctdata.txt` | the same class, seeding **no** cross-reference row, and seeding the account through the production record mapper |
+| `export/happy_path` | `acctdata.txt` | `ExportJobTest`, for the account phase of the export record |
+| every other scenario | **none** | -- |
+
+The two domains that are **not** driven from this tree are driven elsewhere, and the
+elsewhere is specific:
+
+- **`interest/*`** -- `CalculateInterestJobTest` resolves its fixtures under the repository
+  root as `tests/fixtures/interest/<scenario>/<file>` and asserts each is a regular file, so
+  it reads the **reference** tree and never this one. The three scenario directories here
+  mirror it.
+- **`posting/*`** -- the rule is asserted by `PostingValidationServiceTest` and
+  `CategoryBalanceServiceTest` against values declared inside those classes, which cite
+  `tests/fixtures/posting/...` in their documentation. The driven nine-scenario corpus with
+  its own contract test lives in the sibling module at
+  `services/transaction-service/src/test/resources/fixtures/`.
+
+**Every file in this tree nonetheless has an executable consumer**, and it is
+`services/batch-service/src/test/java/com/carddemo/batch/fixtures/BatchFixtureContractTest.java`.
+That class asserts the scenario census as a closed set in both directions, the presence of the
+README section 10 mandates for each, whole-record geometry against the layout each file name maps
+to, LF-only line endings, the one-trailing-newline rule and its two exemptions, a successful decode
+of every record under its declared layout -- which is what proves the sign-overpunch rule of section
+3.3 across the corpus without restating the overpunch alphabet -- and the discriminating value or
+relationship each scenario turns on.
+
+Assumptions: the contract test deliberately does **not** re-run the jobs over these bytes.
+Duplicating the two driven domains' runs would assert those jobs twice while leaving the
+mirrored files exactly as unread as before, so what it asserts instead is the corpus: its
+census, its geometry, its governance rules and the values the scenario documents state.
 
 ---
 
@@ -440,7 +490,7 @@ does not automatically satisfy the other:
 A posting fixture must therefore make every daily transaction's card resolvable at offset 0,
 and an interest fixture must make every category balance's account resolvable at offset 25.
 The migrated target of the alternate path is the secondary index
-`idx_card_xref_account_id` on `account.card_xref(acct_id)`, declared by the sibling harness
+`idx_card_xref_account_id` on `account.card_xref(account_id)`, declared by the sibling harness
 at `services/batch-service/src/test/resources/db/testharness/test-harness-schemas-and-foreign-tables.sql`
 line 301.
 
@@ -625,14 +675,48 @@ row is a measurement rather than an inference.
 | ACCOUNT `CVACT01Y` | `X(178)` at 122 | **`0x20` SPACE** | `app/data/ASCII/acctdata.txt`, slice `[122:300]`, byte-set `{32}` across all 50 rows |
 | DALYTRAN `CVTRA06Y`, **input** | `X(20)` at 330 | **`0x20` SPACE** | `app/data/ASCII/dailytran.txt`, slice `[330:350]`, byte-set `{32}` across all 300 rows |
 | TRAN `CVTRA05Y`, **output** | `X(20)` at 330 | **`0x00` NUL** | slice `[330:350]`, byte-set `{0}` in the posting golden and in all three interest scenario goldens -- because **no `MOVE` in either program ever touches `TRAN-RECORD`'s `FILLER`**, so it keeps the low-values state of the record area |
-| TCATBAL `CVTRA01Y` | `X(22)` at 28 | **`0x30` ASCII `'0'`** | `app/data/ASCII/tcatbal.txt`, slice `[28:50]`, byte-set `{48}` across all 50 rows; and the posting golden `tcatbal.expected`, same slice, same byte-set |
+| TCATBAL `CVTRA01Y`, **input and rewritten output** | `X(22)` at 28 | **`0x30` ASCII `'0'`** | `app/data/ASCII/tcatbal.txt`, slice `[28:50]`, byte-set `{48}` across all 50 rows; and **eight of the nine** posting goldens' `tcatbal.expected`, same slice, same byte-set |
+| TCATBAL `CVTRA01Y`, **created output** | `X(22)` at 28 | **`0x00` NUL** | `tests/golden/posting/zero_balance/tcatbal.expected`, slice `[28:50]`, byte-set `{0}` -- the ONE tree whose input holds no row for the key, so the row is created rather than rewritten (section 6.2.1) |
 | DISCGRP `CVTRA02Y` | `X(28)` at 22 | **`0x30` ASCII `'0'`** | `app/data/ASCII/discgrp.txt`, slice `[22:50]`, byte-set `{48}` across all 51 rows; and the house interest fixture `discgrp.txt`, identical |
 | CARD-XREF `CVACT03Y` | `X(14)` at 36 | **`0x20` SPACE** | the house 51-byte fixture line = 50 + LF, slice `[36:50]`, byte-set `{32}` (the seed omits this `FILLER` entirely -- section 3.10) |
+
+### 6.2.1 TCATBAL's `FILLER` depends on the ARM that wrote the row, not on the record
+
+**The two TCATBAL rows of the table above are one record type with two padding bytes, and which
+one appears is decided by the create-versus-update branch of section 7.1.5.** This was measured
+across all nine committed posting trees rather than inferred:
+
+| Trees | Arm that wrote the row | `tcatbal.expected` slice `[28:50]` |
+|---|---|---|
+| `happy_path`, `empty_input`, `boundary_exact_limit`, `boundary_expiry_equal`, and all four `reject_10x_*` -- **eight** | `2700-B-UPDATE`, `app/cbl/CBTRN02C.cbl:526-542`, or no write at all | byte-set `{48}` -- the **seed row's own** padding, carried through untouched |
+| `zero_balance` -- **one** | `2700-A-CREATE`, `app/cbl/CBTRN02C.cbl:503-524` | byte-set `{0}` |
+
+The mechanism is the same one the table's TRAN row already records: a **created** record is built
+in a record area no `MOVE` reaches beyond the fields it sets, so the pad keeps the low-values
+state of that area, whereas a **rewritten** record starts from the row that was read and keeps
+whatever that row carried. `zero_balance` is the only posting scenario that reaches the create
+arm, because it is the only one whose `tcatbal.txt` is a **zero-byte file** (section 3.11), and
+that is exactly why the scenario exists.
+
+The consequence, stated specifically: **an author who applies the `{48}` row of the table to a
+newly created TCATBAL expectation differs from the golden in 22 bytes, with the key and the
+balance both correct.** It is the same failure class section 6.2 describes, arriving from the
+opposite direction -- the general rule is not the hazard here, the record-level rule is, because
+it is right for eight trees out of nine.
+
+Assumptions: this is stated as a property of the WRITING ARM rather than of the record, so a
+scenario README must say which arm produced the category row it expects, exactly as section 6.3
+requires a `TRAN-DESC` expectation to name its writing job. `PostTransactionsJobTest` derives the
+byte from the arm for this reason -- it asks whether the scenario's own input holds a row under the
+key its expectation carries, and requires `0x30` when it does and `0x00` when it does not -- so
+the two cannot be conflated by a reader of that case either.
 
 ### 6.2 The two rows that contradict the general rule
 
 **TCATBAL's and DISCGRP's `FILLER`s are ASCII zeros, which contradicts the general "text `X`
-pads right with spaces" rule of section 3.2. The measured bytes win.**
+pads right with spaces" rule of section 3.2. The measured bytes win.** (For TCATBAL that holds
+wherever the row is read or rewritten; a row the posting job CREATES pads with the low value
+instead, which section 6.2.1 measures and explains.)
 
 The consequence, stated specifically rather than as a caution: an author who applies the
 general rule to `tcatbal.txt` produces a row that differs from **both** the seed and the
@@ -795,10 +879,14 @@ before** the expiration date, or its expectation silently becomes 103.
   byte for byte, which is why the oracle can read the card number out of the reject at
   offsets 262 to 277 (section 5.2).
 - **Unit of work.** `2000-POST-TRANSACTION` performs, in order, `:440` the category balance,
-  `:441` the account, `:442` the transaction write. In the migrated job these three writes
-  are **one `@Transactional` commit**. **No saga, no two-phase commit, no compensating
-  reversal.** A partial-posting state does not exist in the baseline, so no fixture may
-  expect one.
+  `:441` the account, `:442` the transaction write, and the record loop at `:200-226` performs
+  that paragraph **once per record**. In the migrated job those three writes are **one commit
+  per record** -- opened by a `TransactionTemplate` over the step's transaction manager, with the
+  tasklet itself declared `PROPAGATION_NOT_SUPPORTED` so the pass body holds no transaction.
+  **No saga, no two-phase commit, no compensating reversal.** A partial-posting state within one
+  record does not exist in the baseline, so no fixture may expect one; a run that committed some
+  records and then failed **is** baseline behaviour, so no fixture may expect the earlier records
+  to be undone either.
 - **Category balance, create versus update** (`:495-542`). Both paths are **additive**. The
   create path (`:503-524`) `INITIALIZE`s the record, sets the key, `ADD`s the amount and
   `WRITE`s; the update path (`:526-542`) `ADD`s the amount and `REWRITE`s. The only
@@ -1232,13 +1320,63 @@ reader comparing a fixture row against its seed row byte for byte will otherwise
 row was invented when only a business-rule field was reshaped.
 
 A scenario README cites this document **by section number** and restates none of it
-(section 1.3). The section numbers above are stable and are the ones to cite. Paths to
-scenario READMEs that do not exist yet are written as plain code spans rather than links,
-per `docs/CODE_DOCUMENTATION_STANDARD.md`, so that no reader follows a reference to nothing.
+(section 1.3). The section numbers above are stable and are the ones to cite.
+
+**All sixteen scenario READMEs now exist**, and the mandate is machine-checked rather than
+stated: `BatchFixtureContractTest` asserts the presence of a `README.md` in each of the
+sixteen directories, one parameterised case per scenario, and asserts the scenario census as
+a closed set in both directions so that a scenario added without a contract document fails
+rather than escaping notice. Section 1.5 records the class and what else it holds.
+
+Refactoring Rationale: twelve of the sixteen were missing while this section stated the
+obligation as *must*, which is exactly the failure mode an unchecked prose obligation
+produces -- and the reason the presence check is now an assertion. The convention that a path
+to a scenario README which does not exist yet is written as a **plain code span** rather than
+a link, per `docs/CODE_DOCUMENTATION_STANDARD.md`, remains in force for any future scenario
+authored before its document; it no longer applies to any scenario in this tree, so the
+sibling references in the existing READMEs are links.
+
+Refactoring Rationale: the mandate above is now **satisfied for all sixteen scenarios**, and
+the two paragraphs that follow were written while it was not. Twelve of the sixteen READMEs
+were authored after this contract, in one pass: `interest/zero_balance`, the eight `posting/`
+scenarios other than `empty_input`, and all three `preflight/` scenarios. The preceding
+paragraph's code-span convention therefore no longer applies to any path in this tree --
+every scenario README exists and may be linked -- and it is left standing because it still
+governs a scenario added in future, which would carry the same gap until its README is
+written. Assumptions: the count is measured rather than tallied. Sixteen scenario
+directories each hold a `README.md`, which is the same population section 4.1 counts, so
+that sentence and this one check each other.
+
+Alternatives Considered: those twelve scenario READMEs were drafted THREE times, independently,
+and the two shorter drafts are superseded rather than merged in -- with one exception recorded
+below. The first shorter draft mirrored the five mandated items above one-for-one, at roughly 185
+lines each; the second ran 123 to 161 lines. The one in the tree carries the
+same five in the same relative order -- intent, then the rule cited by program and line, then
+the outcome, then the bytes and their governance, then the provenance attestation -- and adds
+five sections the mandate does not ask for: what must NOT happen and why it cannot, what the
+blank timestamp means for determinism, which target-side contracts the scenario agrees with,
+where the scenario's boundaries lie, and what drives the corpus and what reads it.
+
+⚠️ Assumptions: that last section is the ONE thing carried out of a superseded draft rather than
+discarded with it, because the surviving text had no equivalent and a reader cannot otherwise tell
+whether editing these bytes changes what a run asserts. It is carried CORRECTED, not copied: the
+draft stated uniformly that no test in this module opens the folders, and that is now true of
+`preflight/**` and `interest/**` only. `PostTransactionsJobParityIT` declares `/fixtures/posting/`
+as its seed root and compares against `tests/golden/posting/<scenario>`, so the posting family is a
+driven input and each of its READMEs says so, while the other two say the opposite and each states
+the other case so the split cannot read as an oversight. The supersession was decided by MEASUREMENT rather
+than by length: every code span the shorter draft cited appears in the surviving one, in that
+spelling or a finer one -- its `:229-230` grade citation inside a `:227-230` report-and-grade
+row, its `:562` write citation inside the `:442` performing site that reaches it, and its seed
+row key inside a per-file seed-row table that also states the one-byte difference and its
+offset. Keeping both was rejected because two contracts for one directory is the condition
+section 1.3 exists to prevent: a reader would have to decide which one governs.
 
 Two checks are worth running before proposing a fixture. In the first, `FIXTURE` and `WIDTH`
-are parameters to substitute: the path shown is the one a `posting/happy_path` author will
-have created, not a file that exists at the time this contract was written.
+are parameters to substitute. Assumptions: the illustrative path is `posting/happy_path`,
+which **does** now hold the files shown -- it did not when this contract was written, and the
+statement that it would not has been corrected rather than left to read as a caveat about a
+file a reader can see.
 
 ```bash
 # WHAT: assert that every physical row of a fixture file is exactly the declared

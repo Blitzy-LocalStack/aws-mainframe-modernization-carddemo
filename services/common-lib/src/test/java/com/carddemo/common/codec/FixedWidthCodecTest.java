@@ -3197,6 +3197,58 @@ class FixedWidthCodecTest {
     }
 
     /**
+     * Proves a low-value trailing pad is dropped as inert while a printable one is kept as content.
+     *
+     * <p>Assumptions: a registered pad is dropped when it holds nothing, and it holds nothing in two
+     * states -- the blank a {@code MOVE} leaves and the low value an untouched record area holds. The
+     * second state is the ordinary one for this very record: the trailing pad of every committed
+     * transaction expectation, {@code tests/golden/posting/}{@code *}{@code /tranfile.expected} and
+     * {@code tests/golden/interest/}{@code *}{@code /transact.expected}, holds twenty low values, because
+     * {@code app/cbl/CBTRN02C.cbl:426-438} and {@code app/cbl/CBACT04C.cbl:482-498} populate the mapped
+     * fields and neither names {@code FILLER}.</p>
+     *
+     * <p>Assumptions: the printable case is asserted in the SAME test rather than relying on the sibling
+     * reference-data case, because what is at stake is the boundary between the two rules. A pad holding
+     * printable characters is content and is retained; asserting only the drop would pass a rule that
+     * dropped every pad unconditionally, which would silently discard the report record's {@code VALUE}
+     * clauses and the ASCII zeros the reference data pads two records with.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    void aLowValuePaddingIsDroppedAsInertAndAPrintableOneIsKept() {
+        RecordSpec transaction = CopybookLayout.layout("TRAN");
+        FieldSpec padding = transaction.field("FILLER");
+
+        byte[] lowValuePadded = transactionImage().getBytes(ASCII);
+        Arrays.fill(lowValuePadded, padding.start(), padding.end(), (byte) 0);
+        byte[] printablePadded = transactionImage().getBytes(ASCII);
+        Arrays.fill(printablePadded, padding.start(), padding.end(), (byte) 'X');
+
+        Map<String, Object> fromLowValues = FixedWidthCodec.decodeRecord(lowValuePadded, transaction);
+        Map<String, Object> fromPrintable = FixedWidthCodec.decodeRecord(printablePadded, transaction);
+
+        assertThat(fromLowValues)
+                .as("a low-value pad carries nothing and is omitted, exactly as a blank pad is")
+                .doesNotContainKey("FILLER");
+        assertEquals(transaction.fields().size() - 1, fromLowValues.size());
+        assertThat(fromPrintable).containsKey("FILLER");
+        assertEquals("X".repeat(padding.length()), fromPrintable.get("FILLER"));
+
+        // WHY : Assumptions: the re-encode is asserted to rebuild the omitted span with the charset's
+        //       BLANK, which means a low-value pad does not survive a decode-encode round trip through
+        //       this codec alone. That is deliberate and is the reason the two mappers whose records
+        //       measure low values write the byte themselves after encoding: a codec holding no
+        //       record-specific knowledge has to choose one filler, and the blank is the right choice for
+        //       the four records whose measured pad IS the blank.
+        byte[] reEncoded = FixedWidthCodec.encodeRecord(fromLowValues, transaction);
+        for (int offset = padding.start(); offset < padding.end(); offset++) {
+            assertEquals((byte) ' ', reEncoded[offset],
+                    "the codec rebuilds an omitted pad with the blank, whatever byte was dropped");
+        }
+    }
+
+    /**
      * Proves the four reference-data records carry character-zero padding that is retained as content.
      *
      * @param layoutName the registered logical record name whose trailing padding is under test

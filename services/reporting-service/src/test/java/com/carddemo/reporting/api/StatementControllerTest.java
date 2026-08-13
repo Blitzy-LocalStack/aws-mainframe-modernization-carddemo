@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -15,11 +16,15 @@ import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.money.Money;
 import com.carddemo.common.money.MoneyModule;
+import com.carddemo.common.security.OpaqueIdentifier;
 import com.carddemo.reporting.dto.StatementDocument;
 import com.carddemo.reporting.dto.StatementRequest;
 import com.carddemo.reporting.dto.StatementResponse;
 import com.carddemo.reporting.dto.StatementTransactionResponse;
+import com.carddemo.reporting.service.ArtifactStore;
 import com.carddemo.reporting.service.StatementService;
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -31,6 +36,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.http.converter.ResourceHttpMessageConverter;
 import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -72,6 +78,33 @@ class StatementControllerTest {
     /** The mapper used to write request bodies, deliberately without the money module. */
     private static final JsonMapper REQUEST_MAPPER = JsonMapper.builder().build();
 
+    /**
+     * A well-formed artifact selector, at the tokeniser's exact width.
+     *
+     * <p>Assumptions: composed from the declared width rather than typed as a literal, so a case
+     * asserting that a malformed selector is refused cannot silently become a case asserting that a
+     * well-formed one is.</p>
+     */
+    private static final String SELECTOR = "A".repeat(OpaqueIdentifier.TOKEN_LENGTH);
+
+    /** The location the plain-text artifact is collected from, as the service composes it. */
+    private static final String PLAIN_TEXT_LOCATION =
+            StatementService.ARTIFACT_LOCATION_PREFIX + SELECTOR;
+
+    /** The location the markup artifact is collected from, differing only in its selector. */
+    private static final String MARKUP_LOCATION =
+            StatementService.ARTIFACT_LOCATION_PREFIX + "B".repeat(OpaqueIdentifier.TOKEN_LENGTH);
+
+    /** Where a stubbed statement begins in the run artifact, as a record ordinal. */
+    private static final long FIRST_RECORD = 240L;
+
+    /** How many records a stubbed statement occupies from that ordinal. */
+    private static final long RECORD_COUNT = 27L;
+
+    /** The bytes a stored artifact is stubbed to hold, standing for a rendered statement record. */
+    private static final byte[] ARTIFACT_BYTES =
+            "STATEMENT RECORD ONE\n".getBytes(StandardCharsets.UTF_8);
+
     private StatementService statements;
 
     private MockMvc mockMvc;
@@ -84,8 +117,14 @@ class StatementControllerTest {
         statements = Mockito.mock(StatementService.class);
 
         JsonMapper mapper = JsonMapper.builder().addModule(new MoneyModule()).build();
+        // WHY : Assumptions: TWO converters are registered, and the resource one is not optional here.
+        //       setMessageConverters REPLACES the default list, so a pipeline carrying only the JSON
+        //       converter cannot write the artifact body at all and the collection cases would fail on
+        //       the harness rather than on the controller. A running application registers the resource
+        //       converter itself, so this restores the production shape rather than extending it.
         mockMvc = MockMvcBuilders.standaloneSetup(new StatementController(statements))
-                .setMessageConverters(new JacksonJsonHttpMessageConverter(mapper))
+                .setMessageConverters(new JacksonJsonHttpMessageConverter(mapper),
+                        new ResourceHttpMessageConverter())
                 .setControllerAdvice(new GlobalExceptionHandler(
                         Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC)))
                 .build();
@@ -208,9 +247,11 @@ class StatementControllerTest {
                 "JOHN Q PUBLIC",
                 Money.ZERO,
                 0,
-                "s3://bucket/statements/11-1111.txt",
-                "s3://bucket/statements/11-1111.html",
-                "2026-08-05 09:14:27.481903");
+                PLAIN_TEXT_LOCATION,
+                MARKUP_LOCATION,
+                "2026-08-05 09:14:27.481903",
+                FIRST_RECORD,
+                RECORD_COUNT);
         when(statements.compose(any())).thenReturn(new StatementDocument(empty, List.of()));
 
         String body = mockMvc.perform(
@@ -428,6 +469,97 @@ class StatementControllerTest {
         return headingCounting(1);
     }
 
+    // WHY : Assumptions: the body is compared BYTE FOR BYTE rather than by length or by a prefix,
+    //       because the plain-text artifact is the parity artifact the golden masters are compared
+    //       against -- a response that re-encoded it would still satisfy a length assertion while
+    //       destroying exactly the property the artifact exists for.
+    /**
+     * Asserts that a stored artifact is streamed unmodified, as an attachment, at its declared length.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a stored artifact is streamed as an attachment at its declared length")
+    void aStoredArtifactIsStreamedAsAnAttachment() throws Exception {
+        when(statements.collectArtifact(SELECTOR)).thenReturn(
+                new ArtifactStore.OpenArtifact(ARTIFACT_BYTES.length,
+                        new ByteArrayInputStream(ARTIFACT_BYTES)));
+
+        byte[] body = mockMvc.perform(get(PLAIN_TEXT_LOCATION))
+                .andExpect(status().isOk())
+                .andExpect(header().string(HttpHeaders.CONTENT_TYPE,
+                        MediaType.APPLICATION_OCTET_STREAM_VALUE))
+                .andExpect(header().longValue(HttpHeaders.CONTENT_LENGTH, ARTIFACT_BYTES.length))
+                .andExpect(header().string(HttpHeaders.CONTENT_DISPOSITION,
+                        StatementController.ATTACHMENT_DISPOSITION))
+                .andExpect(header().string(StatementController.CONTENT_TYPE_OPTIONS_HEADER,
+                        StatementController.NOSNIFF))
+                .andExpect(header().string(StatementController.CONTENT_SECURITY_POLICY_HEADER,
+                        StatementController.STATEMENT_POLICY))
+                .andReturn()
+                .getResponse()
+                .getContentAsByteArray();
+
+        assertThat(body).isEqualTo(ARTIFACT_BYTES);
+    }
+
+    // WHY : Assumptions: this is the case that pins WHY the markup is served as an opaque attachment.
+    //       The markup artifact is built from cardholder data, so a caller able to negotiate it as
+    //       text/html could have a browser render it in this origin -- which is what the policy and the
+    //       disposition header on every response of this surface exist to prevent. Asserting the
+    //       refusal is what keeps a later "convenience" media type from being added without the
+    //       argument being revisited.
+    /**
+     * Asserts that an artifact cannot be negotiated into a renderable media type.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("an artifact cannot be negotiated as renderable markup")
+    void anArtifactCannotBeNegotiatedAsMarkup() throws Exception {
+        mockMvc.perform(get(MARKUP_LOCATION).accept(MediaType.TEXT_HTML))
+                .andExpect(status().isNotAcceptable());
+
+        verify(statements, never()).collectArtifact(any());
+    }
+
+    /**
+     * Asserts that an artifact the store does not hold answers 404 through the shared advice.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("an artifact the store does not hold answers 404")
+    void anAbsentArtifactAnswersNotFound() throws Exception {
+        when(statements.collectArtifact(SELECTOR)).thenThrow(
+                new NoSuchElementException("the requested statement artifact is not available"));
+
+        mockMvc.perform(get(PLAIN_TEXT_LOCATION))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value(ApiError.CODE_NOT_FOUND));
+    }
+
+    // WHY : Assumptions: the store is asserted NEVER CONSULTED, which is the property that makes the
+    //       shape guard worth having. A malformed selector answered with 404 after a metadata call
+    //       would be indistinguishable from this one by status alone, so the verification is what
+    //       separates a guard from a coincidence.
+    /**
+     * Asserts that a selector of the wrong shape is refused before the store is consulted.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a selector of the wrong shape is refused before the store is consulted")
+    void aMalformedSelectorIsRefusedBeforeTheStore() throws Exception {
+        String tooShort = "A".repeat(OpaqueIdentifier.TOKEN_LENGTH - 1);
+
+        mockMvc.perform(get(StatementService.ARTIFACT_LOCATION_PREFIX + tooShort))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION));
+
+        verify(statements, never()).collectArtifact(any());
+    }
+
     /**
      * Builds one statement heading reporting a stated transaction count.
      *
@@ -445,9 +577,11 @@ class StatementControllerTest {
                 "JOHN Q PUBLIC",
                 Money.of("-1234.56"),
                 transactionCount,
-                "s3://bucket/statements/11-1111.txt",
-                "s3://bucket/statements/11-1111.html",
-                "2026-08-05 09:14:27.481903");
+                PLAIN_TEXT_LOCATION,
+                MARKUP_LOCATION,
+                "2026-08-05 09:14:27.481903",
+                FIRST_RECORD,
+                RECORD_COUNT);
     }
 
     /**

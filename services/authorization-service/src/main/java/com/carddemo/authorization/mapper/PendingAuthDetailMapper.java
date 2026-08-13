@@ -12,6 +12,7 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
@@ -870,7 +871,7 @@ public final class PendingAuthDetailMapper {
             throw new IllegalArgumentException("a decoded authorization time must occupy at most "
                     + TIME_DIGIT_POSITIONS + " digit positions, but was " + decodedTime);
         }
-        return String.format("%0" + TIME_DIGIT_POSITIONS + "d", decodedTime);
+        return String.format(Locale.ROOT, "%0" + TIME_DIGIT_POSITIONS + "d", decodedTime);
     }
 
     /**
@@ -1223,7 +1224,7 @@ public final class PendingAuthDetailMapper {
             throw new IllegalArgumentException("a point-of-sale entry mode must occupy at most "
                     + POS_ENTRY_MODE_DIGITS + " unsigned digit positions, but was " + mode);
         }
-        return String.format("%0" + POS_ENTRY_MODE_DIGITS + "d", mode);
+        return String.format(Locale.ROOT, "%0" + POS_ENTRY_MODE_DIGITS + "d", mode);
     }
 
     /**
@@ -1249,7 +1250,7 @@ public final class PendingAuthDetailMapper {
             throw new IllegalArgumentException("a processing code must occupy at most "
                     + PROCESSING_CODE_DIGITS + " unsigned digit positions, but was " + decoded);
         }
-        return String.format("%0" + PROCESSING_CODE_DIGITS + "d", decoded);
+        return String.format(Locale.ROOT, "%0" + PROCESSING_CODE_DIGITS + "d", decoded);
     }
 
     /**
@@ -2190,7 +2191,7 @@ public final class PendingAuthDetailMapper {
      */
     private static String renderScreenDate(LocalDateTime renderedAt) {
         Objects.requireNonNull(renderedAt, "renderedAt must not be null");
-        return String.format("%02d/%02d/%02d", renderedAt.getMonthValue(),
+        return String.format(Locale.ROOT, "%02d/%02d/%02d", renderedAt.getMonthValue(),
                 renderedAt.getDayOfMonth(), renderedAt.getYear() % CLOCK_FIELD_MODULUS);
     }
 
@@ -2208,7 +2209,7 @@ public final class PendingAuthDetailMapper {
      */
     private static String renderScreenTime(LocalDateTime renderedAt) {
         Objects.requireNonNull(renderedAt, "renderedAt must not be null");
-        return String.format("%02d:%02d:%02d", renderedAt.getHour(), renderedAt.getMinute(),
+        return String.format(Locale.ROOT, "%02d:%02d:%02d", renderedAt.getHour(), renderedAt.getMinute(),
                 renderedAt.getSecond());
     }
 }

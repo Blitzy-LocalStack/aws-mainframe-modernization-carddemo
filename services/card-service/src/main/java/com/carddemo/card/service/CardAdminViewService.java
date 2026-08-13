@@ -115,8 +115,15 @@ public class CardAdminViewService {
 
         LOG.info("event=card.admin.disclosed key={}", core.key());
 
+        // WHY : Refactoring Rationale: the masked rendering is carried across from the core and used to be
+        //       dropped here. The resolved administrative schema requires it -- the composition is
+        //       CardDetailCore plus one member, closed to anything else -- and the browser type declares it
+        //       through two levels of extension, so omitting it made every successful body violate both
+        //       while nothing compared the record to either. It is taken from the core rather than
+        //       recomputed, so the two shapes cannot disagree about one card's masked form.
         return new AdminCardDetail(core.key(),
-                this.mapper.discloseCardNumberToAdministrator(card), core.accountId(),
-                core.embossedName(), core.expirationDate(), core.activeStatus(), core.version());
+                core.displayCardNumber(), core.accountId(),
+                core.embossedName(), core.expirationDate(), core.activeStatus(), core.version(),
+                this.mapper.discloseCardNumberToAdministrator(card));
     }
 }

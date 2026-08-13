@@ -123,8 +123,24 @@ public class PendingAuthSummary {
      * <p>Assumptions: four decimal digits, so 9999 rather than the halfword's own 32767. The schema's
      * check constraint on the two counter columns states the identical bound, and the two are meant to
      * be read together.</p>
+     *
+     * <p>⚠️ Assumptions: this is PUBLIC because the atomic counter statements need it, and the reason it
+     * is needed there is the reason it was not enough here. This type bounds the counters it holds in
+     * memory, and the decision path does not go through this type at all -- it advances the two counters
+     * with a single qualified {@code update} so that two concurrent requests for one account cannot both
+     * read the same total. Those statements had no counter bound of any kind, so the invariant this
+     * constant states was asserted on the path that does not write and absent from the path that does.
+     * Passing it in is what puts one bound on both.</p>
+     *
+     * <p>⚠️ Trade-offs: the two paths bound the counters DIFFERENTLY, and the asymmetry is deliberate
+     * rather than overlooked. This type REFUSES an increment that would leave the domain, because it can
+     * leave the object untouched and let its caller decide; a statement has no such option -- refusing
+     * means the constraint raises, the whole decision rolls back, the requester receives no reply at all
+     * and the message dead-letters after five receives, which is precisely the outcome the money
+     * saturation on those same statements exists to prevent. The statements therefore SATURATE, on the
+     * same reasoning and registered as the same class of divergence.</p>
      */
-    private static final int COUNTER_MAX = 9999;
+    public static final int COUNTER_MAX = 9999;
 
     /**
      * The least value the reference counter fields can hold, from {@code PIC S9(04) COMP}.
@@ -132,8 +148,17 @@ public class PendingAuthSummary {
      * <p>Assumptions: the sign is load-bearing rather than decorative, because the purge program
      * DECREMENTS these counters at {@code app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl} lines 287
      * to 293, so a negative bound is the correct floor for a signed running total.</p>
+     *
+     * <p>⚠️ Assumptions: public for the same reason as {@link #COUNTER_MAX}, and load-bearing on the
+     * purge path specifically. The sweep reverses a whole account's expired children in one statement,
+     * subtracting accumulated counts rather than stepping by one, so the result can fall an order of
+     * magnitude below this floor from a single window -- and the constraint violation that produced
+     * abended the run with earlier windows already committed, leaving the table partly purged and no
+     * later retention able to complete while such a row existed. Saturating at this floor keeps the
+     * sweep running over the rest of the table, which is the identical argument the money floor on that
+     * statement already carries.</p>
      */
-    private static final int COUNTER_MIN = -9999;
+    public static final int COUNTER_MIN = -9999;
 
     /**
      * The width of the authorization-status column.
@@ -624,7 +649,7 @@ public class PendingAuthSummary {
      * Returns a counter once it is known to be present and within the domain its picture declares.
      *
      * <p>Assumptions: the bound is the PICTURE's and not the storage type's, for the reason recorded on
-     * {@link #incremented(Short, String)} -- {@code PIC S9(04) COMP} holds -9999 through 9999 while the
+     * {@link #incremented(Short)} -- {@code PIC S9(04) COMP} holds -9999 through 9999 while the
      * halfword that stores it reaches 32767, and the schema's own check constraint enforces the narrower
      * range. A load admitting the wider range would put a value in the aggregate that the row refuses.</p>
      *
@@ -899,15 +924,18 @@ public class PendingAuthSummary {
      * kind, so a decline leaves whatever the cash balance held -- which is why
      * {@link #recordDeclined(BigDecimal)} does not zero it and the two methods stay separate.</p>
      *
+     * <p>⚠️ Assumptions: the count SATURATES at the four-digit maximum instead of raising, so this method
+     * cannot fail on an account that has already recorded 9999 approvals. Refactoring Rationale: it used
+     * to raise, and the refusal was invisible -- it rolled the message's unit of work back, the queue
+     * redelivered, and the request dead-lettered unanswered, so a counter reaching its bound took the
+     * account permanently out of service. The reasoning and the reported divergence are recorded on
+     * {@link #narrowedCounterToStoredDomain(int)}.</p>
+     *
      * @param amount the approved amount at scale two, added to both the approved total and the credit
      *     balance; must not be {@code null}
-     * @throws IllegalStateException if the approved count has already reached the four-digit maximum
-     *     that {@code PIC S9(04) COMP} can represent, propagated from
-     *     {@link #incremented(Short, String)}; the summary is left unchanged when that happens, so a
-     *     caller that catches it holds a row still consistent with the authorizations already recorded
      */
     public void recordApproved(BigDecimal amount) {
-        this.approvedAuthCount = incremented(this.approvedAuthCount, "approvedAuthCount");
+        this.approvedAuthCount = incremented(this.approvedAuthCount);
         // WHY : ⚠️ Assumptions: each running total is reduced to this segment's domain AFTER the addition
         //       rather than the addend being reduced before it, and the order matters. Reducing the addend
         //       would let two in-domain contributions sum past the bound and reach the database, which is
@@ -935,14 +963,15 @@ public class PendingAuthSummary {
      * {@link #recordApproved(BigDecimal)} is also the whole reason the two are separate methods rather
      * than one method taking a flag.</p>
      *
+     * <p>⚠️ Assumptions: the count SATURATES rather than raising, as on the approved path, and this arm is
+     * where the bound is reached soonest -- an account with no headroom declines every further request and
+     * advances only this counter. See {@link #narrowedCounterToStoredDomain(int)}.</p>
+     *
      * @param amount the declined amount at scale two, added to the declined total only; must not be
      *     {@code null}
-     * @throws IllegalStateException if the declined count has already reached the four-digit maximum
-     *     that {@code PIC S9(04) COMP} can represent, propagated from
-     *     {@link #incremented(Short, String)}; as on the approved path, the summary is left unchanged
      */
     public void recordDeclined(BigDecimal amount) {
-        this.declinedAuthCount = incremented(this.declinedAuthCount, "declinedAuthCount");
+        this.declinedAuthCount = incremented(this.declinedAuthCount);
         // WHY : ⚠️ Assumptions: the declined total is the one most exposed of the four, which is why the
         //       reduction matters here even though the arithmetic is the same as the approved arm's. The
         //       approved arm is gated by the account's own headroom, so its addend cannot exceed a limit
@@ -970,13 +999,16 @@ public class PendingAuthSummary {
      * observable balance the reference system leaves standing, which Rule T9 forbids without a documented
      * divergence, and there is no reference behaviour to derive the correction from.
      *
+     * <p>⚠️ Assumptions: the count SATURATES at the four-digit MINIMUM rather than raising, which matters
+     * on this path because a saturated counter has already lost the excess it could not record, so
+     * reversing every expired child can legitimately reach the floor. Raising here abended the whole purge
+     * sweep and left the table partly purged; see {@link #narrowedCounterToStoredDomain(int)}.</p>
+     *
      * @param amount the approved amount recorded against the expiring authorization, at scale two;
      *     must not be {@code null}
-     * @throws IllegalStateException if the approved count is already at the four-digit minimum, so the
-     *     decrement would leave the domain {@code PIC S9(04) COMP} declares; the summary is left unchanged
      */
     public void reverseApproved(BigDecimal amount) {
-        this.approvedAuthCount = decremented(this.approvedAuthCount, "approvedAuthCount");
+        this.approvedAuthCount = decremented(this.approvedAuthCount);
         this.approvedAuthAmount = this.approvedAuthAmount.subtract(amount);
     }
 
@@ -994,25 +1026,26 @@ public class PendingAuthSummary {
      * type, which sees only a scale-two amount, so it is stated here and enforced at the call site in the
      * purge job.
      *
+     * <p>⚠️ Assumptions: the count SATURATES at the four-digit minimum rather than raising, for the reason
+     * recorded on {@link #reverseApproved(BigDecimal)}.</p>
+     *
      * @param amount the transaction amount of the expiring authorization, at scale two; must not be
      *     {@code null}
-     * @throws IllegalStateException if the declined count is already at the four-digit minimum, so the
-     *     decrement would leave the domain {@code PIC S9(04) COMP} declares; the summary is left unchanged
      */
     public void reverseDeclined(BigDecimal amount) {
-        this.declinedAuthCount = decremented(this.declinedAuthCount, "declinedAuthCount");
+        this.declinedAuthCount = decremented(this.declinedAuthCount);
         this.declinedAuthAmount = this.declinedAuthAmount.subtract(amount);
     }
 
     /**
-     * Subtracts one from a counter in a wider type and refuses a result the reference field cannot hold.
+     * Subtracts one from a counter in a wider type and narrows a result the reference field cannot hold.
      *
      * <p>Assumptions: the arithmetic is performed in {@code int} and the result checked before it is
-     * narrowed, for the same reason {@link #incremented(Short, String)} does so -- a cast applied to the
+     * narrowed, for the same reason {@link #incremented(Short)} does so -- a cast applied to the
      * result of the subtraction would be a narrowing conversion that wraps without any diagnostic.
      *
-     * <p>Trade-offs: the bound checked is -9999 rather than zero, so a counter already at zero decrements
-     * to minus one rather than being refused. That looks like a missing guard and is a deliberate one. The
+     * <p>Trade-offs: the bound applied is -9999 rather than zero, so a counter already at zero decrements
+     * to minus one rather than being narrowed. That looks like a missing guard and is a deliberate one. The
      * reference field is SIGNED four digits at {@code cpy/CIPAUSMY.cpy} lines 27 and 28, the reference
      * program subtracts with no floor test of its own, and the schema's own check constraint
      * {@code ck_pending_auth_summary_counts} admits the negative half of that range -- so a negative
@@ -1022,23 +1055,14 @@ public class PendingAuthSummary {
      * a value a reader can see and question.
      *
      * @param counter the current counter value; must not be {@code null}
-     * @param fieldName the counter's name, used to identify it in the refusal
      * @return the decremented value, always within the four-digit domain
-     * @throws IllegalStateException if the decrement would leave the four-digit domain the reference
-     *     field declares
      */
-    private static Short decremented(Short counter, String fieldName) {
-        int next = counter - 1;
-        if (next > COUNTER_MAX || next < COUNTER_MIN) {
-            throw new IllegalStateException(fieldName + " would reach " + next
-                    + ", which is outside the range " + COUNTER_MIN + " to " + COUNTER_MAX
-                    + " that PIC S9(04) COMP can hold");
-        }
-        return Short.valueOf((short) next);
+    private static Short decremented(Short counter) {
+        return narrowedCounterToStoredDomain(counter - 1);
     }
 
     /**
-     * Adds one to a counter in a wider type and refuses a result the reference field cannot hold.
+     * Adds one to a counter in a wider type and narrows a result the reference field cannot hold.
      *
      * <p>Refactoring Rationale: the increment was written as {@code (short) (counter + 1)}, and the cast
      * is what made it wrong. The addition itself is performed in {@code int}, so the cast is a NARROWING
@@ -1056,28 +1080,80 @@ public class PendingAuthSummary {
      * whose own check constraint refuses it, turning a representable-value question into a database error
      * raised at flush time with no field named.</p>
      *
-     * <p>Trade-offs: an approval on an account that has already reached 9999 is refused, and the
-     * authorization it belongs to fails rather than being recorded against a wrapped counter. That is the
-     * conservative outcome of the two available: the alternatives are to store a value the reference
-     * field cannot represent, or to stop counting at the bound and let the total silently understate the
-     * approvals -- and a total that lies is worse than a request that fails loudly, because only the
-     * second one gets noticed. The same bound is asserted by the schema's own check constraint, so the
-     * two writers of these columns -- this listener and the extract load -- are held to one rule.</p>
+     * <p>⚠️ Trade-offs: an approval on an account that has already reached 9999 is RECORDED against a
+     * counter resting at 9999, and the total then understates the approvals. Refactoring Rationale: this
+     * paragraph argued the opposite -- that refusing the request was better because "a total that lies is
+     * worse than a request that fails loudly, because only the second one gets noticed" -- and the premise
+     * is what failed. The refusal is not loud: on the authorization path it rolls the message's unit of
+     * work back, the queue redelivers it, and after five receives the request dead-letters unanswered, so
+     * nobody is notified and the account stops being answerable at all. The understatement is bounded, is
+     * recognisable as a value resting exactly on the bound, and is reported by both writers; the outage was
+     * neither bounded nor reported. The full argument, the rejected truncation alternative and the
+     * registered divergence are on {@link #narrowedCounterToStoredDomain(int)}.</p>
      *
      * @param counter the current counter value; must not be {@code null}
-     * @param fieldName the counter's name, used to identify it in the refusal
      * @return the incremented value, always within the four-digit domain
-     * @throws IllegalStateException if the increment would leave the four-digit domain the reference
-     *     field declares
      */
-    private static Short incremented(Short counter, String fieldName) {
-        int next = counter + 1;
-        if (next > COUNTER_MAX || next < COUNTER_MIN) {
-            throw new IllegalStateException(fieldName + " would reach " + next
-                    + ", which is outside the range " + COUNTER_MIN + " to " + COUNTER_MAX
-                    + " that PIC S9(04) COMP can hold");
+    private static Short incremented(Short counter) {
+        return narrowedCounterToStoredDomain(counter + 1);
+    }
+
+    /**
+     * Reports whether a counter value has left the four-digit domain the reference field declares.
+     *
+     * @param candidate the value a counter would take, of type {@code int}
+     * @return {@code true} when {@code candidate} is outside {@link #COUNTER_MIN} to
+     *     {@link #COUNTER_MAX}
+     */
+    public static boolean exceedsCounterDomain(int candidate) {
+        return candidate > COUNTER_MAX || candidate < COUNTER_MIN;
+    }
+
+    /**
+     * Reduces a counter value to the four-digit domain the reference field declares.
+     *
+     * <p>⚠️ Refactoring Rationale: the policy for a counter that leaves its domain is SATURATION, and it
+     * used to be refusal -- the two increment helpers raised {@code IllegalStateException} at the bound
+     * and the Trade-offs block on the increment argued that "a total that lies is worse than a request
+     * that fails loudly". The measurement that overturns it is that the failure is not loud. Nothing on
+     * the authorization path presents this refusal to anyone: it rolls the message's whole unit of work
+     * back, the queue redelivers, and after five receives the request dead-letters unanswered -- so an
+     * account reaching 9999 approvals stopped being answerable at all, permanently, and the reference it
+     * is compared against does not stop: {@code cbl/COPAUA0C.cbl} L815 and L821 add to
+     * {@code PIC S9(04) COMP} fields with no size clause, discarding high-order digits and carrying on.
+     * The money members of this same row already saturate for exactly this reason, argued on
+     * {@link #MONEY_MAX_MAGNITUDE}, so refusal here also meant one row followed two policies.</p>
+     *
+     * <p>Trade-offs: a saturated counter understates the number of authorizations, which is a real loss
+     * of information and is why the narrowing is REPORTED at every writer -- {@code event=} lines in
+     * {@code AuthorizationRequestListener} and {@code PurgeJob} name the account and the member -- and
+     * why the divergence from the reference's truncation is registered as
+     * {@code D-SUMMARY-COUNTER-SATURATION}. Truncating as the reference does was the other candidate:
+     * rejected because discarding high-order digits turns 10000 into 0, which is not merely imprecise but
+     * WRONG in a way a reader cannot detect, whereas a value resting at exactly the bound is recognisable
+     * as saturated.</p>
+     *
+     * <p>Alternatives Considered: widening the column so the bound is unreachable. Rejected because the
+     * column mirrors {@code PIC S9(04) COMP} and the extract that loads it carries four digits, so a
+     * wider column would hold values no extract could round-trip and no reference reader could
+     * represent.</p>
+     *
+     * <p>Assumptions: the narrowing is NOT reported from here. This is a domain type with no logger --
+     * every sibling aggregate in this service is the same -- and it does not know the account whose
+     * counter it is narrowing, which is the one identifier a report has to carry. The two writers that do
+     * know it report it: {@code AuthorizationRequestListener} emits
+     * {@code event=auth.summary.counter-narrowed} and {@code PurgeJob} emits
+     * {@code event=authorization.purge.counter-narrowed}, both naming the account and the member.</p>
+     *
+     * @param candidate the value a counter would take, of type {@code int}
+     * @return {@code candidate} when it is in domain, otherwise the bound it exceeded, never
+     *     {@code null}
+     */
+    public static Short narrowedCounterToStoredDomain(int candidate) {
+        if (!exceedsCounterDomain(candidate)) {
+            return Short.valueOf((short) candidate);
         }
-        return Short.valueOf((short) next);
+        return Short.valueOf((short) (candidate > COUNTER_MAX ? COUNTER_MAX : COUNTER_MIN));
     }
 
     /**

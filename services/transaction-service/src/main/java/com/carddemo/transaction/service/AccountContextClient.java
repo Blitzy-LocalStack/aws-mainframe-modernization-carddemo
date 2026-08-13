@@ -1,5 +1,6 @@
 package com.carddemo.transaction.service;
 
+import com.carddemo.common.security.CardNumberMasker;
 import java.util.Optional;
 
 /**
@@ -70,6 +71,34 @@ public interface AccountContextClient {
      * @param cardNumber the card number the entry is keyed by, as digit characters, never {@code null}
      */
     record CardXref(String accountId, String cardNumber) {
+
+        /**
+         * Renders this entry for a log line or a diagnostic, disclosing neither the whole card number nor
+         * the account identifier.
+         *
+         * <p>Purpose. A record's compiler-generated rendering prints every component, and both of this
+         * record's components are values the migration's sensitive-data logging contract withholds -- a
+         * primary account number and an account identifier. It reaches a log without anyone writing it
+         * there: {@link AccountContextUnavailableException} is raised with this seam in scope, and any
+         * framework diagnostic that describes a resolved value calls this method implicitly.</p>
+         *
+         * <p>Trade-offs: the card number is rendered MASKED and the account identifier is omitted
+         * altogether. The two are treated differently because the disclosure rule treats them differently:
+         * the plan allows the last four digits of a card number at its sections 0.4.1.9 and 0.7.8, and
+         * allows nothing of an account identifier. Abbreviating the identifier to look like the masked card
+         * number would be applying a card-number rule to a value that has no masked form, which is the
+         * mistake this override exists to avoid rather than a smaller version of it.</p>
+         *
+         * <p>Assumptions: the masking is delegated to the shared masker, so this rendering agrees with the
+         * account context's published projection and with every other context's rendering of the same
+         * column rather than restating the rule in a third place.</p>
+         *
+         * @return a single-line rendering naming the type and the masked card number, never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "CardXref[cardNumber=" + CardNumberMasker.mask(this.cardNumber) + ']';
+        }
     }
 
     /**

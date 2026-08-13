@@ -4,10 +4,11 @@
  *
  * Purpose
  * -------
- * Covers the five operations that contract publishes: starting an on-demand transaction report in
- * place of the report-request screen `app/cbl/CORPT00C.cbl` drives, reading that report's detail
- * lines and its three subtotal bands, and rendering the statement pair `app/cbl/CBSTM03A.CBL`
- * produces together with the transactions behind it. Every target is derived from the operation
+ * Covers the eight operations that contract publishes: starting an on-demand transaction report in
+ * place of the report-request screen `app/cbl/CORPT00C.cbl` drives, reading that run's status,
+ * reading the report's detail lines and its three subtotal bands, collecting the report document
+ * itself, and rendering the statement pair `app/cbl/CBSTM03A.CBL` produces together with the
+ * transactions behind it and the two documents it wrote. Every target is derived from the operation
  * manifest below rather than written as a literal, for the reason recorded in `ui/src/api/types.ts`.
  *
  * Failures
@@ -31,7 +32,8 @@
  * second renderer of an artifact the golden-master comparison checks byte for byte, and the
  * one-character difference between those two mask families is exactly what a reimplementation
  * smooths over. Every amount below therefore arrives as an already-rendered string this module hands
- * on untouched, and the documents themselves arrive as locations.
+ * on untouched, and each document is either located or collected as an undecoded blob -- never parsed
+ * here, and never re-rendered.
  *
  * Why two operations POST what they only read
  * -------------------------------------------
@@ -56,10 +58,11 @@
  * links to it and never assembles one.
  */
 
-import { getApiClient, requestPath } from './client';
+import { getApiClient, keysetPagingMembers, requestPath } from './client';
 import type {
   ContractOperation,
   PageResponse,
+  ReportExecutionStatus,
   ReportRangeQuery,
   ReportRequest,
   ReportSubmissionOutcome,
@@ -78,6 +81,7 @@ import type {
  *       service does not emit, because a second declaration has nothing holding it to the contract.
  */
 export type {
+  ReportExecutionStatus,
   ReportRequest,
   ReportSubmissionOutcomeBody,
   ReportSubmission,
@@ -123,18 +127,44 @@ const LIST_STATEMENT_TRANSACTIONS: ContractOperation = {
   operationId: 'listStatementTransactions',
 };
 
+const READ_REPORT_EXECUTION: ContractOperation = {
+  method: 'GET',
+  path: '/api/v1/reports/executions/{executionName}',
+  operationId: 'readReportExecution',
+};
+
+const COLLECT_REPORT_ARTIFACT: ContractOperation = {
+  method: 'GET',
+  path: '/api/v1/reports/transaction-report/artifact',
+  operationId: 'collectReportArtifact',
+};
+
+const COLLECT_STATEMENT_ARTIFACT: ContractOperation = {
+  method: 'GET',
+  path: '/api/v1/reports/statements/artifacts/{selector}',
+  operationId: 'collectArtifact',
+};
+
 /**
  * Every operation `reporting-api.yaml` declares, in the order the contract declares them.
  *
  * Assumptions: exhaustive rather than a selection, and compared with the contract for equality in
  * both directions by `ui/src/api/contracts.test.ts`.
+ *
+ * Refactoring Rationale: three operations joined this manifest when the report and statement
+ * lifecycles were given a read side. A submission returned a handle nothing consumed and a statement
+ * answer carried locations no caller could open, so this client could show a submitted state and
+ * nothing after it. The three are a run's status, the report document and a statement document.
  */
 export const REPORTING_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
   SUBMIT_TRANSACTION_REPORT,
   LIST_TRANSACTION_REPORT_LINES,
   READ_TRANSACTION_REPORT_TOTALS,
+  COLLECT_REPORT_ARTIFACT,
+  READ_REPORT_EXECUTION,
   GENERATE_STATEMENT,
   LIST_STATEMENT_TRANSACTIONS,
+  COLLECT_STATEMENT_ARTIFACT,
 ];
 
 /** HTTP status the submission answers when an execution was actually started. */
@@ -143,16 +173,41 @@ const HTTP_CREATED = 201;
 /** Matches the masked rendering every statement response must carry. */
 const MASKED_CARD_NUMBER = /^[*]{12}[0-9]{4}$/u;
 
+/** The selector shape the contract publishes: twenty-two URL-safe characters, unpadded. */
+const ARTIFACT_SELECTOR_SHAPE = '[A-Za-z0-9_-]{22}';
+
+/** The one path parameter the artifact operation declares, spelled once for both uses below. */
+const ARTIFACT_SELECTOR_PARAMETER = 'selector';
+
 /**
- * Reading direction the contract applies when a cursor is supplied without one.
+ * Matches a statement artifact location in the form a statement ANSWER publishes it, capturing the
+ * selector inside it.
  *
- * Assumptions: sent EXPLICITLY rather than relied upon, even though the contract declares the same
- * default. A sealed cursor carries the direction it was issued for, and the service refuses a
- * backward position replayed as a forward read, so the value that reaches the query is the one fact
- * that decides whether a browse advances or is refused -- naming it here keeps that fact visible at
- * the call rather than resident in a default a reader has to look up.
+ * Assumptions: derived from the manifest entry's own path rather than retyped, and anchored at both
+ * ends, so the whole value is fixed rather than merely its beginning.
+ *
+ * Measured: the published form carries the version prefix. `reporting-api.yaml` L1595 declares
+ * `^/api/v1/reports/statements/artifacts/[A-Za-z0-9_-]{22}$` on the two members a statement answer
+ * returns, while `requestPath` in `./client` REMOVES that prefix because a build's base URL already
+ * ends in it. The two forms are therefore handled separately and deliberately: this pattern is the
+ * form that arrives, and the target dispatched below is composed from the manifest.
  */
-const DEFAULT_PAGING_DIRECTION = 'next';
+const PUBLISHED_ARTIFACT_LOCATION = new RegExp(
+  `^${COLLECT_STATEMENT_ARTIFACT.path.replace(
+    `{${ARTIFACT_SELECTOR_PARAMETER}}`,
+    `(${ARTIFACT_SELECTOR_SHAPE})`,
+  )}$`,
+  'u',
+);
+
+/*
+ * WHY : Refactoring Rationale: the forward default declared here was withdrawn when the pair became
+ *       `keysetPagingMembers` in `./client`. The reason for stating it EXPLICITLY on the request is
+ *       unchanged and now lives on that guard: a sealed cursor carries the direction it was issued for
+ *       and the service refuses a backward position replayed as a forward read, so the value that
+ *       reaches the query is the one fact deciding whether a browse advances or is refused. What
+ *       changed is that seven modules no longer each hold a copy of it.
+ */
 
 /**
  * Header the published contract accepts an optional submission key in.
@@ -254,8 +309,31 @@ export async function submitTransactionReport(
   );
 
   const body = response.data;
+  // WHY : ⚠️ Refactoring Rationale: the outcome is READ from the body and was inferred from the
+  //       status. Two of the three turns answer 200 -- a declined confirmation and one not yet
+  //       answered -- so a status cannot separate them; this call labelled every non-created answer
+  //       DECLINED and told a caller it had cancelled when it had merely not answered, dropping the
+  //       prompt naming the report in the process. The status is still checked, below, but only for
+  //       the started arm, where it and the member must agree.
+  // WHY : Alternatives Considered: inferring the unanswered turn from the presence of a message on a
+  //       200. Rejected because that is the same class of inference read from a different member, and
+  //       it breaks the moment a declined answer carries a sentence -- which the contract permits no
+  //       more and no less than it permitted an unanswered one to carry none.
+  if (body.outcome === 'DECLINED') {
+    return { outcome: 'DECLINED', message: null };
+  }
+  if (body.outcome === 'UNANSWERED') {
+    if (body.message === null) {
+      throw new RangeError(
+        'An unanswered report confirmation must carry the prompt naming the report.',
+      );
+    }
+    return { outcome: 'UNANSWERED', message: body.message };
+  }
   if (response.status !== HTTP_CREATED) {
-    return { outcome: 'DECLINED', message: body.message };
+    throw new RangeError(
+      'A started report submission must be answered with HTTP 201; the status and the outcome disagree.',
+    );
   }
 
   // WHY : Refactoring Rationale: the handle is read from `body.submission` rather than from the body
@@ -302,6 +380,8 @@ export async function submitTransactionReport(
  * @returns {Promise<PageResponse<TransactionReportLine>>} One bounded window of detail lines, each
  *   carrying its amount as an already-rendered string, together with the two sealed boundaries a
  *   following or preceding read is issued from and whether a following window exists.
+ * @throws {RangeError} If a direction is supplied without a cursor, which names no position to move
+ *   from and which the contract refuses.
  * @throws {Error} The normalised failure from `./client`, carrying the shared `ApiError` document:
  *   HTTP 400 for a malformed bound or for a cursor replayed against the direction it was sealed for,
  *   401 without a usable token, 403 without the required authority, and 500 otherwise.
@@ -309,12 +389,20 @@ export async function submitTransactionReport(
 export async function listTransactionReportLines(
   query: ReportRangeQuery,
 ): Promise<PageResponse<TransactionReportLine>> {
+  // Assumptions: a direction with no cursor is refused before the window is assembled, rather than
+  //   dropped as it previously was. This read is the one paged operation whose other two members are
+  //   MANDATORY, so a dropped direction here produced the most misleading outcome of the seven: a
+  //   fully-populated opening window over the requested date range, which looks like a correct answer
+  //   to a backward step rather than like the caller defect it is.
   const params: Record<string, string> = { startDate: query.startDate, endDate: query.endDate };
-  // Assumptions: the direction is sent only ALONGSIDE a cursor, because the contract declares it
-  //   meaningful only there. Sending it on an opening read would name a position that does not exist.
-  if (query.cursor !== undefined) {
-    params.cursor = query.cursor;
-    params.direction = query.direction ?? DEFAULT_PAGING_DIRECTION;
+  // Refactoring Rationale: ⚠️ the direction is sent only ALONGSIDE a cursor, and supplying one without
+  //   a cursor is now REFUSED rather than dropped. Sending it on an opening read would name a position
+  //   that does not exist; dropping it silently answered the opening window to a caller that had asked
+  //   to move, which for a report read means the same page of lines returned under a different request.
+  const paging = keysetPagingMembers(query.cursor, query.direction);
+  if (paging !== undefined) {
+    params.cursor = paging.cursor;
+    params.direction = paging.direction;
   }
 
   const response = await getApiClient().get<PageResponse<TransactionReportLine>>(
@@ -394,6 +482,110 @@ export async function listStatementTransactions(
     assertCardNumberMasked(row.cardNumber);
   }
   return body;
+}
+
+// WHY : Assumptions: the three reads below are the LIFECYCLE half of this client, and they exist
+//       because a submission returned a handle nothing consumed. `app/cbl/CORPT00C.cbl` L462 performs
+//       SUBMIT-JOB-TO-INTRDR and receives nothing back at all -- the queue definition at
+//       `app/csd/CARDDEMO.CSD` L501 maps to the internal reader with ERROROPTION(IGNORE), so even a
+//       failed write is silent -- so an operator learned an outcome by looking somewhere else
+//       entirely. Reporting a run's status and handing back the document it produced is therefore a
+//       documented improvement rather than a port, and it is the reason a screen can show more than a
+//       submitted state.
+// WHY : Assumptions: both documents arrive as a BINARY blob and neither is parsed here. The
+//       plain-text statement is the byte-for-byte parity artifact compared against the committed
+//       golden masters and the report line is fixed at 133 columns with COBOL edit masks, so a client
+//       that decoded either into text would become a second renderer of an artifact a golden-master
+//       comparison checks byte for byte. Trade-offs: a caller receives a blob it must download or hand
+//       to an object URL rather than a string it can inspect, which is the point.
+// WHY : Assumptions: the two documents are addressed DIFFERENTLY on purpose. A statement is reached
+//       through an opaque selector the service minted, because a statement names one cardholder; a
+//       report is reached through its type and its two date bounds in the clear, because those
+//       describe a query and name no person -- and an operator holding the coordinates of a run must
+//       be able to construct its location, which is what a runbook does.
+
+/**
+ * Reports what became of one submitted report run.
+ * @param {string} executionName - The execution NAME a submission returned, never an ARN. The service
+ *   composes the ARN from its own configured state machine, so a name is all a caller can supply and
+ *   all it needs to.
+ * @returns {Promise<ReportExecutionStatus>} The orchestration status, the two instants, the three
+ *   coordinates when the run was started through this surface, and the document's location and write
+ *   instant once the run has succeeded and the store holds it.
+ * @throws {Error} The normalised failure from `./client`, carrying the shared `ApiError` document:
+ *   HTTP 400 for a name outside the published shape, 401 without a usable token, 403 without the
+ *   required authority, 404 when no run of that name is known -- which is also the answer for a run
+ *   the orchestrator has forgotten, so the two are deliberately indistinguishable -- and 500
+ *   otherwise.
+ */
+export async function readReportExecution(executionName: string): Promise<ReportExecutionStatus> {
+  const response = await getApiClient().get<ReportExecutionStatus>(
+    requestPath(READ_REPORT_EXECUTION, { executionName }),
+  );
+  return response.data;
+}
+
+/**
+ * Collects the transaction report document one run produced.
+ * @param {string} reportType - The report type token the run was started for, one of the four the
+ *   contract publishes. Sent exactly as given; no token is derived here.
+ * @param {string} startDate - Inclusive lower bound of the run's processing-date range.
+ * @param {string} endDate - Inclusive upper bound of the run's processing-date range.
+ * @returns {Promise<Blob>} The 133-column document exactly as the service wrote it, undecoded.
+ * @throws {Error} The normalised failure from `./client`, carrying the shared `ApiError` document:
+ *   HTTP 400 for a type outside the published set or a malformed bound, 401 without a usable token,
+ *   403 without the required authority, 404 when no document exists for those coordinates -- which is
+ *   the answer both for a run that never happened and for one whose document a lifecycle rule has
+ *   expired -- and 500 otherwise.
+ */
+export async function collectReportArtifact(
+  reportType: string,
+  startDate: string,
+  endDate: string,
+): Promise<Blob> {
+  const response = await getApiClient().get<Blob>(requestPath(COLLECT_REPORT_ARTIFACT), {
+    params: { type: reportType, startDate, endDate },
+    responseType: 'blob',
+  });
+  return response.data;
+}
+
+/**
+ * Collects one statement document from a location a statement answer reported.
+ * @param {string} location - The location as `generateStatement` returned it, either
+ *   `plainTextUri` or `htmlUri`, in the published form that carries the version prefix. The selector
+ *   inside it is opaque: it is matched and carried through unchanged, never composed or shortened.
+ * @returns {Promise<Blob>} The document exactly as the service wrote it, undecoded.
+ * @throws {RangeError} If the location is not one this contract publishes, which is what stops a
+ *   value from another response being sent to this operation.
+ * @throws {Error} The normalised failure from `./client`, carrying the shared `ApiError` document:
+ *   HTTP 400 for a selector outside the published shape, 401 without a usable token, 403 without the
+ *   required authority, 404 when the selector names no stored document, and 500 otherwise.
+ */
+export async function collectArtifact(location: string): Promise<Blob> {
+  // WHY : Assumptions: the location is MATCHED against the form a statement answer publishes, and the
+  //       selector it carries is then handed, unchanged, to the manifest's own template. Neither half
+  //       is optional. The value arrives carrying the version prefix that a build's base URL already
+  //       supplies, so dispatching it as it stands would address `/api/v1/api/v1/...`; and the
+  //       selector is never synthesised here, so a document this client was not told about stays
+  //       unaddressable -- which is the whole point of an opaque token.
+  // WHY : Alternatives Considered: slicing the prefix off the validated value and dispatching the
+  //       remainder, which needs no capture group. Rejected because it states the prefix rule a second
+  //       time when `requestPath` already owns it, and the two statements would drift apart the moment
+  //       the gateway published a different prefix.
+  const published = PUBLISHED_ARTIFACT_LOCATION.exec(location);
+  const selector = published?.[1];
+  if (selector === undefined) {
+    throw new RangeError(
+      'A statement artifact location must be one this contract publishes; it is never composed here.',
+    );
+  }
+
+  const response = await getApiClient().get<Blob>(
+    requestPath(COLLECT_STATEMENT_ARTIFACT, { [ARTIFACT_SELECTOR_PARAMETER]: selector }),
+    { responseType: 'blob' },
+  );
+  return response.data;
 }
 
 /**

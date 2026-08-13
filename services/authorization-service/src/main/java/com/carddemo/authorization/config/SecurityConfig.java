@@ -3,6 +3,7 @@ package com.carddemo.authorization.config;
 import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.security.CognitoAccessTokenValidator;
 import com.carddemo.common.security.JwtRoleConverter;
+import jakarta.servlet.DispatcherType;
 import java.time.Clock;
 import java.util.List;
 import org.springframework.beans.factory.annotation.Value;
@@ -498,6 +499,41 @@ public class SecurityConfig {
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(requests -> requests
+                        // WHY : Refactoring Rationale: the container's ERROR dispatch is admitted, and
+                        //       this rule exists because its absence turned a RENDERING failure into an
+                        //       AUTHORIZATION refusal. When the framework cannot write a response -- a
+                        //       caller whose accept header admits nothing the converters produce is the
+                        //       reachable case, and this context publishes 406 for exactly that -- the
+                        //       container re-dispatches the request to its own error path. That path
+                        //       matches no rule below, so the denying catch-all answered a caller holding
+                        //       a valid group token with 403 "not authorized", on the path /error rather
+                        //       than its own, with an empty correlation identifier because the filter
+                        //       publishing it had already completed. The authorization decision for the
+                        //       original request has already been taken by the time an ERROR dispatch
+                        //       runs, so admitting it grants nothing: it re-renders a response this
+                        //       chain already decided.
+                        // WHY : Assumptions: the rule matches the DISPATCHER TYPE and not the path,
+                        //       which is what keeps a direct request to /error refused by the catch-all
+                        //       exactly as it is today. A path-based permit would open that path to any
+                        //       caller, and the container's own error body is not the shape
+                        //       openapi/authorization-api.yaml publishes, so an unauthenticated caller
+                        //       could provoke a body no operation of this context declares.
+                        // WHY : Assumptions: the shared defaults narrow the filter chain to the REQUEST
+                        //       and ASYNC dispatches at carddemo-common-defaults.yml line 383, so in a
+                        //       fully-configured application this rule is defence in depth. It is
+                        //       required nonetheless, because a sliced web test builds this chain
+                        //       WITHOUT that property and would then measure the refused-dispatch
+                        //       behaviour rather than the served one -- and because a chain that depends
+                        //       on an external property for a security-visible outcome states its own
+                        //       intent nowhere.
+                        // WHY : Alternatives Considered: narrowing this chain to the REQUEST dispatch
+                        //       alone, which has the same effect on this condition. Rejected because it
+                        //       silently withdraws authorization from ASYNC dispatches as well, and an
+                        //       asynchronous handler added later would then run outside every rule here
+                        //       -- a much wider change than the one condition being fixed. The auth,
+                        //       card and reference contexts resolve this the same way, so the four
+                        //       chains stay comparable.
+                        .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                         .requestMatchers(HEALTH_PATH).permitAll()
                         // WHY : Assumptions: granted by NETWORK POSITION, not authority, because the
                         //       only configured consumer is the task-local collector and it presents

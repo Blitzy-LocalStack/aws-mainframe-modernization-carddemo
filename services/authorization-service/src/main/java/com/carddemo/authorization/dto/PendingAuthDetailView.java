@@ -242,4 +242,47 @@ public record PendingAuthDetailView(
                     + candidate);
         }
     }
+
+    /**
+     * Renders this projection as its identity and its decision, omitting the other twenty components.
+     *
+     * <p>Purpose. Nine of the twenty-nine components are prohibited from a diagnostic rendering by
+     * {@code docs/architecture/observability.md} L1093 to L1112: the account identifier by name, the
+     * requested and approved amounts as monetary values, the four merchant free-text fields, the merchant
+     * identifier for the reason recorded on the sibling screen shape, and the card expiry. The
+     * compiler-generated rendering printed all twenty-nine, which for a declined authorization meant the
+     * requested sum, the merchant and the account together on one line.</p>
+     *
+     * <p>Assumptions: the card number is rendered because the component receives an ALREADY-MASKED value,
+     * as its own documentation states; printing it performs no abbreviation here.</p>
+     *
+     * <p>Assumptions: the card expiry is omitted although a date is otherwise permitted by that rule's
+     * third clause. An expiry beside a card number -- even a masked one -- is the pair that turns two
+     * separately harmless values into card data, so it is treated as belonging to the number rather than
+     * to the dates.</p>
+     *
+     * <p>Trade-offs: eleven of the twenty omitted components are neither prohibited nor sensitive -- the
+     * sealed selector, the acquirer message and country fields, the originating date and time, the entry
+     * mode, the category code and the fraud report date. They are left out because a twenty-component
+     * line is read by nobody: the ones kept are the row's identity and the outcome recorded against it,
+     * which is what a diagnostic is opened to establish, and every omitted value is a column of the row
+     * the transaction identifier names.</p>
+     *
+     * @return a rendering carrying the transaction identifier, the composite key's date and time parts,
+     *     the masked card number, the authorization type, the response code and reason, the match status
+     *     and the fraud flag, with the remaining twenty components omitted; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "PendingAuthDetailView[transactionId=" + this.transactionId
+                + ", authDate=" + this.authDate
+                + ", authTime=" + this.authTime
+                + ", maskedCardNumber=" + this.cardNum
+                + ", authType=" + this.authType
+                + ", authRespCode=" + this.authRespCode
+                + ", authRespReason=" + this.authRespReason
+                + ", matchStatus=" + this.matchStatus
+                + ", authFraud=" + this.authFraud
+                + ", omitted=20 components]";
+    }
 }

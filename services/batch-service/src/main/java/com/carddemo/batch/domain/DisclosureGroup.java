@@ -142,8 +142,8 @@ import org.hibernate.type.SqlTypes;
  *
  * <p>It holds a rate and does not apply one. The accrual formula lives at
  * {@code app/cbl/CBACT04C.cbl} lines 464 to 465 and belongs in the service layer through
- * {@code com.carddemo.common.money.Money}, which owns both rounding contracts this migration needs
- * and is the single place either is expressed. No arithmetic of any kind is performed here, and in
+ * {@code com.carddemo.common.money.Money}, which owns the ONE rounding contract this migration needs
+ * and is the single place it is expressed. No arithmetic of any kind is performed here, and in
  * particular the division that converts an annual percentage into a monthly fraction is not.</p>
  *
  * @see DisclosureGroupId

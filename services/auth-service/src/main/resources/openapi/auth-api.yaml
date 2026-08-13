@@ -493,6 +493,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
         "500":
           # Assumptions: the baseline's WHEN OTHER arm at app/cbl/COSGN00C.cbl
           #   line 254 handles every file response that is neither success nor
@@ -604,6 +612,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
         "500":
           description: >-
             The renewal could not be evaluated. The message is
@@ -715,6 +731,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
         "500":
           description: >-
             The exchange could not be evaluated -- the pool was unreachable, the
@@ -902,6 +926,10 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
         "500":
           # Assumptions: the baseline reaches this arm from three separate places
           #   -- the WHEN OTHER of each of its three reads, at
@@ -977,9 +1005,27 @@ paths:
         "201":
           description: >-
             The row was created. The body is the stored row as a subsequent read
-            would return it, PLUS the one-time credential for its owner's first
-            sign-on, and the Location header addresses the row. Hand the credential
-            over now: it appears in this response and nowhere else.
+            would return it, PLUS credentialSecretName -- the NAME of the managed-secret
+            entry holding the one-time credential for its owner's first sign-on. The
+            Location header addresses the row.
+
+
+            NO CREDENTIAL IS IN THIS BODY. Onboarding is a two-step act: read this
+            locator, then retrieve the value from that entry with
+            secretsmanager:GetSecretValue and the customer-managed key's grant, and hand
+            THAT over. The retrieval is privileged and audited, which is the point of it;
+            a browser session cannot perform it and a task role can.
+
+
+            Refactoring Rationale: this description asserted that the credential itself
+            was in the body and appeared nowhere else. Both halves were wrong and the
+            schema below, the response record and the later prose on
+            CreatedUserResponse all already said so -- the value is published to a
+            per-user managed-secret entry, so the response was never its only home, and
+            what crosses the wire is a name. The claim is corrected rather than softened
+            because an operator acting on it looked for a credential property that does
+            not exist, concluded the create had failed to produce one, and had no reason
+            to look in the secret store where it actually was.
           headers:
             Location:
               description: >-
@@ -1011,16 +1057,43 @@ paths:
           #   additionalProperties: false, which is a schema violation rather than a
           #   field-level validation failure and so reports no logical field at
           #   all.
+          # Assumptions: an ABSENT value and an UNUSABLE one are described separately
+          #   below, because only the first has a baseline literal. The four
+          #   emptiness sentences are transcribed from the program; the width and
+          #   domain sentences are authored, because a 3270 field cannot hold a
+          #   character past its declared width and the program therefore has no
+          #   over-length branch to take a literal from.
+          # Assumptions: the userId width sentence is reachable in TWO ways and the
+          #   description does not distinguish them, because a caller cannot act on
+          #   the difference. The request schema's own maxLength refuses a submitted
+          #   value longer than eight, and the service additionally refuses one whose
+          #   FOLDED form is longer -- case folding is not length-preserving, so
+          #   eight characters of a letter that upper-cases to two exceed the stored
+          #   key's width while satisfying maxLength. Both mean the same thing to the
+          #   caller: the identifier this operation can store is at most eight
+          #   characters.
+          # Assumptions: a userId whose folded form is EMPTY carries the emptiness
+          #   sentence rather than the width one, because that is what it is. A value
+          #   of whitespace the baseline's own emptiness test reads as present -- a
+          #   tab equals neither SPACES nor LOW-VALUES -- still leaves nothing once
+          #   trimmed.
           description: >-
-            A required value was absent or outside its domain. Each fieldErrors
-            entry is keyed by the logical field -- firstName, lastName, userId or
-            userType -- and carries the baseline literal for that
-            field: "First Name can NOT be empty..."
+            A required value was absent, or a supplied value could not be used.
+            Each fieldErrors entry is keyed by the logical field -- firstName,
+            lastName, userId or userType. An ABSENT value carries the baseline
+            literal for that field: "First Name can NOT be empty..."
             (app/cbl/COUSR01C.cbl line 120),
             "Last Name can NOT be empty..." (line 126),
             "User ID can NOT be empty..." (line 132) or
             "User Type can NOT be empty..." (line 144). None of these four
-            carries a space before its ellipsis.
+            carries a space before its ellipsis. A value that is present but
+            unusable carries the authored sentence for that field instead:
+            "First Name must be at most 20 characters...",
+            "Last Name must be at most 20 characters...",
+            "User ID must be at most 8 characters..." -- which also answers an
+            identifier whose upper-cased form exceeds that width, since the stored
+            key holds the folded value -- "User Type must be exactly one
+            character..." or "User Type must be A or U...".
           headers:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
@@ -1032,6 +1105,10 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
         "409":
           # Assumptions: the baseline folds two distinct file responses into one
           #   handler -- WHEN DFHRESP(DUPKEY) at app/cbl/COUSR01C.cbl line 260 and
@@ -1059,6 +1136,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
         "500":
           description: >-
             The row could not be written. The message is
@@ -1131,10 +1212,21 @@ paths:
                 $ref: "#/components/schemas/UserResponse"
         "400":
           description: >-
-            The path segment was blank or wider than eight characters. The message
-            is "User ID can NOT be empty..." (app/cbl/COUSR02C.cbl lines 148 and
-            182, and app/cbl/COUSR03C.cbl lines 147 and 179), keyed userId in the
-            fieldErrors array, with no space before the ellipsis.
+            The path segment was blank, was wider than eight characters, or
+            carried a character the stored key cannot be drawn from. A blank segment
+            carries "User ID can NOT be empty..." (app/cbl/COUSR02C.cbl lines 148
+            and 182, and app/cbl/COUSR03C.cbl lines 147 and 179), with no space
+            before the ellipsis. An over-wide one carries
+            "User ID must be at most 8 characters...", a sentence this service
+            authors rather than transcribes, because an eight-position screen field
+            could not submit a ninth character for the baseline to refuse. A segment
+            carrying a character outside the printable single-byte range PIC X(08)
+            means carries "User ID contains an unsupported character..." -- which is
+            also what refuses a segment that would have folded WIDER than eight
+            positions, since only a character from outside that range can change a
+            value's width when it is upper-cased. Each of these is keyed userId in
+            the fieldErrors array, and none is reported as a 404 instead: a value
+            the column could not hold is not a key any row could carry.
           headers:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
@@ -1158,6 +1250,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
         "500":
           description: >-
             The row could not be read. The message is
@@ -1255,6 +1351,17 @@ paths:
             between the two kinds: the three validation literals carry no space
             before the ellipsis and the aggregate one does, exactly as the program
             writes them.
+
+
+            The path segment is refused on the same terms as it is on the read and
+            delete operations, and before the body is examined: blank carries
+            "User ID can NOT be empty..." (app/cbl/COUSR02C.cbl lines 148 and 182),
+            wider than eight characters carries
+            "User ID must be at most 8 characters...", and a character outside the
+            printable single-byte range PIC X(08) means -- including one that would
+            widen the derived key past eight positions when upper-cased -- carries
+            "User ID contains an unsupported character...". All three are keyed
+            userId, and in each case the stored row is neither read nor changed.
           headers:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
@@ -1277,6 +1384,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
         "500":
           description: >-
             The change could not be written. The message is
@@ -1365,11 +1480,17 @@ paths:
         "400":
           description: >-
             The confirmation was absent or was not true, or the path segment was
-            blank or wider than eight characters. In the confirmation case the
-            fieldErrors array carries a single entry keyed confirmed and nothing
-            is deleted; in the identifier case the entry is keyed userId and
-            carries "User ID can NOT be empty..."
-            (app/cbl/COUSR03C.cbl lines 147 and 179).
+            blank, wider than eight characters, or carried a character the stored key
+            cannot be drawn from. In the confirmation case the fieldErrors array
+            carries a single entry keyed confirmed and nothing is deleted; in the
+            identifier case the entry is keyed userId and carries
+            "User ID can NOT be empty..." (app/cbl/COUSR03C.cbl lines 147 and 179)
+            when the segment is blank,
+            "User ID must be at most 8 characters..." when it is over-wide, or
+            "User ID contains an unsupported character..." when it carries a
+            character outside the printable single-byte range PIC X(08) means --
+            which includes any character that would widen the derived key when
+            upper-cased. Nothing is deleted in any of them.
           headers:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
@@ -1392,6 +1513,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
         "500":
           # Refactoring Rationale: the message on this branch says Update on a
           #   delete failure. That is what the baseline writes -- the literal at
@@ -1559,8 +1684,18 @@ components:
         identity is echoed and logged. The refusal carries the shared problem body
         and the response correlation header, the same as any other 400, and it names
         the rule it applied without ever repeating the value it refused.
+      # WHY : Measured: the shared CorrelationId schema admits the EMPTY string, because
+      #       ApiError normalises an absent identity to "" at L619 and every problem
+      #       document carries the member, so the schema a BODY member names has to admit
+      #       it. A REQUEST header must not: conformsWithin in CorrelationIdFilter
+      #       declines an empty value and the filter then answers 400. This parameter
+      #       therefore narrows the shared schema by one facet instead of restating its
+      #       alphabet and width, which would be a second statement of both. Omitting the
+      #       header entirely stays valid -- that is governed by required above.
       schema:
-        $ref: "#/components/schemas/CorrelationId"
+        allOf:
+          - $ref: "#/components/schemas/CorrelationId"
+          - minLength: 1
 
     UserIdPath:
       name: userId
@@ -1569,10 +1704,28 @@ components:
       description: >-
         Identifier of the user this request addresses. At most eight characters,
         the width SEC-USR-ID is declared with at app/cpy/CSUSR01Y.cpy line 18 and
-        the width the users table stores it at. No character-class restriction is
-        asserted, because the baseline declares none: the field is PIC X(08), the
-        column is CHAR(8), and inventing a pattern here would refuse identifiers
-        the migrated data may legitimately contain.
+        the width the users table stores it at. The value is folded -- trimmed and
+        upper-cased -- to derive the key that is looked up, so either case reaches
+        the same row.
+
+
+        Two rules govern the value beyond that width. It must be drawn from the
+        printable single-byte range PIC X(08) means, and the key it folds to must
+        occupy at most those eight positions; a value failing either is refused with
+        400 keyed userId rather than reported as a row that was not found, because a
+        value the column could not hold is not a key any row could carry. No
+        narrower character class is imposed: the field declares none, so the
+        addressable range is kept as wide as an eight-position single-byte key can
+        express, and all ten identifiers the seed security file carries -- upper-case
+        letters and digits -- sit well inside it.
+
+
+        No pattern facet is asserted for the range. An expression anchored tightly
+        enough to state it would also refuse a segment with a surrounding blank,
+        which this service trims rather than rejects, and the same range is stated
+        in prose on the request-body property for the same reason -- so the two
+        routes into one rule are documented the same way rather than one being
+        expressed and the other described.
       schema:
         type: string
         minLength: 1
@@ -1650,6 +1803,94 @@ components:
             $ref: "#/components/schemas/ApiError"
 
 
+    # WHY : Refactoring Rationale: the transport refusals below were UNDECLARED while the shared
+    #       advice in services/common-lib produces every one of them, so each was reachable on
+    #       every operation of this contract with no published shape. A client had no branch for
+    #       them: ui/src/api/client.ts could only treat each as an unrecognised body. Declaring
+    #       them here and handling them there are two halves of one correction, and declaring one
+    #       half alone would have documented a response no caller could recognise.
+    # WHY : Assumptions: each carries the same ApiError shape as every other refusal of this
+    #       contract, with its own machine code -- CARDDEMO-0405, CARDDEMO-0406 and
+    #       CARDDEMO-0415. A distinct code per condition is what lets a client branch without
+    #       reading the sentence, which is the same reason the 400 and the 401 do not share one.
+    # WHY : Assumptions: the body is declared application/json because that is what the shared
+    #       advice writes -- it returns a plain ApiError record and this build registers no
+    #       problem+json converter -- and because the 406 arm pins MediaType.APPLICATION_JSON
+    #       explicitly, which is the single call that lets a body be produced at all for a caller
+    #       whose Accept header matched nothing.
+    MethodNotAllowed:
+      description: >-
+        The route addressed does not publish the method the request named. The response
+        carries an Allow header naming the methods it does publish, which is where a client
+        reads them; the body does not repeat that list, so the two cannot disagree.
+
+
+        Assumptions: this has no reference counterpart. A 3270 terminal cannot address a
+        transaction with a verb the program did not define, so no reference literal or
+        condition name corresponds to this outcome. It exists because a target route is
+        addressed by callers this system does not control.
+      headers:
+        X-Correlation-Id:
+          $ref: "#/components/headers/XCorrelationId"
+        Allow:
+          description: >-
+            The methods the addressed route publishes, joined with a comma and a space.
+            Composed from the methods the framework's handler mapping reports, which are
+            server-authored; the method the caller USED is echoed nowhere. It is omitted
+            rather than sent empty when the framework reported no supported set, because an
+            empty Allow states that the route supports no method at all, which would be a
+            different and false claim.
+          required: false
+          schema:
+            type: string
+            example: "GET, PUT"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+    UnsupportedMediaType:
+      description: >-
+        The request carried a body in a media type this route does not accept, or carried a
+        body with no Content-Type at all. Every operation of this contract that accepts a
+        body accepts application/json and nothing else.
+
+
+        The body carries no fieldErrors entry and cannot: the refusal is raised before any
+        member has been parsed, so there is no bound object to have fields. That is why this
+        is a distinct code from CARDDEMO-0400 rather than a 400 with an empty array, which a
+        caller could not tell from a body it had mis-spelled.
+      headers:
+        X-Correlation-Id:
+          $ref: "#/components/headers/XCorrelationId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+    NotAcceptable:
+      description: >-
+        The request's Accept header names no media type this service can produce. The shared
+        advice answers with JSON and nothing else.
+
+
+        Assumptions: the body of this response is itself application/json, which is a type
+        the caller has just said it will not accept. That is deliberate. The alternative is
+        an empty 406, which carries neither the machine code nor the correlation identifier
+        a support enquiry needs and tells the caller nothing about which header to change.
+        The content type is set explicitly by the shared advice for a second reason recorded
+        there: a body left to content negotiation would be negotiated against the same
+        Accept header that already matched nothing, and the request would then be forwarded
+        to the container error path, which this service publishes no route for.
+      headers:
+        X-Correlation-Id:
+          $ref: "#/components/headers/XCorrelationId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+
   # WHY : Assumptions: the seven mirrored shapes -- the cursor token, the paging
   #       direction, the correlation identity, the page envelope, the error body,
   #       its per-field entry and its abend aggregate -- describe types published by
@@ -1676,6 +1917,55 @@ components:
   #       bytes that exist to make the record eighty bytes long; it addresses no
   #       data, no program reads it, and a JSON payload has no length to pad, so it
   #       appears in no schema.
+
+    # WHY : Refactoring Rationale: a SECOND definition of MethodNotAllowed, NotAcceptable and
+    #   UnsupportedMediaType stood here and all three are withdrawn. They were a whole earlier
+    #   generation of the same three components, merged alongside the surviving generation, and a
+    #   duplicate mapping key is the most deceptive shape this can take: YAML resolves a repeated
+    #   key to the LAST definition, so one of every pair was dead text that still read as the
+    #   contract, and no schema-shaped test could tell -- both copies were well formed and both
+    #   carried the correlation header. The survivors are the generation that states the Allow
+    #   header's composition rule with an example and attributes the pinned content type to the
+    #   shared advice rather than to a per-service handler; the withdrawn copies said only that
+    #   Allow is 'comma separated'. Detected with a duplicate-key-aware composer, because
+    #   yaml.safe_load hides the condition by construction.
+    PayloadTooLarge:
+      description: >-
+        The request body exceeds the byte ceiling this service accepts, and
+        carries the machine code CARDDEMO-0413. The ceiling is 65536 bytes unless
+        the deployment names another under carddemo.web.max-request-body-bytes,
+        and it is enforced by a servlet filter ordered ahead of the security
+        chain rather than by a handler -- which is why it applies to every
+        operation that accepts a body and why the refusal reaches a caller that
+        presented no token at all.
+
+
+        Assumptions: the body of this response carries no fieldErrors entry and
+        cannot. The refusal is raised before any member is parsed, so there is no
+        bound object to have fields; the message names the ceiling and the size
+        the request declared, which is what distinguishes a misconfigured client
+        from a deliberate flood.
+
+
+        Assumptions: a body that declares no length is not refused for that alone.
+        It is read up to the ceiling and refused only if it exceeds it, and the
+        bytes already read are forwarded to the handler when it does not, so a
+        chunked request within the bound is served normally. For that case the
+        message states that the body declares no length and exceeds the bound,
+        because the exact size is the one thing that was never learned.
+
+
+        Assumptions: this response carries the correlation identifier like every
+        other, and that is a property of filter ORDER rather than of this filter.
+        The correlation filter is registered one position ahead of it and has
+        already put the identifier on the response before the body is written.
+      headers:
+        X-Correlation-Id:
+          $ref: "#/components/headers/XCorrelationId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
   schemas:
 
     SignOnRequest:
@@ -1864,7 +2154,21 @@ components:
         minted for. The caller sends accessToken as a bearer credential on every
         other operation in this document.
       additionalProperties: false
-      required: [outcome, userId, accessToken, idToken, tokenType, expiresIn]
+      # WHY : Refactoring Rationale: every property below is REQUIRED, including the nullable
+      #       ones, and that is a correction rather than a tightening. carddemo-common-defaults.yml
+      #       pins default-property-inclusion to always, so every record component is written on
+      #       every response and a nullable member arrives as null, NEVER absent. Publishing such
+      #       a member as optional described an omission this service cannot produce, and generated
+      #       a type that was optional AND nullable -- two states for one fact.
+      # WHY : ⚠️ Refactoring Rationale: refreshToken was the member that correction was found on. It
+      #       was absent from this list and is now in it: it is a component of the SignOnResponse
+      #       record and nothing in this service narrows Jackson's inclusion, so the key is
+      #       serialised on every one of these bodies -- as null where the app client issues no
+      #       refresh token and on a renewal, which the member's own description already states.
+      #       Publishing it as optional conflated that null with an absent key and left a client
+      #       provisioning for two states where the wire has one; the ['string', 'null'] union it
+      #       carries is what expresses the null, and it is unchanged.
+      required: [outcome, userId, accessToken, idToken, refreshToken, tokenType, expiresIn]
       properties:
         # Assumptions: this member exists so that the two things a sign-on can return
         #   are told apart by a VALUE rather than by which members a client happens to
@@ -2244,6 +2548,31 @@ components:
             value of only whitespace is refused by the pattern, matching that
             check -- and must not already exist: a duplicate is refused with 409
             rather than overwriting the existing row.
+
+
+            The value is folded -- trimmed and upper-cased -- to derive the stored
+            key, and two further rules govern that derivation. A value carrying a
+            character outside the printable single-byte range PIC X(08) means
+            (app/cpy/CSUSR01Y.cpy line 18) is refused, and so is one whose derived
+            key occupies more than those eight positions. The first rule is what
+            makes maxLength above sufficient for the second: upper-casing is
+            length-preserving only within that range -- eight sharp-s characters
+            are eight positions submitted and sixteen once folded -- so without it
+            a value satisfying maxLength could still exceed the positions the
+            column stores. Both refusals are 400 keyed userId and both are raised
+            before the duplicate check and before any pool account is created, so a
+            refused identifier leaves nothing behind.
+
+
+            Neither rule is published as a pattern facet, and the reason is that
+            this property already carries one. JSON Schema admits a single pattern
+            per property, the one declared here refuses a whitespace-only value to
+            match the record's non-blank constraint, and the character range cannot
+            be folded into it: an expression anchored tightly enough to state the
+            range would also refuse a value with a surrounding blank, which this
+            service trims rather than rejects. The rules are therefore stated here
+            in prose for both routes into them, rather than expressed for one and
+            described for the other.
         userType:
           type: string
           minLength: 1
@@ -2359,8 +2688,10 @@ components:
       type: object
       description: >-
         The body of a successful create: the five stored columns exactly as
-        UserResponse publishes them, plus the one-time credential the new pool
-        account was created with.
+        UserResponse publishes them, plus credentialSecretName -- the NAME of the
+        managed-secret entry the new pool account's one-time credential was published
+        to. The credential itself is NOT here, and the Refactoring Rationale below
+        records why.
 
 
         Assumptions: the five row properties are REPEATED here rather than composed
@@ -2702,6 +3033,56 @@ components:
     #       published by
     #       services/common-lib for all eight services and the two sibling
     #       contracts already describe it as application/json.
+    # WHY : ⚠️ Refactoring Rationale: these three domains are declared as named components
+    #   because they belong to ONE shared record that every context writes, and this
+    #   document previously wrote their values out inline inside `ApiError` and
+    #   `FieldError`. Six sibling contracts already publish them under exactly these
+    #   names, so the inline form made this the only document from which a generated
+    #   client produced anonymous local enumerations for values that cross every
+    #   service boundary. Naming them also gives the values one place to change.
+    # WHY : Assumptions: each enumeration reproduces the Java domain it is generated
+    #   from exactly -- the four severity constants, the six subsystem constants and the
+    #   two field states declared in
+    #   services/common-lib/src/main/java/com/carddemo/common/error/ApiError.java and the
+    #   shared validation package. A document listing a value the writer cannot emit
+    #   would have a client branch on an unreachable state; one omitting a value the
+    #   writer can emit would have a strict client refuse a well-formed body.
+    Severity:
+      type: string
+      enum: [LOG, INFO, WARNING, CRITICAL]
+      example: WARNING
+      description: >-
+        The operational level of a failure, drawn from the baseline's own four-value
+        domain rather than a newly invented ladder, so an operator reading a migrated
+        failure sees the level the platform would have reported. The client-correctable
+        failures this context reports are at the warning level, because each is an
+        outcome a caller may act on rather than a fault in the service; the unclassified
+        failure reported as 500 is at the critical level.
+
+    Subsystem:
+      type: string
+      enum: [APPLICATION, CICS, IMS, RELATIONAL, QUEUE, OBJECT_STORE]
+      example: APPLICATION
+      description: >-
+        Which subsystem the failure is attributed to, using the baseline's own
+        vocabulary so an operator can route a migrated failure the way the platform's
+        would have been routed. This context reports APPLICATION for its own validation
+        and business refusals and RELATIONAL for a store failure; the remaining values
+        exist because the record is shared with contexts that do reach those subsystems.
+
+    FieldValidationState:
+      type: string
+      enum: [NOT_OK, BLANK]
+      example: BLANK
+      description: >-
+        Why a field appears in the per-field list: NOT_OK for a value that was supplied
+        and rejected, BLANK for one that was absent or blank. The two stay distinct
+        because the baseline treated them differently on screen -- a blank field
+        additionally received a literal asterisk marker, which is the disjunction at
+        app/cpy/CSSETATY.cpy lines 18 and 19 with the marker written at lines 23 to 25.
+        The shared validation domain declares a third, acceptable state; it cannot
+        appear here, because an entry exists only where a field was refused.
+
     ApiError:
       type: object
       description: >-
@@ -2724,20 +3105,56 @@ components:
       # WHY : Alternatives Considered: suppressing the two keys when null, with an inclusion setting, so
       #       the omission became true. Rejected because the aggregate sentence is the reference's own
       #       75-character message field and a client renders the band from it unconditionally, so a
-      #       key that comes and goes moves that decision into every client; and because the services
-      #       set `default-property-inclusion: always`, which the money contract depends on.
+      #       key that comes and goes moves that decision into every client; and because
+      #       always-inclusion is PINNED for every service in
+      #       services/common-lib/src/main/resources/carddemo-common-defaults.yml, which the
+      #       money contract SEPARATELY depends on -- a money member with no value must be
+      #       present and null rather than absent, because absent reads as "no balance" where
+      #       null reads as "no amount applies". That is a second consumer of the same pin and
+      #       NOT the reason these two keys are required here: the reason is the record shape
+      #       above, and this schema carries no monetary member at all. An earlier revision ran
+      #       the two together, which read as though a problem document's nullability followed
+      #       from a money rule.
+      # WHY : ⚠️ Refactoring Rationale: that last clause used to read "the services set
+      #       default-property-inclusion: always" and it named no place, which is how it came
+      #       to be inaccurate -- exactly one of the seven services actually set the key, and
+      #       the other six, this one included, rested a published contractual promise on the
+      #       serialiser's own default. The key is now set once in the shared defaults every
+      #       service imports, so the claim is true for all of them and is verifiable by
+      #       reading one file. The reasoning is unchanged; only its subject is now real.
       required: [code, secondaryCode, message, severity, subsystem, status, correlationId, path, timestamp, fieldErrors, abend]
       properties:
+        # WHY : Assumptions: the bound of 13 is the exact width of every identifier the
+        #   shared writer can emit, not a round number -- each is the literal
+        #   `CARDDEMO-` followed by four digits, so all eight values are 13 characters.
+        #   Publishing it lets a client size a fixed field for the value; leaving it
+        #   unbounded described an open-ended string for a closed, uniform set.
         code:
           type: string
+          maxLength: 13
           description: >-
             Stable machine-readable identifier for the failure, matched on by
             clients and by operational tooling and never reworded. The values this
             context produces are CARDDEMO-0400 for a validation failure,
-            CARDDEMO-0404 for an absent row, CARDDEMO-0409 for a duplicate
-            identifier and CARDDEMO-0500 for an internal failure.
+            CARDDEMO-0401 for an absent or unacceptable credential, CARDDEMO-0403
+            for a credential lacking the required authority, CARDDEMO-0404 for an
+            absent row, CARDDEMO-0405 for a method the addressed route does not
+            publish, CARDDEMO-0406 for an Accept header naming no type this service
+            produces, CARDDEMO-0409 for a duplicate identifier, CARDDEMO-0415 for a
+            body in a media type this service does not read, CARDDEMO-0500 for an
+            internal failure and CARDDEMO-0503 for a request refused while writes
+            are quiesced.
+
+
+            Assumptions: the list names one code per refusal status this document
+            declares, so a client that branches on the code can tell when it has
+            seen them all. Five were missing from it -- the credential pair, which
+            this contract has always declared, and the three transport codes added
+            with the 405, 406 and 415 responses below -- and an incomplete list of
+            this kind reads as though it were complete.
         secondaryCode:
           type: string
+          maxLength: 22
           description: >-
             Subordinate identifier qualifying code where the failure has a second
             classification, and the empty string where it has none. Empty rather
@@ -2777,17 +3194,23 @@ components:
             has no message. The per-operation responses above name the exact
             literal each status carries, together with the program and line it was
             read from.
+        # WHY : ⚠️ Refactoring Rationale: the four-value domain is referenced from a named
+        #   component rather than written out here, and it was written out here. Six
+        #   sibling contracts name the same domain as `Severity` and reference it; this
+        #   document was the only one restating the values inline, so one shared record's
+        #   domain was expressed two ways across seven documents that describe it. A
+        #   generated client built from this document produced a differently-named local
+        #   enumeration from one built from any sibling, for a value that crosses every
+        #   context. Referencing also means adding a level is one edit rather than seven.
         severity:
-          type: string
-          enum: [LOG, INFO, WARNING, CRITICAL]
+          $ref: '#/components/schemas/Severity'
           description: >-
             Operational level of the failure, drawn from the baseline's own
             four-value domain rather than a newly invented ladder, so an operator
             reading a migrated failure sees the level the platform would have
             reported.
         subsystem:
-          type: string
-          enum: [APPLICATION, CICS, IMS, RELATIONAL, QUEUE, OBJECT_STORE]
+          $ref: '#/components/schemas/Subsystem'
           description: >-
             Which part of the platform the failure arose in, from the baseline's
             own six-value domain. Failures from this context are APPLICATION or
@@ -2819,9 +3242,19 @@ components:
             The request path that failed, so a client reporting a problem need not
             reconstruct which call produced it. The empty string where no path is
             available.
+        # WHY : ⚠️ Assumptions: the shape is published as a REGULAR EXPRESSION and not as
+        #   `format: date-time`, because the value is not an RFC 3339 instant. It is the
+        #   baseline's 26-character stamp -- a space between date and time rather than a
+        #   `T`, six fractional digits, and no zone designator -- emitted by the shared
+        #   TimestampFormatter from the pattern `uuuu-MM-dd HH:mm:ss.SSSSSS`. Declaring
+        #   `date-time` would tell a generated client to parse it as an instant, and a
+        #   strict parser refuses this value for the missing `T` and offset while a
+        #   lenient one invents a zone. The bound and the expression together pin the
+        #   width the reference field carried.
         timestamp:
           type: string
           maxLength: 26
+          pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}$'
           description: >-
             The instant of the failure in the baseline-compatible
             twenty-six-character form, to microsecond precision, and the empty
@@ -2841,8 +3274,10 @@ components:
         abend:
           description: >-
             The structured abend aggregate when the failure was an abend, and
-            absent otherwise. Nullable rather than always present because an abend
-            is genuinely absent from most failures rather than empty in them.
+            null otherwise. Nullable rather than an empty object because such a
+            failure genuinely has no abend detail rather than an empty one. The
+            member itself is never absent: the pinned inclusion policy writes
+            every record component, so a caller reads one state, not two.
           oneOf:
             - $ref: "#/components/schemas/AbendDetail"
             - type: "null"
@@ -2863,8 +3298,13 @@ components:
         #   reproducing the target would sometimes blame the wrong field. The keys
         #   this context produces are userId, password, firstName, lastName,
         #   userType and confirmed.
+        # WHY : Assumptions: the lower bound is stated because an entry exists only when a
+        #   named field was refused, so an empty name is not a value this array can
+        #   carry -- a client keying its per-field highlight off the name would have
+        #   nothing to key on. Three sibling contracts already bound it this way.
         field:
           type: string
+          minLength: 1
           description: >-
             Name of the offending field as it appears in the request: a property of
             the request body, a path parameter, or a query parameter. The names
@@ -2887,8 +3327,7 @@ components:
         #   for and will never reach, and it would disagree with the sibling contracts,
         #   which publish two.
         state:
-          type: string
-          enum: [NOT_OK, BLANK]
+          $ref: '#/components/schemas/FieldValidationState'
           description: >-
             Why the field is listed: NOT_OK for a value that was supplied and
             rejected, BLANK for one that was absent or blank. A caller rendering
@@ -2900,6 +3339,7 @@ components:
         #   for a field is well inside it.
         message:
           type: string
+          minLength: 1
           maxLength: 75
           description: >-
             The message this field's failure produced, carried verbatim from its

@@ -16,6 +16,7 @@ import com.carddemo.reporting.mapper.ReportBandLayouts;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.NoSuchElementException;
 import java.time.ZoneOffset;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -25,6 +26,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.services.sfn.SfnClient;
+import software.amazon.awssdk.services.sfn.model.DescribeExecutionRequest;
+import software.amazon.awssdk.services.sfn.model.DescribeExecutionResponse;
+import software.amazon.awssdk.services.sfn.model.ExecutionDoesNotExistException;
 import software.amazon.awssdk.services.sfn.model.StartExecutionRequest;
 import software.amazon.awssdk.services.sfn.model.StartExecutionResponse;
 
@@ -93,6 +97,19 @@ class ReportExecutionServiceTest {
     /** The handle the stubbed orchestrator answers a started run with. */
     private static final String EXECUTION_ARN =
             "arn:aws:states:us-east-1:000000000000:execution:carddemo-transaction-report-dev:1";
+
+    /**
+     * The handle prefix the service composes an execution handle under.
+     *
+     * <p>Assumptions: derived by hand from {@link #STATE_MACHINE_ARN} rather than read from the service, so
+     * a case asserting the composed handle is comparing against an independently written value.</p>
+     */
+    private static final String EXECUTION_ARN_PREFIX =
+            "arn:aws:states:us-east-1:000000000000:execution:carddemo-transaction-report-dev:";
+
+    /** The execution input this service composes, as the describe path expects to read it back. */
+    private static final String RECOGNISED_INPUT =
+            "{\"reportType\":\"monthly\",\"startDate\":\"2022-07-01\",\"endDate\":\"2022-07-31\"}";
 
     /** The mark the reference treats as a selection: any character that is neither space nor low value. */
     private static final String MARK = "Y";
@@ -717,5 +734,162 @@ class ReportExecutionServiceTest {
                 .isThrownBy(() -> service.resolveRange(
                         null, ReportExecutionService.MONTHLY_REPORT_NAME))
                 .withMessage("request must not be null");
+    }
+
+    // WHY : ⚠️ Refactoring Rationale: the six cases below cover the describe operation, which did not
+    //       exist. The submission returned an orchestration handle that no operation consumed, so a caller
+    //       could not tell a run still going from one that had failed. The first thing each case asserts is
+    //       something that was unobservable before: the composed handle, the recovered coordinates, an
+    //       absent run, and an input this service did not write.
+    /**
+     * Asserts that the handle is composed from the configured machine rather than from the caller.
+     */
+    @Test
+    @DisplayName("the described handle is composed from the configured state machine")
+    void theDescribedHandleIsComposedFromTheConfiguredMachine() {
+        when(sfn.describeExecution(any(DescribeExecutionRequest.class)))
+                .thenReturn(describedAs("RUNNING", null));
+
+        serviceAt(MID_JULY).describeExecution("some-run-name");
+
+        ArgumentCaptor<DescribeExecutionRequest> asked =
+                ArgumentCaptor.forClass(DescribeExecutionRequest.class);
+        verify(sfn).describeExecution(asked.capture());
+        assertThat(asked.getValue().executionArn())
+                .as("nothing the caller sends may reach the handle except the final name segment")
+                .isEqualTo(EXECUTION_ARN_PREFIX + "some-run-name");
+    }
+
+    /**
+     * Asserts that the three coordinates are recovered from the execution's own input.
+     */
+    @Test
+    @DisplayName("the coordinates are recovered from the execution input")
+    void theCoordinatesAreRecoveredFromTheInput() {
+        when(sfn.describeExecution(any(DescribeExecutionRequest.class)))
+                .thenReturn(describedAs("SUCCEEDED", Instant.parse("2022-07-18T12:05:00Z")));
+
+        ReportExecutionService.ExecutionState state =
+                serviceAt(MID_JULY).describeExecution("some-run-name");
+
+        assertThat(state.status()).isEqualTo(ReportExecutionService.ExecutionStatus.SUCCEEDED);
+        assertThat(state.succeeded()).isTrue();
+        assertThat(state.coordinates().reportType()).isEqualTo("monthly");
+        assertThat(state.coordinates().rangeStart()).isEqualTo(LocalDate.of(2022, 7, 1));
+        assertThat(state.coordinates().rangeEnd()).isEqualTo(LocalDate.of(2022, 7, 31));
+        assertThat(state.stoppedAt()).isEqualTo("2022-07-18 12:05:00.000000");
+    }
+
+    // WHY : Assumptions: the round trip is asserted through the SUBMISSION path rather than against a
+    //       hand-written input document, because the property under test is that the reader and the writer
+    //       agree. A hand-written document would pass against a reader that had drifted from the writer,
+    //       which is the only way this can break.
+    /**
+     * Asserts that the input the submission path writes is the input the describe path reads.
+     */
+    @Test
+    @DisplayName("the input the submission writes is the input the describe reads")
+    void theWrittenInputIsTheReadInput() {
+        when(sfn.startExecution(any(StartExecutionRequest.class))).thenReturn(
+                StartExecutionResponse.builder().executionArn(EXECUTION_ARN)
+                        .startDate(MID_JULY).build());
+        ReportExecutionService service = serviceAt(MID_JULY);
+        service.start(
+                selection(MARK, null, null, "Y"),
+                ReportExecutionService.MONTHLY_REPORT_NAME,
+                LocalDate.of(2022, 7, 1),
+                LocalDate.of(2022, 7, 31), NO_SUPPLIED_KEY);
+
+        ArgumentCaptor<StartExecutionRequest> started =
+                ArgumentCaptor.forClass(StartExecutionRequest.class);
+        verify(sfn).startExecution(started.capture());
+        when(sfn.describeExecution(any(DescribeExecutionRequest.class))).thenReturn(
+                DescribeExecutionResponse.builder()
+                        .executionArn(EXECUTION_ARN)
+                        .status("SUCCEEDED")
+                        .startDate(MID_JULY)
+                        .input(started.getValue().input())
+                        .build());
+
+        ReportExecutionService.ExecutionCoordinates recovered =
+                service.describeExecution("some-run-name").coordinates();
+
+        assertThat(recovered.reportType()).isEqualTo("monthly");
+        assertThat(recovered.rangeStart()).isEqualTo(LocalDate.of(2022, 7, 1));
+        assertThat(recovered.rangeEnd()).isEqualTo(LocalDate.of(2022, 7, 31));
+    }
+
+    /**
+     * Asserts that an unknown execution is reported as an absent record.
+     */
+    @Test
+    @DisplayName("an unknown execution is reported as an absent record")
+    void anUnknownExecutionIsAbsent() {
+        when(sfn.describeExecution(any(DescribeExecutionRequest.class)))
+                .thenThrow(ExecutionDoesNotExistException.builder().message("gone").build());
+
+        assertThatExceptionOfType(NoSuchElementException.class)
+                .isThrownBy(() -> serviceAt(MID_JULY).describeExecution("some-run-name"))
+                .withMessageContaining("no report execution of that name is known");
+    }
+
+    // WHY : Assumptions: a run started OUTSIDE this surface is asserted to report its status with no
+    //       coordinates, rather than to fail. The nightly schedule starts the same state machine with an
+    //       input of its own shape, so refusing to describe it would make the operation unusable for
+    //       exactly the runs an operator most often asks about.
+    /**
+     * Asserts that an input this service did not compose yields a status without coordinates.
+     */
+    @Test
+    @DisplayName("an input this service did not compose yields no coordinates")
+    void anUnrecognisedInputYieldsNoCoordinates() {
+        when(sfn.describeExecution(any(DescribeExecutionRequest.class))).thenReturn(
+                DescribeExecutionResponse.builder()
+                        .executionArn(EXECUTION_ARN)
+                        .status("RUNNING")
+                        .startDate(MID_JULY)
+                        .input("{\"businessDate\":\"2022-07-18\"}")
+                        .build());
+
+        ReportExecutionService.ExecutionState state =
+                serviceAt(MID_JULY).describeExecution("some-run-name");
+
+        assertThat(state.status()).isEqualTo(ReportExecutionService.ExecutionStatus.RUNNING);
+        assertThat(state.coordinates()).isNull();
+    }
+
+    /**
+     * Asserts that a status the orchestration adds later is refused rather than mapped to a nearby one.
+     */
+    @Test
+    @DisplayName("an unpublished orchestration status is refused")
+    void anUnpublishedStatusIsRefused() {
+        when(sfn.describeExecution(any(DescribeExecutionRequest.class))).thenReturn(
+                DescribeExecutionResponse.builder()
+                        .executionArn(EXECUTION_ARN)
+                        .status("SOMETHING_NEW")
+                        .startDate(MID_JULY)
+                        .input(RECOGNISED_INPUT)
+                        .build());
+
+        assertThatExceptionOfType(IllegalStateException.class)
+                .isThrownBy(() -> serviceAt(MID_JULY).describeExecution("some-run-name"))
+                .withMessageContaining("status this service does not publish");
+    }
+
+    /**
+     * Builds a described execution carrying the input this service composes.
+     *
+     * @param status the orchestration status token
+     * @param stopped when the run stopped, or {@code null} while it runs
+     * @return the described execution; never {@code null}
+     */
+    private static DescribeExecutionResponse describedAs(String status, Instant stopped) {
+        DescribeExecutionResponse.Builder builder = DescribeExecutionResponse.builder()
+                .executionArn(EXECUTION_ARN)
+                .status(status)
+                .startDate(MID_JULY)
+                .input(RECOGNISED_INPUT);
+        return stopped == null ? builder.build() : builder.stopDate(stopped).build();
     }
 }

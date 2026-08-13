@@ -26,7 +26,14 @@ import com.carddemo.batch.service.DatasetGenerationService;
 import com.carddemo.common.codec.CopybookLayout;
 import com.carddemo.common.codec.FixedWidthCodec;
 import com.carddemo.common.codec.ZonedDecimalCodec;
+import java.io.File;
+import java.io.InputStream;
+import java.io.Reader;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -35,8 +42,11 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Stream;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -68,16 +78,23 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * Pins the pipeline join, the sort-order translation and the absent load-back of the combine step.
+ * Pins the join, the sort order, the absent load-back and the registered divergences of the combine
+ * step.
  *
  * <h2>Purpose</h2>
  *
- * <p>Purpose: this is the tier-two owner of three contracts of
+ * <p>Purpose: this is the tier-two owner of four contracts of
  * {@link CombineTransactionsJob}, state seven of the nightly chain. First, the PIPELINE JOIN: the
- * combined artefact carries the rows of both upstream producers, the posting pass and the interest
- * pass, each exactly once. Second, the SORT ORDER, together with the collation ruling that makes it
+ * combined artefact carries every committed row exactly once, whichever upstream pass wrote it -- the
+ * posting pass or the interest pass -- which is the SET the reference assembled by concatenating two
+ * datasets and this step reaches from one relation. Second, the SORT ORDER, together with the collation ruling that makes it
  * a correctness requirement rather than a preference. Third, the NO-LOAD-BACK ruling: the run writes
- * a generation and touches no row of the relation it read.</p>
+ * a generation and touches no row of the relation it read. Fourth, the REGISTERED DIVERGENCES of this
+ * state: the record layout measured against an image composed from the copybook rather than from the
+ * layout registry, the artefact's independence of the two named input generations, and the one
+ * description pad both row classes carry. Each of those three cites the entry it measures in
+ * {@code docs/architecture/cobol-to-service-traceability.md}, so a reader who finds a difference
+ * against a reference extract is told where it is accounted for.</p>
  *
  * <p>Assumptions: there is NO COBOL PROGRAM behind this state, so nothing here is a transcription of
  * one. {@code app/jcl/COMBTRAN.jcl:22} reads {@code //STEP05R EXEC PGM=SORT}, a sort-utility
@@ -277,13 +294,113 @@ class CombineTransactionsJobTest {
      * The card number every seeded row carries.
      *
      * <p>Assumptions: sixteen characters, the width {@code TRAN-CARD-NUM PIC X(16)} declares at line 15
-     * of {@code app/cpy/CVTRA05Y.cpy}. It is fabricated, fails the industry check digit, and identifies
-     * nothing.</p>
+     * of {@code app/cpy/CVTRA05Y.cpy}. It is taken verbatim from the repository's own published sample
+     * data rather than fabricated here: it appears six times in {@code app/data/ASCII/dailytran.txt}
+     * and once each in {@code app/data/ASCII/carddata.txt} and {@code app/data/ASCII/cardxref.txt},
+     * which are the Apache-2.0 sample datasets the baseline ships and which this project treats as
+     * reference-only input. Reusing that value is what lets a reader line this fixture up against the
+     * parity oracle's own goldens, where the same number is the subject of every posting scenario
+     * under {@code tests/golden/posting/}.</p>
+     *
+     * <p>Refactoring Rationale: this note used to say the value "fails the industry check digit". It
+     * does not -- its Luhn sum is 80, so it satisfies the check -- and the claim mattered because it
+     * was offered as the reason the value is safe to commit. The actual reason is its provenance: it is
+     * published sample data that identifies no cardholder and no account, and it is already committed
+     * to this repository in three places. A false safety rationale is worse than none, because the next
+     * author who needs a card number copies the reasoning rather than the value.</p>
      */
     private static final String CARD_NUM = "4859452612877065";
 
     /** The zero-based offset of the trailing pad, from line 18 of {@code app/cpy/CVTRA05Y.cpy}. */
     private static final int TRAILING_PAD_OFFSET = 330;
+
+    /**
+     * The character the reference leaves in a span no statement of either producer writes.
+     *
+     * <p>Assumptions: it is declared as a {@code char} rather than a {@code byte} because the helper
+     * that reports a span's distinct bytes returns characters, so a byte constant would have to be cast
+     * at every use and the cast would read as an encoding decision it is not.</p>
+     */
+    private static final char LOW_VALUE_CHARACTER = '\0';
+
+    /**
+     * The positive sign overpunch table, transcribed from {@code tests/helpers/record_codec.py:137}.
+     *
+     * <p>Assumptions: the table is transcribed from the PARITY ORACLE's own codec and never imported
+     * from the encoder under test, because it is one half of the independent expectation
+     * {@link #theStagedRecordMatchesAnIndependentlyComposedImage} composes. Importing the encoder's own
+     * table would make the expectation a restatement of the code it checks. The index is the low-order
+     * digit's value, so {@code '\u007b'} carries a positive zero and {@code 'I'} a positive nine.</p>
+     */
+    private static final String POSITIVE_OVERPUNCH = "{ABCDEFGHI";
+
+    /**
+     * The negative sign overpunch table, transcribed from {@code tests/helpers/record_codec.py:138}.
+     *
+     * <p>Assumptions: the negative table is what separates the two sign conventions, which section 5.2
+     * of {@code tests/README.md} records as a silent corruption when the wrong one is used, so the
+     * oracle carries both rather than deriving one from the other.</p>
+     */
+    private static final String NEGATIVE_OVERPUNCH = "}JKLMNOPQR";
+
+    /**
+     * The record layout transcribed field by field from {@code app/cpy/CVTRA05Y.cpy} lines 5 to 18.
+     *
+     * <p>Assumptions: this table is the INDEPENDENT half of the byte oracle and is deliberately NOT
+     * read from {@code CopybookLayout}. Every other case in this class decodes through the registered
+     * layout, which is the right way to assert a field's content and the wrong way to assert the
+     * layout itself: an expectation taken from the registry agrees with the encoder by construction and
+     * would keep agreeing if both drifted from the copybook together. The widths here are transcribed
+     * from the copybook's own picture clauses -- sixteen, two, four, ten, one hundred, nine plus two,
+     * nine, fifty, fifty, ten, sixteen, twenty-six, twenty-six and twenty -- which sum to the three
+     * hundred and fifty bytes line 2 of that file declares.</p>
+     *
+     * <p>Assumptions: the signed amount's width is ELEVEN and not thirteen. {@code TRAN-AMT
+     * PIC S9(09)V99} at {@code app/cpy/CVTRA05Y.cpy:10} declares nine integer and two decimal digit
+     * positions; the decimal point is implied and occupies no byte, and the sign is an overpunch on the
+     * low-order digit rather than a byte of its own, so eleven digit positions are eleven bytes.</p>
+     */
+    private static final List<CopybookField> TRANSCRIBED_LAYOUT = List.of(
+            new CopybookField("TRAN-ID", 16, FieldKind.TEXT),
+            new CopybookField("TRAN-TYPE-CD", 2, FieldKind.TEXT),
+            new CopybookField("TRAN-CAT-CD", 4, FieldKind.UNSIGNED_DIGITS),
+            new CopybookField("TRAN-SOURCE", 10, FieldKind.TEXT),
+            new CopybookField("TRAN-DESC", 100, FieldKind.TEXT),
+            new CopybookField("TRAN-AMT", 11, FieldKind.SIGNED_ZONED),
+            new CopybookField("TRAN-MERCHANT-ID", 9, FieldKind.UNSIGNED_DIGITS),
+            new CopybookField("TRAN-MERCHANT-NAME", 50, FieldKind.TEXT),
+            new CopybookField("TRAN-MERCHANT-CITY", 50, FieldKind.TEXT),
+            new CopybookField("TRAN-MERCHANT-ZIP", 10, FieldKind.TEXT),
+            new CopybookField("TRAN-CARD-NUM", 16, FieldKind.TEXT),
+            new CopybookField("TRAN-ORIG-TS", 26, FieldKind.TEXT),
+            new CopybookField("TRAN-PROC-TS", 26, FieldKind.TEXT),
+            new CopybookField("FILLER", 20, FieldKind.TEXT));
+
+    /**
+     * The whole public operation surface of the generation seam this job holds.
+     *
+     * <p>Assumptions: the list is an ALLOWLIST and not a description. It is asserted equal to the
+     * seam's measured surface so that a new operation cannot appear without a decision being taken
+     * here, which is what keeps {@code D-COMBINE-GENERATION-BYPASS} checkable: the divergence that
+     * entry registers holds because no operation on this collaborator can return a dataset's contents,
+     * and a silently added reader would falsify it with no assertion failing.</p>
+     */
+    private static final List<String> SEAM_OPERATIONS = List.of("allocateNewGeneration",
+            "resolveCurrentGeneration", "generationsToScratch", "datasetUri", "stageDataset",
+            "scratchGeneration");
+
+    /**
+     * The return types that would let an operation hand back a dataset's contents.
+     *
+     * <p>Assumptions: the set names BYTE AND CHARACTER SOURCES and deliberately excludes the value and
+     * coordinate types the seam does return -- {@code String} for a key or a location,
+     * {@code DatasetGeneration} for a coordinate, {@code Optional} and {@code List} of that coordinate,
+     * and {@code int} for a count. A definition wide enough to include {@code List} would flag
+     * {@code generationsToScratch}, which returns coordinates and no bytes, and the assertion would
+     * then be measuring the seam's shape rather than whether a payload can leave it.</p>
+     */
+    private static final List<Class<?>> PAYLOAD_RETURN_TYPES = List.of(byte[].class, InputStream.class,
+            Reader.class, ByteBuffer.class, Path.class, File.class, Stream.class);
 
     /**
      * The name given to the linguistic collation the discrimination case creates.
@@ -302,6 +419,16 @@ class CombineTransactionsJobTest {
      * somewhere the session cannot see and every reference to it fails as unknown.</p>
      */
     private static final String LINGUISTIC_COLLATION = "batch.carddemo_shifted_punctuation";
+
+    /**
+     * The bytewise collation the owning schema pins the ledger's ordering-critical columns to.
+     *
+     * <p>Assumptions: the name is the engine's own built-in and is held as a constant rather than
+     * written at each of the four use sites, because two of them compare it against a catalogue
+     * reading and two apply it in DDL -- and a typo in one of the four would either pass vacuously or
+     * leave the shared schema mis-collated for every case that follows.</p>
+     */
+    private static final String BYTE_WISE_COLLATION = "C";
 
     /** The engine the ordering ruling is measured against. */
     @Container
@@ -448,18 +575,30 @@ class CombineTransactionsJobTest {
     }
 
     /**
-     * The combined artefact carries both producers' rows, each exactly once.
+     * Every committed row reaches the artefact exactly once, whichever pass wrote it.
      *
-     * <p>Pins {@code app/jcl/COMBTRAN.jcl:23-24} and {@code :25-26}, the two concatenated inputs: the
-     * backup generation the posting pipeline produced, and the system-transaction generation the
-     * interest pipeline produced. Seeding only one class of row would let this case pass while
-     * proving nothing at all about the join, which is why both are seeded and both are counted.</p>
+     * <p>Pins the SET the combined generation carries. That set is what the reference assembled by
+     * concatenating {@code app/jcl/COMBTRAN.jcl:23-24} and {@code :25-26}, and it is what this step
+     * reaches another way. Both producer classes are seeded because a fixture of one class would let the
+     * case pass while proving nothing about the other, and each is required EXACTLY ONCE because one
+     * record per relation row is precisely what separates this step from a concatenation of the two
+     * staged objects -- which in the migrated model would emit the night's accrual rows twice, for the
+     * reason {@code D-COMBINE-BACKUP-SUPERSET} records in
+     * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+     *
+     * <p>Assumptions: this case does NOT show that either named input object contributed a byte, and it
+     * no longer claims to. The job reads neither payload -- {@code D-COMBINE-GENERATION-BYPASS}
+     * registers that difference and {@link #theCombinedImageIsIndependentOfTheTwoNamedGenerations}
+     * measures it. Refactoring Rationale: this case was named for both PRODUCERS' rows and read as a
+     * claim about both physical INPUTS, which it could not support: its two rows are seeded into one
+     * table and the run resolves the two generations without opening either. The name and the wording
+     * now state the property the fixture can actually establish.</p>
      *
      * @throws Exception if the framework's own execution path raises, which no case here provokes
      */
     @Test
-    @DisplayName("carry both the posted and the interest-generated rows, each exactly once")
-    void carryBothProducersRowsExactlyOnce() throws Exception {
+    @DisplayName("carry every committed row exactly once, whichever pass wrote it")
+    void carryEveryCommittedRowExactlyOnceWhicheverPassWroteIt() throws Exception {
         // WHY : Refactoring Rationale: the reference had to CONCATENATE TWO PHYSICAL DATASETS because
         //       its producers wrote to different files -- posting to the master, whose backup
         //       generation app/jcl/COMBTRAN.jcl:23-24 names, and accrual to the generation
@@ -467,14 +606,20 @@ class CombineTransactionsJobTest {
         //       relation: posting writes its rows at app/cbl/CBTRN02C.cbl:442 and accrual writes its
         //       generated rows at app/cbl/CBACT04C.cbl:468, and both land in ledger.transactions. The
         //       union the reference assembled physically is therefore already materialised, so this
-        //       case seeds both classes into one table and asserts the artefact carries both. No
-        //       concatenation step is invented, because inventing one would require materialising two
-        //       intermediate datasets that the migrated model does not produce.
+        //       case seeds both classes into one table and asserts the artefact carries both, once
+        //       each. No concatenation step is invented, because inventing one would require
+        //       materialising two intermediate datasets that the migrated model does not produce, and
+        //       because state six stages the whole relation AFTER state five has committed its accrual
+        //       rows -- so the two objects are no longer disjoint the way the reference's were, and
+        //       concatenating them would duplicate every interest row.
         // WHY : Assumptions: this state's correctness DEPENDS on states four and five having
         //       committed, which is exactly what the sequencing of the orchestration guarantees. Both
         //       reference inputs at app/jcl/COMBTRAN.jcl:23-26 are named at the CURRENT generation,
-        //       `(0)` rather than `(+1)`, so the reference reads what its predecessors just wrote and
-        //       so does this job.
+        //       `(0)` rather than `(+1)`, so the reference reads what its predecessors just wrote.
+        //       This job depends on the same sequencing for a different reason, and the difference is
+        //       stated rather than glossed: its predecessors' COMMITS are what put the rows in the
+        //       relation it reads, while their generations are only what its two preconditions require
+        //       to EXIST.
         seed(interestRow(INTEREST_HYPHEN_ID, NEGATIVE_AMOUNT),
                 postedRow(POSTED_SEED_ID, POSITIVE_AMOUNT));
 
@@ -524,6 +669,64 @@ class CombineTransactionsJobTest {
     }
 
     /**
+     * The staged image does not change when the two named input generations do.
+     *
+     * <p>Pins {@code D-COMBINE-GENERATION-BYPASS} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}. The reference SORTS TWO PHYSICAL
+     * DATASETS, named at {@code app/jcl/COMBTRAN.jcl:24} and {@code :26}, so every byte it emitted came
+     * out of one of them. This job resolves the same two families as a PRECONDITION and composes its
+     * output from the relation, so the coordinate each resolution answers with cannot reach the
+     * artefact. That is the difference the register entry records, and this case measures it two ways
+     * rather than arguing it: the same rows staged under two different pairs of input generation
+     * numbers produce byte-identical images, and the seam the job holds publishes no operation that
+     * could hand back a payload at all.</p>
+     *
+     * <p>Assumptions: the second launch uses a DIFFERENT run identifier. The durable step ledger skips
+     * a repeat of the same run and step -- the behaviour
+     * {@link #skipARepeatOfTheSameRunAndStepInsteadOfDuplicatingIt} owns -- so a second launch under the
+     * same identifier would record no work, stage nothing, and leave this case comparing one captured
+     * image against itself and passing for the wrong reason.</p>
+     *
+     * @throws Exception if the framework's own execution path raises, which no case here provokes
+     */
+    @Test
+    @DisplayName("stage an image independent of the two named input generations")
+    void theCombinedImageIsIndependentOfTheTwoNamedGenerations() throws Exception {
+        seed(interestRow(INTEREST_HYPHEN_ID, NEGATIVE_AMOUNT),
+                postedRow(POSTED_SEED_ID, POSITIVE_AMOUNT));
+
+        byte[] first = runAndCaptureStagedPayload();
+
+        // WHY : Assumptions: the two inputs are re-stubbed to answer DIFFERENT generation numbers, and
+        //       that is the only way this case can distinguish reading a payload from resolving a
+        //       coordinate. A second run whose inputs answered the same numbers would produce identical
+        //       bytes under either implementation, so the comparison would discriminate nothing.
+        when(this.generations.resolveCurrentGeneration(DatasetFamily.TRANSACT_BKUP))
+                .thenReturn(Optional.of(generation(DatasetFamily.TRANSACT_BKUP, 1)));
+        when(this.generations.resolveCurrentGeneration(DatasetFamily.SYSTRAN))
+                .thenReturn(Optional.of(generation(DatasetFamily.SYSTRAN, 2)));
+
+        JobExecution second = runCombine(RUN_ID + "-restated-inputs");
+
+        assertThat(second.getStatus()).isEqualTo(BatchStatus.COMPLETED);
+        assertThat(this.stagedPayloads).hasSize(2);
+        assertThat(this.stagedPayloads.get(1).body())
+                .withFailMessage("the staged image changed when only the INPUT generation numbers"
+                        + " changed, so a payload of one of them reached the output -- which"
+                        + " D-COMBINE-GENERATION-BYPASS records as not happening")
+                .isEqualTo(first);
+
+        // WHY : Assumptions: the seam's SURFACE is asserted alongside the two images, because the
+        //       images alone are a statement about this job's body and a later change could begin
+        //       reading a payload without any assertion here failing. A collaborator that publishes no
+        //       payload-returning operation cannot be read from at all, so the independence becomes a
+        //       property of the seam rather than of one implementation of one job.
+        assertThat(payloadReturningOperationsOf(DatasetGenerationService.class)).isEmpty();
+        assertThat(publicOperationNamesOf(DatasetGenerationService.class))
+                .containsExactlyInAnyOrderElementsOf(SEAM_OPERATIONS);
+    }
+
+    /**
      * The records are ordered ascending by the sixteen-byte identifier, compared byte by byte.
      *
      * <p>Pins {@code SORT FIELDS=(TRAN-ID,A)} at {@code app/jcl/COMBTRAN.jcl:30} over the symbol
@@ -538,19 +741,34 @@ class CombineTransactionsJobTest {
     void orderTheRecordsByteWiseAscendingByIdentifier() throws Exception {
         // WHY : Assumptions: the sort format at app/jcl/COMBTRAN.jcl:28 is `CH`, which is a BYTE-WISE
         //       character comparison, and the direction at :30 is ascending. The migrated read orders
-        //       a CHAR(16) column, and a column comparison resolves through the database collation --
-        //       so on an engine whose collation gives punctuation no primary weight the emitted order
-        //       would differ from the reference's for exactly the identifiers the accrual pass
-        //       produces, because app/cbl/CBACT04C.cbl:476-480 concatenates the ten-character token
-        //       into the key unchanged and one committed layout of that token carries hyphens.
+        //       a CHAR(16) column, and a column comparison resolves through the COLUMN's collation --
+        //       which is why the column is declared COLLATE "C", in the owning service's
+        //       V3__ledger_bytewise_collation.sql and mirrored in this module's harness script.
+        //       Without that declaration the column would inherit the database default, and on an
+        //       engine whose default gives punctuation no primary weight the emitted order would differ
+        //       from the reference's for exactly the identifiers the accrual pass produces, because
+        //       app/cbl/CBACT04C.cbl:476-480 concatenates the ten-character token into the key
+        //       unchanged and one committed layout of that token carries hyphens.
         // WHY : Alternatives Considered: asserting the emitted order against a second query ordered by
         //       the same column, which is the shorter case to write. Rejected because both readings
-        //       would resolve through the SAME collation -- the job walks the derived finder
-        //       TransactionRepository.findAllByOrderByTransactionIdAsc, which names no COLLATE clause,
-        //       over a column the harness script declares without one -- so the pair would agree under
-        //       every collation and the assertion would hold whatever the engine did. The expectation
-        //       is therefore computed from the bytes, which is the only form of the claim that can fail
-        //       when the engine's comparison stops matching the reference's.
+        //       resolve through the SAME collation -- the job walks the derived finder
+        //       TransactionRepository.findAllByOrderByTransactionIdAsc, which names no COLLATE clause
+        //       of its own and inherits the column's -- so the pair would agree under every collation
+        //       and the assertion would hold whatever the engine did. The expectation is therefore
+        //       computed from the bytes, which is the only form of the claim that can fail when the
+        //       engine's comparison stops matching the reference's.
+        // WHY : Refactoring Rationale: that paragraph also said the column was one "the harness script
+        //       declares without one", and it no longer is. The owning schema pins it and the harness
+        //       mirrors the pin, so this case now observes a column whose collation is declared rather
+        //       than inherited from whatever the container's initdb chose. What the pin does NOT do is
+        //       make this case redundant: it still measures the emitted order against bytes computed
+        //       here, and theEmittedOrderFollowsTheKeyColumnsPinnedCollation is what measures that the
+        //       pin is the thing deciding it.
+        // WHY : ⚠️ Assumptions: this case does not prove the DEPLOYED column carries that collation --
+        //       it proves the order this harness produced was byte order, which is a different claim,
+        //       and one that would also hold on a container whose default collation happened to agree.
+        //       theDeployedIdentifierColumnIsCollatedByteWise is the case that reads the catalogue and
+        //       binds the schema; the two are separate because either can fail without the other.
         seed(interestRow(INTEREST_HYPHEN_ID, NEGATIVE_AMOUNT),
                 interestRow(INTEREST_HYPHEN_ID_NEXT, POSITIVE_AMOUNT),
                 postedRow(POSTED_DIGITS_ID, POSITIVE_AMOUNT),
@@ -564,6 +782,91 @@ class CombineTransactionsJobTest {
         assertThat(emitted).containsExactlyElementsOf(byteWiseAscending(emitted));
         assertThat(emitted).containsExactly(POSTED_SEED_ID, POSTED_SEED_ID_NEXT,
                 INTEREST_HYPHEN_ID, INTEREST_HYPHEN_ID_NEXT, POSTED_DIGITS_ID);
+    }
+
+    /**
+     * The deployed identifier column is collated byte-wise, which is what binds the ordering contract.
+     *
+     * <p>⚠️ Purpose: this is the case the ordering assertions above cannot be. They read an order back
+     * and compare it with an order computed from bytes, so they establish what THIS schema produced;
+     * they cannot establish that the schema says so, and a container whose default collation happened to
+     * agree with byte order would satisfy them while a deployment whose default did not would fail in
+     * production with every test green. Reading the catalogue is the only assertion that fails when the
+     * declaration is missing rather than when an environment's default is unhelpful.
+     *
+     * <p>⚠️ Assumptions: the collation is read from {@code pg_attribute.attcollation} and NOT from
+     * {@code pg_indexes.indexdef}, and the distinction is not stylistic. Once a column carries a
+     * collation, an index over that column no longer prints a {@code COLLATE} clause of its own, because
+     * the index collation equals the column's -- measured directly against PostgreSQL 17.10. An
+     * assertion written against the index text would therefore fail on a correctly collated schema and
+     * pass on one where only the index had been collated, which is the opposite of what is wanted.
+     *
+     * <p>⚠️ Assumptions: the free-text {@code description} is asserted to be UNCOLLATED in the same
+     * case, because the property being pinned is that the obligation is SCOPED to the fixed-width
+     * identifier and code columns. A migration that collated the whole table would satisfy an assertion
+     * about {@code transaction_id} alone while changing the ordering of columns nothing asked to change.
+     *
+     * <p>⚠️ Refactoring Rationale: this half of the assertion named {@code card_num} and required it to
+     * be uncollated, on the ground that collating it would reorder the card-ordered access path. That
+     * premise was measured and does not hold, so the assertion is re-aimed rather than deleted. Every
+     * card number in {@code app/data/ASCII/carddata.txt} is sixteen digits with no other character, and
+     * ordering those fifty values under {@code "C"}, under {@code "default"} and under
+     * {@code "en-US-x-icu"} on PostgreSQL 17.10 returns the same sequence three times -- zero positions
+     * differ, because a linguistic collation has no case, accent or punctuation to weigh in a digit
+     * string. The reference agrees: {@code app/jcl/TRANREPT.jcl} sorts this field as
+     * {@code TRAN-CARD-NUM,263,16,ZD}, a zoned-decimal compare, which for a fixed-width all-digit field
+     * is the byte compare. So the column IS pinned, deliberately, for the reason the owning migration
+     * records -- {@code idx_transactions_card_num} replaced a physically re-sorted extract and the pin
+     * documents the byte order its golden image was produced under -- and the pin changes no order.
+     *
+     * <p>Assumptions: {@code description} carries the negative half instead, because it is a column
+     * where the collations genuinely diverge: ordering {@code ('a-1','A-1','a 1','b-1','B 1','_x','Zed')}
+     * under {@code "C"} and under {@code "en-US-x-icu"} returns different sequences. Asserting the
+     * absence of a pin THERE is what would actually fail if a migration collated the whole table, which
+     * is the failure this half exists to catch.
+     *
+     * <p>⚠️ Assumptions: this asserts the HARNESS schema, which is what this module can reach, and the
+     * harness declares the clause because the owning service's migration does. That is a two-place
+     * literal and the mitigation is stated at the harness declaration: this case is what makes a drift
+     * between them fail rather than pass quietly, in the direction that matters -- a harness that lost
+     * the clause fails here.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("the deployed identifier and card columns are collated byte-wise and free text is not")
+    void theDeployedIdentifierColumnIsCollatedByteWise() {
+        // WHY : Assumptions: the aliases are abbreviations rather than the words they stand for, because
+        //       COLLATION and SCHEMA are reserved words in this engine's grammar -- `collation.collname`
+        //       is refused with "syntax error at or near \".\"" rather than with anything naming the
+        //       cause, which cost one run to diagnose. Quoting them would also work and would leave the
+        //       same trap for the next reader.
+        String collationOfColumn = """
+                SELECT coalesce(coll.collname, 'default')
+                  FROM pg_attribute att
+                  JOIN pg_class rel ON rel.oid = att.attrelid
+                  JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+                  LEFT JOIN pg_collation coll ON coll.oid = att.attcollation
+                 WHERE nsp.nspname = 'ledger'
+                   AND rel.relname = 'transactions'
+                   AND att.attname = ?
+                """;
+
+        assertThat(this.jdbc.queryForObject(collationOfColumn, String.class, "transaction_id"))
+                .as("the ledger key must be collated \"C\", or ORDER BY on it is a linguistic order"
+                        + " and the combine step stops reproducing app/jcl/COMBTRAN.jcl:28-30")
+                .isEqualTo("C");
+        assertThat(this.jdbc.queryForObject(collationOfColumn, String.class, "card_num"))
+                .as("the card-number column is pinned too, because the index that replaced the"
+                        + " physically re-sorted extract reads it; measured order-identical under C,"
+                        + " default and en-US-x-icu for a sixteen-digit domain, so this is a guarantee"
+                        + " rather than a change of order")
+                .isEqualTo("C");
+        assertThat(this.jdbc.queryForObject(collationOfColumn, String.class, "description"))
+                .as("the obligation is scoped to the fixed-width identifier and code columns; a"
+                        + " migration that collated the whole table would reorder free text, where the"
+                        + " byte and linguistic orders genuinely differ")
+                .isEqualTo("default");
     }
 
     /**
@@ -587,19 +890,19 @@ class CombineTransactionsJobTest {
 
         // WHY : Assumptions: the collation is created here and not assumed to exist. The engine pinned
         //       by POSTGRES_IMAGE ships the provider that can express punctuation weighting but
-        //       registers no collation that uses it, so the case has to declare one; it is declared
-        //       non-deterministic because a shifted weighting can rank two distinct strings equal at
-        //       every level, which a deterministic collation is not permitted to do.
-        // WHY : Assumptions: the declaration is wrapped in a transaction so that it COMMITS. Line 217
-        //       of services/batch-service/src/test/resources/application-test.yml sets the pool's
-        //       auto-commit to false, so a statement issued outside a transaction is executed and then
-        //       discarded when the connection is returned -- and because this engine keeps schema
-        //       changes transactional, the collation would simply not exist by the time the next
-        //       statement looked for it.
-        this.transactionTemplate.executeWithoutResult(status ->
-                this.jdbc.execute("CREATE COLLATION IF NOT EXISTS " + LINGUISTIC_COLLATION
-                        + " (provider = icu, locale = 'en-u-ka-shifted', deterministic = false)"));
+        //       registers no collation that uses it, so the case has to declare one.
+        // WHY : Refactoring Rationale: the declaration was made inline here and is now made through
+        //       declareLinguisticCollation, because a second case needs the same collation and two
+        //       copies of one DDL statement in one class are two places for a locale tag to drift. That
+        //       helper carries the reasoning for the non-deterministic flag and for the surrounding
+        //       transaction, both of which applied to this call site verbatim.
+        declareLinguisticCollation();
 
+        // WHY : Assumptions: the byte-wise reading still states COLLATE "C" explicitly even though the
+        //       column now carries that collation, so this case keeps discriminating if the column's
+        //       declaration is ever lost. Relying on the column here would make the comparison below
+        //       "the default order versus a shifted order", which is a weaker claim than the one this
+        //       case exists to make.
         List<String> byteWise = this.jdbc.queryForList(
                 "SELECT transaction_id FROM ledger.transactions"
                         + " ORDER BY transaction_id COLLATE \"C\"", String.class);
@@ -614,6 +917,195 @@ class CombineTransactionsJobTest {
                         + " app/jcl/COMBTRAN.jcl:28 is no longer being checked; restore an identifier"
                         + " carrying a hyphen at a position where the two orders disagree")
                 .isNotEqualTo(byteWise);
+    }
+
+    /**
+     * The job's order is decided by the COLUMN's collation, and that collation is pinned byte-wise.
+     *
+     * <p>⚠️ Purpose: this is the case the two above could not be. They establish that a byte-wise
+     * order and a linguistic order differ, and that the job emits the byte-wise one -- but they
+     * establish it on an engine whose own initdb default collation happens to BE byte-wise, so the
+     * job's order was correct by accident of the container and production carried no explicit
+     * collation anywhere: not on the column, not in the derived finder
+     * {@code TransactionRepository.findAllByOrderByTransactionIdAsc}, and not in the harness that
+     * mirrors this schema. Deployed against a database created with a linguistic default -- the
+     * ordinary case, and the managed-service default -- the same code would have emitted a different
+     * order, and the disagreement with {@code SORT FIELDS=(TRAN-ID,A)} at
+     * {@code app/jcl/COMBTRAN.jcl:30} would have appeared in the produced dataset rather than in any
+     * test.</p>
+     *
+     * <p>Assumptions: the discriminating collation is applied to the COLUMN and the ACTUAL JOB is then
+     * run over it, rather than a second query being ordered with an explicit {@code COLLATE}. That is
+     * the only form of the experiment that observes what the job does: the finder carries no
+     * {@code COLLATE} clause and cannot, so whatever the column resolves to IS the job's order. Under
+     * the linguistic collation the emitted order must therefore DIFFER from the byte-wise one, and the
+     * fact that it does is what proves the pin is load-bearing rather than decorative.</p>
+     *
+     * <p>Assumptions: the pin is asserted in the CATALOGUE as well as through behaviour, because the
+     * two fail for different reasons. The catalogue assertion fails if a future migration or harness
+     * edit drops the collation, which is the regression this case exists to prevent; the behavioural
+     * halves fail if the identifiers stop discriminating or if the finder acquires an ordering of its
+     * own. Either alone would leave one of the two silent.</p>
+     *
+     * <p>⚠️ Assumptions: WHY the container's default happens to be byte-wise is worth naming, because it
+     * is the reason every ordering assertion in this class passed for a reason that does not hold in
+     * production. This module's pinned image runs musl, which implements no locale-specific collation, so
+     * even its {@code en_US.utf8} compares byte-wise; Amazon Aurora PostgreSQL runs glibc and does not.
+     * Reading the collation out of the catalogue is the only form of the claim that fails HERE when the
+     * pin is absent.</p>
+     *
+     * <p>⚠️ Assumptions: {@code infra/} is not the place to fix this, and nothing there is asserted,
+     * because there is nothing there to assert -- the AWS provider exposes no collation or locale
+     * argument for an {@code aws_rds_cluster} on the PostgreSQL engine, so the cluster default is not
+     * settable. The column is the only lever, which is why the pin lives in a migration.</p>
+     *
+     * <p>Measured: with the pin removed from the harness declaration this case is the only one of the
+     * twenty-five here that fails, and it fails on the catalogue assertion rather than on an ordering --
+     * which is the point, because on this engine the ordering would still have been byte-wise by
+     * default. That is the whole shape of the defect being closed, reproduced from the test side.</p>
+     *
+     * <p>Assumptions: the column is restored in a {@code finally}, so a failure inside the linguistic
+     * phase cannot leave the shared container's schema mis-collated for the cases that follow. The
+     * restoration is then re-asserted in the catalogue, because a restore that silently failed would
+     * hand every later case an engine ordering the key the wrong way.</p>
+     *
+     * <p>Trade-offs: repinning a primary-key column rewrites the table and rebuilds its index twice
+     * inside one case, which is the slowest case in this class. The alternative -- starting a second
+     * container with a linguistic initdb default -- was rejected because it doubles the container
+     * cost of the module and because a harness that differs from production in a comparison-affecting
+     * way makes every ordering assertion in this module a statement about the harness rather than
+     * about the schema.</p>
+     *
+     * @throws Exception if the framework's own execution path raises, which no case here provokes
+     */
+    @Test
+    @DisplayName("emit the byte-wise order because the key column is pinned to it, not by default")
+    void theEmittedOrderFollowsTheKeyColumnsPinnedCollation() throws Exception {
+        seed(interestRow(INTEREST_HYPHEN_ID, NEGATIVE_AMOUNT),
+                interestRow(INTEREST_HYPHEN_ID_NEXT, POSITIVE_AMOUNT),
+                postedRow(POSTED_DIGITS_ID, POSITIVE_AMOUNT),
+                postedRow(POSTED_SEED_ID_NEXT, POSITIVE_AMOUNT),
+                postedRow(POSTED_SEED_ID, NEGATIVE_AMOUNT));
+        declareLinguisticCollation();
+
+        assertThat(keyColumnCollation())
+                .as("the harness must mirror the owning schema's pin from"
+                        + " V3__ledger_bytewise_collation.sql")
+                .isEqualTo(BYTE_WISE_COLLATION);
+
+        List<String> underLinguisticCollation;
+        try {
+            repinKeyColumn(LINGUISTIC_COLLATION);
+            underLinguisticCollation = emittedIdentifiers(runAndCaptureStagedPayload());
+        } finally {
+            repinKeyColumn('"' + BYTE_WISE_COLLATION + '"');
+        }
+        List<String> underThePin = emittedIdentifiers(capturedPayloadOf("batch-run-combine-0003"));
+
+        assertThat(underThePin)
+                .as("with the column pinned the job emits the DFSORT CH order of COMBTRAN.jcl:30")
+                .containsExactlyElementsOf(byteWiseAscending(underThePin));
+        assertThat(underLinguisticCollation)
+                .withFailMessage("the job emitted the same order under a linguistic column collation"
+                        + " as under the byte-wise pin, so this case is no longer proving that the pin"
+                        + " decides the order; either the seeded identifiers stopped discriminating or"
+                        + " the ordered read acquired a collation of its own")
+                .isNotEqualTo(underThePin);
+        assertThat(keyColumnCollation())
+                .as("the column must be left pinned for every case that follows in this class")
+                .isEqualTo(BYTE_WISE_COLLATION);
+
+        // WHY : Assumptions: the database default is read alongside the column's collation and is
+        //       deliberately NOT asserted to be anything in particular. It is read so that a failure
+        //       message shows which default the column is being protected FROM -- byte-wise on this
+        //       image and linguistic on the deployed engine -- and it is left unasserted because the
+        //       whole point of the pin is that the default no longer decides the order.
+        assertThat(this.jdbc.queryForObject(
+                        "SELECT datcollate FROM pg_database WHERE datname = current_database()",
+                        String.class))
+                .as("the database default collation, recorded for diagnosis only")
+                .isNotBlank();
+    }
+
+    /**
+     * Declares the linguistic collation this class compares against, committing the declaration.
+     *
+     * <p>Assumptions: the collation is declared here rather than assumed to exist, and the declaration
+     * is idempotent, because two cases in this class need it and neither may depend on the other
+     * having run first. It is declared non-deterministic because a shifted punctuation weighting can
+     * rank two distinct strings equal at every level, which a deterministic collation may not do.</p>
+     *
+     * <p>Assumptions: the statement runs inside a transaction so that it COMMITS. The pool's
+     * auto-commit is off, so a statement issued outside a transaction is executed and then discarded
+     * when the connection is returned -- and because this engine keeps schema changes transactional,
+     * the collation would simply not exist by the time the next statement looked for it.</p>
+     */
+    private void declareLinguisticCollation() {
+        this.transactionTemplate.executeWithoutResult(status ->
+                this.jdbc.execute("CREATE COLLATION IF NOT EXISTS " + LINGUISTIC_COLLATION
+                        + " (provider = icu, locale = 'en-u-ka-shifted', deterministic = false)"));
+    }
+
+    /**
+     * Repins the transaction master's key column to a named collation, rebuilding its index.
+     *
+     * @param collation the collation to apply, already quoted or schema-qualified as the engine
+     *     requires, of type {@code String}; must not be {@code null}
+     */
+    private void repinKeyColumn(String collation) {
+        this.transactionTemplate.executeWithoutResult(status ->
+                this.jdbc.execute("ALTER TABLE ledger.transactions ALTER COLUMN transaction_id"
+                        + " SET DATA TYPE CHAR(16) COLLATE " + collation));
+    }
+
+    /**
+     * Reads the collation the engine records for the transaction master's key column.
+     *
+     * <p>Assumptions: the catalogue is read through {@code information_schema.columns}, whose
+     * {@code collation_name} is NULL for a column that merely inherits the database default and names
+     * the collation for a column that pins one. That distinction is the whole point of reading it: a
+     * query that only compared orderings could not tell a pinned column from a database whose default
+     * happens to agree with the pin, which is exactly the state this case was written to end.</p>
+     *
+     * @return the recorded collation name, or {@code null} when the column inherits the default
+     */
+    private String keyColumnCollation() {
+        return this.jdbc.queryForObject("select collation_name from information_schema.columns"
+                + " where table_schema = 'ledger' and table_name = 'transactions'"
+                + " and column_name = 'transaction_id'", String.class);
+    }
+
+    /**
+     * Runs the job under a distinct run identifier and returns the payload that run staged.
+     *
+     * <p>Assumptions: the payload is taken by POSITION from the accumulated list rather than by
+     * clearing it, because the durable step ledger keys on the run identifier and a repeat of one
+     * already recorded is skipped entirely -- so each phase of a two-phase case must launch under an
+     * identifier of its own and the earlier payloads necessarily remain in the list.</p>
+     *
+     * @param runId the orchestrator execution identifier to launch under, of type {@code String};
+     *     must not be {@code null} and must not repeat one already used in the same case
+     * @return the bytes that run handed to the staging seam, never {@code null}
+     * @throws Exception if the framework's own execution path raises
+     */
+    private byte[] capturedPayloadOf(String runId) throws Exception {
+        int before = this.stagedPayloads.size();
+        JobExecution execution = runCombine(runId);
+        assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
+        assertThat(this.stagedPayloads).hasSize(before + 1);
+        return this.stagedPayloads.get(before).body();
+    }
+
+    /**
+     * Reads the identifiers out of a staged payload in the order the payload carries them.
+     *
+     * @param payload one whole staged image, of type {@code byte[]}; must not be {@code null}
+     * @return the identifiers in emitted order, never {@code null}
+     */
+    private static List<String> emittedIdentifiers(byte[] payload) {
+        return splitIntoRecords(payload).stream()
+                .map(CombineTransactionsJobTest::identifierOf)
+                .toList();
     }
 
     /**
@@ -791,17 +1283,102 @@ class CombineTransactionsJobTest {
                 .containsEntry("TRAN-PROC-TS", SEEDED_PROCESSING_STAMP)
                 .doesNotContainKey("FILLER");
 
-        // WHY : Assumptions: the trailing pad is asserted PRESENT and never trimmed. Section 6.1 of
-        //       the fixture contract measures the reference's own pad on this record as low values,
-        //       because no statement in either producer touches it, while the shared encoder rebuilds a
-        //       dropped pad as blanks. The bytes therefore differ from the reference's on a span that
-        //       carries no data at all; what must hold, and what is asserted, is that the span EXISTS
-        //       and is uniform, because a reader of a fixed-length dataset positions the next record
-        //       by it.
+        // WHY : Assumptions: the trailing pad is asserted PRESENT, uniform and carrying the byte the
+        //       reference leaves there. Section 6.1 of the fixture contract measures that byte as a low
+        //       value on this record, in the posting expectation and in all three interest
+        //       expectations, because no statement in either producer touches the item.
+        // WHY : Refactoring Rationale: this assertion required a blank and its rationale recorded the
+        //       resulting difference from the reference as unavoidable, on the ground that the shared
+        //       encoder rebuilds a dropped pad as blanks. The record mapper now writes the measured
+        //       byte, so the difference is gone and the assertion states the reference's byte instead of
+        //       excusing another one. A staged generation is read positionally by whoever consumes it,
+        //       so twenty bytes per record is not a difference that can be argued as immaterial.
         assertThat(record).hasSize(TRANSACTION_RECORD_LENGTH);
         assertThat(spec.field("FILLER").start()).isEqualTo(TRAILING_PAD_OFFSET);
         assertThat(distinctBytes(record, TRAILING_PAD_OFFSET, TRANSACTION_RECORD_LENGTH))
-                .containsExactly(' ');
+                .containsExactly(LOW_VALUE_CHARACTER);
+    }
+
+    /**
+     * Each staged record equals an expected image composed from the copybook, byte for byte.
+     *
+     * <p>Pins the layout half of {@code D-COMBINE-NO-LOADBACK} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}, which claims the combined generation
+     * preserves the reference's record layout. Every other case in this class reads the emitted bytes
+     * through the registered layout, which is the right way to assert a field's CONTENT and the wrong
+     * way to assert the LAYOUT: an expectation taken from the registry agrees with the encoder by
+     * construction, and the pair could drift from {@code app/cpy/CVTRA05Y.cpy} together with every
+     * assertion still passing. This case composes the whole three-hundred-and-fifty-byte image from
+     * {@link #TRANSCRIBED_LAYOUT} -- widths transcribed from the copybook's picture clauses -- and the
+     * overpunch tables transcribed from the parity oracle's own codec, and compares it against what the
+     * step staged.</p>
+     *
+     * <p>Assumptions: both row classes are composed, because the amount is the one field whose rendering
+     * depends on the value's SIGN, and a positive-only expectation would agree with an encoder that had
+     * lost the negative half of the overpunch convention.</p>
+     *
+     * <p>Assumptions: the transcription is cross-checked against the registered layout AFTERWARDS, in a
+     * second block, and the ordering matters. The comparison above is the oracle; the cross-check below
+     * only reports WHERE a disagreement is, so a drift between the copybook and the registry names the
+     * field rather than showing three hundred and fifty characters of diff.</p>
+     *
+     * @throws Exception if the framework's own execution path raises, which no case here provokes
+     */
+    @Test
+    @DisplayName("match an image composed from the copybook rather than from the layout registry")
+    void theStagedRecordMatchesAnIndependentlyComposedImage() throws Exception {
+        assertThat(transcribedRecordLength()).isEqualTo(TRANSACTION_RECORD_LENGTH);
+
+        seed(interestRow(INTEREST_HYPHEN_ID, NEGATIVE_AMOUNT),
+                postedRow(POSTED_SEED_ID, POSITIVE_AMOUNT));
+
+        List<byte[]> records = splitIntoRecords(runAndCaptureStagedPayload());
+
+        // WHY : Assumptions: each expectation names its own producer's description pad -- the blank for
+        //       the posted row and the low value for the accrual row -- because the job selects the
+        //       registered layout per row from the source and description the reference itself writes,
+        //       so the two rows of this one stream are padded differently on purpose. Composing both
+        //       with one pad would agree with an encoder that had lost the distinction.
+        String expectedPosted = composeRecordImage(transcribedValuesFor(POSTED_SEED_ID,
+                POSTED_CATEGORY_CD, POSTED_SOURCE, POSTED_DESCRIPTION, POSITIVE_AMOUNT), ' ');
+        String expectedInterest = composeRecordImage(transcribedValuesFor(INTEREST_HYPHEN_ID,
+                INTEREST_CATEGORY_CD, INTEREST_SOURCE, INTEREST_DESCRIPTION, NEGATIVE_AMOUNT),
+                LOW_VALUE_CHARACTER);
+
+        // WHY : Assumptions: the comparison is over the WHOLE record and not field by field, because a
+        //       field-by-field comparison would read each span at the offset the reader chose and would
+        //       therefore agree with an image whose fields were all placed one byte along. Comparing one
+        //       contiguous string is what makes a misplaced field fail.
+        assertThat(new String(recordFor(records, POSTED_SEED_ID), StandardCharsets.US_ASCII))
+                .isEqualTo(expectedPosted);
+        assertThat(new String(recordFor(records, INTEREST_HYPHEN_ID), StandardCharsets.US_ASCII))
+                .isEqualTo(expectedInterest);
+
+        // WHY : Assumptions: the two amount spans are additionally asserted as LITERALS read out of the
+        //       staged records, at the offset the transcription puts them at. The whole-record
+        //       comparisons above already imply these, so the value here is diagnostic and it is worth
+        //       the duplication: a sign-convention regression is the failure section 5.2 of
+        //       tests/README.md records as silent, and a case that reported it as three hundred and
+        //       fifty characters of unequal string would bury which byte moved. Positive seven renders
+        //       as `G` and negative four as `M`, so the two literals also state the convention at a
+        //       place a reader can check against the tables above.
+        int amountOffset = transcribedOffsetOf("TRAN-AMT");
+        int amountWidth = transcribedWidthOf("TRAN-AMT");
+        assertThat(new String(recordFor(records, POSTED_SEED_ID), amountOffset, amountWidth,
+                StandardCharsets.US_ASCII)).isEqualTo("0000005047G");
+        assertThat(new String(recordFor(records, INTEREST_HYPHEN_ID), amountOffset, amountWidth,
+                StandardCharsets.US_ASCII)).isEqualTo("0000000123M");
+
+        int offset = 0;
+        for (CopybookField field : TRANSCRIBED_LAYOUT) {
+            CopybookLayout.FieldSpec registered = CopybookLayout.layout("TRAN").field(field.name());
+            assertThat(registered.start()).as("registered offset of %s", field.name())
+                    .isEqualTo(offset);
+            assertThat(registered.length()).as("registered width of %s", field.name())
+                    .isEqualTo(field.width());
+            offset += field.width();
+        }
+        assertThat(offset).isEqualTo(TRANSACTION_RECORD_LENGTH);
     }
 
     /**
@@ -841,51 +1418,76 @@ class CombineTransactionsJobTest {
     }
 
     /**
-     * Both producers' descriptions carry the same pad, and the layout name changes no byte of it.
+     * Each producer's description pad is emitted as that producer wrote it, both classes side by side.
      *
      * <p>Pins section 6.3 of the fixture contract, which measures the reference's description pad as
      * job-dependent: the accrual pass leaves the tail of the field at low values because it assembles
-     * the text with a string verb, while the posting pass blank-pads it because it moves an
-     * already-padded field. This case records what the migrated encoder actually emits for the two row
-     * classes standing side by side in one stream, which is a thing only this artefact can show.</p>
+     * the text with {@code STRING} at {@code app/cbl/CBACT04C.cbl:485-489}, while the posting pass
+     * blank-pads it because it moves an already-padded field at {@code app/cbl/CBTRN02C.cbl:429}. This
+     * artefact is the only one in the chain that holds both classes at once -- the reference builds it
+     * by concatenating {@code TRANSACT.BKUP(0)} and {@code SYSTRAN(0)} at
+     * {@code app/jcl/COMBTRAN.jcl:24} and {@code :26} -- so it is the only place the two pads can be
+     * compared against each other.</p>
+     *
+     * <p>Refactoring Rationale: this case previously asserted that both classes carried the SAME pad and
+     * recorded the reference's low-value pad as unreproducible, on the ground that a relational row
+     * remembers nothing about how its writer padded a text field. That is true of the pad bytes and
+     * false of the producer: the accrual pass writes an attribution the reference itself uses to tell
+     * its two writers apart -- the {@code System} source at {@code app/cbl/CBACT04C.cbl:484} and the
+     * {@code Int. for a/c } prefix at {@code :485} -- so the job selects the layout per row from those
+     * two fields and the encoder pads from the layout. The case now asserts the two pads exactly. What
+     * was called faking is a schema-carried discriminator: the source is a ten-character closed-domain
+     * label, and requiring the description prefix ALSO means a row must match both marks to be
+     * misclassified.</p>
+     *
+     * <p>Refactoring Rationale: the difference is therefore NOT a registered divergence. It was carried
+     * for a time as {@code D-COMBINE-DESC-PAD} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}, on the reading that a relational row
+     * cannot remember how its writer padded a text field; the per-row layout selection this case
+     * measures removed the premise, so the entry is withdrawn there rather than left asserting a
+     * divergence the emitted bytes no longer show.</p>
      *
      * @throws Exception if the framework's own execution path raises, which no case here provokes
      */
     @Test
-    @DisplayName("emit one description pad for both row classes, whichever layout is named")
-    void emitOneDescriptionPadForBothRowClasses() throws Exception {
-        // WHY : Assumptions: the two registered layouts differ in ONE COMPARISON FLAG and in nothing
-        //       that reaches the emitted bytes. Section 8.1 of the fixture contract records the
-        //       derivation, and CopybookLayout.java lines 1843-1844 declare it as
-        //       TRAN_LAYOUT.withFieldFlags("INTTRAN", "TRAN-ORIG-TS", true, false) -- a flip of the
-        //       normalise marker on one field -- so every offset, width and storage kind is shared and
-        //       the description is a plain text field under both, which the encoder blank-pads either
-        //       way. The measured consequence is asserted below: naming the derived layout produces a
-        //       byte-identical image, so the reference's job-dependent pad is NOT expressible by
-        //       choosing a layout.
-        // WHY : Trade-offs: the reference's low-value pad, which section 6.3 of the fixture contract
-        //       measures as exactly 76 NUL bytes behind the accrual description, is therefore not
-        //       reproduced, and the difference is recorded rather than faked. It cannot be recovered
-        //       from a relational row at all: the description is stored as text with no memory of how
-        //       its writer padded it, and the job encodes every row it reads through one call that
-        //       names no layout. Faking the distinction -- by guessing the producer from the
-        //       description's leading text -- would make the artefact depend on a literal rather than
-        //       on the schema, and would misclassify any row whose text happened to match.
+    @DisplayName("emit each producer's own description pad, both row classes in one stream")
+    void emitEachProducersOwnDescriptionPad() throws Exception {
         seed(interestRow(INTEREST_HYPHEN_ID, NEGATIVE_AMOUNT),
                 postedRow(POSTED_SEED_ID, POSITIVE_AMOUNT));
 
         List<byte[]> records = splitIntoRecords(runAndCaptureStagedPayload());
         CopybookLayout.FieldSpec description = CopybookLayout.layout("TRAN").field("TRAN-DESC");
-        int padStart = description.start() + INTEREST_DESCRIPTION.length();
+        int accrualPadStart = description.start() + INTEREST_DESCRIPTION.length();
+        int postedPadStart = description.start() + POSTED_DESCRIPTION.length();
         int padEnd = description.start() + description.length();
 
         byte[] interestRecord = recordFor(records, INTEREST_HYPHEN_ID);
         byte[] postedRecord = recordFor(records, POSTED_SEED_ID);
-        assertThat(fieldOf(interestRecord, "TRAN-DESC"))
-                .isEqualTo(blankPadded(INTEREST_DESCRIPTION, description.length()));
-        assertThat(distinctBytes(interestRecord, padStart, padEnd)).containsExactly(' ');
-        assertThat(distinctBytes(postedRecord,
-                description.start() + POSTED_DESCRIPTION.length(), padEnd)).containsExactly(' ');
+
+        // WHY : Assumptions: the text is asserted before the pad, and each is asserted for both rows,
+        //       because the two claims fail differently. A wrong text means the row was assembled
+        //       wrongly; a wrong pad means the row was attributed to the wrong producer, and only the
+        //       pair together distinguishes those two.
+        assertThat(fieldOf(interestRecord, "TRAN-DESC")).startsWith(INTEREST_DESCRIPTION);
+        assertThat(fieldOf(postedRecord, "TRAN-DESC")).startsWith(POSTED_DESCRIPTION);
+        assertThat(distinctBytes(interestRecord, accrualPadStart, padEnd))
+                .as("the accrual pass leaves exactly the reference's low values behind its text")
+                .containsExactly(LOW_VALUE_CHARACTER);
+        assertThat(distinctBytes(postedRecord, postedPadStart, padEnd))
+                .as("the posting pass blank-pads its own description")
+                .containsExactly(' ');
+        assertThat(padEnd - accrualPadStart)
+                .as("section 6.3 measures the accrual tail as exactly seventy-six bytes")
+                .isEqualTo(76);
+
+        // WHY : Assumptions: the trailing pad of BOTH rows is asserted low-valued in the same case,
+        //       because the two pad rules are independent and stating them together is what shows a
+        //       reader that only ONE of the two differs by producer. A change that made the trailing pad
+        //       follow the description pad would pass every other assertion here.
+        assertThat(distinctBytes(interestRecord, TRAILING_PAD_OFFSET, TRANSACTION_RECORD_LENGTH))
+                .containsExactly(LOW_VALUE_CHARACTER);
+        assertThat(distinctBytes(postedRecord, TRAILING_PAD_OFFSET, TRANSACTION_RECORD_LENGTH))
+                .containsExactly(LOW_VALUE_CHARACTER);
 
         assertThat(CopybookLayout.layout("INTTRAN").field("TRAN-ORIG-TS").normalizeTs()).isTrue();
         assertThat(CopybookLayout.layout("TRAN").field("TRAN-ORIG-TS").normalizeTs()).isFalse();
@@ -1510,6 +2112,257 @@ class CombineTransactionsJobTest {
     }
 
     /**
+     * Composes one whole record image from the transcribed layout and a value per field.
+     *
+     * <p>Assumptions: the composition walks {@link #TRANSCRIBED_LAYOUT} in declaration order and
+     * concatenates each field's rendered span, so the resulting offsets are a CONSEQUENCE of the
+     * transcribed widths rather than a copy of any offset table. That is what makes the result usable as
+     * an oracle: if the encoder placed a field one byte off, the comparison fails on content at that
+     * field and every field behind it, which is exactly the symptom a fixed-width reader would see.</p>
+     *
+     * <p>Assumptions: the two PAD REGIONS are rendered with the byte the WRITING PRODUCER leaves in
+     * them, and both bytes are transcribed here from the reference rather than read from the encoder.
+     * The trailing {@code FILLER} is the low value under both producers, because neither writes it: the
+     * posting pass at {@code app/cbl/CBTRN02C.cbl:429} onward moves named fields only, and the accrual
+     * pass at {@code app/cbl/CBACT04C.cbl:484-489} does the same, which is what the twenty low values
+     * behind every record of {@code tests/golden/posting/}{@code *}{@code /tranfile.expected} measure.
+     * The description tail is the caller's, because it is the one span the two producers differ on: the
+     * posting pass blank-pads it by moving an already blank-padded feed field, while the accrual pass
+     * leaves it at low values because {@code STRING} writes only the characters it was handed.</p>
+     *
+     * @param values the value each field carries, of type {@code Map<String, Object>}, keyed by the
+     *     copybook field name; a field absent from the map renders as an empty text value, which is how
+     *     the trailing pad is expressed; must not be {@code null}
+     * @param descriptionPad the char the writing producer leaves behind the description text, being the
+     *     blank for a posted row and {@link #LOW_VALUE_CHARACTER} for an accrual row
+     * @return the whole record as the characters the image is expected to hold, never {@code null}
+     * @throws IllegalArgumentException if a value is wider than the field's declared width, because a
+     *     truncating oracle would silently agree with a truncating encoder
+     */
+    private static String composeRecordImage(Map<String, Object> values, char descriptionPad) {
+        StringBuilder image = new StringBuilder();
+        for (CopybookField field : TRANSCRIBED_LAYOUT) {
+            image.append(switch (field.kind()) {
+                case TEXT -> leftJustified(
+                        (String) values.getOrDefault(field.name(), ""), field.width(),
+                        transcribedPadFor(field.name(), descriptionPad));
+                case UNSIGNED_DIGITS -> zeroFilled(
+                        String.valueOf(values.get(field.name())), field.width());
+                case SIGNED_ZONED -> zonedOverpunched(
+                        (BigDecimal) values.get(field.name()), field.width());
+            });
+        }
+        return image.toString();
+    }
+
+    /**
+     * Builds the per-field values one seeded row is expected to render into.
+     *
+     * <p>Assumptions: the values restate what {@link #row} committed rather than reading the row back,
+     * so the expectation is written from the fixture's inputs and not from anything the system under
+     * test produced or stored. The two timestamp values are the RENDERED twenty-six-character forms
+     * because the copybook declares those spans as text.</p>
+     *
+     * @param transactionId the sixteen-character identifier the row is keyed on, of type
+     *     {@code String}; must not be {@code null}
+     * @param categoryCd the four-digit category code, of type {@code String}; must not be {@code null}
+     * @param source the source label, of type {@code String}; must not be {@code null}
+     * @param description the description text, of type {@code String}; must not be {@code null}
+     * @param amount the monetary value, of type {@code BigDecimal} at scale two, which may be negative;
+     *     must not be {@code null}
+     * @return the value map {@link #composeRecordImage} renders, never {@code null}
+     */
+    private static Map<String, Object> transcribedValuesFor(String transactionId, String categoryCd,
+            String source, String description, BigDecimal amount) {
+        Map<String, Object> values = new LinkedHashMap<>();
+        values.put("TRAN-ID", transactionId);
+        values.put("TRAN-TYPE-CD", TYPE_CD);
+        values.put("TRAN-CAT-CD", categoryCd);
+        values.put("TRAN-SOURCE", source);
+        values.put("TRAN-DESC", description);
+        values.put("TRAN-AMT", amount);
+        values.put("TRAN-MERCHANT-ID", String.valueOf(MERCHANT_ID));
+        values.put("TRAN-MERCHANT-NAME", MERCHANT_NAME);
+        values.put("TRAN-MERCHANT-CITY", MERCHANT_CITY);
+        values.put("TRAN-MERCHANT-ZIP", MERCHANT_ZIP);
+        values.put("TRAN-CARD-NUM", CARD_NUM);
+        values.put("TRAN-ORIG-TS", SEEDED_ORIGINATION_STAMP);
+        values.put("TRAN-PROC-TS", SEEDED_PROCESSING_STAMP);
+        return values;
+    }
+
+    /**
+     * Renders a text value into its declared span: left-justified, padded on the right with one byte.
+     *
+     * @param value the value the field carries, of type {@code String}; must not be {@code null}
+     * @param width the field's transcribed width in bytes, of type {@code int}
+     * @param pad the char the span is filled with behind the value, which is the blank for every field
+     *     except the two the reference's producers leave otherwise
+     * @return the rendered span, exactly {@code width} characters, never {@code null}
+     * @throws IllegalArgumentException if the value is wider than the span
+     */
+    private static String leftJustified(String value, int width, char pad) {
+        if (value.length() > width) {
+            throw new IllegalArgumentException("the oracle was given '" + value + "', which is "
+                    + value.length() + " characters and does not fit the " + width
+                    + "-byte span app/cpy/CVTRA05Y.cpy declares");
+        }
+        return value + String.valueOf(pad).repeat(width - value.length());
+    }
+
+    /**
+     * Names the byte the reference leaves behind one transcribed text field's content.
+     *
+     * <p>Assumptions: only two of the fourteen transcribed fields have a pad of their own. The trailing
+     * {@code FILLER} is the low value under both producers because neither writes it, and the
+     * description carries whichever pad the writing producer leaves. Every other text field is filled by
+     * a {@code MOVE} into an alphanumeric receiver, which blank-pads over the whole declared width.</p>
+     *
+     * <p>Alternatives Considered: asking the registered layout which byte applies. Rejected for the same
+     * reason {@link #TRANSCRIBED_LAYOUT} is transcribed rather than read: an expectation taken from the
+     * encoder's own tables agrees with it by construction, and would keep agreeing if the encoder and
+     * the reference drifted apart together.</p>
+     *
+     * @param fieldName the copybook field name, of type {@code String}; must not be {@code null}
+     * @param descriptionPad the char the writing producer leaves behind the description text
+     * @return the char this field's declared span is padded with
+     */
+    private static char transcribedPadFor(String fieldName, char descriptionPad) {
+        return switch (fieldName) {
+            case "FILLER" -> LOW_VALUE_CHARACTER;
+            case "TRAN-DESC" -> descriptionPad;
+            default -> ' ';
+        };
+    }
+
+    /**
+     * Renders unsigned digits into their declared span: right-justified, filled on the left with zeroes.
+     *
+     * @param digits the digits the field carries, of type {@code String}; must not be {@code null}
+     * @param width the field's transcribed width in bytes, of type {@code int}
+     * @return the rendered span, exactly {@code width} characters, never {@code null}
+     * @throws IllegalArgumentException if more digits are given than the span holds
+     */
+    private static String zeroFilled(String digits, int width) {
+        if (digits.length() > width) {
+            throw new IllegalArgumentException("the oracle was given " + digits.length()
+                    + " digits for a " + width + "-byte unsigned span");
+        }
+        return "0".repeat(width - digits.length()) + digits;
+    }
+
+    /**
+     * Renders a signed value into a zoned span whose low-order byte carries the sign as an overpunch.
+     *
+     * <p>Assumptions: the digits are taken from the value's UNSCALED form at scale two, which is the
+     * two-implied-decimal representation {@code S9(09)V99} declares, and the decimal point is written
+     * nowhere because the picture clause implies it. The sign then replaces the low-order DIGIT rather
+     * than being appended, which is the whole content of the overpunch convention: eleven digit
+     * positions carry eleven digits and a sign in eleven bytes.</p>
+     *
+     * @param value the value the field carries, of type {@code BigDecimal}; must not be {@code null}
+     * @param width the field's transcribed width in bytes, of type {@code int}
+     * @return the rendered span, exactly {@code width} characters, never {@code null}
+     * @throws IllegalArgumentException if the value needs more digit positions than the span holds
+     */
+    private static String zonedOverpunched(BigDecimal value, int width) {
+        String filled = zeroFilled(
+                value.abs().setScale(2, RoundingMode.UNNECESSARY).unscaledValue().toString(),
+                width);
+        int lowOrderDigit = filled.charAt(width - 1) - '0';
+        String table = value.signum() < 0 ? NEGATIVE_OVERPUNCH : POSITIVE_OVERPUNCH;
+        return filled.substring(0, width - 1) + table.charAt(lowOrderDigit);
+    }
+
+    /**
+     * Sums the transcribed widths, so the transcription's own arithmetic is asserted rather than assumed.
+     *
+     * @return the record length the transcribed fields add up to, of type {@code int}
+     */
+    private static int transcribedRecordLength() {
+        return TRANSCRIBED_LAYOUT.stream().mapToInt(CopybookField::width).sum();
+    }
+
+    /**
+     * Computes one transcribed field's zero-based offset by summing the widths declared ahead of it.
+     *
+     * <p>Assumptions: the offset is DERIVED from the transcribed widths and never read from the
+     * registered layout, for the same reason the expected image is composed rather than decoded: an
+     * offset taken from the registry would place the span wherever the encoder placed it.</p>
+     *
+     * @param fieldName the copybook field name to locate, of type {@code String}; must not be
+     *     {@code null}
+     * @return the field's zero-based offset within the record, of type {@code int}
+     * @throws IllegalArgumentException if the transcription declares no such field
+     */
+    private static int transcribedOffsetOf(String fieldName) {
+        int offset = 0;
+        for (CopybookField field : TRANSCRIBED_LAYOUT) {
+            if (field.name().equals(fieldName)) {
+                return offset;
+            }
+            offset += field.width();
+        }
+        throw new IllegalArgumentException(
+                "app/cpy/CVTRA05Y.cpy declares no field named '" + fieldName + "'");
+    }
+
+    /**
+     * Reads one transcribed field's declared width.
+     *
+     * @param fieldName the copybook field name to measure, of type {@code String}; must not be
+     *     {@code null}
+     * @return the field's width in bytes, of type {@code int}
+     * @throws IllegalArgumentException if the transcription declares no such field
+     */
+    private static int transcribedWidthOf(String fieldName) {
+        return TRANSCRIBED_LAYOUT.stream()
+                .filter(field -> field.name().equals(fieldName))
+                .mapToInt(CopybookField::width)
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "app/cpy/CVTRA05Y.cpy declares no field named '" + fieldName + "'"));
+    }
+
+    /**
+     * Lists the public instance operations a type declares.
+     *
+     * <p>Assumptions: only DECLARED methods are read, so nothing inherited from {@code Object} is
+     * counted, and synthetic methods the compiler generates are skipped because a bridge method would
+     * otherwise appear as a second operation under the same name.</p>
+     *
+     * @param seam the collaborator type to measure, of type {@code Class<?>}; must not be {@code null}
+     * @return the operation names, each once, never {@code null}
+     */
+    private static List<String> publicOperationNamesOf(Class<?> seam) {
+        return Arrays.stream(seam.getDeclaredMethods())
+                .filter(method -> Modifier.isPublic(method.getModifiers()))
+                .filter(method -> !method.isSynthetic())
+                .map(Method::getName)
+                .distinct()
+                .sorted()
+                .toList();
+    }
+
+    /**
+     * Lists the public operations of a type whose return type could carry a dataset's contents.
+     *
+     * @param seam the collaborator type to measure, of type {@code Class<?>}; must not be {@code null}
+     * @return the names of any operations returning a byte or character source, never {@code null}
+     */
+    private static List<String> payloadReturningOperationsOf(Class<?> seam) {
+        return Arrays.stream(seam.getDeclaredMethods())
+                .filter(method -> Modifier.isPublic(method.getModifiers()))
+                .filter(method -> !method.isSynthetic())
+                .filter(method -> PAYLOAD_RETURN_TYPES.stream()
+                        .anyMatch(payload -> payload.isAssignableFrom(method.getReturnType())))
+                .map(Method::getName)
+                .distinct()
+                .sorted()
+                .toList();
+    }
+
+    /**
      * Renders every committed row as one comparable string, in byte-wise identifier order.
      *
      * <p>Assumptions: the ordering clause pins the byte-wise collation explicitly rather than
@@ -1560,6 +2413,38 @@ class CombineTransactionsJobTest {
      *     {@code null}
      */
     private record StagedPayload(DatasetGeneration generation, String objectName, byte[] body) {
+    }
+
+    /**
+     * One field of the independently transcribed record layout.
+     *
+     * @param name the copybook field name, as {@code app/cpy/CVTRA05Y.cpy} spells it, never
+     *     {@code null}
+     * @param width the field's declared width in bytes, taken from its picture clause rather than from
+     *     the registered layout
+     * @param kind how the field's value occupies those bytes, never {@code null}
+     */
+    private record CopybookField(String name, int width, FieldKind kind) {
+    }
+
+    /**
+     * The three ways a field of the transaction record occupies its declared bytes.
+     *
+     * <p>Assumptions: three kinds are enough for this record because its fourteen fields use only
+     * three picture forms -- {@code X(n)}, {@code 9(n)} and {@code S9(n)V99}. A packed field would need
+     * a fourth, and this record declares none; {@code app/cpy/CVEXPORT.cpy} is where packed fields
+     * appear and {@code ExportRecordMapperTest} owns them.</p>
+     */
+    private enum FieldKind {
+
+        /** A {@code PIC X(n)} field: the value left-justified and padded on the right with blanks. */
+        TEXT,
+
+        /** A {@code PIC 9(n)} field: the digits right-justified and filled on the left with zeroes. */
+        UNSIGNED_DIGITS,
+
+        /** A {@code PIC S9(n)V99} field: zoned digits whose low-order byte carries the sign. */
+        SIGNED_ZONED
     }
 
     /**

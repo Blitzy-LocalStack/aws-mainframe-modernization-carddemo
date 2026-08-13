@@ -232,15 +232,29 @@ exactly, in fixed point, with no residue to round. `:467` accumulates it into
 
 ### 3.2 Account balances after the run
 
-| Account | Opening `ACCT-CURR-BAL` | Expected | Encoding | Why |
-|---|---|---|---|---|
-| `00000000001` | `194.00` | **`206.50`** | `00000002065{` | `194.00 + 12.50` -- the control break to account 2 fired `1050-UPDATE-ACCOUNT`, so `:356` rewrote this record |
-| `00000000002` | `158.00` | **`158.00`** | `00000001580{` | unchanged -- no control break follows the final account, so it is never written back (section 6.2) |
+Two values are stated per account and they are **not the same claim**. The *reference golden*
+column is the byte content of `acctdat.expected` under
+`tests/golden/interest/default_fallback/`, which is what the immutable COBOL produces. The
+*migrated expectation* column is what the Java produces. They agree on the non-final account
+and diverge on the final one, for the reason section 6.6 establishes:
+
+| Account | Opening `ACCT-CURR-BAL` | Reference golden | Encoding in the golden | Migrated expectation | Why the two columns read as they do |
+|---|---|---|---|---|---|
+| `00000000001` | `194.00` | **`206.50`** | `00000002065{` | **`206.50`**, identical | `194.00 + 12.50` -- the control break to account 2 fired `1050-UPDATE-ACCOUNT`, so `:356` rewrote this record. Both implementations flush this account |
+| `00000000002` | `158.00` | **`158.00`** | `00000001580{` | **`170.50`**, different | the reference never writes the final account back (section 6.6), so its golden carries the opening balance unchanged. The migrated rule flushes every account: `158.00 + 12.50 = 170.50`. Registered divergence **D-3** |
+
+Assumptions: the `158.00` in the reference column is a **consequence of the baseline defect**
+and not a target result. The migrated code is asserted against `170.50` --
+`InterestCalculationServiceTest`, case *flush every account including the final one, the
+documented D-3 divergence*. Neither `app/**` nor `tests/golden/**` is edited to reconcile the
+two columns; the divergence is registered in
+`docs/architecture/cobol-to-service-traceability.md` under D-3.
 
 Both rows also keep `ACCT-CURR-CYC-CREDIT` and `ACCT-CURR-CYC-DEBIT` at
 `00000000000{`: account 1 because `:353-354` zeroed them, account 2 because they were
-already zero on input and were never rewritten. The two reasons differ even though the
-bytes agree.
+already zero on input and were never rewritten in the reference. The two reasons differ even
+though the bytes agree -- and under the migrated rule account 2 reaches the same bytes by the
+first reason rather than the second, because it is flushed as well.
 
 ### 3.3 Generated transactions
 
@@ -599,10 +613,13 @@ module's own `InterestCalculationServiceTest` passes.
 Alternatives Considered: the compact token `2022071800` that `app/jcl/INTCALC.jcl:22`
 passes as `PARM='2022071800'`. Not used here, because the token is **opaque** -- the
 program neither parses nor validates it -- so the passthrough is only genuinely
-exercised if the domain supplies both shapes, and `../zero_balance` is the sibling
-carrying the compact form. Choosing ISO here also keeps this folder byte-aligned with
-its committed golden, which is the artifact the expectation in section 3 is checked
-against. Master section 8.2 fixes the two-shape requirement for the domain.
+exercised if the domain supplies both shapes. Master section 8.2's measurement fixes
+where each shape lives: **all three** interest scenario goldens carry the ISO prefix,
+while the two interest end-to-end goldens carry the compact form, and the module
+discharges the two-shape requirement by parameterising one launch over both tokens
+rather than by splitting them across scenario folders. Choosing ISO here also keeps
+this folder byte-aligned with its committed golden, which is the artifact the
+expectation in section 3 is checked against.
 
 Assumptions: `services/batch-service/README.md` describes the compact token as
 `yyyyMMdd` followed by the literal `00` and not an ISO date. That is accurate as a
@@ -634,6 +651,12 @@ observable. Two accounts make both halves visible at once: `00000000001` is the
 3.2 expects `206.50` persisted; `00000000002` is the **final** account, which is why
 section 3.2 expects `158.00` unchanged. A third account was also considered and
 rejected: it only shifts which account is final and buys no additional observation.
+
+Assumptions: the phrase *"section 3.2 expects `158.00` unchanged"* above describes the
+**reference** golden and not the migrated expectation, which section 3.2 states as `170.50`
+under divergence D-3. Both are named here because the two-account design is what makes the
+divergence observable at all: with one account there would be no non-final account to compare
+the flushed case against.
 
 Assumptions: `TCATBAL` is an indexed file, so its rows are consumed in key order
 regardless of the fixture's physical line order (master section 3.12). `...001` is
@@ -744,11 +767,12 @@ paragraph. Master section 7.2.4 states the same rule for the whole domain.
 
 ### 6.12 The `1000.00` balance is held equal to the direct-hit sibling
 
-Both category balances carry `0000010000{` -- the same `1000.00` that `../happy_path`
-uses, against the same `15.00` rate, over the same two accounts opening at `194.00` and
-`158.00`. So this scenario produces the **identical** `12.50` per row and `206.50`
-persisted figures as its direct-hit sibling, and reaches them through the **other**
-branch of the rate lookup.
+Both category balances carry `0000010000{` -- the same `1000.00` that
+[`../happy_path`](../happy_path/README.md) uses, against the same `15.00` rate, over the same
+two accounts opening at `194.00` and `158.00`. So this scenario produces the **identical**
+`12.50` per row and `206.50` persisted figures as its direct-hit sibling -- and the identical
+`170.50` migrated expectation for the final account -- while reaching them through the
+**other** branch of the rate lookup.
 
 Trade-offs: holding every operand constant across the two scenarios means the numbers
 alone cannot tell a reader which branch ran, so section 1 has to say so in words. What

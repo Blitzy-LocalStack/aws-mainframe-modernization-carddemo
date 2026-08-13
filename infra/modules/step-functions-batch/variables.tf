@@ -4,7 +4,7 @@
 # Purpose:
 #   The complete input contract of the `step-functions-batch` module -- the
 #   module that replaces the mainframe JCL/JES2 nightly job stream with the
-#   eleven-work-state `carddemo-daily-batch` state machine, a second and much
+#   twelve-work-state `carddemo-daily-batch` state machine, a second and much
 #   smaller state machine for on-demand reports, a third for the operator-invoked
 #   dataset export/import round trip, one shared least-privilege execution role
 #   and one encrypted log group per machine. Anything absent from this file is a
@@ -48,7 +48,7 @@
 #   remote-state read, because a module that resolves its own dependencies
 #   cannot be composed differently by a different caller.
 #
-#   Assumptions: the eleven states are NOT inputs. Their order, their catch
+#   Assumptions: the twelve states are NOT inputs. Their order, their catch
 #   handlers and the inverted condition predicates that replace the baseline's
 #   `COND=` parameters are this module's substance and live in main.tf.
 #   Exposing the state list would let one environment run a different chain
@@ -64,7 +64,7 @@
 #   argument at execution time; a Terraform variable would freeze one date into
 #   the infrastructure.
 #
-#   Trade-offs: per-state timing is ONE `map(number)` carrying all eleven state
+#   Trade-offs: per-state timing is ONE `map(number)` carrying all twelve state
 #   names rather than a floor plus a sparse override map. A state left out of
 #   sparse overrides silently inherits a ceiling nobody chose for it, and a
 #   mistyped key does the same while the operator believes a limit was raised;
@@ -74,8 +74,8 @@
 #
 #   Refactoring Rationale: the round trip's two states carry their ceilings in a
 #   SECOND map, `dataset_state_timeout_seconds`, rather than as two more keys in
-#   the eleven-name map above. Merging them would have widened that map's
-#   exactness check from eleven names to thirteen, and that check is what catches
+#   the twelve-name map above. Merging them would have widened that map's
+#   exactness check from twelve names to fourteen, and that check is what catches
 #   a missing or misspelled NIGHTLY ceiling -- the failure it exists to prevent.
 #   Two maps, each exact over its own machine's states, keeps both checks as
 #   strong as they were.
@@ -389,36 +389,46 @@ variable "authorization_container_name" {
 #   Both halves of each pair are needed -- the execution role pulls the image and
 #   writes the log stream, the task role is what the job authenticates as.
 variable "pass_role_arns" {
-  description = "IAM role ARNs the state-machine execution role is permitted to pass to ECS: the task role AND the task execution role of each of the batch, data-migration, reporting and authorization task definitions, eight entries for four images. The environment root assembles the list from the ecs-service outputs it already holds; enumerating it is the least-privilege boundary of what any of this module's state machines may run a task as, and omitting an entry fails at run-task with an access-denied error on iam:PassRole."
+  description = "IAM role ARNs each state machine's execution role may pass to ECS, keyed by machine: `daily` takes the task role AND task execution role of the batch, data-migration and reporting task definitions (six entries), `adhoc` those of reporting, `dataset` those of batch, and `authz` those of authorization (two entries each). The environment root assembles each list from the ecs-service outputs it already holds; the per-machine split is the least-privilege boundary of what THAT machine may run a task as, and omitting an entry fails at run-task with an access-denied error on iam:PassRole."
 
-  type = list(string)
+  type = map(list(string))
 
   validation {
     # Trade-offs: the grant is enumerated rather than written as a wildcard over
-    #   the account's roles. A wildcard is one line shorter and would let this
+    #   the account's roles. A wildcard is one line shorter and would let a
     #   state machine start a task running as ANY role in the account, which
     #   turns a state-machine definition into a privilege-escalation path.
     #   Enumerating costs the caller a list it already has, because every entry
     #   is another module's output, and the name says PASS because that is the
-    #   action authorised -- one `iam:PassRole` statement whose Resource is
-    #   exactly these ARNs.
-    # Assumptions: the arity is exactly eight -- four task definitions, each
-    #   needing both an execution role and a task role -- and DUPLICATES are
-    #   permitted, so this is an exact-count check rather than a distinctness
-    #   check: a caller may legitimately share one execution role across
-    #   definitions. An under-supplied list does not fail at apply; it fails at
-    #   the first nightly run-task with an access-denied error on iam:PassRole
-    #   that names a role rather than this input, which is the most expensive
-    #   place to discover it.
-    # Refactoring Rationale: the arity was six for three images and became eight
-    #   when the authorization task definition was added for the operator-invoked
-    #   extract machine. This exact-count check is what surfaced the omission: the
-    #   root was wired with eight entries and `terraform validate` refused it here,
-    #   naming this input, rather than the fourth image's run-task failing later on
-    #   iam:PassRole. That is precisely the trade the count was written for, so it
-    #   is raised with the arity rather than relaxed to a minimum.
-    condition     = length(var.pass_role_arns) == 8 && alltrue([for r in var.pass_role_arns : can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:role/", r))])
-    error_message = "pass_role_arns must list exactly eight IAM role ARNs -- the task role and the task execution role of each of the batch, data-migration, reporting and authorization task definitions -- each of the form arn:<partition>:iam::<account-id>:role/<name>. List a shared role once per slot it fills."
+    #   action authorised -- one `iam:PassRole` statement per machine whose
+    #   Resource is exactly that machine's ARNs.
+    # Refactoring Rationale: this input was a flat list of exactly eight ARNs when
+    #   one union execution role served all four machines. It is a map because the
+    #   roles are now per machine, and a flat list would have had to be granted to
+    #   all four -- which is the finding this change resolves: the ad-hoc report
+    #   machine could pass the batch and authorization task roles it never uses.
+    #   The exact-arity check the flat list carried is replaced by a per-machine
+    #   minimum of two, because the arity now varies by machine (six for daily, two
+    #   for each of the others) and a machine gaining an image should not have to
+    #   restate a total here.
+    # Assumptions: DUPLICATES across machines are expected, not an error -- the
+    #   batch image's two roles appear under both `daily` and `dataset` because both
+    #   machines run that image. Within a machine a shared execution role may also
+    #   legitimately be listed once per slot it fills, so this is a minimum-arity
+    #   check rather than a distinctness check. An under-supplied list does not fail
+    #   at apply; it fails at the first run-task with an access-denied error on
+    #   iam:PassRole that names a role rather than this input, which is the most
+    #   expensive place to discover it.
+    condition = (
+      length(setsubtract(keys(var.pass_role_arns), ["daily", "adhoc", "dataset", "authz"])) == 0
+      && length(setsubtract(["daily", "adhoc", "dataset", "authz"], keys(var.pass_role_arns))) == 0
+      && alltrue([for machine, arns in var.pass_role_arns : length(arns) >= 2])
+      && alltrue([
+        for machine, arns in var.pass_role_arns :
+        alltrue([for r in arns : can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:role/", r))])
+      ])
+    )
+    error_message = "pass_role_arns must carry exactly the keys daily, adhoc, dataset and authz, each listing at least two IAM role ARNs -- the task role and the task execution role of every task definition that machine runs -- of the form arn:<partition>:iam::<account-id>:role/<name>."
   }
 }
 
@@ -523,11 +533,11 @@ variable "dataset_bucket_name" {
 #   only then to the terminal failure, so a failed nightly run notifies
 #   instead of failing silently. That is the analogue of the job log and the
 #   operator console the baseline relied on -- the baseline reported a failed
-#   step through `NOTIFY=&SYSUID` on the job card, and routing all eleven
+#   step through `NOTIFY=&SYSUID` on the job card, and routing all twelve
 #   states' catch handlers through one topic is what makes any of them reach
 #   the same place.
 variable "notification_topic_arn" {
-  description = "ARN of the SNS topic every state's catch handler publishes to before the execution reaches its terminal failure state. Published as an output by infra/modules/observability and passed in by the environment root. It replaces the baseline's job-card NOTIFY and job log; routing all eleven states through one topic is what makes a failure in any of them reach the same place rather than failing silently."
+  description = "ARN of the SNS topic every state's catch handler publishes to before the execution reaches its terminal failure state. Published as an output by infra/modules/observability and passed in by the environment root. It replaces the baseline's job-card NOTIFY and job log; routing all twelve states through one topic is what makes a failure in any of them reach the same place rather than failing silently."
 
   type = string
 
@@ -617,8 +627,97 @@ variable "log_group_kms_key_arn" {
   }
 }
 
+# Assumptions: this is the literal every RunTask integration stamps as StartedBy, and
+#   it is also the ListTasks filter both the graph's cancellation states and the resume
+#   function's reconciling release match on. All three have to agree exactly, which is
+#   why it is one input rather than a value each side composes.
+# Refactoring Rationale: it was `substr("${local.name_stem}-sfn", 0, 36)` inside the
+#   module. It became an input when the resume function started needing the same
+#   literal: the module already takes that function's ARN, so publishing the marker as
+#   an output would have made the function depend on the module and the module depend
+#   on the function -- a cycle Terraform refuses. The caller owns the value and passes
+#   it to both.
+# Trade-offs: the ceiling is 36 characters, the SMALLEST length any published surface
+#   states for this field -- the run-task CLI reference and the StartTask API reference
+#   both say 36 while the current RunTask API reference says 128 -- so a value inside 36
+#   is valid under all of them and remains usable verbatim as a ListTasks filter. The
+#   bound is REFUSED rather than truncated, unlike the module-internal version that
+#   composed and then shortened it: a caller whose marker is silently shortened has a
+#   Lambda environment variable that no longer matches what the tasks carry, and a
+#   filter that matches nothing reads as "no tasks are running".
+variable "task_started_by" {
+  description = "Literal stamped as StartedBy on every task these state machines launch, and used as the ListTasks filter that finds a residual task after the state that started it gave up. The environment root owns the value because the resume function's environment must carry the identical string."
+
+  type = string
+
+  validation {
+    # Assumptions: the ECS-reserved `ecs-svc/` prefix is refused. A service sets its
+    #   own startedBy of that shape, so a marker imitating it would make the
+    #   cancellation path able to stop tasks an ECS SERVICE is running -- which is a
+    #   production outage rather than a cleanup. Blank is refused because an empty
+    #   filter matches every task in the cluster.
+    condition     = length(trimspace(var.task_started_by)) > 0 && length(var.task_started_by) <= 36 && !startswith(var.task_started_by, "ecs-svc/")
+    error_message = "task_started_by must be a non-blank string of at most 36 characters and must not begin with the ECS-reserved ecs-svc/ prefix."
+  }
+}
+
+# Assumptions: nullable for the same reason log_group_kms_key_arn is -- the module
+#   stays applicable without a key, and both roots pass one. The fallback is never
+#   "unencrypted": main.tf asserts sqs_managed_sse_enabled when this is null, so the
+#   only choice this input expresses is WHOSE key, not whether.
+# Trade-offs: the SQS key is the right one to pass rather than the S3 key the log
+#   groups take, because both roots already create a queue key for
+#   infra/modules/sqs and the scheduler's dead-letter target uses it. Reusing it
+#   keeps every queue in the deployment under one key.
+variable "dead_letter_kms_key_arn" {
+  description = "ARN of the customer-managed key encrypting the bracket-release dead-letter queue, published as an output by infra/modules/kms and passed in by the environment root. Null leaves the queue on SQS-managed encryption."
+
+  type     = string
+  nullable = true
+  default  = null
+
+  validation {
+    # Assumptions: the same alias-ARN trap the log-group key documents applies here,
+    #   with one difference worth naming: SQS accepts an ALIAS for
+    #   kms_master_key_id, so an alias would apply cleanly and then be impossible to
+    #   audit against the key the rest of the deployment uses. Requiring a key ARN
+    #   keeps the queue's key comparable with every other resource's.
+    condition     = var.dead_letter_kms_key_arn == null || can(regex("^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/", var.dead_letter_kms_key_arn))
+    error_message = "dead_letter_kms_key_arn must be null, or a KMS key ARN of the form arn:<partition>:kms:<region>:<account-id>:key/<key-id>, not an alias ARN."
+  }
+}
+
+# Assumptions: this is a CADENCE, not a staleness threshold. The reconciler releases
+#   on evidence -- a terminal owning execution and no task short of STOPPED -- so this
+#   value decides only how quickly a stranded bracket is noticed, never whether one
+#   is. That is why it can be shortened without any risk of re-enabling writes inside
+#   a legitimate long night.
+# Trade-offs: fifteen minutes, so a stranded bracket costs at most a quarter of an
+#   hour of read-only online service. Every cycle costs one Lambda invocation, one
+#   strongly-consistent DynamoDB read and -- only when a lease is actually stranded --
+#   one DescribeExecution and two ListTasks calls, so the cadence is bounded by
+#   attention rather than by cost. A minute would be cheap too and was rejected as
+#   noise: the finalizer already covers the fast path, so this rule's job is to
+#   converge, not to race.
+variable "reconcile_interval_minutes" {
+  description = "How often the bracket reconciler asks the resume function to look for a quiesce bracket that no event released. It is a cadence and not a staleness threshold: the release still requires the owning execution and its tasks to be terminal."
+
+  type    = number
+  default = 15
+
+  validation {
+    # Assumptions: the floor is one minute because EventBridge's rate expression
+    #   accepts no smaller unit, and the ceiling is 720 -- twelve hours -- because a
+    #   cadence longer than half a day could let a stranded bracket outlast a full
+    #   business day, which is the outage this rule exists to bound. An integer is
+    #   required because rate() takes no fraction.
+    condition     = var.reconcile_interval_minutes == floor(var.reconcile_interval_minutes) && var.reconcile_interval_minutes >= 1 && var.reconcile_interval_minutes <= 720
+    error_message = "reconcile_interval_minutes must be a whole number of minutes between 1 and 720."
+  }
+}
+
 # Trade-offs: the default is the most verbose setting rather than the
-#   cheapest. A nightly chain runs once, so volume is bounded by eleven
+#   cheapest. A nightly chain runs once, so volume is bounded by twelve
 #   states rather than by a request rate, and the first question asked after
 #   a failure -- which state failed and what did it receive -- is answered
 #   only by the full transition history.
@@ -652,11 +751,44 @@ variable "log_level" {
 #   chain: a future change that threaded record-level data through an execution
 #   input must revisit this default.
 variable "log_include_execution_data" {
-  description = "Whether each logged event carries the state's input and output payload as well as the transition itself. Safe to leave on because this chain's payloads are business dates, dataset names, job names and execution identities -- no cardholder data, primary account number or credential enters either state machine. It remains an input so that a future change threading record-level data through an execution can turn it off."
+  description = "Whether each logged event of the daily, ad-hoc report and dataset round-trip machines carries the state's input and output payload as well as the transition itself. Safe to leave on because those three chains' payloads are business dates, dataset names, job names and execution identities -- no cardholder data, primary account number or credential enters them. It remains an input so that a future change threading record-level data through an execution can turn it off. The authorization-extract machine is governed separately by log_include_authorization_execution_data, because its payload carries operator-supplied extract locations."
   type        = bool
   default     = true
 }
 
+# WHY : ⚠️ Refactoring Rationale: the authorization-extract machine used to share the input
+#   above, and the claim that made sharing safe -- that no payload carries anything but business
+#   dates, dataset names, job names and execution identities -- was untrue of that one machine.
+#   Its load mode takes two extract LOCATIONS from the operator's request, and with execution
+#   data on, each is written verbatim into the execution log at every transition. An operator's
+#   own path is not cardholder data, but it is operator-supplied text this module neither
+#   composed nor bounded, and the honest response to a claim that has acquired an exception is to
+#   split the input rather than to widen the claim.
+# WHY : Assumptions: the default is ON, matching the shared input, and what makes that safe is
+#   not the same argument. The shared claim is about what the payload CANNOT contain; here it is
+#   about what the graph will ACCEPT. ValidateAuthorizationExtractRequest now requires both
+#   locations to match s3://<dataset bucket>/authorization/extract/*, the same space the unload
+#   mode computes its own destinations in, so the only value that can reach the log is an object
+#   key inside this deployment's own bucket under a fixed prefix. A foreign bucket, another
+#   scheme and a container-local path are refused before the first transition, which is where the
+#   sensitivity was -- not in the fact that a location is logged at all.
+# WHY : Trade-offs: setting this to false is what the code review's suggested resolution asked
+#   for, and it is available deliberately -- but it FAILS the curated policy gate. Checkov's
+#   CKV_AWS_285, which .github/workflows/infra-ci.yml gates on, reads exactly
+#   logging_configuration[0].include_execution_data and requires it true, so a root that turns
+#   this off trades a gated logging control for a narrowing the input constraint above has
+#   already achieved. The input exists for the case that changes that balance -- a future mode
+#   accepting an operand this deployment does not bound -- and turning it off then would be a
+#   deliberate, reviewable act with a policy exception attached, rather than the default.
+# WHY : Alternatives Considered: redacting the two locations instead of withholding the whole
+#   payload. Step Functions offers no field-level redaction in a log destination, so the only
+#   two settings available are all of the payload or none of it; there is no third option to
+#   prefer.
+variable "log_include_authorization_execution_data" {
+  description = "Whether the authorization-extract machine's logged events carry state input and output as well as the transition. Governed separately from log_include_execution_data because this machine's load mode accepts two extract locations from the operator's request; those locations are constrained by the graph to objects under the deployment's own authorization/extract/ prefix before any transition, which is what makes logging them safe. Setting this to false withholds the payload and fails Checkov CKV_AWS_285, which requires execution-data logging on a state machine."
+  type        = bool
+  default     = true
+}
 # Trade-offs: tracing costs per recorded trace, and a chain that runs once a
 #   night records one. Against that cost, the question this module's failures
 #   raise is almost always where in the chain time went or which call failed, and
@@ -665,7 +797,7 @@ variable "log_include_execution_data" {
 # -----------------------------------------------------------------------------
 # Function-backed states -- the operator bracket and the statistics refresh
 #
-# Three of the eleven states are a single API call each and are therefore backed
+# Three of the twelve states are a single API call each and are therefore backed
 # by functions rather than tasks. They are declared as three separate inputs
 # rather than one list, because each is invoked at a specific position in the
 # chain and a list would lose which is which.
@@ -789,61 +921,197 @@ variable "read_only_flag_parameter_name" {
 }
 
 # -----------------------------------------------------------------------------
-# Assumptions: this is a filesystem path inside the data-migration task, not a bucket
-#   or a URI. The staging command resolves each seed dataset to a bare source file NAME
-#   through its own registry and joins it to this directory, so the value names where
-#   those files are mounted rather than what they are called.
-# Trade-offs: a default is offered rather than the input being required, because every
-#   deployment of this stack mounts the extracts at the same conventional location and a
-#   required input would make the module unusable without restating that convention. The
-#   cost is that a deployment which mounts them elsewhere and forgets to say so gets a
-#   staging failure naming an absent file rather than a plan-time error -- acceptable,
-#   because the command reports the variable it consulted and the file it looked for, so
-#   the diagnosis is one log line rather than an investigation.
-# Assumptions: making the extracts available at this path is an OPERATOR action and is
-#   documented as one in docs/runbooks/data-migration.md. This module cannot perform it:
-#   it provisions no filesystem, and the AAP places a live deployment outside this
-#   scope. What the module owes is that the container is told where to look, which is
-#   what this input supplies.
+# Refactoring Rationale: this input is the OPERATOR OVERRIDE only. The composed default it
+#   overrides is built in main.tf from var.dataset_source_extract_prefix, which is the prefix
+#   the s3-datasets module owns, provisions a lifecycle rule for and publishes, and which the
+#   environment roots already wire into this module.
+# Refactoring Rationale: two further inputs for the same location were authored here and are
+#   WITHDRAWN, because four spellings of "where the seed extracts are" cannot be kept honest.
+#   The first was `dataset_source_prefix`, a bare key segment defaulting to "source-extracts"
+#   whose validation REFUSED a trailing slash. The second was `dataset_inbox_prefix`,
+#   defaulting to "inbox". Neither was passed by either environment root, and the measurement
+#   that decided it is this: var.dataset_source_extract_prefix defaults to
+#   "migration/source/EBCDIC/" and REQUIRES a trailing slash, and the s3-datasets output the
+#   roots wire into it carries the same default -- so a location composed from either withdrawn
+#   input addressed a prefix nothing is ever synced to, while the refresh command read the
+#   other one. That divergence was latent only because the environment variable carrying the
+#   composed value had lost its consumer; restoring the consumer makes it reachable, so the
+#   duplicate inputs go rather than the consumer.
+# Assumptions: the withdrawn inbox input carried two arguments worth keeping, and they are kept
+#   here rather than lost with it. First, this prefix is deliberately NOT a member of
+#   infra/modules/s3-datasets's family inventory: every prefix in that inventory carries a
+#   lifecycle rule reproducing the baseline's LIMIT(5) SCRATCH generation limit, and this one
+#   holds the operator's delivered export, whose retention is the operator's decision and which
+#   is read once per execution. Adding it would attach a generation-retention rule to bytes
+#   that are not generations and would raise a prefix count the architecture documents publish.
+#   Second, provisioning an Elastic File System volume, populating it and mounting it on the
+#   task was rejected on two counts: it adds a file system, a mount target per availability
+#   zone, a security group and an access point to operate and pay for, purely to hold bytes S3
+#   already holds; and populating it still requires an out-of-band copy, so the operator action
+#   does not go away, it moves behind two more resources.
+# Assumptions: populating the prefix remains an OPERATOR action and is documented as one in
+#   docs/runbooks/data-migration.md, as a single `aws s3 sync` of app/data/EBCDIC/. This module
+#   cannot perform it: the AAP places a live deployment outside this scope, and the extracts are
+#   baseline data no Terraform resource should carry. What the module owes is that the container
+#   is told where to look.
+# Trade-offs: this override is nullable and defaults to null, meaning "use the composed bucket
+#   prefix". It is kept rather than removed because the same commands are run by hand in a
+#   checkout, where a local directory is the natural source and the CLI's filesystem branch
+#   reads the operator's own file without copying it. Null rather than an empty string, so that
+#   "not overridden" is a distinct value from "overridden with nothing" and `coalesce` in
+#   main.tf can decide between them.
 variable "dataset_staging_root" {
-  description = "Absolute path inside the data-migration container where the exported seed extracts are mounted. The staging command joins each dataset's registered source file name to this directory; it ships no extract in its image, so this is the only thing that tells it where to read. Populating the path is an operator action documented in docs/runbooks/data-migration.md."
+  description = "Optional override for the location the data-migration container resolves seed extracts from, replacing the composed `s3://dataset_bucket_name/dataset_source_extract_prefix` value. Accepts an absolute filesystem path for a mounted or local source, or an `s3://bucket/prefix` URI to read a different bucket. Leave null in both environment roots."
 
   type    = string
-  default = "/mnt/carddemo-extracts"
+  default = null
 
   validation {
-    # Assumptions: an ABSOLUTE path is required. A relative value would resolve against
-    #   the container's working directory, which the image sets and this module does not
-    #   control, so the same configuration would read different directories if that
-    #   working directory ever changed.
-    condition     = startswith(var.dataset_staging_root, "/")
-    error_message = "dataset_staging_root must be an absolute path beginning with /."
+    # Assumptions: an absolute path or an s3:// URI, and nothing else. A relative path
+    #   would resolve against the container's working directory, which the image sets and
+    #   this module does not control, so the same configuration would read different
+    #   directories if that working directory ever changed; any other scheme names a
+    #   transport the CLI has no branch for.
+    condition = (
+      var.dataset_staging_root == null
+      || startswith(var.dataset_staging_root, "/")
+      || can(regex("^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9](/.+)?$", var.dataset_staging_root))
+    )
+    error_message = "dataset_staging_root must be null, an absolute path beginning with /, or an s3://bucket/prefix URI."
   }
 
   validation {
     # Assumptions: a trailing slash is refused rather than tolerated so the value has one
-    #   spelling. Both forms work when joined, but permitting both means two deployments
-    #   can differ in a way that shows up in logs and diffs while meaning the same thing.
-    condition     = var.dataset_staging_root == "/" || !endswith(var.dataset_staging_root, "/")
+    #   spelling. Both forms address the same prefix once joined, but permitting both means
+    #   two deployments can differ in a way that shows up in logs and diffs while meaning
+    #   the same thing.
+    condition = (
+      var.dataset_staging_root == null
+      || var.dataset_staging_root == "/"
+      || !endswith(var.dataset_staging_root, "/")
+    )
     error_message = "dataset_staging_root must not end with a trailing slash."
+  }
+
+  validation {
+    # Assumptions: the alphabet is restricted to what an S3 key and a POSIX path both
+    #   handle without escaping, and `..` is refused outright. The value is composed into a
+    #   location the container parses, so a segment that traversed upward would address a
+    #   prefix outside the one the task role's own statements are scoped to -- the request
+    #   would be denied rather than misrouted, but the failure would surface as an
+    #   authorization error against a prefix nobody configured.
+    condition     = var.dataset_staging_root == null || (can(regex("^[A-Za-z0-9/][A-Za-z0-9._:/-]*$", var.dataset_staging_root)) && !strcontains(var.dataset_staging_root, ".."))
+    error_message = "dataset_staging_root must contain only letters, digits, dot, colon, underscore, hyphen and forward slash, and must not contain '..'."
+  }
+}
+
+# Assumptions: this is the directory holding the `sql` tree inside the data-migration image, and
+#   it is stated here because the container cannot derive it. The two committed verification
+#   queries are read from <root>/sql/verify/, and the package resolves that root from its own
+#   location only in a source checkout or an editable install -- in the image the package is
+#   installed into a virtual environment while data-migration/Dockerfile's `COPY sql/ ./sql/`
+#   places the queries under its WORKDIR, so the two are not in the same tree and the default
+#   cannot resolve.
+# Alternatives Considered: passing `--sql-root .` and relying on the image's WORKDIR. Rejected
+#   for the reason the staging-root override above gives for requiring an absolute path: a
+#   relative value resolves against a working directory this module does not control, so the
+#   same configuration would read a different tree if the image ever changed it.
+variable "data_migration_sql_root" {
+  description = "Absolute path inside the data-migration container of the directory holding the sql tree, passed to the verification state as --sql-root. Matches the WORKDIR that data-migration/Dockerfile copies sql/ beneath, so the two committed verification queries -- whose digests the passes pin -- are found where the image actually places them."
+
+  type    = string
+  default = "/opt/carddemo"
+
+  validation {
+    condition     = startswith(var.data_migration_sql_root, "/")
+    error_message = "data_migration_sql_root must be an absolute path beginning with /."
+  }
+
+  validation {
+    condition     = var.data_migration_sql_root == "/" || !endswith(var.data_migration_sql_root, "/")
+    error_message = "data_migration_sql_root must not end with a trailing slash."
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Refactoring Rationale: this input REPLACES `dataset_staging_root`, which named an
+#   absolute FILESYSTEM path (defaulting to /mnt/carddemo-extracts) inside the
+#   data-migration task. Nothing in this stack provisions a filesystem -- the tasks are
+#   Fargate with no volume, and the container image deliberately ships no extract -- so
+#   the second state's ten Map branches each read an absent file and failed. The old
+#   input's own documentation said as much, calling population of the path "an OPERATOR
+#   action" that "this module cannot perform"; a state whose only source is a path no
+#   deployment creates is a state that cannot run, so the input was describing a gap
+#   rather than closing one.
+# Refactoring Rationale: the replacement is an S3 KEY PREFIX because the extracts were
+#   already going to S3. docs/runbooks/data-migration.md has always told an operator to
+#   `aws s3 sync app/data/ s3://<dataset bucket>/migration/source/`, so the bytes the
+#   state needed existed in the bucket the task already reads while the state looked for
+#   them on a disk that did not. Reading where the runbook writes is what makes the
+#   branch runnable from the documented procedure instead of from an undocumented mount.
+# Alternatives Considered: mounting an EFS access point into the task and keeping the
+#   filesystem contract. Rejected on cost and on blast radius: it adds a file system, a
+#   mount target per availability zone and a security group to the stack for one
+#   read-only directory that is consumed once per nightly execution, and it gives the
+#   batch tasks a writable shared filesystem they otherwise have no reason to hold.
+# Alternatives Considered: baking the extracts into the container image. Rejected for
+#   the reason the withdrawn input already recorded: it would put a copy of the baseline
+#   data -- including the security file, which carries a plaintext credential in the
+#   baseline -- into every published image layer, and would make correcting one extract
+#   an image rebuild and a redeploy.
+# Assumptions: the value is supplied by the s3-datasets module, which owns the prefix,
+#   provisions its lifecycle rule and publishes it as `source_extract_prefix`. The
+#   default here matches that module's default so the module remains usable standalone,
+#   but a composed root passes the owner's value so the two cannot disagree.
+variable "dataset_source_extract_prefix" {
+  description = "S3 key prefix inside the dataset bucket holding the exported baseline extracts the seed-refresh state READS. Passed to the data-migration container as --extract-prefix; the container joins each dataset's registered source file name to it. Owned and provisioned by the s3-datasets module, which publishes it as source_extract_prefix. Populating it is an operator action documented in docs/runbooks/data-migration.md."
+
+  type    = string
+  default = "migration/source/EBCDIC/"
+
+  validation {
+    # Assumptions: a LEADING separator is refused rather than stripped, because an S3
+    #   key has no root: "/migration/source/" is a prefix whose first segment is empty,
+    #   which is a different working prefix. A value copied from a filesystem path would
+    #   otherwise plan cleanly and then read a prefix nothing was synced to. The ETL's
+    #   own `extract_source_key` refuses the same spelling, so both sides agree.
+    condition     = length(trimspace(var.dataset_source_extract_prefix)) > 0 && !startswith(var.dataset_source_extract_prefix, "/")
+    error_message = "dataset_source_extract_prefix must be a non-empty S3 key prefix and must not begin with \"/\"; an object key has no root, so a leading separator names a different prefix rather than the same one."
+  }
+
+  validation {
+    # Assumptions: a TRAILING separator is REQUIRED -- the opposite of the rule the
+    #   withdrawn filesystem input carried -- because the container joins the registered
+    #   file name to this value directly. Without the separator the join would produce
+    #   "migration/source/EBCDICAWS.M2..." and read a key that does not exist.
+    condition     = endswith(var.dataset_source_extract_prefix, "/")
+    error_message = "dataset_source_extract_prefix must end with \"/\" so that the registered source file name joins to it as a child key rather than being concatenated onto the last segment."
   }
 }
 
 # Seed-dataset staging -- the branches of the second state's Map
 # -----------------------------------------------------------------------------
 
-# Assumptions: the ten defaults correspond one-to-one to the ten IDCAMS
+# Assumptions: ten of the eleven defaults correspond one-to-one to the ten IDCAMS
 #   master-refresh load jobs in app/jcl/ -- ACCTFILE, CARDFILE, CUSTFILE,
 #   XREFFILE, TRANFILE, DISCGRP, TCATBALF, TRANTYPE, TRANCATG and DUSRSECJ --
 #   each of which performs exactly one `REPRO`, which is what makes the mapping
-#   one-to-one rather than approximate. DALYTRAN.PS is deliberately NOT an
-#   eleventh entry: app/jcl/POSTTRAN.jcl:30 reads it directly with `DISP=SHR`,
-#   so it is a flat sequential INPUT to posting rather than a loaded master, and
-#   staging it would invent a load step the baseline has no contract for.
+#   one-to-one rather than approximate.
+# Refactoring Rationale: `daily_transactions` is the eleventh, and it was ADDED
+#   after being reasoned out of the list. The earlier reasoning was that
+#   app/jcl/POSTTRAN.jcl:30 reads DALYTRAN.PS directly with `DISP=SHR`, so it is
+#   flat sequential input to posting rather than a loaded master -- true of the
+#   BASELINE and false of the target. Here posting reads `ledger.daily_transactions`,
+#   a real table with a declared Aurora load target, and its `amount` column is one
+#   of the nine the committed money-total query totals. So omitting it did not avoid
+#   inventing a load step; it left a declared target unloaded while the verification
+#   query totalled it, and verification pass 3 refuses the entire run when a layout
+#   that ships a committed extract contributes no source total. The load step is the
+#   target's own contract, not an invention.
 # Trade-offs: the list is exposed because a caller occasionally needs to stage a
 #   SUBSET -- reloading one master after a correction rather than the whole set
 #   -- which is then a tfvars change instead of a module edit.
-# Assumptions: these ten names are a CROSS-LANGUAGE CONTRACT, not a local label set.
+# Assumptions: these eleven names are a CROSS-LANGUAGE CONTRACT, not a local label set.
 #   Each is passed verbatim as `--dataset` to the data-migration CLI, which resolves
 #   it through `carddemo_migration.seed_datasets` to obtain the bounded-context
 #   domain, the prefix segment, the source extract and the declared record length.
@@ -864,7 +1132,7 @@ variable "dataset_staging_root" {
 #   and asserts it names exactly the registry's tokens. A name added on either side
 #   without the other fails that test rather than a nightly execution.
 variable "seed_datasets" {
-  description = "Dataset names the seed-staging state iterates over, one Map branch and one data-migration task per name. The default is the ten loaded masters, one per IDCAMS master-refresh load job in app/jcl/; DALYTRAN is absent because posting reads it directly as sequential input rather than loading it into a master table. An environment may pass a subset to restage one master without a module edit."
+  description = "Dataset names the seed-staging state iterates over, one Map branch and one data-migration task per name. The default is the eleven loaded masters, one per declared Aurora load target. daily_transactions is included because ledger.daily_transactions IS a declared load target whose amount column the committed money-total query totals, so verification pass 3 refuses the whole run without a DALYTRAN source total. An environment may pass a subset to restage one master without a module edit."
 
   type = list(string)
 
@@ -874,6 +1142,7 @@ variable "seed_datasets" {
     "customers",
     "card_xref",
     "transactions",
+    "daily_transactions",
     "disclosure_groups",
     "transaction_category_balances",
     "transaction_types",
@@ -889,11 +1158,11 @@ variable "seed_datasets" {
     #   reads as a clean run. Distinctness is asserted too: a repeated name
     #   stages one master twice in the same run -- two Map branches loading the
     #   same table concurrently, a write conflict rather than a slower load.
-    # Refactoring Rationale: membership in the closed ten-name set is asserted
+    # Refactoring Rationale: membership in the closed eleven-name set is asserted
     #   rather than a character-shape pattern, which admitted any lowercase token
     #   so that `accounts_v2` or a misspelled `custommers` passed validation and
     #   failed later inside a Map branch as a container usage error naming an
-    #   argument. Every legal value is one of the ten defaults, so the set is
+    #   argument. Every legal value is one of the eleven defaults, so the set is
     #   knowable here even though the readers themselves live in the ETL package.
     condition = length(var.seed_datasets) >= 1 && length(distinct(var.seed_datasets)) == length(var.seed_datasets) && alltrue([
       for d in var.seed_datasets : contains([
@@ -902,6 +1171,7 @@ variable "seed_datasets" {
         "customers",
         "card_xref",
         "transactions",
+        "daily_transactions",
         "disclosure_groups",
         "transaction_category_balances",
         "transaction_types",
@@ -909,21 +1179,21 @@ variable "seed_datasets" {
         "users",
       ], d)
     ])
-    error_message = "seed_datasets must list at least one name, each DISTINCT and each one of the ten loaded masters: accounts, cards, customers, card_xref, transactions, disclosure_groups, transaction_category_balances, transaction_types, transaction_categories, users."
+    error_message = "seed_datasets must list at least one name, each DISTINCT and each one of the eleven loaded masters: accounts, cards, customers, card_xref, transactions, daily_transactions, disclosure_groups, transaction_category_balances, transaction_types, transaction_categories, users."
   }
 }
 
 # Trade-offs: three is chosen between two bad endpoints. Unbounded
-#   concurrency would start all ten branches at once, and ten simultaneous
+#   concurrency would start all eleven branches at once, and eleven simultaneous
 #   bulk loads can exhaust both the Aurora connection budget and the Fargate
 #   task quota -- a failure that presents as an unrelated capacity error
-#   rather than as a concurrency choice. A value of 1 serialises ten loads
+#   rather than as a concurrency choice. A value of 1 serialises eleven loads
 #   that have no ordering requirement between them, spending the window for
 #   no correctness gain. Three keeps useful parallelism while bounding
 #   connection pressure, and the input lets a root tune that sizing without
 #   changing the state-machine topology.
 variable "stage_datasets_max_concurrency" {
-  description = "Maximum number of seed-staging Map branches allowed to run at once. The environment root may lower it to fit Aurora connection and Fargate task quotas; the default permits parallel loads without starting all ten branches simultaneously. A sizing value, so it is one of the few a root may legitimately differ on."
+  description = "Maximum number of seed-staging Map branches allowed to run at once. The environment root may lower it to fit Aurora connection and Fargate task quotas; the default permits parallel loads without starting all eleven branches simultaneously. A sizing value, so it is one of the few a root may legitimately differ on."
   type        = number
   default     = 3
 
@@ -954,13 +1224,42 @@ variable "stage_datasets_max_concurrency" {
 #   neutral default but an outage the flag makes worse. A conservative
 #   ceiling on every state is therefore safer than none.
 variable "state_timeout_seconds" {
-  description = "Ceiling on each of the eleven work states, keyed by the state name exactly as main.tf spells it. The default sizes the long-running states -- seed staging, posting, interest, statements and reports -- above the states that only toggle a flag or refresh statistics. Every key must be present, so a state can never be left without a timeout: a state with no ceiling waits indefinitely, which holds the whole chain open and leaves the online read-only flag set until an operator intervenes."
+  description = "Ceiling on each of the twelve work states, keyed by the state name exactly as main.tf spells it. The default puts the migration verification gate at the top ceiling because it re-reads every staged record and runs both committed whole-migration queries, then the four next-longest states -- seed staging, posting, interest and statements -- below it, the three dataset-writing states in the middle, and the three states that only toggle a flag or refresh statistics at the bottom. Every key must be present, so a state can never be left without a timeout: a state with no ceiling waits indefinitely, which holds the whole chain open and leaves the online read-only flag set until an operator intervenes."
 
   type = map(number)
 
+  # Assumptions: StageSeedDatasets carries the second-largest ceiling, and the reason is
+  #   what one branch of it does. It copies bytes from one prefix of a bucket to another,
+  #   AND decodes every record of the extract, seals three protected columns through the
+  #   key-management service, bulk-copies into a session-temporary table and then merges,
+  #   AND runs three verification passes over that one dataset. The largest family alone
+  #   -- the daily-transaction extract against ledger.daily_transactions -- costs a hash
+  #   of the destination table per load.
+  # Assumptions: VerifyMigration is sized above it. It is three passes over the whole
+  #   migration, not one dataset: a server-side row-count report, a per-record digest
+  #   comparison for each of the ten seeded datasets with the target rows streamed back,
+  #   and an exact money-total report. The digest pass reads both sides of every record.
   default = {
+    # Refactoring Rationale: VerifyMigration is the entry added to the eleven this map
+    #   used to carry, and it carries the LARGEST ceiling of any state. It re-reads every
+    #   staged record and runs both committed whole-migration queries on a SELECT-only
+    #   session, which is the most work any single state does; 10800 is three hours, the
+    #   same order as the two seven-two-hundred states, with headroom because a gate that
+    #   times out leaves the online-write bracket engaged.
+    # Refactoring Rationale: two further entries -- LoadSeedDatasets and
+    #   ReconcileTransactionSequence -- were authored alongside it and are NOT here,
+    #   because the states they timed are withdrawn in main.tf. See the withdrawal
+    #   recorded there: the refresh state already loads each dataset and already advances
+    #   the identifier allocator, so both would have timed a second pass over work that
+    #   had been done.
+    # Assumptions: StageSeedDatasets keeps its 7200 rather than being lowered to 3600.
+    #   That lower figure belonged to the split chain, where the state only staged; here
+    #   one branch fetches, stages, loads, runs three verification passes, may stage a
+    #   backup generation and may advance the allocator, so the higher ceiling is the one
+    #   that matches the work.
     QuiesceOnlineWrites        = 300
-    StageSeedDatasets          = 3600
+    StageSeedDatasets          = 7200
+    VerifyMigration            = 10800
     PreflightDailyTransactions = 1800
     PostTransactions           = 7200
     CalculateInterest          = 7200
@@ -973,20 +1272,27 @@ variable "state_timeout_seconds" {
   }
 
   validation {
-    # Assumptions: the eleven names are fixed by main.tf's own state list and are
+    # Assumptions: the twelve names are fixed by main.tf's own state list and are
     #   spelled here character for character; the error message carries the
     #   required set. Both directions matter -- a MISSING key would leave that
     #   state without a ceiling, and a key such as "PostTransaction" would apply
     #   cleanly while posting ran unbounded and the operator believed a limit had
     #   been set. Exactness needs both halves of the condition: `setsubtract`
     #   proves every required name is present but says nothing about an extra
-    #   one, and a map holds no duplicate keys, so eleven keys that include all
-    #   eleven required names are exactly those names. Terraform has no
+    #   one, and a map holds no duplicate keys, so twelve keys that include all
+    #   twelve required names are exactly those names. Terraform has no
     #   symmetric-difference function, which is why the count carries the second
     #   half.
-    condition = length(var.state_timeout_seconds) == 11 && length(setsubtract([
+    # Refactoring Rationale: the count moved from eleven to twelve when the chain
+    #   gained the state that stands between staging an extract and posting against it,
+    #   VerifyMigration. It was briefly written as fourteen, alongside two further
+    #   states that are withdrawn in main.tf; this check is what makes the count a
+    #   measured property of the graph rather than a tally, because a name here with no
+    #   state and a state with no name here both fail the plan naming this variable.
+    condition = length(var.state_timeout_seconds) == 12 && length(setsubtract([
       "QuiesceOnlineWrites",
       "StageSeedDatasets",
+      "VerifyMigration",
       "PreflightDailyTransactions",
       "PostTransactions",
       "CalculateInterest",
@@ -997,7 +1303,7 @@ variable "state_timeout_seconds" {
       "AnalyzeTables",
       "ResumeOnlineWrites",
     ], keys(var.state_timeout_seconds))) == 0
-    error_message = "state_timeout_seconds must hold exactly one entry for each of the eleven work states, named as main.tf spells them: QuiesceOnlineWrites, StageSeedDatasets, PreflightDailyTransactions, PostTransactions, CalculateInterest, BackupTransactions, CombineTransactions, GenerateStatements, GenerateReports, AnalyzeTables, ResumeOnlineWrites."
+    error_message = "state_timeout_seconds must hold exactly one entry for each of the twelve work states, named as main.tf spells them: QuiesceOnlineWrites, StageSeedDatasets, VerifyMigration, PreflightDailyTransactions, PostTransactions, CalculateInterest, BackupTransactions, CombineTransactions, GenerateStatements, GenerateReports, AnalyzeTables, ResumeOnlineWrites."
   }
 
   validation {
@@ -1074,6 +1380,71 @@ variable "retry_backoff_rate" {
   }
 }
 
+# Refactoring Rationale: the three inputs below configure the cancellation
+#   sub-chain the daily failure path now runs before it releases the online-write
+#   bracket, and they are separate from the retry inputs above because they
+#   measure a different thing. The retry inputs govern how many times a failing
+#   API call is repeated; these govern how long the graph is prepared to wait for
+#   a container that has been asked to stop to actually exit. Sharing one set
+#   would tie the number of DescribeTasks polls to the number of SNS publish
+#   retries, which have nothing to do with each other.
+# Assumptions: all three carry defaults, so neither environment root has to
+#   declare them and the cancellation behaviour is identical in dev and prod.
+#   Nothing about draining a task differs by environment.
+variable "cancellation_poll_seconds" {
+  description = "Seconds the daily failure path waits between passes of the residual-task cancellation loop. The default matches the Amazon ECS container stop timeout, which is the shortest interval after which a task asked to stop can plausibly have exited, so a smaller value spends DescribeTasks calls observing a container that cannot yet be gone."
+  type        = number
+  default     = 30
+
+  validation {
+    # Assumptions: the floor is 5 seconds because the loop's whole purpose is to
+    #   let a SIGTERM be honoured, and a poll faster than that observes nothing
+    #   new while still counting against the attempt budget -- it converts the
+    #   budget from a drain allowance into a burst of API calls.
+    condition     = var.cancellation_poll_seconds >= 5 && var.cancellation_poll_seconds <= 300 && floor(var.cancellation_poll_seconds) == var.cancellation_poll_seconds
+    error_message = "cancellation_poll_seconds must be a whole number of seconds between 5 and 300 inclusive."
+  }
+}
+
+variable "cancellation_max_attempts" {
+  description = "How many passes of the residual-task cancellation loop the daily failure path will make before it gives up and fails WITHOUT releasing the online-write bracket. The product of this value and cancellation_poll_seconds is the total drain allowance; exhausting it is treated as an operator-visible failure rather than an excuse to release, because releasing while a batch task may still be writing is the corruption the bracket exists to prevent."
+  type        = number
+  default     = 10
+
+  validation {
+    # Assumptions: the floor is 1 rather than 0. At zero the loop would fail on
+    #   its first pass without ever waiting, which makes every failing execution
+    #   that started a task end in the unconfirmed terminal state and require an
+    #   operator -- a bound so tight it is indistinguishable from no cleanup at
+    #   all. The ceiling of 100 keeps the worst-case drain inside the whole-machine
+    #   ceiling, whose validation adds this budget to its own floor.
+    condition     = var.cancellation_max_attempts >= 1 && var.cancellation_max_attempts <= 100 && floor(var.cancellation_max_attempts) == var.cancellation_max_attempts
+    error_message = "cancellation_max_attempts must be a whole number between 1 and 100 inclusive."
+  }
+}
+
+variable "cancellation_state_timeout_seconds" {
+  description = "Ceiling on each individual state of the residual-task cancellation sub-chain: the ListTasks discovery call and the two Map states that stop and then confirm the tasks. Held separately from state_timeout_seconds because that map's validation asserts exactly the eleven names of the nightly work chain, and these states are failure-path recovery rather than work."
+  type        = number
+  default     = 60
+
+  validation {
+    condition     = var.cancellation_state_timeout_seconds >= 30 && var.cancellation_state_timeout_seconds <= 900 && floor(var.cancellation_state_timeout_seconds) == var.cancellation_state_timeout_seconds
+    error_message = "cancellation_state_timeout_seconds must be a whole number of seconds between 30 and 900 inclusive."
+  }
+}
+
+variable "cancellation_max_concurrency" {
+  description = "How many residual tasks the cancellation sub-chain stops and confirms in parallel. Bounded rather than unlimited so that a failure which left many tasks running cannot answer with a burst of StopTask and DescribeTasks calls large enough to be throttled, which would turn a cleanup into a second failure."
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.cancellation_max_concurrency >= 1 && var.cancellation_max_concurrency <= 20 && floor(var.cancellation_max_concurrency) == var.cancellation_max_concurrency
+    error_message = "cancellation_max_concurrency must be a whole number between 1 and 20 inclusive."
+  }
+}
+
 # Assumptions: this is a CEILING, not an expectation of how long a run takes, and
 #   per-state timeouts do not make it redundant -- an execution can stall between
 #   states, or in a Map's own bookkeeping, where no single state's timeout
@@ -1087,24 +1458,79 @@ variable "retry_backoff_rate" {
 #   bracket's lease length, so the advertised expiry and the enforced ceiling
 #   agree by construction.
 variable "state_machine_timeout_seconds" {
-  description = "Ceiling on a single daily-batch execution, applied at the top level of the state machine definition rather than to any one state. It bounds the whole chain: an execution that stalls where no individual state's timeout applies would otherwise wait indefinitely, holding the online read-only flag set, because the resume state runs only after the chain finishes or fails. The ceiling caps how long the flag can be held rather than releasing it -- a timed-out execution runs no further state -- so release on that path comes from the out-of-execution watchdog rule, and this same value is published to the quiesce call as the bracket's lease length."
+  description = "Ceiling on a single daily-batch execution, applied at the top level of the state machine definition rather than to any one state. It bounds the whole chain: an execution that stalls where no individual state's timeout applies would otherwise wait indefinitely, holding the online read-only flag set, because the resume state runs only after the chain finishes or fails. The ceiling caps how long the flag can be held rather than releasing it -- a timed-out execution runs no further state -- so release on that path comes from the out-of-execution watchdog rule, and this same value is published to the quiesce call as the bracket's lease length. The default is validated against the aggregate SEQUENTIAL budget of the twelve work states rather than against the largest single one, because the chain runs them one after another."
   type        = number
-  default     = 28800
+  # Refactoring Rationale: the default is 61200 where it read 46800, and the raise is a
+  #   MEASURED correction rather than headroom taken for comfort. The floor below is the
+  #   SUM of the per-state ceilings plus two further allowances, and at the defaults it
+  #   evaluates to 58920 -- 54600 for the twelve sequential ceilings, 2520 for the retry
+  #   waits at twelve states times 210 seconds each, 1500 for the cancellation drain and
+  #   300 for the second ResumeOnlineWrites. 46800 was below that, so the module's own
+  #   validation refused its own default, and a caller who accepted the default got a
+  #   plan-time error naming this variable. It was already below the floor at eleven
+  #   states, where the same formula returns 47910; adding the verification gate widened
+  #   the gap rather than opening it. 61200 is seventeen hours, which clears the floor
+  #   with 2280 seconds of margin and stays well inside the service's own 86400 ceiling.
+  # Assumptions: raising this value lengthens the quiesce LEASE as well, because the same
+  #   number is published to the quiesce call as the bracket's lease length. That is the
+  #   intended coupling and not a side effect: the lease must outlast the execution it
+  #   brackets, or the watchdog releases the read-only flag while the chain is still
+  #   posting.
+  default = 61200
 
   validation {
-    # Assumptions: the floor is computed from the other two timing inputs rather
-    #   than written as a literal, which would go stale the moment a caller
-    #   raised any per-state ceiling: a top-level bound below the longest state
-    #   bound could expire while a legitimately long state was still inside its
-    #   own allowance, aborting a healthy run and reading as a task failure. The
-    #   one-day ceiling is the point past which this stops being a bound on a
-    #   nightly chain at all. `max` is spread over the map's values with `...`
-    #   rather than given a seed, which is safe only because
-    #   state_timeout_seconds is validated to hold exactly eleven entries.
-    condition = var.state_machine_timeout_seconds <= 86400 && floor(var.state_machine_timeout_seconds) == var.state_machine_timeout_seconds && var.state_machine_timeout_seconds >= max(
-      [for t in values(var.state_timeout_seconds) : t]...
+    # Refactoring Rationale: the floor was `max` over the per-state ceilings and
+    #   is now their SUM plus two further allowances, because `max` was the wrong
+    #   comparison for a chain whose states run SEQUENTIALLY. The eleven default
+    #   ceilings totalled 43800 seconds against a whole-machine default of 28800, so
+    #   a run in which several long states each used most of its own allowance was
+    #   aborted at the top level while every state was still inside its budget --
+    #   and a top-level expiry runs no further state, so it left the online-write
+    #   bracket engaged and produced no notification. The old floor could not
+    #   detect that: 28800 is comfortably above the largest single ceiling of 7200.
+    # Assumptions: the floor is the sum of three named terms, each of which is a
+    #   real thing the ceiling has to cover.
+    #     1. sequential work -- every one of the twelve states running to its own
+    #        ceiling, in order, which is the shape of the chain.
+    #     2. retry waits -- the geometric backoff each state may spend before its
+    #        final attempt. This is the WAITS only, not additional whole attempts;
+    #        see the trade-off below.
+    #     3. the failure path -- the residual-task cancellation loop's full drain
+    #        allowance plus a second ResumeOnlineWrites, because a chain that fails
+    #        late still has to cancel its tasks and clear the bracket, and the
+    #        top-level ceiling aborts that cleanup too if it does not fit.
+    # Trade-offs: term 2 counts the retry WAITS but not the extra whole attempts a
+    #   retried state may consume. Counting those would multiply term 1 by one plus
+    #   retry_max_attempts, which at the defaults is 218400 seconds -- above the
+    #   86400 the service itself permits, so no value could satisfy the floor and
+    #   the check would refuse every configuration. The line drawn here is that the
+    #   ceiling must not abort a HEALTHY sequential run; a run that additionally
+    #   burned several full state timeouts on retries is exactly the run this
+    #   ceiling exists to abort.
+    # Assumptions: the geometric sum is written with an explicit guard for a
+    #   backoff rate of exactly 1, where the series degenerates to a flat interval
+    #   and the closed form would divide by zero. retry_backoff_rate's own
+    #   validation admits 1.0, so the guard is reachable rather than defensive.
+    condition = var.state_machine_timeout_seconds <= 86400 && floor(var.state_machine_timeout_seconds) == var.state_machine_timeout_seconds && var.state_machine_timeout_seconds >= (
+      sum(values(var.state_timeout_seconds))
+      + length(var.state_timeout_seconds) * (
+        var.retry_backoff_rate == 1
+        ? var.retry_interval_seconds * var.retry_max_attempts
+        : var.retry_interval_seconds * (pow(var.retry_backoff_rate, var.retry_max_attempts) - 1) / (var.retry_backoff_rate - 1)
+      )
+      + var.cancellation_max_attempts * (var.cancellation_poll_seconds + 2 * var.cancellation_state_timeout_seconds)
+      + var.state_timeout_seconds["ResumeOnlineWrites"]
+      # Refactoring Rationale: a `max` over the map's values stood here in a second
+      #   authoring of this same floor, spread with `...` and justified by the map
+      #   holding a fixed number of entries. It is superseded rather than merged: the
+      #   sum above is the strictly stronger bound for the same reason recorded at the
+      #   top of this block -- the states run SEQUENTIALLY, so the largest single
+      #   ceiling is not a bound on the chain, and a floor set from it admits a
+      #   whole-machine ceiling that expires while every state is still inside its own
+      #   allowance. The entry-count assertion that authoring relied on is kept, at the
+      #   exactness check on var.state_timeout_seconds itself.
     )
-    error_message = "state_machine_timeout_seconds must be a whole number of seconds, at most 86400, and at least as large as the largest value in state_timeout_seconds, which is the longest any single state is allowed to run."
+    error_message = "state_machine_timeout_seconds must be a whole number of seconds, at most 86400, and at least the aggregate sequential budget of the chain: the sum of all twelve state_timeout_seconds values, plus each state's geometric retry waits, plus the failure path's cancellation drain allowance and a second ResumeOnlineWrites. A ceiling below that aborts a healthy sequential run at the top level, which runs no further state and therefore leaves the online-write bracket engaged with no notification."
   }
 }
 
@@ -1125,7 +1551,7 @@ variable "adhoc_report_timeout_seconds" {
     #   so the floor is derived from that entry rather than from a literal that
     #   would silently become too low when a caller raised the report state's own
     #   ceiling. The key is indexed rather than looked up with a fallback because
-    #   state_timeout_seconds is validated to hold every one of the eleven names.
+    #   state_timeout_seconds is validated to hold every one of the twelve names.
     condition     = var.adhoc_report_timeout_seconds <= 86400 && floor(var.adhoc_report_timeout_seconds) == var.adhoc_report_timeout_seconds && var.adhoc_report_timeout_seconds >= var.state_timeout_seconds["GenerateReports"]
     error_message = "adhoc_report_timeout_seconds must be a whole number of seconds, at most 86400, and at least as large as the ceiling the report state itself receives -- the GenerateReports entry in state_timeout_seconds."
   }
@@ -1191,7 +1617,7 @@ variable "adhoc_report_timeout_seconds" {
 # -----------------------------------------------------------------------------
 
 variable "dataset_state_timeout_seconds" {
-  description = "Per-state ceiling for the two work states of the operator-invoked dataset round trip, keyed by state name: ExportDataset and ImportDataset. Held in its own map rather than merged into state_timeout_seconds because that variable's validation asserts exactly the eleven names of the nightly chain, and widening it would weaken the check that catches a missing or misspelled nightly ceiling."
+  description = "Per-state ceiling for the two work states of the operator-invoked dataset round trip, keyed by state name: ExportDataset and ImportDataset. Held in its own map rather than merged into state_timeout_seconds because that variable's validation asserts exactly the twelve names of the nightly chain, and widening it would weaken the check that catches a missing or misspelled nightly ceiling."
   type        = map(number)
 
   default = {

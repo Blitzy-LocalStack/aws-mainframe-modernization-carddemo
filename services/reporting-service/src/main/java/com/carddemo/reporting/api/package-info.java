@@ -27,8 +27,18 @@
  * the two are held together by {@code ReportingApiContractTest}. That test compares the published
  * operation set against the routes the annotations declare, in both directions, so a published route
  * with no handler and a handled route with no publication are both build failures. It additionally
- * asserts that no operation carries a path template, which is the machine-checkable form of the
- * decision that a statement selector travels in a request body rather than in a request line.
+ * asserts that no path template addresses a card by NUMBER and pins the masked rendering, which is the
+ * machine-checkable form of the decision that a card selector travels in a request body rather than in
+ * a request line.
+ *
+ * <p>⚠️ Refactoring Rationale: that sentence read "no operation carries a path template", and it was
+ * wrong twice over. The test never asserted the absence of templates -- it asserts that no path
+ * addresses a card by number, which is a different and narrower property -- and two operations now
+ * carry a template deliberately: an artifact download addressed by an opaque selector, and a run
+ * status addressed by an execution name. Neither names a card: the selector is a minted token and the
+ * execution name is orchestration identity, so both are admissible in a request line under exactly the
+ * rule the test enforces. The correction matters because the withdrawn sentence would have been read as
+ * forbidding the two operations that a caller needs in order to reach what a run produced.
  *
  * <h2>Roster</h2>
  *

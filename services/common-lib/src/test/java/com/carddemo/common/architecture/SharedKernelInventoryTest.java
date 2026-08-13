@@ -139,6 +139,99 @@ final class SharedKernelInventoryTest {
     /** Label the sums use for the kernel root, which has no simple package name of its own. */
     private static final String ROOT_LABEL = "root";
 
+    /** The shared kernel's own README, whose published censuses this class also re-derives. */
+    private static final String KERNEL_README = "services/common-lib/README.md";
+
+    /** Root of the kernel's test tree, measured for the README's test-side listing. */
+    private static final String KERNEL_TEST_ROOT =
+            "services/common-lib/src/test/java/com/carddemo/common";
+
+    /**
+     * Matches the README's canonical production census marker.
+     *
+     * <p>Assumptions: the marker is an HTML comment, invisible in rendered Markdown, and it is the
+     * same device {@link ServiceReadmeInventoryTest} uses for the test-side census in the same file.
+     * A second mechanism for the same job would be two things to learn; reusing this one means a
+     * reader who understands either census understands both.</p>
+     */
+    private static final Pattern README_SOURCE_MARKER = Pattern.compile(
+            "<!--\\s*source-inventory:\\s*(\\d+) production classes \\+ (\\d+) charters"
+                    + " = (\\d+) compilation units\\s*-->");
+
+    /** Matches the header line of the README's main-source tree listing. */
+    private static final Pattern README_MAIN_HEADER = Pattern.compile(
+            "src/main/java/com/carddemo/common/\\s+(\\d+) packages · (\\d+) production types");
+
+    /** Matches the header line of the README's test tree listing. */
+    private static final Pattern README_TEST_HEADER = Pattern.compile(
+            "src/test/java/com/carddemo/common/\\s+(\\d+) packages · (\\d+) \\*Test \\+ (\\d+) \\*IT");
+
+    /** Opens the roster the root charter states one entry per package in. */
+    private static final String ROSTER_START = "<h2>What each subpackage owns</h2>";
+
+    /** Matches the package a roster entry describes, which its bold lead names. */
+    private static final Pattern ROSTER_PACKAGE =
+            Pattern.compile("<b>\\{@code ([a-z]+)}</b>");
+
+    /** Matches a roster entry's production-class count, stated as a word before the colon. */
+    private static final Pattern ROSTER_COUNT =
+            Pattern.compile("([A-Za-z]+(?:-[a-z]+)?) production class(?:es)?:");
+
+    /** Matches one class a roster entry or a charter census names. */
+    private static final Pattern NAMED_CLASS =
+            Pattern.compile("\\{@code ([A-Z][A-Za-z0-9]*)}");
+
+    /** Matches the anchor of a prose census that attributes a count to a named package. */
+    private static final Pattern PROSE_PACKAGE_ANCHOR =
+            Pattern.compile("([a-z]+(?:-[a-z]+)?) production classes in \\{@code ([a-z]+)}");
+
+    /** Matches one further term of that prose census, after its anchor. */
+    private static final Pattern PROSE_PACKAGE_TERM =
+            Pattern.compile("([a-z]+(?:-[a-z]+)?) in \\{@code ([a-z]+)}");
+
+    /**
+     * The census nouns whose figures this class re-derives wherever they appear in prose.
+     *
+     * <p>Assumptions: the set is closed and small on purpose. Each noun names a quantity this class
+     * can measure from the directory, so a figure written against one of them is checkable; a noun
+     * outside the set -- "services", "endpoints", "bytes" -- names something this module cannot
+     * measure, and admitting it would produce a check that guessed.</p>
+     */
+    private static final List<String> CENSUS_NOUNS = List.of(
+            "production classes", "production class", "production types", "production type",
+            "compilation units", "compilation unit", "package descriptors", "charter files",
+            "charters", "subpackages");
+
+    /**
+     * Words that mark a census figure as a statement about an EARLIER state of the tree.
+     *
+     * <p>Assumptions: every charter in this module records what it previously said, because the
+     * Explainability rule asks for the rationale of a correction and not merely its result. Those
+     * sentences necessarily carry figures the directory no longer supports, and they are correct as
+     * written. They are recognised by the past-tense verb that makes them retrospective rather than
+     * by an allow-list of line numbers, which would need editing on every reflow of a paragraph.</p>
+     *
+     * <p>Trade-offs: a paragraph that carries one of these words AND states a current figure wrongly
+     * is exempted, so this scan is not a total guarantee. It is accepted because the authoritative
+     * statements -- the root charter's table, the labelled sums, each charter's own-share line, the
+     * roster, and the README's marker and listing -- are all re-derived unconditionally by the other
+     * cases here, so the exemption only ever covers prose that restates one of them.</p>
+     */
+    private static final List<String> RETROSPECTIVE_MARKERS = List.of(
+            "named", "said", "stated", "recorded", "stood here", "exceeded", "drifted",
+            "previously", "target", "earlier", "corrected", "understated", "omitted");
+
+    /** Lines whose figures another case in this class re-derives, removed before the prose scan. */
+    private static final Pattern CANONICAL_LINE = Pattern.compile(
+            "^(?: \\*)? *(?:this package: .*|this directory: .*|production classes: .*"
+                    + "|compilation units: .*|package +production classes.*|common(?:\\.[a-z]+)?"
+                    + "(?: \\(this root\\)| \\(root\\))? +\\d+ +\\d+ +\\d+|[a-z]+ \\d+(?: \\+ [a-z]+"
+                    + " \\d+)+ = \\d+)$",
+            Pattern.MULTILINE);
+
+    /** Number words the charters spell out, used to read a spelled census figure. */
+    private static final Map<String, Integer> NUMBER_WORDS = numberWords();
+
     /**
      * Locates the repository root by walking up from the working directory.
      *
@@ -590,5 +683,432 @@ final class SharedKernelInventoryTest {
                 .as("own-share lines found across the shared kernel's charters; none would make"
                         + " this check vacuous")
                 .isPositive();
+    }
+
+    /**
+     * Builds the spelled-number vocabulary the charters draw on.
+     *
+     * <p>Assumptions: only the units, the teens and the tens are declared, and a hyphenated word is
+     * read by adding its parts. That covers every figure this module can state -- its largest census
+     * is in the fifties -- without a table of a hundred entries, and a word outside the vocabulary is
+     * reported rather than silently skipped by the case that reads it.</p>
+     *
+     * @return word to value, for the units, the teens and the tens; never {@code null}
+     */
+    private static Map<String, Integer> numberWords() {
+        Map<String, Integer> words = new LinkedHashMap<>();
+        List<String> units = List.of("zero", "one", "two", "three", "four", "five", "six", "seven",
+                "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+                "sixteen", "seventeen", "eighteen", "nineteen");
+        for (int value = 0; value < units.size(); value++) {
+            words.put(units.get(value), value);
+        }
+        List<String> tens = List.of("twenty", "thirty", "forty", "fifty", "sixty", "seventy",
+                "eighty", "ninety");
+        for (int index = 0; index < tens.size(); index++) {
+            words.put(tens.get(index), 20 + index * 10);
+        }
+        return words;
+    }
+
+    /**
+     * Reads a census figure written either in digits or in words.
+     *
+     * @param token the figure as the document writes it, for example {@code 44} or
+     *     {@code forty-four}
+     * @return the value, or {@code null} when the token is not a number this vocabulary knows
+     */
+    private static Integer figure(String token) {
+        String candidate = token.toLowerCase(java.util.Locale.ROOT);
+        if (candidate.chars().allMatch(Character::isDigit)) {
+            return Integer.parseInt(candidate);
+        }
+        int total = 0;
+        for (String part : candidate.split("-")) {
+            Integer value = NUMBER_WORDS.get(part);
+            if (value == null) {
+                return null;
+            }
+            total += value;
+        }
+        return total;
+    }
+
+    /**
+     * Lists the class file names one kernel package holds, without their extension.
+     *
+     * @param packageName the package to list, for example {@code common.codec} or {@code common}
+     * @return the simple class names in the directory, excluding the charter; never {@code null}
+     * @throws UncheckedIOException if the directory cannot be listed
+     */
+    private static List<String> measuredClassNames(String packageName) {
+        Path directory = repositoryRoot().resolve(packageName.equals("common")
+                ? KERNEL_SOURCE_ROOT
+                : KERNEL_SOURCE_ROOT + "/" + packageName.substring("common.".length()));
+        try (Stream<Path> files = Files.list(directory)) {
+            return files.filter(Files::isRegularFile)
+                    .map(file -> file.getFileName().toString())
+                    .filter(name -> name.endsWith(".java"))
+                    .filter(name -> !name.equals(CHARTER_FILE_NAME))
+                    .map(name -> name.substring(0, name.length() - ".java".length()))
+                    .sorted()
+                    .toList();
+        } catch (IOException unreadable) {
+            throw new UncheckedIOException("cannot list " + directory, unreadable);
+        }
+    }
+
+    /**
+     * Confirms the root charter's roster names, for each package, the classes that package holds.
+     *
+     * <p>Assumptions: the roster is checked by NAME and not only by count, because the omission this
+     * case exists for was invisible to a count alone. The {@code messaging} entry said three classes
+     * and named three while the directory held four, so the entry was internally consistent and
+     * externally wrong -- a reader deciding where a fourth messaging concern belonged would have
+     * concluded from the closed roster that the module had no such class.</p>
+     *
+     * <p>Assumptions: the count word and the named set are both compared, rather than only the set.
+     * The two can disagree with each other as easily as either can disagree with the tree, and an
+     * entry whose word and list contradict each other is a document a reader cannot use.</p>
+     */
+    @Test
+    @DisplayName("the root charter's roster names every class in every package it describes")
+    void theRootRosterNamesEveryClassInEveryPackage() {
+        String charter = read(ROOT_CHARTER);
+        int rosterStart = charter.indexOf(ROSTER_START);
+        assertThat(rosterStart)
+                .as("the root charter must carry the roster heading '%s', or this case is vacuous",
+                        ROSTER_START)
+                .isNotNegative();
+        String roster = charter.substring(rosterStart, charter.indexOf(LIST_END, rosterStart));
+
+        Map<String, Integer> measured = measuredProductionClasses();
+        int checked = 0;
+        for (String rawEntry : roster.split("<li>")) {
+            // Assumptions: the entry's leading asterisks and line breaks are collapsed to single
+            //   spaces before it is parsed, because Javadoc wraps a sentence wherever the column
+            //   runs out -- the codec entry writes its count word at the end of one line and the
+            //   noun at the start of the next. A pattern demanding a single space would fail on the
+            //   longest entries only, which is the least useful place for a document check to stop
+            //   working.
+            String entry = rawEntry.replaceAll("\\s*\\*\\s*", " ");
+            Matcher declaredPackage = ROSTER_PACKAGE.matcher(entry);
+            if (!declaredPackage.find()) {
+                continue;
+            }
+            String packageName = "common." + declaredPackage.group(1);
+            Matcher declaredCount = ROSTER_COUNT.matcher(entry);
+            assertThat(declaredCount.find())
+                    .as("the roster entry for %s must state its production-class count in the shape"
+                            + " '<count> production classes:'", packageName)
+                    .isTrue();
+
+            assertThat(figure(declaredCount.group(1)))
+                    .as("production classes the roster claims for %s", packageName)
+                    .isEqualTo(measured.get(packageName));
+
+            List<String> named = new ArrayList<>();
+            Matcher classes = NAMED_CLASS.matcher(entry.substring(declaredCount.end()));
+            while (classes.find()) {
+                named.add(classes.group(1));
+            }
+            assertThat(named)
+                    .as("classes the roster names for %s, against that directory", packageName)
+                    .containsExactlyInAnyOrderElementsOf(measuredClassNames(packageName));
+            checked++;
+        }
+        assertThat(checked)
+                .as("roster entries parsed; the kernel has ten subpackages and each must be named")
+                .isEqualTo(measuredProductionClasses().size() - 1);
+    }
+
+    /**
+     * Confirms every prose census that attributes a count to a named package matches that directory.
+     *
+     * <p>Assumptions: this reads the one sentence shape that spreads the whole inventory across prose
+     * -- "six production classes in {@code codec}, four in {@code control}, ..." -- rather than any
+     * sentence mentioning a package. A looser pattern would match ordinary prose such as "the two
+     * filters in {@code web}" and would then fail on a sentence that was never a census, which is the
+     * failure mode that makes a document check untrustworthy.</p>
+     */
+    @Test
+    @DisplayName("every prose census attributing a count to a package matches that directory")
+    void everyProsePackageCountMatchesItsDirectory() {
+        Map<String, Integer> measured = measuredProductionClasses();
+        int checked = 0;
+        for (Map.Entry<String, String> charter : charters().entrySet()) {
+            String text = read(charter.getValue()).replaceAll("\\s*\\*\\s*", " ");
+            Matcher anchor = PROSE_PACKAGE_ANCHOR.matcher(text);
+            while (anchor.find()) {
+                assertThat(figure(anchor.group(1)))
+                        .as("production classes %s attributes to common.%s in prose",
+                                charter.getValue(), anchor.group(2))
+                        .isEqualTo(measured.get("common." + anchor.group(2)));
+                checked++;
+                int sentenceEnd = text.indexOf(". ", anchor.end());
+                String sentence = sentenceEnd < 0 ? text.substring(anchor.start())
+                        : text.substring(anchor.start(), sentenceEnd);
+                Matcher term = PROSE_PACKAGE_TERM.matcher(sentence);
+                while (term.find()) {
+                    String packageName = "common." + term.group(2);
+                    Integer stated = figure(term.group(1));
+                    // Assumptions: a term whose leading word is not a number is skipped rather than
+                    //   failed, because the pattern deliberately matches "<word> in {@code pkg}" and
+                    //   the anchor's own noun sits in that position too -- "six production classes
+                    //   in {@code codec}" contains "classes in {@code codec}". The anchor's figure is
+                    //   asserted from its own capture above, so skipping here loses no coverage.
+                    if (stated == null || !measured.containsKey(packageName)) {
+                        continue;
+                    }
+                    assertThat(stated)
+                            .as("production classes %s attributes to %s in prose",
+                                    charter.getValue(), packageName)
+                            .isEqualTo(measured.get(packageName));
+                    checked++;
+                }
+            }
+        }
+        // Assumptions: the floor is the number of SUBPACKAGES rather than of packages, because the
+        //   one sentence of this shape in the tree attributes a count to each of the ten subpackages
+        //   and then states the root's single class in a different clause -- "the package root
+        //   contributing one" -- which this pattern deliberately does not read, there being no
+        //   {@code common} to name it against.
+        assertThat(checked)
+                .as("prose per-package census terms found; the money charter states one such"
+                        + " sentence covering every subpackage, so a lower figure means the shape"
+                        + " moved and this case stopped checking what it was written for")
+                .isGreaterThanOrEqualTo(measured.size() - 1);
+    }
+
+    /**
+     * Confirms the README's production census and both tree-listing headers match the module.
+     *
+     * <p>Assumptions: the README is checked here rather than in {@link ServiceReadmeInventoryTest}
+     * because these three figures are kernel-specific -- a production census and a package count --
+     * where that class governs the test census every service README publishes in one shared shape.
+     * Splitting them this way keeps each check next to the tree it measures.</p>
+     */
+    @Test
+    @DisplayName("the README's production census and tree-listing headers match the module")
+    void theReadmeCensusAgreesWithTheModule() {
+        String readme = read(KERNEL_README);
+        Map<String, Integer> measured = measuredProductionClasses();
+        int production = measured.values().stream().mapToInt(Integer::intValue).sum();
+        int packages = measured.size();
+
+        Matcher marker = README_SOURCE_MARKER.matcher(readme);
+        assertThat(marker.find())
+                .as("the README must carry the source-inventory marker, or its census is prose"
+                        + " nothing measures")
+                .isTrue();
+        assertThat(Integer.parseInt(marker.group(1)))
+                .as("production classes the README marker publishes").isEqualTo(production);
+        assertThat(Integer.parseInt(marker.group(2)))
+                .as("charters the README marker publishes").isEqualTo(packages);
+        assertThat(Integer.parseInt(marker.group(3)))
+                .as("compilation units the README marker publishes")
+                .isEqualTo(production + packages);
+
+        Matcher mainHeader = README_MAIN_HEADER.matcher(readme);
+        assertThat(mainHeader.find())
+                .as("the README's main-source listing must carry its packages-and-types header")
+                .isTrue();
+        assertThat(Integer.parseInt(mainHeader.group(1)))
+                .as("packages the README's main listing header claims").isEqualTo(packages);
+        assertThat(Integer.parseInt(mainHeader.group(2)))
+                .as("production types the README's main listing header claims")
+                .isEqualTo(production);
+
+        Matcher testHeader = README_TEST_HEADER.matcher(readme);
+        assertThat(testHeader.find())
+                .as("the README's test listing must carry its packages-and-classes header").isTrue();
+        assertThat(Integer.parseInt(testHeader.group(1)))
+                .as("packages the README's test listing header claims")
+                .isEqualTo(testTreeCensus().get("packages"));
+        assertThat(Integer.parseInt(testHeader.group(2)))
+                .as("*Test classes the README's test listing header claims")
+                .isEqualTo(testTreeCensus().get("tests"));
+        assertThat(Integer.parseInt(testHeader.group(3)))
+                .as("*IT classes the README's test listing header claims")
+                .isEqualTo(testTreeCensus().get("integrationTests"));
+    }
+
+    /**
+     * Measures the kernel's test tree the way the README's listing header states it.
+     *
+     * @return the package count, the {@code *Test} count and the {@code *IT} count, keyed
+     *     {@code packages}, {@code tests} and {@code integrationTests}; never {@code null}
+     * @throws UncheckedIOException if the test tree cannot be walked
+     */
+    private static Map<String, Integer> testTreeCensus() {
+        Path root = repositoryRoot().resolve(KERNEL_TEST_ROOT);
+        Map<String, Integer> census = new LinkedHashMap<>();
+        try (Stream<Path> walk = Files.walk(root)) {
+            List<Path> files = walk.filter(Files::isRegularFile)
+                    .filter(file -> file.getFileName().toString().endsWith(".java"))
+                    .toList();
+            census.put("packages", (int) files.stream()
+                    .map(Path::getParent).distinct().count());
+            census.put("tests", (int) files.stream()
+                    .filter(file -> file.getFileName().toString().endsWith("Test.java")).count());
+            census.put("integrationTests", (int) files.stream()
+                    .filter(file -> file.getFileName().toString().endsWith("IT.java")).count());
+        } catch (IOException unreadable) {
+            throw new UncheckedIOException("cannot walk " + root, unreadable);
+        }
+        return census;
+    }
+
+    /**
+     * Confirms the README's file listing names every file in the module and no file it does not hold.
+     *
+     * <p>Assumptions: both directions are asserted, because the two failures read differently to a
+     * reader and both occurred. Two production classes were missing from the listing, which reads as
+     * a module that does not hold them -- the omission that made the README's totals wrong in the
+     * first place -- while a name left behind by a deletion reads as a class to look for and not
+     * find.</p>
+     *
+     * <p>Assumptions: charters are excluded from the comparison because the listing states one per
+     * package as its first entry rather than by name, and their count is checked by the header case
+     * above.</p>
+     *
+     * @throws UncheckedIOException if either source tree cannot be walked, which is a broken checkout
+     *     rather than a documentation failure and fails loudly rather than comparing a short list
+     */
+    @Test
+    @DisplayName("the README's file listing names exactly the files this module holds")
+    void theReadmeListingNamesExactlyTheFilesTheModuleHolds() {
+        String readme = read(KERNEL_README);
+        int start = readme.indexOf("src/main/java/com/carddemo/common/");
+        assertThat(start)
+                .as("the README must carry its tree listing, or this case is vacuous")
+                .isNotNegative();
+        String listing = readme.substring(start, readme.indexOf("```", start));
+
+        List<String> named = new ArrayList<>();
+        // Assumptions: the name class admits a HYPHEN, so that "package-info.java" is captured
+        //   whole and filtered by name. Without it the capture began after the hyphen and every
+        //   charter in the listing was read as a class called "info", which no directory holds.
+        Matcher file = Pattern.compile("([A-Za-z0-9_-]+)\\.java").matcher(listing);
+        while (file.find()) {
+            if (!file.group(1).equals("package-info")) {
+                named.add(file.group(1));
+            }
+        }
+
+        List<String> measured = new ArrayList<>();
+        for (String root : List.of(KERNEL_SOURCE_ROOT, KERNEL_TEST_ROOT)) {
+            try (Stream<Path> walk = Files.walk(repositoryRoot().resolve(root))) {
+                walk.filter(Files::isRegularFile)
+                        .map(path -> path.getFileName().toString())
+                        .filter(name -> name.endsWith(".java"))
+                        .filter(name -> !name.equals(CHARTER_FILE_NAME))
+                        .map(name -> name.substring(0, name.length() - ".java".length()))
+                        .forEach(measured::add);
+            } catch (IOException unreadable) {
+                throw new UncheckedIOException("cannot walk " + root, unreadable);
+            }
+        }
+
+        assertThat(named)
+                .as("classes the README's listing names, against the module's own two source trees")
+                .containsExactlyInAnyOrderElementsOf(measured);
+    }
+
+    /**
+     * Confirms no census figure written in prose contradicts the directory it describes.
+     *
+     * <p>Purpose: this is the residual gap the labelled-sum case documents -- a charter that keeps a
+     * stale figure in ordinary prose beside a correct canonical line -- closed by measurement rather
+     * than left accepted. Every figure the review found stale lived in exactly that position: the
+     * root charter said 43 classes and 54 units above a table that said 44 and 55, and the
+     * {@code security} charter promised that a ninth class would fail the build in the same paragraph
+     * that named eight.</p>
+     *
+     * <p>Assumptions: the check is by ADMISSIBLE VALUE rather than by parsing each sentence's
+     * meaning. A figure written against one of the census nouns must be a number the directory
+     * supports for that noun -- a per-package count or the kernel total for classes, a per-package
+     * unit count or the kernel total for units, one or the charter count for charters, and the
+     * subpackage count for subpackages. That admits a coincidence, in that a figure equal to a
+     * different package's count passes; it refuses every value the tree does not produce at all,
+     * which is the whole of the drift observed, and it needs no sentence-level grammar to do it.</p>
+     *
+     * <p>Assumptions: canonical lines are removed before the scan and retrospective paragraphs are
+     * exempted, so this case never duplicates another's verdict and never fails a correction's own
+     * account of what it corrected.</p>
+     */
+    @Test
+    @DisplayName("no census figure in prose contradicts the directory it describes")
+    void noProseCensusFigureContradictsTheDirectory() {
+        Map<String, Integer> measured = measuredProductionClasses();
+        int production = measured.values().stream().mapToInt(Integer::intValue).sum();
+        int packages = measured.size();
+        Map<String, List<Integer>> admissible = new LinkedHashMap<>();
+        List<Integer> classCounts = new ArrayList<>(measured.values());
+        classCounts.add(production);
+        List<Integer> unitCounts = measured.values().stream().map(count -> count + 1)
+                .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+        unitCounts.add(production + packages);
+        for (String noun : CENSUS_NOUNS) {
+            if (noun.startsWith("production")) {
+                admissible.put(noun, classCounts);
+            } else if (noun.startsWith("compilation")) {
+                admissible.put(noun, unitCounts);
+            } else if (noun.equals("subpackages")) {
+                admissible.put(noun, List.of(packages - 1));
+            } else {
+                admissible.put(noun, List.of(1, packages, packages + 1));
+            }
+        }
+
+        List<String> documents = new ArrayList<>(charters().values());
+        documents.add(KERNEL_README);
+        int examined = 0;
+        for (String document : documents) {
+            String text = CANONICAL_LINE.matcher(read(document)).replaceAll("");
+            for (String paragraph : text.split("(?m)^(?: \\*)?\\s*$")) {
+                String prose = paragraph.replaceAll("\\s*\\*\\s*", " ");
+                boolean retrospective = RETROSPECTIVE_MARKERS.stream()
+                        .anyMatch(marker -> prose.toLowerCase(java.util.Locale.ROOT)
+                                .contains(marker));
+                for (String noun : CENSUS_NOUNS) {
+                    // Assumptions: the separator admits a HYPHEN as well as a space, both before the
+                    //   noun and inside it, because a figure can be written attributively -- "the
+                    //   55-compilation-unit total" -- and that form carried one of the stale numbers
+                    //   this case was written for.
+                    // Refactoring Rationale: the noun is quoted WORD BY WORD and the separators are
+                    //   inserted between the quoted parts. An earlier form quoted the whole noun and
+                    //   then substituted inside the result, which put the separator class inside the
+                    //   quotation and so matched the literal text "production[- ]classes" -- nothing
+                    //   at all. The scan still passed its own floor on the single-word nouns, which
+                    //   is exactly the silent weakening a negative check exists to catch.
+                    String nounPattern = java.util.Arrays.stream(noun.split(" "))
+                            .map(Pattern::quote)
+                            .collect(java.util.stream.Collectors.joining("[- ]"));
+                    Matcher census = Pattern.compile("([A-Za-z]+(?:-[a-z]+)?|\\d+)"
+                            + "(?:\\*\\*)?[- ]" + nounPattern + "\\b").matcher(prose);
+                    while (census.find()) {
+                        Integer value = figure(census.group(1));
+                        if (value == null) {
+                            continue;
+                        }
+                        examined++;
+                        if (retrospective) {
+                            continue;
+                        }
+                        assertThat(value)
+                                .as("'%s %s' in %s must be a figure this module's directory"
+                                        + " supports; a paragraph describing an EARLIER state is"
+                                        + " exempt and this one carries no retrospective marker",
+                                        census.group(1), noun, document)
+                                .isIn(admissible.get(noun));
+                    }
+                }
+            }
+        }
+        assertThat(examined)
+                .as("census figures examined across the kernel's charters and README; none would"
+                        + " mean the nouns moved and this case stopped checking anything")
+                .isGreaterThan(20);
     }
 }

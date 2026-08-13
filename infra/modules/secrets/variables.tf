@@ -305,8 +305,9 @@ variable "password_length" {
 #   username has to match character for character -- so the honest expression is a
 #   default that states them plus a validation that refuses anything else.
 # Assumptions: drift is answered by the validation rather than by the absence of
-#   a default. A ninth bounded context fails HERE at plan time, naming this
-#   variable, instead of applying cleanly against a stale inventory. The same
+#   a default. A ninth bounded context, or a further non-context login identity,
+#   fails HERE at plan time, naming this variable, instead of applying cleanly
+#   against a stale inventory. The same
 #   closed-inventory treatment is applied to the repository set in
 #   infra/modules/ecr, the dataset prefixes in infra/modules/s3-datasets and the
 #   listener rules in infra/modules/alb, so every place the topology is enumerated
@@ -316,8 +317,8 @@ variable "password_length" {
 variable "service_credential_names" {
   description = <<-EOT
     Names of the database roles that each need their own generated credential; one
-    secret is created per element. Fixed at the fifteen LOGIN roles
-    data-migration/sql/V0__schemas_and_roles.sql creates, in two tiers:
+    secret is created per element. Fixed at the sixteen LOGIN roles
+    data-migration/sql/V0__schemas_and_roles.sql creates, in three tiers:
 
       * eight RUNTIME roles, the identity each service connects as --
         carddemo_auth, carddemo_account, carddemo_card, carddemo_ledger,
@@ -325,7 +326,13 @@ variable "service_credential_names" {
         carddemo_reporting;
       * seven MIGRATION roles, the identity Flyway connects as --
         carddemo_auth_migrator and its six siblings. Reporting has none because
-        reporting-service runs no migration.
+        reporting-service runs no migration;
+      * one VERIFICATION role, the identity a post-load verification connects as
+        -- carddemo_verifier. It holds SELECT on the five schemas the ETL loads
+        into and no write privilege anywhere, and the bootstrap sets
+        default_transaction_read_only on it, so a verification cannot alter the
+        rows it certifies. It needs a credential because it LOGS IN; being
+        read-only makes it no less an authenticated identity.
 
     The EIGHT owner roles (carddemo_auth_owner and its siblings, including
     carddemo_reporting_owner) are deliberately NOT accepted. Each owns one schema
@@ -357,17 +364,18 @@ variable "service_credential_names" {
     "carddemo_reference_migrator",
     "carddemo_batch_migrator",
     "carddemo_authorization_migrator",
+    "carddemo_verifier",
   ]
   nullable = false
 
   # WHY : Assumptions: membership in a closed list is checked rather than a name
-  #       SHAPE, because shape was never the real constraint. The fifteen names are
+  #       SHAPE, because shape was never the real constraint. The sixteen names are
   #       fixed by the bootstrap SQL that creates the roles and binds their
   #       credentials, so any other name is wrong however well-formed it is. A
   #       shape check accepted "ledger", "carddemo_Ledger" was already caught by
   #       the lowercase rule, and "carddemo_reports" would have passed silently --
   #       and only the closed list rejects all three.
-  # WHY : Trade-offs: this module now holds a copy of the fifteen role names,
+  # WHY : Trade-offs: this module now holds a copy of the sixteen role names,
   #       which is exactly the duplication the default above declines to make, and
   #       the two decisions are not in conflict. A stale DEFAULT applies cleanly
   #       and provisions the wrong set silently; a stale VALIDATION LIST fails the
@@ -375,10 +383,10 @@ variable "service_credential_names" {
   #       context added to the bootstrap SQL and not to this list stops the apply
   #       at review time rather than half-provisioning. The copy is safe in
   #       precisely the direction the default was not.
-  # WHY : Assumptions: a SUBSET is accepted rather than all fifteen demanded. A
+  # WHY : Assumptions: a SUBSET is accepted rather than all sixteen demanded. A
   #       root that provisions a partial stack, or one environment brought up
   #       ahead of another, is a coherent state this module should not forbid; the
-  #       bootstrap SQL is where the requirement that ALL fifteen roles be bound is
+  #       bootstrap SQL is where the requirement that ALL sixteen roles be bound is
   #       enforced, and it raises there naming any role left unbound. Requiring
   #       completeness here as well would put one rule in two places, and the
   #       place that can actually see whether a role authenticates is the one that
@@ -402,21 +410,24 @@ variable "service_credential_names" {
         "carddemo_reference_migrator",
         "carddemo_batch_migrator",
         "carddemo_authorization_migrator",
+        "carddemo_verifier",
       ], role_name)
     ])
     error_message = "Each service_credential_names element must be lowercase letters, digits and underscores, start with a letter, and be at most 63 characters -- for example \"carddemo_ledger\"."
   }
 
-  # WHY : Assumptions: the inventory holds fifteen names because the
-  #       schema-ownership split in V0 section 1 needs two identities per context.
-  #       A schema is owned by a NOLOGIN role, so Flyway cannot create its objects
-  #       by connecting as the runtime identity and needs an identity of its own
-  #       that can `SET ROLE` to the owner. Each of those seven migration
-  #       identities has LOGIN and therefore needs a credential, and this is the
-  #       module that generates one.
-  # WHY : Assumptions: the fifteen role names are a contract with a SQL artifact,
+  # WHY : Assumptions: the inventory holds sixteen names for two reasons rather
+  #       than one. The schema-ownership split in V0 section 1 needs two identities
+  #       per context: a schema is owned by a NOLOGIN role, so Flyway cannot create
+  #       its objects by connecting as the runtime identity and needs an identity of
+  #       its own that can `SET ROLE` to the owner, and each of those seven
+  #       migration identities has LOGIN and therefore needs a credential. The
+  #       sixteenth is the verification identity, which exists because a post-load
+  #       verification connecting as a service role would hold INSERT and UPDATE on
+  #       the very rows it certifies.
+  # WHY : Assumptions: the sixteen role names are a contract with a SQL artifact,
   #       not a naming convention. data-migration/sql/V0__schemas_and_roles.sql
-  #       creates exactly these fifteen LOGIN roles, and its own header states that the
+  #       creates exactly these sixteen LOGIN roles, and its own header states that the
   #       names are the source of truth: the datasource username each service
   #       resolves and the secret entry each credential is written to must match
   #       them character for character. A secret created under any other name is
@@ -424,17 +435,17 @@ variable "service_credential_names" {
   #       service that cannot authenticate -- and BOTH states apply cleanly, which
   #       is what makes an unvalidated inventory here expensive.
   #       Assumptions: equality needs both halves. The setunion comparison alone
-  #       proves only that every name supplied is one of the fifteen, so a root
+  #       proves only that every name supplied is one of the sixteen, so a root
   #       creating a single credential would satisfy it; the count closes that,
-  #       because a set holds no duplicates, so fifteen members drawn from a set of
-  #       fifteen is that set exactly.
+  #       because a set holds no duplicates, so sixteen members drawn from a set of
+  #       sixteen is that set exactly.
   #       Trade-offs: a ninth bounded context now needs an edit here. Accepted:
   #       that context also needs a schema and a role in the bootstrap SQL, a
   #       repository in infra/modules/ecr and, if it is online, a listener rule in
   #       infra/modules/alb, each of which is enumerated in the module that owns
   #       it, so this file is not the place the addition would be discovered late.
   validation {
-    condition = length(var.service_credential_names) == 15 && setunion(var.service_credential_names, [
+    condition = length(var.service_credential_names) == 16 && setunion(var.service_credential_names, [
       "carddemo_auth",
       "carddemo_account",
       "carddemo_card",
@@ -450,6 +461,7 @@ variable "service_credential_names" {
       "carddemo_reference_migrator",
       "carddemo_batch_migrator",
       "carddemo_authorization_migrator",
+      "carddemo_verifier",
       ]) == toset([
       "carddemo_auth",
       "carddemo_account",
@@ -466,8 +478,9 @@ variable "service_credential_names" {
       "carddemo_reference_migrator",
       "carddemo_batch_migrator",
       "carddemo_authorization_migrator",
+      "carddemo_verifier",
     ])
-    error_message = "service_credential_names must be exactly the fifteen LOGIN roles data-migration/sql/V0__schemas_and_roles.sql creates: the eight runtime roles carddemo_auth, carddemo_account, carddemo_card, carddemo_ledger, carddemo_reference, carddemo_batch, carddemo_authorization and carddemo_reporting, plus the seven migration roles carddemo_auth_migrator, carddemo_account_migrator, carddemo_card_migrator, carddemo_ledger_migrator, carddemo_reference_migrator, carddemo_batch_migrator and carddemo_authorization_migrator. Note the carddemo_ prefix: \"ledger\" is the schema name, \"carddemo_ledger\" is the role a service connects as, and \"carddemo_ledger_owner\" is the role that owns the schema. All EIGHT owner roles are excluded because each is created NOLOGIN and has no credential. A secret under any other name is a credential no service reads, and a role left without one is a service that cannot authenticate."
+    error_message = "service_credential_names must be exactly the sixteen LOGIN roles data-migration/sql/V0__schemas_and_roles.sql creates: the eight runtime roles carddemo_auth, carddemo_account, carddemo_card, carddemo_ledger, carddemo_reference, carddemo_batch, carddemo_authorization and carddemo_reporting, plus the seven migration roles carddemo_auth_migrator, carddemo_account_migrator, carddemo_card_migrator, carddemo_ledger_migrator, carddemo_reference_migrator, carddemo_batch_migrator and carddemo_authorization_migrator, plus the one verification role carddemo_verifier. Note the carddemo_ prefix: \"ledger\" is the schema name, \"carddemo_ledger\" is the role a service connects as, and \"carddemo_ledger_owner\" is the role that owns the schema. All EIGHT owner roles are excluded because each is created NOLOGIN and has no credential. A secret under any other name is a credential no service reads, and a role left without one is a service that cannot authenticate."
   }
 }
 

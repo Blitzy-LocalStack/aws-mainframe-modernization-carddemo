@@ -26,6 +26,7 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.Optional;
 import java.util.Objects;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -266,6 +267,118 @@ public class StatementService {
      */
     public static final String HTML_SUFFIX = ".html";
 
+    /**
+     * Object-name stem both run-wide statement artifacts are published under, being
+     * {@code statements}.
+     */
+    public static final String STATEMENT_OBJECT_STEM = "statements";
+
+    /**
+     * Object name of the plain-text artifact one statement run publishes, being
+     * {@code statements.txt}.
+     *
+     * <p>⚠️ Refactoring Rationale: this name and its markup counterpart are declared HERE, and the
+     * writer's own constants are aliases of them, because the read side and the write side disagreeing
+     * about an object name is exactly the defect a review found on this class: the response published a
+     * per-card location while {@code S3StatementSink} wrote two run-wide objects, so every published
+     * location named an object that did not exist. One declaration removes the class of defect rather
+     * than the instance.
+     *
+     * <p>Assumptions: the declaration sits on this side and not on the writer because
+     * {@code S3StatementSink} already depends on this class for the {@link StatementSink} seam, so the
+     * writer can alias a constant here without a package cycle whereas this class importing the writer
+     * would create one. Alternatives Considered: keeping both declarations and asserting their equality
+     * in a test, which detects a drift instead of preventing it and leaves the wrong value compilable.
+     */
+    public static final String PLAIN_TEXT_OBJECT = STATEMENT_OBJECT_STEM + PLAIN_TEXT_SUFFIX;
+
+    /**
+     * Object name of the markup artifact the same statement run publishes, being
+     * {@code statements.html}.
+     */
+    public static final String HTML_OBJECT = STATEMENT_OBJECT_STEM + HTML_SUFFIX;
+
+    /**
+     * Object name of the run index, being {@code statements-index.txt}.
+     *
+     * <p>Assumptions: the index is a THIRD artifact of the run rather than a member of either other
+     * one. Neither artifact can carry it: the plain-text object is compared byte for byte against the
+     * golden masters, so anything added to it is a parity failure, and the markup object is a rendered
+     * document. Trade-offs: a third object per run, against a statement response that can say where in
+     * the run's document one card's statement begins.
+     *
+     * <p>Assumptions: the index is NOT collectable through the artifact operation. It is an internal
+     * locating aid whose records carry card fingerprints, and a fingerprint names exactly one card, so
+     * publishing the whole index would hand a caller the portfolio's card identities in one request --
+     * which is precisely the metadata disclosure the artifact selectors exist to avoid.
+     */
+    public static final String INDEX_OBJECT = STATEMENT_OBJECT_STEM + "-index" + PLAIN_TEXT_SUFFIX;
+
+    /**
+     * Path the statement surface is served under, being {@code /api/v1/reports/statements}.
+     *
+     * <p>Assumptions: declared here and ALIASED by {@code StatementController.BASE_PATH}, for the same
+     * reason the two artifact object names are declared here and aliased by the writer: this class
+     * composes a location that has to be the path the controller serves, and two independent
+     * declarations of one path is the shape the defect this replaces had. Trade-offs: a service
+     * declaring an HTTP path reads oddly, and the alternative -- a configured base URL -- is worse,
+     * because a configured value can name a host or a path this deployment does not answer on and
+     * nothing would detect it until a caller followed the location.
+     */
+    public static final String STATEMENTS_BASE_PATH = "/api/v1/reports/statements";
+
+    /**
+     * Path segment separating the artifact collection operation from the statement paths, being
+     * {@code /artifacts/}.
+     *
+     * <p>Assumptions: the trailing separator belongs to the segment, so the location prefix and the
+     * route pattern are both one concatenation away from it and neither has to remember to add it.
+     * Both remain compile-time constants, which is what lets the route pattern sit in an annotation.
+     */
+    public static final String ARTIFACTS_SEGMENT = "/artifacts/";
+
+    /**
+     * Greatest number of integer positions a statement total this class publishes may occupy, being
+     * nine.
+     *
+     * <p>⚠️ Refactoring Rationale: nine was enforced only by the artifact writer. {@code CobolEditMask}
+     * refuses a tenth integer digit when it edits a total into the 13-character band item that
+     * {@code ST-TOTAL-TRAMT} declares at L142 of {@code app/cbl/CBSTM03A.CBL}, but the two request-edge
+     * operations return a total WITHOUT emitting an artifact, so nothing on that path met the encoder
+     * and a total the reference band could not hold was published as a plain JSON value. The contract's
+     * own {@code MonetaryAmount} admits nine integer digits, so the response was capable of carrying a
+     * value it declares invalid.
+     *
+     * <p>Assumptions: the bound is nine because both reference items are nine --
+     * {@code PIC S9(09)V99} at L29 of {@code app/cpy/COSTM01.CPY} for the amount being summed and
+     * {@code PIC S9(9)V99 COMP-3} at L65 of the program for the accumulator. This constant is
+     * DELIBERATELY separate from the encoder's own nine: this one bounds what a response body may
+     * carry, the encoder's bounds what a band item may hold, and collapsing them would make a change
+     * to either silently move the other.
+     */
+    /**
+     * Path prefix the artifact download operation is served under, one opaque selector short of a
+     * complete path.
+     *
+     * <p>Assumptions: the published location is a path this deployment serves and not an
+     * {@code s3://} location, because the dataset bucket denies access outside the VPC endpoint -- so
+     * an object-store location is unusable by the one caller the field exists for, while a path
+     * carries the caller's own bearer token through the same authorization the rest of the surface
+     * uses. Trade-offs: the path is a compile-time constant rather than a configured base URL, which
+     * costs the ability to publish an absolute location naming a host, and buys the guarantee that a
+     * location cannot name a host this deployment does not answer on. The gateway and the load
+     * balancer both preserve the path, so a relative location resolves for a browser and for a service
+     * client alike.
+     *
+     * <p>Assumptions: {@code StatementController} derives its own mapping from this constant, and
+     * {@code StatementApiContractGateTest} asserts that the two agree, so a published location and the
+     * route that serves it cannot drift apart.
+     */
+    public static final String ARTIFACT_LOCATION_PREFIX =
+            STATEMENTS_BASE_PATH + ARTIFACTS_SEGMENT;
+
+    public static final int STATEMENT_TOTAL_INTEGER_DIGITS = 9;
+
     // WHY : Assumptions: the culprit is the reference program this class encodes, and it is exactly
     //       the eight characters ABEND-CULPRIT declares at app/cpy/CSMSG02Y.cpy, so it reaches
     //       AbendDetail without being shortened. Naming the paragraph's own program rather than this
@@ -343,6 +456,17 @@ public class StatementService {
      * for.</p>
      */
     private static final String ARTIFACT_TOKEN_PURPOSE = "reporting-statement-artifact";
+
+    /**
+     * The two artifact object names, in the order a statement response reports them.
+     *
+     * <p>Assumptions: the list is the whole domain of what a selector may resolve to, which is what
+     * lets {@link #resolveArtifactKey(String)} answer by lookup instead of by composition -- no part
+     * of a caller-supplied value reaches an object key, so a caller cannot address an object this
+     * service does not publish however the selector is manipulated.
+     */
+    private static final List<String> ARTIFACT_OBJECT_NAMES =
+            List.of(PLAIN_TEXT_OBJECT, HTML_OBJECT);
 
     private static final String ABEND_CULPRIT = "CBSTM03A";
 
@@ -444,14 +568,24 @@ public class StatementService {
 
 
 
-    // WHY : Assumptions: the store and prefix are configuration rather than stored values, so no
-    //       relation has to be written to record where an artifact went -- which matters because this
-    //       context holds no writable relation at all. Deriving a location also lets a caller
-    //       construct the same one independently, which is what the reference's constant data-set
-    //       names at L87 and L92 of app/jcl/CREASTMT.JCL gave for free.
-    private final String outputBucket;
-
+    // WHY : Assumptions: the prefix is configuration rather than a stored value, so no relation has to
+    //       be written to record where an artifact went -- which matters because this context holds no
+    //       writable relation at all. Trade-offs: the bucket is NO LONGER held here. It moved to
+    //       ArtifactStore, which is the only collaborator that addresses the store, so this
+    //       class can no longer name a bucket in a response body -- which is what it used to do.
     private final String statementPrefix;
+
+    /**
+     * The read side of the object store, which answers whether an artifact exists and when it was
+     * written.
+     *
+     * <p>⚠️ Refactoring Rationale: this collaborator is what turns a published location from a claim
+     * into a fact. Before it, the response asserted two locations unconditionally, so a caller reading
+     * a statement heading for a card whose run had not happened yet received two locations that
+     * resolved to nothing and a produced-at stamp of 26 blanks. Asking the store costs one
+     * {@code HeadObject} per artifact and lets the response say "absent" where absent is the truth.
+     */
+    private final ArtifactStore artifacts;
 
     /**
      * The keyed tokeniser that turns a card's identity into the opaque component of an object key.
@@ -485,10 +619,10 @@ public class StatementService {
      *     {@code app/cbl/CBSTM03B.CBL}, reached by the single-card request path
      * @param accounts the keyed account read replacing the random definition at L51 of
      *     {@code app/cbl/CBSTM03B.CBL}, reached by the single-card request path
-     * @param outputBucket the object store the two artifacts are published to, supplied by
-     *     {@value #OUTPUT_BUCKET_PROPERTY}
      * @param statementPrefix the key prefix the artifacts sit under, supplied by
      *     {@value #STATEMENT_PREFIX_PROPERTY}
+     * @param artifacts the read side of the object store, which reports whether each artifact exists
+     *     and when it was last written
      * @param artifactIdentity the keyed tokeniser the artifact object key is built with, so that no
      *     account identifier and no part of a card number appears in a key an object store logs
      * @throws NullPointerException if any collaborator or configuration value is {@code null}
@@ -498,17 +632,17 @@ public class StatementService {
             StatementCardXrefRepository cardXrefs,
             StatementCustomerRepository customers,
             StatementAccountRepository accounts,
-            @Value("${" + OUTPUT_BUCKET_PROPERTY + "}") String outputBucket,
             @Value("${" + STATEMENT_PREFIX_PROPERTY + "}") String statementPrefix,
+            ArtifactStore artifacts,
             @Qualifier(ArtifactIdentityConfig.ARTIFACT_TOKENISER)
                     OpaqueIdentifier artifactIdentity) {
         this.transactions = Objects.requireNonNull(transactions, "transactions must not be null");
         this.cardXrefs = Objects.requireNonNull(cardXrefs, "cardXrefs must not be null");
         this.customers = Objects.requireNonNull(customers, "customers must not be null");
         this.accounts = Objects.requireNonNull(accounts, "accounts must not be null");
-        this.outputBucket = Objects.requireNonNull(outputBucket, "outputBucket must not be null");
         this.statementPrefix =
                 Objects.requireNonNull(statementPrefix, "statementPrefix must not be null");
+        this.artifacts = Objects.requireNonNull(artifacts, "artifacts must not be null");
         this.artifactIdentity =
                 Objects.requireNonNull(artifactIdentity, "artifactIdentity must not be null");
     }
@@ -687,7 +821,43 @@ public class StatementService {
                     customer.getFicoCreditScore(),
                     account.getCurrentBalance());
         }
-    }
+    
+        /**
+         * Renders NOTHING but the presence of its optional members: all fourteen components are protected.
+         *
+         * <p>Purpose. This is the widest concentration of protected data anywhere in the migration -- a
+         * primary account number, an account identifier, a name in three parts, an address in six, a credit
+         * score and a balance, for one identified cardholder, in one object.
+         * {@code docs/architecture/observability.md} L1093 to L1112 withholds every one of those
+         * categories, and the compiler-generated rendering printed all of them together, which is the exact
+         * join that rule exists to prevent.</p>
+         *
+         * <p>Assumptions: the card number is omitted rather than masked, unlike the statement RESPONSE this
+         * heading is mapped into. The response carries a masked number because a client has to know which
+         * card its statement is for; this internal heading is identified by the run it belongs to, so the
+         * rule's second clause does not apply -- the sanctioned abbreviation is available only where a
+         * rendering has no other way to say which row it describes.</p>
+         *
+         * <p>Assumptions: the card fingerprint is omitted too, and it is the component most likely to be
+         * mistaken for safe. It is a derived value over the card number used to group a run's rows, so it is
+         * a confirmable token over a sixteen-digit input -- the shared kernel's own analysis of unkeyed
+         * digests, which that rule reproduces, is that a low-entropy input makes such a token disclose the
+         * value it was meant to withhold.</p>
+         *
+         * <p>Trade-offs: the credit score is omitted although it is neither an identifier nor an amount. It
+         * is a per-person financial assessment, which is the category the rule's list enumerates rather
+         * than an exhaustive set, and there is no statement-generation fault it helps diagnose.</p>
+         *
+         * @return a rendering reporting which optional members are present, with all fourteen values
+         *     withheld; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "StatementHeading[middleNamePresent=" + (this.middleName != null)
+                    + ", addressLine2Present=" + (this.addressLine2 != null)
+                    + ", personalData=[REDACTED]]";
+        }
+}
 
     /**
      * Reports what one card's statement covers, without producing either artifact.
@@ -704,7 +874,8 @@ public class StatementService {
      * {@code NUMERIC(11,2)} column so it stays exact.</p>
      *
      * @param request the card or account the statement is wanted for
-     * @return the heading figures, the accumulated total, the row count and the two artifact locations
+     * @return the heading figures, the accumulated total, the row count, and the location and write
+     *     instant of each rendered artifact the store holds
      * @throws ClientInputException if the request does not name exactly one of a card and an account,
      *     or if the named account holds more than one card
      * @throws NoSuchElementException if no card with the requested number exists, or the requested
@@ -897,31 +1068,125 @@ public class StatementService {
     }
 
     /**
-     * Assembles the heading response one request-edge operation returns.
+     * Assembles the heading response one request-edge operation returns, reporting each artifact only
+     * where the store actually holds it.
+     *
+     * <p>⚠️ Refactoring Rationale: this method used to assert three values it had not established. It
+     * composed two per-card {@code s3://} locations from a keyed token, and no writer anywhere produces
+     * a per-card object -- {@code S3StatementSink} publishes exactly {@value #PLAIN_TEXT_OBJECT} and
+     * {@value #HTML_OBJECT} for a whole run -- so both locations named nothing whether or not a run had
+     * happened. It then stamped {@code generatedAt} with 26 blanks, defending that as "not inventing a
+     * clock reading", which was true and still published a fixed value in a field whose contract calls
+     * it the instant the statement was produced. A caller had no way to tell a statement that exists
+     * from one that does not.
+     *
+     * <p>Assumptions: existence is ESTABLISHED and not assumed, by one {@code HeadObject} per artifact.
+     * Where the store holds the artifact the response carries a path this deployment serves and the
+     * artifact's own last-written instant; where it does not, all three values are {@code null}, which
+     * the contract publishes as nullable for exactly this state. Trade-offs: two store calls per
+     * heading read, against a response whose locations resolve. Alternatives Considered: recording
+     * artifact metadata in a relation at write time, which this context cannot do -- it holds no
+     * writable relation and its database role is {@code SELECT}-only, which is the property
+     * {@code CrossSchemaPrivilegeContractTest} asserts.
+     *
+     * <p>Assumptions: the two artifacts are described INDEPENDENTLY even though one run writes both.
+     * A run interrupted between the two writes, or a lifecycle rule that expires one, leaves the store
+     * holding one artifact, and reporting the one that exists is more useful than reporting neither and
+     * more honest than reporting both.
+     *
+     * <p>Assumptions: the produced-at stamp is taken from whichever artifact is present, preferring the
+     * plain-text one because that is the artifact the reference job writes first at L87 of
+     * {@code app/jcl/CREASTMT.JCL}. The two instants differ by the time between two writes of one run,
+     * so either is a truthful production time and the order only decides which of two adjacent
+     * instants is published.
+     *
+     * <p>Measured: restoring the unconditional publication -- both locations always, and 26 blanks
+     * when no artifact is described -- fails two cases of {@code StatementServiceTest}.
+     * {@code noStoredArtifactYieldsNoLocation} reports a location where {@code null} was expected,
+     * {@code but was: "/api/v1/reports/statements/artifacts/Rk3IELBwhDXagAz_-uTGC7"}, and
+     * {@code oneStoredArtifactIsReportedAlone} reports the same for the artifact the store does not
+     * hold. Removing the magnitude guard instead fails exactly one case,
+     * {@code aTotalNeedingATenthIntegerDigitIsRefused}, with {@code Expecting code to raise a
+     * throwable} -- so the two changes are independently asserted.
      *
      * @param heading the resolved heading row; must not be {@code null}
      * @param total the exact sum of the card's transaction amounts; must not be {@code null}
      * @param lineCount how many transactions the card has, which is the true count and not the number
      *     of rows any body carries
-     * @return the heading response, never {@code null}
+     * @return the heading response, with each artifact location and the produced-at stamp present only
+     *     where the store holds the artifact; never {@code null}
+     * @throws ArithmeticException if the total needs more than
+     *     {@value #STATEMENT_TOTAL_INTEGER_DIGITS} integer positions
      */
     private StatementResponse headingResponse(
             StatementHeading heading, Money total, long lineCount) {
+        requireStatementTotalMagnitude(total);
+        Optional<ArtifactStore.ArtifactDescriptor> plainText =
+                artifacts.describe(statementPrefix + PLAIN_TEXT_OBJECT);
+        Optional<ArtifactStore.ArtifactDescriptor> markup =
+                artifacts.describe(statementPrefix + HTML_OBJECT);
+        // WHY : Assumptions: the index is searched only when the artifact it indexes EXISTS. A position
+        //       into an artifact the store does not hold locates nothing, so the search would spend
+        //       several ranged reads to produce a pair the response must report as absent anyway.
+        Optional<StatementIndexEntry> position = plainText.isPresent()
+                ? locateInArtifact(heading.cardFingerprint())
+                : Optional.empty();
         return new StatementResponse(
                 heading.cardNum(),
                 String.valueOf(heading.accountId()),
                 assembleName(heading),
                 total,
                 Math.toIntExact(lineCount),
-                artifactUri(heading, PLAIN_TEXT_SUFFIX),
-                artifactUri(heading, HTML_SUFFIX),
-                // WHY : Assumptions: the produced-at stamp is left blank on a request-edge read and is
-                //       not invented. Its own contract on StatementResponse records that an all-blank
-                //       value round-trips unchanged and is deliberately not refused, and this method has
-                //       produced no artifact to stamp. The only honest alternative would be a clock
-                //       reading, which the package charter forbids on this path and which would report a
-                //       production time for a document nothing produced.
-                " ".repeat(TimestampFormatter.TIMESTAMP_LENGTH));
+                plainText.isPresent() ? artifactLocation(PLAIN_TEXT_OBJECT) : null,
+                markup.isPresent() ? artifactLocation(HTML_OBJECT) : null,
+                plainText.or(() -> markup)
+                        .map(ArtifactStore.ArtifactDescriptor::lastModified)
+                        .orElse(null),
+                position.map(StatementIndexEntry::firstRecord).orElse(null),
+                position.map(StatementIndexEntry::recordCount).orElse(null));
+    }
+
+    /**
+     * Refuses a statement total the reference's own accumulator could not hold.
+     *
+     * <p>⚠️ Refactoring Rationale: the total published by the two request-edge operations is a database
+     * aggregate over one card's transactions, and an aggregate is bounded by the data rather than by
+     * any declared picture. Every other path to a statement total meets
+     * {@code CobolEditMask.formatStatementAmount}, which refuses a tenth integer digit; this path does
+     * not emit an artifact and so met nothing. The check is placed on the one method both operations
+     * assemble their response through, rather than on each operation, so a third operation added later
+     * inherits it.
+     *
+     * <p>Assumptions: the refusal is an {@code ArithmeticException} carrying the same meaning the
+     * encoder's is -- a figure outside the range the reference regime can represent -- rather than a
+     * client error, because no request parameter chose the figure. Trade-offs: the message names the
+     * FIELD and the bound and never the figure, because the figure is a sum of a cardholder's
+     * transaction amounts and the logging contract in {@code docs/architecture/observability.md} names
+     * a monetary amount as a value that is omitted rather than abbreviated.
+     *
+     * @param total the accumulated statement total; must not be {@code null}
+     * @throws ArithmeticException if the total needs more than
+     *     {@value #STATEMENT_TOTAL_INTEGER_DIGITS} integer positions
+     */
+    private static void requireStatementTotalMagnitude(Money total) {
+        try {
+            Money.ofPicture(total.amount(), STATEMENT_TOTAL_INTEGER_DIGITS);
+        } catch (ArithmeticException overflow) {
+            throw new ArithmeticException("the statement total exceeds the "
+                    + STATEMENT_TOTAL_INTEGER_DIGITS
+                    + " integer positions the statement regime declares");
+        }
+    }
+
+    /**
+     * Builds the published location of one artifact from its opaque selector.
+     *
+     * @param objectName the artifact's object name within the statement prefix; must not be
+     *     {@code null}
+     * @return the path a caller collects the artifact from, never {@code null}
+     */
+    private String artifactLocation(String objectName) {
+        return ARTIFACT_LOCATION_PREFIX + artifactSelector(objectName);
     }
 
     /**
@@ -978,14 +1243,30 @@ public class StatementService {
      * being read inside one statement. Both are recorded here so that a reader does not have to infer a
      * guarantee from a transaction boundary that never provided it.</p>
      *
+     * <p>⚠️ Refactoring Rationale: the run now returns an INDEX beside its count, where it previously
+     * returned the count alone. The two artifacts are run-wide -- one plain-text object and one markup
+     * object for every card of the night -- and the statement response points a caller at them, so
+     * without an index a caller asking for one card's statement was pointed at a document covering the
+     * whole portfolio with no way to find its own statement inside it. The index is built here because
+     * this is the only place a card boundary is observable: {@code emitStatement} is one call per card,
+     * and the records it writes are counted around it.
+     *
+     * <p>Assumptions: the index covers the PLAIN-TEXT artifact only. That artifact is a sequence of
+     * fixed-width records, so a record ordinal locates a statement inside it exactly and survives being
+     * quoted to another tool. The markup artifact is one document whose per-card boundary is not
+     * addressable by any consumer of it -- a reader opens it and scrolls -- so an ordinal into it would
+     * be a number with no use. Alternatives Considered: indexing both, which doubles the counting and
+     * publishes a figure nothing can act on.
+     *
      * @param sink the destination for both record streams, cleared once before the first statement
-     * @return the number of statements produced, which is the number of cross-reference rows read
+     * @return the number of statements produced and one index entry per statement, in the order the
+     *     cross-reference walk produced them, which is ascending card fingerprint
      * @throws NullPointerException if {@code sink} is {@code null}
      * @throws IllegalStateException if a cross-reference row names a customer or an account that does
      *     not resolve, or if a credit score cannot be carried by the statement band, either of which
      *     stops the run as the reference's abend does
      */
-    public int generateStatements(StatementSink sink) {
+    public StatementRunOutcome generateStatements(StatementSink sink) {
         Objects.requireNonNull(sink, "sink must not be null");
 
         // WHY : Assumptions: the previous run's artifacts are discarded BEFORE the first record and
@@ -994,19 +1275,106 @@ public class StatementService {
         //       produces no statement still leave no stale artifact readable.
         sink.replaceArtifacts();
 
+        // WHY : Assumptions: the counting sink WRAPS the caller's sink rather than the caller being
+        //       asked to count. The seam stays at three methods and no writer has to know that an index
+        //       exists, which matters because the same seam is implemented by the object-store writer
+        //       and by every test double; a fourth method would have made every implementation carry a
+        //       concern only this method has.
+        CountingSink counted = new CountingSink(sink);
+        List<StatementIndexEntry> index = new ArrayList<>();
         int statementsProduced = 0;
+
+        // WHY : Refactoring Rationale: the anchor is the WHOLE ordering tuple and both components
+        //       advance from the same row. Only the fingerprint advanced before, which could not have
+        //       named a position in a sequence ordered by the masked rendering first -- and the
+        //       predicate it fed compared that one component too, so cards were skipped and repeated
+        //       rather than resumed. The repository records which cards each outcome reached.
+        // WHY : Assumptions: the two locals are assigned from the SAME row and never from different
+        //       ones. Advancing them independently would build an anchor naming a position no row
+        //       occupies, which is a shape the engine accepts and answers with a chunk that begins in
+        //       the wrong place.
+        String afterCardNum = WALK_FROM_START;
         String afterFingerprint = WALK_FROM_START;
         for (;;) {
             List<StatementHeadingRow> chunk =
-                    cardXrefs.findHeadingChunk(afterFingerprint, HEADING_CHUNK_SIZE);
+                    cardXrefs.findHeadingChunk(afterCardNum, afterFingerprint, HEADING_CHUNK_SIZE);
             if (chunk.isEmpty()) {
-                return statementsProduced;
+                return new StatementRunOutcome(statementsProduced, List.copyOf(index));
             }
             for (StatementHeadingRow row : chunk) {
-                emitStatement(StatementHeading.of(row), sink);
+                long firstRecord = counted.statementRecords();
+                emitStatement(StatementHeading.of(row), counted);
+                index.add(new StatementIndexEntry(row.getCardFingerprint(), firstRecord,
+                        counted.statementRecords() - firstRecord));
                 statementsProduced++;
+                afterCardNum = row.getCardNum();
                 afterFingerprint = row.getCardFingerprint();
             }
+        }
+    }
+
+    /**
+     * A sink that counts the plain-text records passing through it and otherwise changes nothing.
+     *
+     * <p>Assumptions: only the plain-text stream is counted, because only that stream is indexed, and
+     * the markup stream is forwarded untouched. Trade-offs: the count is a {@code long} although a run
+     * that overflowed an {@code int} would be a hundred million statement lines; a record ordinal is
+     * published in a response and widening it here costs nothing, whereas a silent wrap would put one
+     * card's ordinal inside another card's statement.</p>
+     */
+    private static final class CountingSink implements StatementSink {
+
+        /** The sink every call is forwarded to. */
+        private final StatementSink delegate;
+
+        /** How many plain-text records have passed through. */
+        private long statementRecords;
+
+        /**
+         * Wraps one sink.
+         *
+         * @param delegate the sink to forward to; must not be {@code null}
+         */
+        private CountingSink(StatementSink delegate) {
+            this.delegate = delegate;
+        }
+
+        /**
+         * Reports how many plain-text records have been written so far.
+         *
+         * @return the count, which is the ordinal the next record will occupy
+         */
+        private long statementRecords() {
+            return statementRecords;
+        }
+
+        /**
+         * Forwards the artifact reset.
+         */
+        @Override
+        public void replaceArtifacts() {
+            delegate.replaceArtifacts();
+        }
+
+        /**
+         * Counts one plain-text record and forwards it.
+         *
+         * @param record the record to write
+         */
+        @Override
+        public void writeStatementRecord(byte[] record) {
+            statementRecords++;
+            delegate.writeStatementRecord(record);
+        }
+
+        /**
+         * Forwards one markup record without counting it.
+         *
+         * @param record the record to write
+         */
+        @Override
+        public void writeMarkupRecord(byte[] record) {
+            delegate.writeMarkupRecord(record);
         }
     }
 
@@ -1433,37 +1801,193 @@ public class StatementService {
     }
 
     /**
-     * Builds the location of one stored statement artifact.
+     * Mints the opaque selector that addresses one run-wide statement artifact.
      *
-     * <p>Refactoring Rationale: the key was the account identifier in full, a hyphen, the card's last
-     * four digits and the suffix, and the comment defending it said that "no primary account number
-     * appears in an object key". That was true and was answering too narrow a question. An object key is
-     * written to the store's own access log for every request that touches the object, is returned by
-     * every listing and appears in a bucket inventory, none of which a content-encryption key reaches --
-     * so a key discloses whatever it spells out to a wider audience than the cardholder. An eleven-digit
-     * account identifier is named by the sensitive-data logging contract in
-     * {@code docs/architecture/observability.md} in its own right, and four card digits beside it narrow
-     * a cardholder further than either does alone. The key now carries a keyed opaque token instead,
-     * which discloses neither and still names one artifact stably.</p>
+     * <p>⚠️ Refactoring Rationale: this replaces a method that composed a per-card {@code s3://} location
+     * from a keyed token, and it was wrong in three independent ways that a review found together. The key
+     * it composed NAMED NO STORED OBJECT: {@code S3StatementSink} publishes exactly two run-wide objects,
+     * {@value com.carddemo.reporting.sink.S3StatementSink#PLAIN_TEXT_OBJECT} and
+     * {@value com.carddemo.reporting.sink.S3StatementSink#HTML_OBJECT}, and nothing anywhere writes a
+     * per-card key -- so every location the statement response published resolved to nothing. The scheme
+     * it used was unusable by the one audience for the field, because the dataset bucket denies access
+     * outside the VPC endpoint, so a browser could not open an {@code s3://} location even if the object
+     * had existed. And it named the BUCKET in a response body, which tells an external caller where the
+     * data sits for no benefit it can act on.
      *
-     * <p>Assumptions: the token is computed over the account identifier and the card fingerprint
-     * together, so two cards of one account yield two artifacts rather than overwriting each other, and
-     * a card that moves between accounts yields a new artifact rather than silently replacing the
-     * statement of its former account.</p>
+     * <p>Assumptions: the selector is opaque and keyed, which keeps the property the retired method was
+     * built for. Nothing in it spells out an account identifier, a card number or an object key, so it can
+     * be published in a response, logged and quoted in a support conversation. The tokeniser is keyed
+     * rather than random for the same reason as before: a stable selector means the same artifact answers
+     * to the same address across runs, which a random identifier would have cost. That reasoning is
+     * recorded in full on {@code ArtifactIdentityConfig}.
      *
-     * <p>Assumptions: the token is STABLE for one card under one key, so rerunning a night overwrites
-     * the artifact it replaces instead of accumulating a second copy under a new name. That is the
-     * property a random identifier would have cost, and it is why the tokeniser is keyed rather than
-     * random -- the reasoning is recorded in full on {@code ArtifactIdentityConfig}.</p>
+     * <p>Assumptions: the selector is computed over the ARTIFACT NAME and no longer over a card, because
+     * the artifacts are run-wide. One consequence is worth stating rather than leaving to be discovered:
+     * two cards of one run now report the same two selectors, which is correct -- they are two views of one
+     * pair of artifacts -- and a caller wanting one card's own content uses the two per-card operations
+     * this contract publishes instead.
      *
-     * @param heading the heading row naming the account and the card the artifact belongs to; must not
-     *     be {@code null}
-     * @param suffix the artifact suffix, either {@value #PLAIN_TEXT_SUFFIX} or {@value #HTML_SUFFIX}
-     * @return the artifact location, never {@code null}
+     * @param objectName the artifact's object name within the statement prefix; must not be {@code null}
+     *     or blank
+     * @return the opaque selector for that artifact, never {@code null}
      */
-    private String artifactUri(StatementHeading heading, String suffix) {
-        String token = this.artifactIdentity.token(ARTIFACT_TOKEN_PURPOSE,
-                heading.accountId() + ":" + heading.cardFingerprint());
-        return "s3://" + outputBucket + "/" + statementPrefix + token + suffix;
+    public String artifactSelector(String objectName) {
+        return this.artifactIdentity.token(ARTIFACT_TOKEN_PURPOSE, objectName);
+    }
+
+    /**
+     * Resolves one artifact selector to the object key it names, refusing anything else.
+     *
+     * <p>Assumptions: resolution is a lookup in a two-entry table and never a composition. The selector is
+     * compared against the selectors of the two artifacts this service knows about, and the key is then
+     * taken from the matching entry -- so no part of a caller-supplied value reaches an object key, and a
+     * selector for an artifact this deployment does not publish resolves to nothing rather than to a
+     * probe of the bucket.</p>
+     *
+     * <p>Measured: replacing the lookup with a composition -- returning the prefix concatenated with
+     * the selector, which is the shape an object-key parameter would have had -- fails three cases of
+     * {@code StatementServiceTest}. {@code anUnmintedSelectorIsRefused} reports
+     * {@code Expecting an empty Optional but was containing value: "statements/ffffffffffffffffffffff"},
+     * which is a caller addressing a key of its own choosing;
+     * {@code aPublishedLocationResolvesToTheWrittenObject} and {@code collectionOpensTheResolvedKey}
+     * report {@code expected: "statements/statements.html" but was: "statements/Zk1yZpeITFLYiKrzFIk5nG"}.
+     *
+     * @param selector the opaque selector from a statement response; may be {@code null}
+     * @return the object key, or empty when the selector names neither artifact
+     */
+    public Optional<String> resolveArtifactKey(String selector) {
+        if (selector == null) {
+            return Optional.empty();
+        }
+        for (String objectName : ARTIFACT_OBJECT_NAMES) {
+            if (artifactSelector(objectName).equals(selector)) {
+                return Optional.of(this.statementPrefix + objectName);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Finds where one card's statement sits inside the run-wide plain-text artifact.
+     *
+     * <p>Purpose: this is what makes a run-wide artifact usable from a per-card response. The index
+     * artifact holds one fixed-width record per statement in ascending card-fingerprint order, so an
+     * entry's position is its ordinal times {@link StatementIndexEntry#ENCODED_WIDTH} and a card can be
+     * found by bisection over the object's own size.
+     *
+     * <p>Assumptions: the search reads ONE ENTRY PER PROBE and never the whole index. A portfolio of a
+     * million cards is an eighty-eight-megabyte index and twenty probes of eighty-eight bytes, so the
+     * cost of a statement read stays flat as the portfolio grows. Alternatives Considered: reading the
+     * whole index and building a map, which is simpler and one request rather than several, and whose
+     * cost is the entire index transferred on every statement read; and recording the positions in a
+     * relation, which this context cannot do because its database role is {@code SELECT}-only.
+     *
+     * <p>Assumptions: an absent index artifact yields nothing rather than a failure, because a
+     * deployment whose statement run has not happened yet has no index and that is an ordinary state --
+     * the same state in which neither artifact exists. A PRESENT index whose size is not a whole number
+     * of entries is a failure, because it means the artifact was truncated and every position derived
+     * from it would be wrong.
+     *
+     * @param cardFingerprint the fingerprint naming the card whose position is wanted; must not be
+     *     {@code null}
+     * @return the entry naming the card's first record and record count, or empty when no index is
+     *     stored or the index does not name the card
+     * @throws IllegalStateException if the stored index is not a whole number of entries
+     */
+    public Optional<StatementIndexEntry> locateInArtifact(String cardFingerprint) {
+        Objects.requireNonNull(cardFingerprint, "cardFingerprint must not be null");
+        String key = statementPrefix + INDEX_OBJECT;
+        Optional<ArtifactStore.ArtifactDescriptor> index = artifacts.describe(key);
+        if (index.isEmpty()) {
+            return Optional.empty();
+        }
+        long size = index.get().sizeBytes();
+        if (size % StatementIndexEntry.ENCODED_WIDTH != 0) {
+            throw new IllegalStateException("the stored statement index is " + size
+                    + " bytes, which is not a whole number of entries; every position derived from it "
+                    + "would name the wrong card");
+        }
+        long low = 0;
+        long high = size / StatementIndexEntry.ENCODED_WIDTH - 1;
+        while (low <= high) {
+            long probe = low + (high - low) / 2;
+            StatementIndexEntry entry = readIndexEntry(key, probe);
+            int order = entry.cardFingerprint().compareTo(cardFingerprint);
+            if (order == 0) {
+                return Optional.of(entry);
+            }
+            if (order < 0) {
+                low = probe + 1;
+            } else {
+                high = probe - 1;
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Reads one entry of the index artifact by its ordinal.
+     *
+     * <p>Assumptions: the range is derived from the declared entry width rather than from anything read
+     * out of the artifact, so a probe cannot drift onto a record boundary that does not exist. The upper
+     * bound is inclusive because that is what the store's range syntax means, and the conversion is done
+     * here once rather than at each call site.</p>
+     *
+     * @param key the index object's key
+     * @param ordinal which entry to read, counted from zero
+     * @return the decoded entry, never {@code null}
+     * @throws IllegalStateException if the store returns a short read, which means the index shrank
+     *     between the size being read and the entry being fetched
+     */
+    private StatementIndexEntry readIndexEntry(String key, long ordinal) {
+        long firstByte = ordinal * StatementIndexEntry.ENCODED_WIDTH;
+        byte[] record = artifacts.readRange(key, firstByte,
+                firstByte + StatementIndexEntry.ENCODED_WIDTH - 1);
+        if (record.length != StatementIndexEntry.ENCODED_WIDTH) {
+            throw new IllegalStateException("the statement index returned " + record.length
+                    + " bytes for entry " + ordinal + "; it was replaced while being searched");
+        }
+        return StatementIndexEntry.decode(record);
+    }
+
+    /**
+     * Resolves one selector and opens the artifact it names, for a caller that will stream it onward.
+     *
+     * <p>⚠️ Refactoring Rationale: this is the read path the statement surface never had. The response
+     * published two artifact locations and NOTHING served them, so the only way to collect a statement
+     * was direct access to the dataset bucket -- which the bucket policy refuses outside the VPC
+     * endpoint, leaving the artifacts unreachable to every caller the response was written for. Serving
+     * them through this service puts collection behind the same bearer token, the same authorization
+     * rules and the same audit trail as the rest of the surface.
+     *
+     * <p>Assumptions: a selector is RESOLVED against the two artifacts this service publishes and is
+     * never treated as a key. Nothing a caller sends is concatenated into an object key, so no selector,
+     * however manipulated, can address another object in the bucket -- which matters because the same
+     * bucket holds the report artifacts of every other run.
+     *
+     * <p>Assumptions: an unknown selector and an absent artifact are reported the SAME way, as
+     * {@link NoSuchElementException}, which the request edge renders as 404. Distinguishing them would
+     * tell an unauthenticated-in-effect caller which selectors are real, and neither state is actionable
+     * differently by a caller that holds a selector from a response body.
+     *
+     * @param selector the opaque selector taken from a statement response; may be {@code null}, which is
+     *     reported as an absent artifact rather than as a parameter fault
+     * @return the stored size and the open stream, which the caller must close
+     * @throws NoSuchElementException if the selector names no artifact of this service, or names one the
+     *     store does not hold
+     */
+    public ArtifactStore.OpenArtifact collectArtifact(String selector) {
+        String key = resolveArtifactKey(selector).orElseThrow(() -> new NoSuchElementException(
+                "the requested statement artifact is not available"));
+        return artifacts.open(key);
+    }
+
+    /**
+     * Names the two run-wide artifacts a statement run publishes.
+     *
+     * @return the two object names, in the order the response reports them; never {@code null}
+     */
+    public static List<String> artifactObjectNames() {
+        return ARTIFACT_OBJECT_NAMES;
     }
 }

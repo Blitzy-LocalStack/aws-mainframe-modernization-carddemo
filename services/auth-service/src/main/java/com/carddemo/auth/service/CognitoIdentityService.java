@@ -1051,12 +1051,25 @@ public class CognitoIdentityService {
                 throw unableToVerify("challenge-without-session");
             }
 
-            // WHY : Assumptions: the line records that a challenge was raised and for whom, and does NOT
-            //       record the session. Possession of the session plus a new password completes the
-            //       authentication, so a log store holding it would hold half of a credential; the
-            //       identifier is already the row's primary key and is disclosed by every other line
-            //       about this request.
-            LOG.info("event=auth.signon.challenge userId={} challenge={}", userId, challengeName);
+            // WHY : Assumptions: the line records that a challenge was raised and WHICH challenge, and
+            //       records neither the session nor the identifier. Possession of the session plus a new
+            //       password completes the authentication, so a log store holding it would hold half of
+            //       a credential.
+            // WHY : ⚠️ Refactoring Rationale: this line named the USER IDENTIFIER, on the
+            //       reasoning that it "is already the row's primary key and is disclosed by every other
+            //       line about this request". The second clause was a description of the defect rather
+            //       than a justification -- every one of those lines has stopped disclosing it -- and the
+            //       first is the reason it must not be logged: a sign-on identifier in an application log
+            //       links log access to an identity record, and this line marks an account mid-way
+            //       through authentication, which is the point at which that linkage is most useful to an
+            //       attacker. What identifies the event instead is the correlation identifier the shared
+            //       filter publishes into the mapped diagnostic context for the request, which the shared
+            //       structured format renders on every line of it. Alternatives Considered: keeping the
+            //       identifier because sign-on attribution is a security-audit need. Rejected because the
+            //       authoritative record of who signed on, and of every challenge the pool raised, is the
+            //       managed identity provider's own audit trail, which is separately governed and
+            //       retained -- an application log is a second, weaker copy of it.
+            LOG.info("event=auth.signon.challenge challenge={}", challengeName);
             return SignOnChallenge.newPasswordRequired(answer.session(), userId);
         }
 
@@ -1133,7 +1146,14 @@ public class CognitoIdentityService {
             throw unableToVerify("token-lifetime-" + lifetime);
         }
 
-        LOG.info("event=auth.tokens.issued userId={}", userId);
+        // WHY : ⚠️ Refactoring Rationale: this line named the USER IDENTIFIER and no longer
+        //       does. It is emitted on every successful sign-on, so it was the highest-volume identity
+        //       disclosure in this service: a log store retaining it holds a complete record of who used
+        //       the system and when, keyed by the identity table's own primary key. The correlation
+        //       identifier in the mapped diagnostic context marks the exchange, and the managed identity
+        //       provider's audit trail -- separately governed and retained -- is the authoritative record
+        //       of the sign-in itself.
+        LOG.info("event=auth.tokens.issued");
 
         // WHY : Assumptions: the renewal token is passed through as the pool supplied it, including when
         //       the pool supplied none. The response component is declared nullable for that reason, so

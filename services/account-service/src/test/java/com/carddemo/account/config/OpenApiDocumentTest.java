@@ -196,17 +196,23 @@ class OpenApiDocumentTest {
      * Confirms the scope the filter chain enforces is published, and published from that same constant.
      *
      * <p>Assumptions: the assertion compares the extension's value to
-     * the four scope constants the chain enforces rather than to literals, because the
+     * the five scope constants the chain enforces rather than to literals, because the
      * property worth holding is that the document and the enforcing chain cannot disagree. Literals
      * here would keep passing while the enforced authorities changed.</p>
      *
-     * <p>Refactoring Rationale: this case asserted ONE scope, and the extension now carries four. The
+     * <p>Refactoring Rationale: this case asserted ONE scope, and the extension now carries five. The
      * chain requires one authority per operation family -- the cross-reference, account and customer
      * decision reads each take their own, and the two whole-customer-record reads take the
      * customer-master scope -- so a document naming fewer would state that one token reaches every
-     * internal operation, which is the escalation the split removed. Asserting all four in the order
+     * internal operation, which is the escalation the split removed. Asserting all of them in the order
      * the bean composes them is what keeps a later narrowing of the chain from leaving the document
      * behind.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the fifth entry is the narrowest of the five and was added last. The
+     * cross-reference family was split because ONE of its three addresses answers with an unmasked
+     * primary account number, and the scope covering it is granted to the transaction context alone --
+     * so a document publishing four scopes would tell the authorization context that its
+     * cross-reference credential reaches an address this chain now refuses it.</p>
      */
     @Test
     @DisplayName("the scheme publishes every scope the enforcing chain demands")
@@ -219,6 +225,7 @@ class OpenApiDocumentTest {
                 .as("dropping the scope from the requirement is only safe if it is published elsewhere")
                 .containsEntry(SCOPE_EXTENSION,
                         List.of(InternalServiceToken.SCOPE_CARD_XREF_READ,
+                                InternalServiceToken.SCOPE_CARD_XREF_RESOLVE_CARD_NUMBER,
                                 InternalServiceToken.SCOPE_ACCOUNT_READ,
                                 InternalServiceToken.SCOPE_CUSTOMER_READ,
                                 InternalServiceToken.SCOPE_CUSTOMER_MASTER_READ));
@@ -239,14 +246,17 @@ class OpenApiDocumentTest {
         Map<String, Object> scheme = nested(schemes, SCHEME_NAME);
 
         assertThat(scheme).containsEntry("type", "http");
-        // WHY : Refactoring Rationale: the committed file must carry ALL FOUR scopes, in the same order the
+        // WHY : Refactoring Rationale: the committed file must carry ALL FIVE scopes, in the same order the
         //       bean composes them. The two are maintained separately -- this module generates one
-        //       document and ships another -- so asserting the shipped file against the same two
+        //       document and ships another -- so asserting the shipped file against the same
         //       constants is what keeps a consumer reading the file from being told that one credential
-        //       reaches every internal operation.
+        //       reaches every internal operation. The count read FOUR until the cross-reference family
+        //       was split, and the fifth entry is the scope the one card-number-disclosing address
+        //       demands.
         assertThat(scheme)
                 .containsEntry(SCOPE_EXTENSION,
                         List.of(InternalServiceToken.SCOPE_CARD_XREF_READ,
+                                InternalServiceToken.SCOPE_CARD_XREF_RESOLVE_CARD_NUMBER,
                                 InternalServiceToken.SCOPE_ACCOUNT_READ,
                                 InternalServiceToken.SCOPE_CUSTOMER_READ,
                                 InternalServiceToken.SCOPE_CUSTOMER_MASTER_READ));
@@ -361,5 +371,70 @@ class OpenApiDocumentTest {
             throw new IllegalStateException(key + " is absent or is not a mapping");
         }
         return (Map<String, Object>) value;
+    }
+
+    /**
+     * Asserts that every published operation declares the transport refusals this service can produce,
+     * and that each of the three has a shape a client can bind to.
+     *
+     * <p>⚠️ Refactoring Rationale: all three were reachable and UNDECLARED. The shared advice in
+     * {@code services/common-lib} answers a wrong method with 405, a body in the wrong media type with
+     * 415 and an unsatisfiable {@code Accept} header with 406, on every route of every service, and this
+     * contract declared none of them. A client generated from it had no branch for any of the three and a
+     * hand-written one, {@code ui/src/api/client.ts}, could only report each as an unrecognised body. The
+     * census is written as a loop rather than as a list of paths so that an operation added later is
+     * covered without this case being edited.</p>
+     *
+     * <p>Assumptions: the operation count is asserted so the loop cannot pass vacuously. A scanner that
+     * matched nothing -- because a path item gained a member, or because the document was restructured --
+     * would otherwise assert nothing at all while reading as though it had checked every route.</p>
+     */
+    @Test
+    @DisplayName("every operation declares the transport refusals the shared advice can produce")
+    void theTransportRefusalsAreDeclaredWhereTheyCanOccur() {
+        Map<String, Object> document = contract();
+        Map<String, Object> paths = nested(document, "paths");
+        int operations = 0;
+
+        for (String path : paths.keySet()) {
+            Map<String, Object> methods = nested(paths, path);
+            for (String method : methods.keySet()) {
+
+                // WHY : Assumptions: a path item carries members that are not operations -- a shared
+                //       description, a shared parameter list -- so an operation is identified by carrying
+                //       an operationId rather than by the key not being one of those. Naming the
+                //       exclusions instead would need amending every time a path item gained a member.
+                if (!(methods.get(method) instanceof Map)) {
+                    continue;
+                }
+                Map<String, Object> operation = nested(methods, method);
+                if (!operation.containsKey("operationId")) {
+                    continue;
+                }
+                operations++;
+                Map<String, Object> responses = nested(operation, "responses");
+                assertThat(responses)
+                        .as("%s %s must declare both refusals every route can produce", method, path)
+                        .containsKeys("405", "406");
+                if (operation.containsKey("requestBody")) {
+                    assertThat(responses)
+                            .as("%s %s accepts a body, so it can refuse the body's media type",
+                                    method, path)
+                            .containsKey("415");
+                }
+            }
+        }
+
+        assertThat(operations)
+                .as("the census is not vacuous; every published operation was examined")
+                .isEqualTo(11);
+
+        Map<String, Object> declared = nested(nested(document, "components"), "responses");
+        assertThat(declared)
+                .as("each refusal is declared once and referenced, so the three cannot drift apart")
+                .containsKeys("MethodNotAllowed", "NotAcceptable", "UnsupportedMediaType");
+        assertThat(nested(nested(declared, "MethodNotAllowed"), "headers"))
+                .as("a 405 names the methods the route does publish, which is what a client acts on")
+                .containsKey("Allow");
     }
 }

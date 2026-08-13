@@ -418,6 +418,28 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        # WHY : Refactoring Rationale: 405, 406 and 415 were listed TWICE here, once on each
+        #   side of the note below. A repeated response code is legal YAML and resolves to the
+        #   LAST copy, so the duplicate changed nothing observable and nothing a schema check
+        #   reports; the second copy is withdrawn and the note is moved to where the status it
+        #   explains would sit, so the reason for an ABSENT code reads beside the present ones.
+        # WHY : Refactoring Rationale: this operation declares NO 409, and an earlier
+        #       revision declared one meaning the batch was refused and nothing was
+        #       applied. A conflict with stored state -- a duplicate key, a category
+        #       naming an absent type, or a type whose delete is refused while
+        #       categories still reference it -- is not a batch-level refusal in the
+        #       baseline: each is a negative SQLCODE reaching 9999-ABEND, which
+        #       reports and continues, so each is reported here as one outcome with
+        #       applied false and the baseline's own wording, and it moves the
+        #       aggregate return code to 4. Keeping a batch-level 409 would have
+        #       described the atomic behaviour this operation deliberately does not
+        #       have. The per-row create, replace and delete operations above still
+        #       answer 409, because there a conflict IS the whole outcome of the
+        #       request.
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -487,8 +509,16 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -538,6 +568,10 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -592,8 +626,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -631,6 +673,10 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '409':
           $ref: '#/components/responses/Conflict'
         '500':
@@ -690,6 +736,10 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -748,8 +798,16 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -799,6 +857,10 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -845,8 +907,16 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -895,6 +965,10 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '409':
           $ref: '#/components/responses/Conflict'
         '500':
@@ -991,6 +1065,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -1046,6 +1124,10 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -1093,6 +1175,10 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -1138,6 +1224,10 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -1181,6 +1271,10 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -1224,6 +1318,10 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -1268,6 +1366,10 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -1378,6 +1480,10 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -1523,19 +1629,14 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-        # WHY : Refactoring Rationale: this operation declares NO 409, and an earlier
-        #       revision declared one meaning the batch was refused and nothing was
-        #       applied. A conflict with stored state -- a duplicate key, a category
-        #       naming an absent type, or a type whose delete is refused while
-        #       categories still reference it -- is not a batch-level refusal in the
-        #       baseline: each is a negative SQLCODE reaching 9999-ABEND, which
-        #       reports and continues, so each is reported here as one outcome with
-        #       applied false and the baseline's own wording, and it moves the
-        #       aggregate return code to 4. Keeping a batch-level 409 would have
-        #       described the atomic behaviour this operation deliberately does not
-        #       have. The per-row create, replace and delete operations above still
-        #       answer 409, because there a conflict IS the whole outcome of the
-        #       request.
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -1807,8 +1908,18 @@ components:
         identity is echoed and logged. The refusal carries the shared problem body
         and the response correlation header, the same as any other 400, and it names
         the rule it applied without ever repeating the value it refused.
+      # WHY : Measured: the shared CorrelationId schema admits the EMPTY string, because
+      #       ApiError normalises an absent identity to "" at L619 and every problem
+      #       document carries the member, so the schema a BODY member names has to admit
+      #       it. A REQUEST header must not: conformsWithin in CorrelationIdFilter
+      #       declines an empty value and the filter then answers 400. This parameter
+      #       therefore narrows the shared schema by one facet instead of restating its
+      #       alphabet and width, which would be a second statement of both. Omitting the
+      #       header entirely stays valid -- that is governed by required above.
       schema:
-        $ref: '#/components/schemas/CorrelationId'
+        allOf:
+          - $ref: '#/components/schemas/CorrelationId'
+          - minLength: 1
 
   headers:
 
@@ -2207,6 +2318,143 @@ components:
         concurrency conflict, the failed lock and the unmatched key are each
         reported with their own status above -- so a response here means an
         unclassified fault and not a business outcome.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    # WHY : Refactoring Rationale: a SECOND definition of MethodNotAllowed, NotAcceptable and
+    #   UnsupportedMediaType stood here and all three are withdrawn. They were a whole earlier
+    #   generation of the same three components, merged alongside the surviving generation, and a
+    #   duplicate mapping key is the most deceptive shape this can take: YAML resolves a repeated
+    #   key to the LAST definition, so one of every pair was dead text that still read as the
+    #   contract, and no schema-shaped test could tell -- both copies were well formed and both
+    #   carried the correlation header. The survivors are the generation that states the Allow
+    #   header's composition rule with an example and attributes the pinned content type to the
+    #   shared advice rather than to a per-service handler; the withdrawn copies said only that
+    #   Allow is 'comma separated'. Detected with a duplicate-key-aware composer, because
+    #   yaml.safe_load hides the condition by construction.
+    PayloadTooLarge:
+      description: >-
+        The request body exceeds the byte ceiling this service accepts, and
+        carries the machine code CARDDEMO-0413. The ceiling is 65536 bytes unless
+        the deployment names another under carddemo.web.max-request-body-bytes,
+        and it is enforced by a servlet filter ordered ahead of the security
+        chain rather than by a handler -- which is why it applies to every
+        operation that accepts a body and why the refusal reaches a caller that
+        presented no token at all.
+
+
+        Assumptions: the body of this response carries no fieldErrors entry and
+        cannot. The refusal is raised before any member is parsed, so there is no
+        bound object to have fields; the message names the ceiling and the size
+        the request declared, which is what distinguishes a misconfigured client
+        from a deliberate flood.
+
+
+        Assumptions: a body that declares no length is not refused for that alone.
+        It is read up to the ceiling and refused only if it exceeds it, and the
+        bytes already read are forwarded to the handler when it does not, so a
+        chunked request within the bound is served normally. For that case the
+        message states that the body declares no length and exceeds the bound,
+        because the exact size is the one thing that was never learned.
+
+
+        Assumptions: this response carries the correlation identifier like every
+        other, and that is a property of filter ORDER rather than of this filter.
+        The correlation filter is registered one position ahead of it and has
+        already put the identifier on the response before the body is written.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+
+    # WHY : Refactoring Rationale: the transport refusals below were UNDECLARED while the shared
+    #       advice in services/common-lib produces every one of them, so each was reachable on
+    #       every operation of this contract with no published shape. A client had no branch for
+    #       them: ui/src/api/client.ts could only treat each as an unrecognised body. Declaring
+    #       them here and handling them there are two halves of one correction, and declaring one
+    #       half alone would have documented a response no caller could recognise.
+    # WHY : Assumptions: each carries the same ApiError shape as every other refusal of this
+    #       contract, with its own machine code -- CARDDEMO-0405, CARDDEMO-0406 and
+    #       CARDDEMO-0415. A distinct code per condition is what lets a client branch without
+    #       reading the sentence, which is the same reason the 400 and the 401 do not share one.
+    # WHY : Assumptions: the body is declared application/json because that is what the shared
+    #       advice writes -- it returns a plain ApiError record and this build registers no
+    #       problem+json converter -- and because the 406 arm pins MediaType.APPLICATION_JSON
+    #       explicitly, which is the single call that lets a body be produced at all for a caller
+    #       whose Accept header matched nothing.
+    MethodNotAllowed:
+      description: >-
+        The route addressed does not publish the method the request named. The response
+        carries an Allow header naming the methods it does publish, which is where a client
+        reads them; the body does not repeat that list, so the two cannot disagree.
+
+
+        Assumptions: this has no reference counterpart. A 3270 terminal cannot address a
+        transaction with a verb the program did not define, so no reference literal or
+        condition name corresponds to this outcome. It exists because a target route is
+        addressed by callers this system does not control.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+        Allow:
+          description: >-
+            The methods the addressed route publishes, joined with a comma and a space.
+            Composed from the methods the framework's handler mapping reports, which are
+            server-authored; the method the caller USED is echoed nowhere. It is omitted
+            rather than sent empty when the framework reported no supported set, because an
+            empty Allow states that the route supports no method at all, which would be a
+            different and false claim.
+          required: false
+          schema:
+            type: string
+            example: 'GET, PUT'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    UnsupportedMediaType:
+      description: >-
+        The request carried a body in a media type this route does not accept, or carried a
+        body with no Content-Type at all. Every operation of this contract that accepts a
+        body accepts application/json and nothing else.
+
+
+        The body carries no fieldErrors entry and cannot: the refusal is raised before any
+        member has been parsed, so there is no bound object to have fields. That is why this
+        is a distinct code from CARDDEMO-0400 rather than a 400 with an empty array, which a
+        caller could not tell from a body it had mis-spelled.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    NotAcceptable:
+      description: >-
+        The request's Accept header names no media type this service can produce. The shared
+        advice answers with JSON and nothing else.
+
+
+        Assumptions: the body of this response is itself application/json, which is a type
+        the caller has just said it will not accept. That is deliberate. The alternative is
+        an empty 406, which carries neither the machine code nor the correlation identifier
+        a support enquiry needs and tells the caller nothing about which header to change.
+        The content type is set explicitly by the shared advice for a second reason recorded
+        there: a body left to content negotiation would be negotiated against the same
+        Accept header that already matched nothing, and the request would then be forwarded
+        to the container error path, which this service publishes no route for.
       headers:
         X-Correlation-Id:
           $ref: '#/components/headers/XCorrelationId'
@@ -3041,8 +3289,18 @@ components:
         - hasNext
       additionalProperties: false
       properties:
+        # WHY : Assumptions: the upper bound is declared on the ARRAY and not left as
+        #       prose above it, and it is the value TransactionTypeService.PAGE_SIZE
+        #       carries -- the reference list map's own row count, which is what fixes it at seven
+        #       rather than a value chosen here.
+        #       A page carrying one row more would be a defect in this service, which
+        #       is worth failing a contract check rather than reaching a client that
+        #       had sized its rendering for the published bound. No lower bound is
+        #       declared: an empty page is legitimate for an exhausted set and for a
+        #       filter that removed every row it read.
         items:
           type: array
+          maxItems: 7
           description: >-
             The transaction types of this page, in ascending type-code order.
             Empty, never null, when the set is exhausted or the filters matched
@@ -3108,8 +3366,17 @@ components:
         - hasNext
       additionalProperties: false
       properties:
+        # WHY : Assumptions: the upper bound is declared on the ARRAY and not left as
+        #       prose above it, and it is the value TransactionCategoryService.PAGE_SIZE
+        #       carries -- the reference list map's own row count, as on TransactionTypePage.
+        #       A page carrying one row more would be a defect in this service, which
+        #       is worth failing a contract check rather than reaching a client that
+        #       had sized its rendering for the published bound. No lower bound is
+        #       declared: an empty page is legitimate for an exhausted set and for a
+        #       filter that removed every row it read.
         items:
           type: array
+          maxItems: 7
           description: >-
             The categories of this page, ordered by type code and then category
             code. Empty, never null, when the set is exhausted or the filters
@@ -3160,8 +3427,19 @@ components:
         - hasNext
       additionalProperties: false
       properties:
+        # WHY : Assumptions: the upper bound is declared on the ARRAY and not left as
+        #       prose above it, and it is the value AddressLookupService.PAGE_SIZE
+        #       carries -- twenty rather than seven because these three lookups have no reference
+        #       screen to be sized by: they serve validation rather than a browse, and
+        #       the wider page is the reason recorded on that constant.
+        #       A page carrying one row more would be a defect in this service, which
+        #       is worth failing a contract check rather than reaching a client that
+        #       had sized its rendering for the published bound. No lower bound is
+        #       declared: an empty page is legitimate for an exhausted set and for a
+        #       filter that removed every row it read.
         items:
           type: array
+          maxItems: 20
           description: >-
             The area codes of this page, in ascending order. Empty, never null,
             when the set is exhausted or the classification filter matched nothing.
@@ -3206,8 +3484,17 @@ components:
         - hasNext
       additionalProperties: false
       properties:
+        # WHY : Assumptions: the upper bound is declared on the ARRAY and not left as
+        #       prose above it, and it is the value AddressLookupService.PAGE_SIZE
+        #       carries -- twenty, as on UsPhoneAreaCodePage, and for the reason recorded there.
+        #       A page carrying one row more would be a defect in this service, which
+        #       is worth failing a contract check rather than reaching a client that
+        #       had sized its rendering for the published bound. No lower bound is
+        #       declared: an empty page is legitimate for an exhausted set and for a
+        #       filter that removed every row it read.
         items:
           type: array
+          maxItems: 20
           description: >-
             The state codes of this page, in ascending order. Empty, never null,
             when the set is exhausted.
@@ -3252,8 +3539,17 @@ components:
         - hasNext
       additionalProperties: false
       properties:
+        # WHY : Assumptions: the upper bound is declared on the ARRAY and not left as
+        #       prose above it, and it is the value AddressLookupService.PAGE_SIZE
+        #       carries -- twenty, as on UsPhoneAreaCodePage, and for the reason recorded there.
+        #       A page carrying one row more would be a defect in this service, which
+        #       is worth failing a contract check rather than reaching a client that
+        #       had sized its rendering for the published bound. No lower bound is
+        #       declared: an empty page is legitimate for an exhausted set and for a
+        #       filter that removed every row it read.
         items:
           type: array
+          maxItems: 20
           description: >-
             The combinations of this page, in ascending order. Empty, never null,
             when the set is exhausted.
@@ -4013,8 +4309,23 @@ components:
       # WHY : Alternatives Considered: suppressing the two keys when null, with an inclusion setting, so
       #       the omission became true. Rejected because the aggregate sentence is the reference's own
       #       75-character message field and a client renders the band from it unconditionally, so a
-      #       key that comes and goes moves that decision into every client; and because the services
-      #       set `default-property-inclusion: always`, which the money contract depends on.
+      #       key that comes and goes moves that decision into every client; and because
+      #       always-inclusion is PINNED for every service in
+      #       services/common-lib/src/main/resources/carddemo-common-defaults.yml, which the
+      #       money contract SEPARATELY depends on -- a money member with no value must be
+      #       present and null rather than absent, because absent reads as "no balance" where
+      #       null reads as "no amount applies". That is a second consumer of the same pin and
+      #       NOT the reason these two keys are required here: the reason is the record shape
+      #       above, and this schema carries no monetary member at all. An earlier revision ran
+      #       the two together, which read as though a problem document's nullability followed
+      #       from a money rule.
+      # WHY : ⚠️ Refactoring Rationale: that last clause used to read "the services set
+      #       default-property-inclusion: always" and it named no place, which is how it came
+      #       to be inaccurate -- exactly one of the seven services actually set the key, and
+      #       the other six, this one included, rested a published contractual promise on the
+      #       serialiser's own default. The key is now set once in the shared defaults every
+      #       service imports, so the claim is true for all of them and is verifiable by
+      #       reading one file. The reasoning is unchanged; only its subject is now real.
       required:
         - code
         - secondaryCode
@@ -4029,8 +4340,12 @@ components:
         - abend
       additionalProperties: false
       properties:
+          # WHY : Assumptions: 13 is the exact width of every identifier the shared writer emits --
+          #       the literal `CARDDEMO-` followed by four digits -- so it is a measurement rather
+          #       than a round number, and it is the same bound the six sibling contracts publish.
         code:
           type: string
+          maxLength: 13
           description: >-
             The stable machine-readable identifier of the failure, matched on by
             clients and by operational tooling and never reworded. The shared
@@ -4038,8 +4353,18 @@ components:
             HTTP status the shared advice assembles.
           examples:
             - CARDDEMO-0409
+          # WHY : ⚠️ Refactoring Rationale: the bound is 22 and was 13. Thirteen is the width of
+          #       `code` above -- `CARDDEMO-` and four digits -- and this member is NOT drawn from that
+          #       vocabulary: it carries a subordinate condition name, and the widest the shared writer
+          #       can emit is 22, measured on CARD-LOCK-NOT-ACQUIRED and CARD-WRITE-NOT-APPLIED in
+          #       services/card-service/src/main/java/com/carddemo/card/api/CardController.java. This
+          #       service emits only the empty string today, so 13 was not violated here -- but one
+          #       generated client type reads a problem document from any of the seven services, and a
+          #       bound that differs between them is a type that differs between them. Bounding it at
+          #       the writer's own maximum is what makes the seven agree.
         secondaryCode:
           type: string
+          maxLength: 22
           description: >-
             A subordinate identifier qualifying code, or the empty string when the
             failure has no second identifier. Every response this service returns
@@ -4086,8 +4411,15 @@ components:
             six-value ladder. This service produces only the application and
             relational values; a response naming any of the other four would
             misattribute the failure.
+          # WHY : Assumptions: the range is 400 to 599 because the shared writer never leaves it: every
+          #       factory of com.carddemo.common.error.ApiError is called with a client-error or
+          #       server-error status, and a 2xx or 3xx in this member would describe a response that is
+          #       not a problem document at all. Declared rather than left open so a generated client
+          #       reading this document gets the same type it gets from the six sibling contracts.
         status:
           type: integer
+          minimum: 400
+          maximum: 599
           format: int32
           description: >-
             The HTTP status this response carries, restated inside the body so that a
@@ -4112,8 +4444,15 @@ components:
             record.
           examples:
             - /api/v1/reference/transaction-types/01
+          # WHY : Assumptions: 26 characters and the pattern together, not either alone. The width is the
+          #       reference declaration -- TRNX-ORIG-TS and TRNX-PROC-TS are PIC X(26) -- and the pattern
+          #       is what makes the six microsecond digits a contract rather than a suggestion. A width
+          #       with no pattern admits 26 characters of anything; a pattern with no width leaves a
+          #       client sizing a column from prose.
         timestamp:
           type: string
+          maxLength: 26
+          pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}$'
           description: >-
             When the failure was assembled, to microsecond resolution in the
             twenty-six-character form the migration uses throughout -- the same form
@@ -4189,8 +4528,12 @@ components:
         - message
       additionalProperties: false
       properties:
+          # WHY : Assumptions: a field name is never the empty string. The shared writer names the member
+          #       it refused, so an entry with no name would describe a refusal a client cannot place
+          #       against a control, which is the one thing this array exists to enable.
         field:
           type: string
+          minLength: 1
           description: >-
             The name of the offending member, spelled exactly as it appears in the
             request or response schema it belongs to, so that a client can bind the
@@ -4206,8 +4549,12 @@ components:
           description: >-
             Whether the field was absent or present but unacceptable. The two are
             reported separately because the baseline marks them differently.
+          # WHY : Assumptions: a per-field sentence is never the empty string, for the same reason as the
+          #       field name beside it: the entry exists to be rendered, and an empty sentence renders
+          #       as a highlighted control with no explanation.
         message:
           type: string
+          minLength: 1
           maxLength: 75
           description: >-
             The sentence to show beside this field, carried verbatim from the

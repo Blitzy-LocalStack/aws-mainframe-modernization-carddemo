@@ -42,10 +42,34 @@
 #     - CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID
 #     - CARDDEMO_AUTH_COGNITO_USER_POOL_ID, CARDDEMO_AUTH_COGNITO_CLIENT_ID and
 #       CARDDEMO_AUTH_COGNITO_CLIENT_SECRET
-#   CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD has no fallback either and is
-#   deliberately absent from that list: the entry point mints the keystore and
-#   exports its password itself, so a deployment that injected one would be
-#   overriding material this task generates for its own single use.
+#     - CARDDEMO_AUTH_CREDENTIAL_SECRET_KMS_KEY_ARN and
+#       CARDDEMO_AUTH_CREDENTIAL_SECRET_PREFIX -- the key a seeded user's initial
+#       credential is encrypted under, and the Secrets Manager name prefix that
+#       credential is written to. Both are start-time inputs because a seeded
+#       credential must never be readable under the key or the name of a different
+#       environment's store; there is no defensible default for either.
+#   The list above is the COMPLETE set of no-fallback placeholders across
+#   application.yml and application-prod.yml, with ONE deliberate exclusion, and the
+#   completeness is mechanically held rather than asserted: common-lib's
+#   RuntimeConfigurationContractTest re-derives the placeholder set from those two
+#   files and fails the build if any member of it is absent from this file.
+#   The one exclusion is CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD. It has no fallback
+#   either, but it is NOT an operator-supplied value and belongs in a different
+#   category from every name above: config/docker/generate-listener-material.sh, run
+#   by the entry point below, mints the keystore and exports its password itself for
+#   this one task's single use, so a deployment that injected one would be overriding
+#   material the task generates for itself. The name is documented HERE, as
+#   entrypoint-supplied, rather than listed among the values a deployment must pass.
+#   One further input is required, is NOT an application.yml placeholder, and is
+#   therefore easy to miss when reading only the list above:
+#     - CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY, the environment form of the property
+#       carddemo.pagination.cursor.signing-key, base64 over at least 32 bytes. The
+#       shared kernel publishes the keyset-cursor signer only when that property is
+#       set -- the bean carries @ConditionalOnProperty on it and the kernel defaults
+#       it nowhere, deliberately, so that no deployment can sign cursors with a key
+#       another deployment also holds. Omitting it does not silently degrade the user
+#       list's paging: it removes the bean, UserService requires one, and the context
+#       then fails to start.
 #
 # Return values:
 #   0 (integer): the JVM exited after a requested shutdown.

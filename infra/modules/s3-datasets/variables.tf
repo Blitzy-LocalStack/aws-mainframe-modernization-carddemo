@@ -2,12 +2,17 @@
 # infra/modules/s3-datasets/variables.tf
 # -----------------------------------------------------------------------------
 # Purpose:
-#   The public input surface of the `s3-datasets` module: THIRTEEN variables,
+#   The public input surface of the `s3-datasets` module: FOURTEEN variables,
 #   every one explicitly typed and described. The module provisions the single
 #   versioned, customer-managed-key-encrypted S3 bucket that replaces the
 #   mainframe baseline's generation data groups, carrying one prefix and one
 #   noncurrent-version lifecycle rule for each of the TEN generation-dataset
-#   families, plus the TWO non-generation statement artifacts.
+#   families, plus the TWO non-generation statement artifacts and the ONE
+#   source-extract prefix the nightly dataset refresh reads its inputs from.
+#   Refactoring Rationale: the count read THIRTEEN and the file declared
+#   fourteen from the revision `source_extract_prefix` landed. The sentence now
+#   also names WHY the fourteenth exists, because a bare increment would leave a
+#   reader to infer that the new input was another lifecycle knob.
 #
 #   The environment axis is deliberately narrow. Only retention and
 #   lifecycle-transition values differ between the dev and prod roots; the
@@ -346,78 +351,196 @@ variable "dataset_families" {
 }
 
 variable "non_generation_prefixes" {
-  description = "Prefixes for baseline datasets that are NOT generation data groups, keyed by the S3-safe name main.tf uses as the dataset path segment. Each value carries a domain, the owning bounded context, and a description recording the baseline dataset and the JCL line that writes it. Held separately from dataset_families so these can never be counted as additional generation families."
+  description = "Prefixes for reporting artifacts that are NOT generation data groups, keyed by the S3-safe artifact name. Each value carries the literal key prefix the reporting service writes under, the domain, the owning bounded context, and a description recording the baseline dataset and the JCL line that writes it. Held separately from dataset_families so these can never be counted as additional generation families."
 
   type = map(object({
+    prefix      = string
     domain      = string
     description = string
   }))
 
-  # Assumptions: neither statement artifact has a GENERATIONDATAGROUP base
+  # Assumptions: not one of these three artifacts has a GENERATIONDATAGROUP base
   # anywhere in the baseline. An exhaustive search for DEFINE
   # GENERATIONDATAGROUP matches only four files -- app/jcl/DEFGDGB.jcl,
   # app/jcl/DEFGDGD.jcl, app/jcl/DALYREJS.jcl and app/jcl/REPTFILE.jcl -- and
-  # not one of them defines a statement base. Both are plain sequential
-  # datasets. They live in their own variable precisely so they cannot be
+  # not one of them defines a base for a statement or for
+  # AWS.M2.CARDDEMO.TCATBALF.REPT. All three are plain sequential datasets,
+  # fixed-key rather than numbered. They live in their own variable so they cannot be
   # miscounted as an eleventh generation family, which is the mistake the
   # separation exists to prevent: the ten-family count is asserted in the AAP
-  # and published by two sibling documents, so an inventory of twelve prefixes
-  # in one map would put this module out of step with all of them.
-  # They still need prefixes, because the GenerateStatements batch state writes
-  # both the plain-text and the HTML statement to S3. Bucket versioning is
+  # and published by two sibling documents, so folding these into that map
+  # would put this module out of step with all of them. The BUCKET carries
+  # fourteen prefixes in total -- these three, the ten families, and
+  # `source_extract_prefix` -- and that total is deliberately not a single
+  # inventory: only ten of the fourteen are generation families, and the count
+  # that has to stay checkable is the ten.
+  # They still need prefixes, because the GenerateStatements and GenerateReports
+  # batch states write all three artifacts to S3. Bucket versioning is
   # bucket-wide and cannot be enabled per prefix, so these objects acquire
   # noncurrent versions too and get a noncurrent-version rule as a consequence
   # -- but that rule is ordinary version hygiene and is NOT the LIMIT(5)
   # SCRATCH analogue described on `noncurrent_version_retention` below. Reading
   # it as a generation limit would invent a generation contract the baseline
-  # never had for these two datasets.
+  # never had for these three datasets.
   #
   # Trade-offs: the baseline's own pattern here was delete-then-recreate -- an
-  # IEFBR14 step at app/jcl/CREASTMT.JCL:L66-L75 deletes both datasets before
-  # CBSTM03A writes them fresh at L87-L96. Object versioning expresses that as
-  # a new current version with the previous one becoming noncurrent, so the
-  # target needs no delete step at all: the old statement is retained rather
-  # than scratched, which is strictly more recoverable than the baseline and
-  # costs only the retained versions.
+  # IEFBR14 step at app/jcl/CREASTMT.JCL:L66-L75 deletes both statements before
+  # CBSTM03A writes them fresh at L87-L96, and app/jcl/PRTCATBL.jcl:L21-L25
+  # deletes AWS.M2.CARDDEMO.TCATBALF.REPT before its sort rewrites it. Object
+  # versioning expresses that as a new current version with the previous one
+  # becoming noncurrent, so the target needs no delete step at all: the old
+  # artifact is retained rather than scratched, which is strictly more
+  # recoverable than the baseline and costs only the retained versions.
+  # Refactoring Rationale: each entry now carries its prefix LITERALLY, and the
+  # prefix used to be derived as "<domain>/<key>/". The derivation produced
+  # `reporting/statement-text/` and `reporting/statement-html/`, and the
+  # reporting service writes neither: it publishes both statements under
+  # `statements/` -- declared as `statement-prefix` in
+  # services/reporting-service/src/main/resources/application.yml -- and its two
+  # reports under `reports/transaction-detail/` and
+  # `reports/category-balance/`, declared in the same document. So this module
+  # attached noncurrent-version rules to two prefixes nothing writes while the
+  # three prefixes that ARE written carried no rule at all, and the outputs
+  # published locations no consumer could use. A prefix a service chooses is not
+  # derivable from a key this module invents, so it is transcribed instead.
+  # Alternatives Considered: changing the SERVICE to write under the derived
+  # prefixes. Rejected because the service's prefixes are published contracts --
+  # runbooks address artifacts by them, and the IAM scoping in both environment
+  # roots is expressed in them -- whereas these keys are internal to this module
+  # and consumed by nothing outside it, so moving the module is the change with
+  # no blast radius.
+  # Assumptions: the two statement artifacts share ONE prefix and are
+  # distinguished by object name, `statements.txt` and `statements.html`, which
+  # is why they are one entry here and were two before. Two entries resolving to
+  # one prefix would emit two lifecycle rules with identical filters, which is a
+  # rule that reads as governing two locations while governing one.
   default = {
-    "statement-text" = {
+    "statements" = {
+      prefix      = "statements/"
       domain      = "reporting"
-      description = "Plain-text customer statements. Replaces sequential dataset AWS.M2.CARDDEMO.STATEMNT.PS, deleted by the IEFBR14 step at app/jcl/CREASTMT.JCL:L75 and rewritten by CBSTM03A at L91 with DCB=(LRECL=80,BLKSIZE=8000,RECFM=FB) declared at L89. Not a generation data group: no GENERATIONDATAGROUP base for it exists in the baseline."
+      description = "Plain-text and HTML customer statements, written as statements.txt and statements.html under one prefix. Replaces sequential datasets AWS.M2.CARDDEMO.STATEMNT.PS and AWS.M2.CARDDEMO.STATEMNT.HTML, deleted by the IEFBR14 steps at app/jcl/CREASTMT.JCL:L71 and L75 and rewritten by CBSTM03A at L91 with DCB=(LRECL=80,BLKSIZE=8000,RECFM=FB) and at L96 with DCB=(LRECL=100,BLKSIZE=800,RECFM=FB). Neither is a generation data group: no GENERATIONDATAGROUP base for either exists in the baseline."
     }
-    "statement-html" = {
+    "transaction-detail-report" = {
+      prefix      = "reports/transaction-detail/"
       domain      = "reporting"
-      description = "HTML customer statements. Replaces sequential dataset AWS.M2.CARDDEMO.STATEMNT.HTML, deleted by the IEFBR14 step at app/jcl/CREASTMT.JCL:L71 and rewritten by CBSTM03A at L96 with DCB=(LRECL=100,BLKSIZE=800,RECFM=FB) declared at L94. Not a generation data group: no GENERATIONDATAGROUP base for it exists in the baseline."
+      description = "The request-scoped transaction detail report, keyed by run date, report type and both range bounds. Corresponds to the 133-column output CBTRN03C writes at app/jcl/TRANREPT.jcl:L80. That output also has a generation base -- provisioned as the tranrept generation family -- and the nightly run publishes to BOTH: this prefix is what a range-addressed request and the runbooks resolve, the generation prefix is what carries the LIMIT(5) analogue."
+    }
+    "category-balance-report" = {
+      prefix      = "reports/category-balance/"
+      domain      = "reporting"
+      description = "The category-balance report, written as category-balance.txt. Corresponds to the sorted 40-byte output the DFSORT step at app/jcl/PRTCATBL.jcl:L52-L63 writes to AWS.M2.CARDDEMO.TCATBALF.REPT. Not a generation data group: an exhaustive search of the baseline for DEFINE GENERATIONDATAGROUP matches four files and none of them defines a base for it, so it is a fixed-key artifact like the statements."
     }
   }
 
-  # Assumptions: these TWO keys are asserted for the same reason the ten families
-  # above are, and the assertion matters more here rather than less. The whole
-  # purpose of holding these prefixes in a separate variable is that they can
+  # Assumptions: these THREE keys are asserted for the same reason the ten
+  # families above are, and the assertion matters more here rather than less. The
+  # whole purpose of holding these prefixes in a separate variable is that they can
   # never be counted as generation families; an unconstrained map defeats that,
   # because a root could move a generation family into this variable, or add a
-  # third prefix here, and the twelve-prefix total would still plan cleanly while
+  # fourth prefix here, and the fourteen-prefix total would still plan cleanly while
   # the ten-family count the AAP asserts and two sibling documents publish
   # quietly stopped being true of the deployed bucket.
-  # Assumptions: the domain is fixed to reporting because both artifacts are
-  # written by the statement step, which belongs to reporting-service. The pair is
-  # the complete set: an exhaustive search of the baseline for DEFINE
-  # GENERATIONDATAGROUP matches four files and none of them defines a statement
-  # base, so no third non-generation prefix exists to add.
+  # Assumptions: the domain is fixed to reporting because all three artifacts are
+  # written by the two orchestrated states reporting-service owns -- GenerateStatements
+  # and GenerateReports. The set is complete for that workload: those two states
+  # publish the statements, the transaction detail report and the category-balance
+  # report, and every other object either service writes to this bucket lands in a
+  # generation family or in the source-extract prefix below.
   validation {
-    condition = length(var.non_generation_prefixes) == 2 && setunion(keys(var.non_generation_prefixes), [
-      "statement-text", "statement-html",
+    condition = length(var.non_generation_prefixes) == 3 && setunion(keys(var.non_generation_prefixes), [
+      "statements", "transaction-detail-report", "category-balance-report",
       ]) == toset([
-      "statement-text", "statement-html",
+      "statements", "transaction-detail-report", "category-balance-report",
     ])
-    error_message = "non_generation_prefixes must be keyed by exactly statement-text and statement-html, the two sequential statement datasets the baseline writes. Adding a key here would raise the bucket's prefix count above the twelve the architecture documents publish, and moving a generation family into this variable would drop its LIMIT(5) analogue."
+    error_message = "non_generation_prefixes must be keyed by exactly statements, transaction-detail-report and category-balance-report, the three fixed-key reporting artifacts the baseline writes. Adding a key here would raise the bucket's prefix count above the fourteen the architecture documents publish, and moving a generation family into this variable would drop its LIMIT(5) analogue."
   }
 
+  # Assumptions: the prefix is required to END in a slash and to carry no leading
+  #   one. Every filter and IAM pattern in this stack appends a wildcard to it, so
+  #   `reports/transaction-detail` without the slash would also match a sibling
+  #   prefix such as `reports/transaction-detail-archive/`, and a leading slash
+  #   would produce a key no S3 caller composes.
   validation {
     condition = alltrue([
       for prefix in var.non_generation_prefixes :
-      prefix.domain == "reporting" && length(trimspace(prefix.description)) > 0
+      prefix.domain == "reporting" &&
+      length(trimspace(prefix.description)) > 0 &&
+      length(trimspace(prefix.prefix)) > 1 &&
+      endswith(prefix.prefix, "/") &&
+      !startswith(prefix.prefix, "/")
     ])
-    error_message = "Every non_generation_prefixes entry must carry the reporting domain -- both statements are written by the statement step reporting-service owns -- and a non-empty description recording the baseline sequential dataset it replaces."
+    error_message = "Every non_generation_prefixes entry must carry the reporting domain -- all three artifacts are written by the states reporting-service owns -- a non-empty description recording the baseline dataset it replaces, and a non-empty prefix that ends in a slash and does not begin with one."
+  }
+}
+
+# -----------------------------------------------------------------------------
+# The source-extract prefix -- where the exported baseline datasets are READ from.
+#
+# Refactoring Rationale: this prefix exists because the nightly seed-refresh state
+#   had no readable source at all. It told the data-migration container to read the
+#   extracts from a filesystem path -- /mnt/carddemo-extracts -- and nothing in this
+#   stack provisions a filesystem, so every branch of that state failed on an absent
+#   file while its own input documentation described populating the path as an
+#   "operator action". The extracts were nevertheless already going to S3:
+#   docs/runbooks/data-migration.md tells an operator to
+#   `aws s3 sync app/data/ s3://<dataset bucket>/migration/source/`. Naming that
+#   destination here, and granting the refresh a read of it, is what makes the state
+#   runnable from what the runbook already produces.
+# Alternatives Considered: adding a key to `non_generation_prefixes` instead of a
+#   variable of its own. Rejected because that map is CLOSED by validation at exactly
+#   the two statement artifacts, deliberately, so that no third prefix can be
+#   miscounted as a generation family -- and because this prefix is categorically
+#   different from both inventories: it is the only prefix in the bucket the stack
+#   READS as an input rather than WRITES as an output, so it carries no generation
+#   convention, no dt=/gen= structure and no LIMIT(5) analogue. Folding it in would
+#   have required loosening the assertion that protects the ten-family count.
+# Alternatives Considered: a separate bucket for the extracts. Rejected on two
+#   grounds: the data-migration task already holds a scoped read on this bucket and a
+#   second bucket would need a second grant, a second key policy and a second
+#   lifecycle configuration for one read-only prefix; and the runbook's existing
+#   sync destination is this bucket, so a second one would make the documented
+#   operator step wrong rather than the code right.
+# Assumptions: the prefix defaults to the EBCDIC subdirectory of the runbook's sync
+#   destination, because the exported extracts the registry names are the
+#   mainframe-character-set .PS files -- the ASCII twins are a developer convenience
+#   and are not the cutover input. A deployment holding them elsewhere overrides this
+#   one value and the refresh reads there instead.
+# -----------------------------------------------------------------------------
+
+variable "source_extract_prefix" {
+  description = "Key prefix inside the dataset bucket holding the exported baseline extracts the data-migration refresh READS. Populating it is an operator action -- docs/runbooks/data-migration.md syncs app/data/ here -- and the refresh joins each dataset's registered source file name to this prefix. This is the only prefix in the bucket that is an input rather than an output, so it carries no generation convention and no LIMIT(5) analogue; its lifecycle rule is ordinary version hygiene for a re-synced corrected extract."
+
+  type    = string
+  default = "migration/source/EBCDIC/"
+
+  validation {
+    # Assumptions: a LEADING separator is refused rather than stripped. An S3 key has
+    #   no root, so "/migration/..." is a different, working prefix whose first
+    #   segment is empty -- a value copied from a filesystem path would otherwise plan
+    #   cleanly and then read a prefix nothing was ever synced to. The ETL's own
+    #   `extract_source_key` refuses the same spelling for the same reason, so the two
+    #   sides agree about what a prefix is.
+    condition     = length(trimspace(var.source_extract_prefix)) > 0 && !startswith(var.source_extract_prefix, "/")
+    error_message = "source_extract_prefix must be a non-empty S3 key prefix and must not begin with \"/\"; an object key has no root, so a leading separator names a different prefix rather than the same one."
+  }
+
+  validation {
+    # Assumptions: a TRAILING separator is required, the opposite of the rule on
+    #   dataset_staging paths elsewhere, because this value is used as a prefix FILTER
+    #   in a lifecycle rule and in an IAM resource pattern. Without the separator,
+    #   "migration/source/EBCDIC" also matches "migration/source/EBCDICOLD/", so a
+    #   sibling prefix would inherit this prefix's retention rule and its read grant.
+    condition     = endswith(var.source_extract_prefix, "/")
+    error_message = "source_extract_prefix must end with \"/\" so that it matches only keys inside it; without the separator the prefix also matches sibling prefixes that merely start with the same characters."
+  }
+
+  validation {
+    # Assumptions: the character set is restricted to what the exported extract names
+    #   and the runbook's own sync destination use. It excludes the wildcard and
+    #   policy-variable characters an IAM resource pattern interprets, because this
+    #   value is interpolated into one.
+    condition     = can(regex("^[a-zA-Z0-9!_.*'()/-]+$", var.source_extract_prefix)) && !strcontains(var.source_extract_prefix, "//") && !strcontains(var.source_extract_prefix, "..")
+    error_message = "source_extract_prefix must consist of S3-safe key characters, must not contain an empty segment (\"//\") and must not contain \"..\"."
   }
 }
 
@@ -613,8 +736,13 @@ variable "access_log_bucket_name" {
   # roots are expected to supply a target here and leaving it null in dev or
   # prod is not the intended end state. If the scanner flags this bucket, the
   # resolution is to pass a target from the environment root -- never an inline
-  # suppression, because the gates in this tree are satisfied by construction
-  # rather than by exemption.
+  # suppression, because ACCESS LOGGING carries no exemption anywhere in this
+  # module and a suppression here would make a bucket with no log target
+  # indistinguishable from one whose root forgot to supply one. That is scoped
+  # deliberately: this module does carry two justified Checkov skips, on
+  # `aws_s3_bucket.audit` and `aws_cloudtrail.dataset_object_access`, so a claim
+  # that it declines no check at all would be false and would invite a reader to
+  # treat those two as undocumented drift.
   #
   # Assumptions: the target must be a DIFFERENT bucket from this one. Aiming a
   # bucket's server access logs at itself makes each delivered log object a

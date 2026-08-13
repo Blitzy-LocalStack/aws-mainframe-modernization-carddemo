@@ -2,13 +2,21 @@
 // ui/tsconfig.node.json
 // -----------------------------------------------------------------------------
 // Purpose:
-//   TypeScript project for the Node-executed half of the ui tree: exactly two
-//   files, vite.config.ts and vitest.config.ts. Vite and Vitest load those two
-//   at start-up, in Node, before any browser bundle exists -- so they are the
-//   only TypeScript in this tree that may legitimately reach for a Node API.
+//   TypeScript project for the Node-executed half of the ui tree: exactly three
+//   members, vite.config.ts, vitest.config.ts and documentationGate.test.ts, as
+//   the `include` list at the foot of this file names them. Vite and Vitest load
+//   the first two at start-up, in Node, before any browser bundle exists; the
+//   third is a Vitest suite that shells out to ESLint and so also runs in Node.
+//   All three are therefore the only TypeScript in this tree that may
+//   legitimately reach for a Node API.
 //   This project type-checks them (it never emits) and grants them the Node
 //   type definitions that ui/tsconfig.json withholds from the browser sources
 //   under ui/src.
+//   Refactoring Rationale: this paragraph said "exactly two" while `include`
+//   already named three, and the third is the one a reader is least likely to
+//   expect in a build-tooling project -- so the stale count removed the very
+//   member that needed explaining. The reason it belongs here is argued beside
+//   the `include` line rather than repeated at length in both places.
 //
 //   Two callers consume it. ui/package.json's `typecheck` script runs
 //   `tsc --noEmit -p tsconfig.node.json` as the second of its two invocations,
@@ -23,12 +31,12 @@
 //
 // WHY (non-obvious design decisions):
 //   - Alternatives Considered: one combined tsconfig spanning ui/src and these
-//     two files was evaluated and rejected. A single project has a single
+//     three files was evaluated and rejected. A single project has a single
 //     `types` list, so it would have to either add "node" -- putting `process`,
 //     `__dirname`, `Buffer` and `require` in scope for all 21 React screens,
 //     where `process.env.API_URL` inside a component would type-check cleanly
 //     and then throw at run time in a browser that has no `process` -- or omit
-//     "node" and leave these two files unable to type-check at all. Two
+//     "node" and leave these three files unable to type-check at all. Two
 //     sibling projects are the only arrangement that types both halves without
 //     lending Node globals to browser code.
 //   - Alternatives Considered: the stock-Vite layout, in which the root
@@ -74,16 +82,17 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
 
-    // Assumptions: only these two Node-executed files receive @types/node;
-    // ui/tsconfig.json intentionally withholds those globals from browser code.
+    // Assumptions: only the three Node-executed members named in `include`
+    // receive @types/node; ui/tsconfig.json intentionally withholds those
+    // globals from browser code.
     "types": ["node"],
 
     // Assumptions: Vite and Vitest transpile their own configuration; tsc only
     // checks types and must not create an unused JavaScript tree.
     "noEmit": true,
 
-    // Trade-offs: strict checking adds little cost across two files and catches
-    // malformed Vite or Vitest options at their declaration.
+    // Trade-offs: strict checking adds little cost across three files and
+    // catches malformed Vite or Vitest options at their declaration.
     "strict": true,
 
     // Trade-offs: these checks catch half-finished configuration edits that

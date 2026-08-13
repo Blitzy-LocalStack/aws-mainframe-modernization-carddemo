@@ -717,20 +717,24 @@ rule by name instead.
   and its +100.00 balance, and its `everyScenarioCarriesItsThreeFiles` case asserts
   the record widths and the absence of carriage returns.
 - [`TransactionRejectRepositoryIT`](../../../java/com/carddemo/transaction/repository/TransactionRejectRepositoryIT.java)
-  -- **[present]**. It resolves a scenario's `dailytran.txt` from this tree at its
-  line 1514 and exercises the reject-row columns of section 3.1 against a real
-  PostgreSQL instance through Testcontainers.
+  -- **[present]**. It resolves a scenario's `dailytran.txt` from this tree in its
+  `fixtureRecord` helper and exercises the reject-row columns of section 3.1 against
+  a real PostgreSQL instance through Testcontainers.
 - A test asserting **this scenario's reject outcome** -- **[present]**. The case
   `aProjectedBalanceOneCentBeyondTheCreditLimitYieldsReasonOneHundredAndTwo` of
-  `TransactionRejectRepositoryIT`, at its line 1065, reads this folder's
+  `TransactionRejectRepositoryIT` reads this folder's
   `dailytran.txt`, stores the reject row it produces and asserts `reason_code` 102 and
   `reason_desc` `OVERLIMIT TRANSACTION`. The read itself asserts the 350-character
   image width, so a truncated or carriage-return-bearing fixture fails at the read
   rather than as a puzzling comparison later. Its paired case
-  `aProjectedBalanceExactlyOnTheCreditLimitProducesNoRejectStreamRow`, at line 1034,
-  drives `boundary_exact_limit` through the same path and asserts an empty reject
-  table, so the two cases straddle the inclusive guard from this folder's bytes and
-  from its pair's.
+  `aProjectedBalanceExactlyOnTheCreditLimitProducesNoRejectStreamRow` drives
+  `boundary_exact_limit` through the same path and asserts an empty reject table, so
+  the two cases straddle the inclusive guard from this folder's bytes and from its
+  pair's. Refactoring Rationale: the three citations above named line numbers in that
+  test file as well as the members they mean. The numbers were correct when written
+  and went stale the moment a case above them was deleted, so they are dropped and the
+  member names kept: a name is searchable and survives every edit that does not rename
+  it, while a number is checkable only against the revision it was read from.
 - The **decision** that these bytes are over limit -- **[present]**, and deliberately
   asserted elsewhere rather than here. It belongs to `PostingValidationService` in the
   batch deployable, the module `app/cbl/CBTRN02C.cbl` migrates to, and

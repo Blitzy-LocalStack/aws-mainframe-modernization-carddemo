@@ -172,6 +172,12 @@ _MONEY_BEARING_RECORDS: Final[tuple[str, ...]] = (
     "TRAN",
     "TCATBAL",
 )
+#: The one URI scheme the loader modules may name in an executable literal, mirroring
+#: ``s3_stage._OBJECT_URI_SCHEME``. It is restated here rather than imported because the module
+#: constant is private, and because a test that read the value under test from the module under
+#: test would admit whatever that module happened to say.
+_ADMITTED_URI_SCHEME: Final[str] = "s3://"
+
 _SYNTHETIC_USER_ID: Final[str] = "SYNTH001"
 _SYNTHETIC_SUBJECT: Final[str] = "00000000-0000-4000-8000-000000000001"
 # Assumptions: the stamp is the canonical 26-character form the timestamp module renders, taken
@@ -1146,7 +1152,8 @@ def _stage_generations(
                 dataset=registered.dataset,
                 business_date=business_date,
                 generation=generation,
-                source=source,
+                source=Path(source.name),
+                staging_root=source.parent,
                 retention_count=_RETENTION_KEEPING_EVERY_GENERATION,
             ).prefix
         )
@@ -1321,7 +1328,13 @@ def test_each_target_loads_as_its_own_schema_s_login_role(
         return fake_aurora.connect(**resolved.as_connection_params())
 
     monkeypatch.setattr(cli, "resolve_aurora_settings", _resolve)
-    monkeypatch.setattr(cli, "connect", _connect)
+    # WHY : Refactoring Rationale: the connection seam is patched on the OWNING module, not on
+    #   `cli`. The command imports `connect` inside the handler that uses it -- so that
+    #   `list-datasets`, `decode-record` and `stage-dataset` reach neither the loader nor the
+    #   database driver -- which means a re-export on `cli` no longer exists to patch. Patching
+    #   the authority is the better arrangement anyway: every call path reaches the double,
+    #   including the ones that resolve the name themselves, which a re-export never covered.
+    monkeypatch.setattr(aurora, "connect", _connect)
 
     target = aurora.TARGETS[row.record]
     cli._connect_for(target)  # noqa: SLF001 -- the orchestration under test is module-private
@@ -1540,13 +1553,18 @@ def test_one_dataset_loads_inside_exactly_one_transaction(
     #   one transaction would satisfy the commit count while abandoning that contract entirely.
     assert len(fake_aurora.copy_statements) == 1
     assert len(fake_aurora.copied_rows) == expected_rows
-    # WHY : Assumptions: the three statements are asserted in ORDER, not merely counted. A merge
+    # WHY : Assumptions: the four statements are asserted in ORDER, not merely counted. A merge
     #   issued before the COPY would insert nothing into the target and still commit, reporting a
     #   successful load of an empty table -- and the arranged affected-row count would make that
     #   outcome indistinguishable from this one on the counts alone.
+    # WHY : Assumptions: the content-conflict probe sits between the COPY and the merge, and its
+    #   POSITION is the property rather than its presence. After the merge the disagreeing rows have
+    #   already been skipped and counted as duplicates, so a probe issued there would report the
+    #   conflict having let the load succeed -- which is the defect it exists to close.
     assert fake_aurora.executed_sql() == (
         target.stage_statement(),
         target.stage_copy_statement(),
+        target.conflict_statement(),
         target.merge_statement(),
     )
 
@@ -2966,7 +2984,13 @@ def test_a_driver_diagnostic_is_redacted_at_the_command_log_boundary(
         return fake_aurora.connect(**resolved.as_connection_params())
 
     monkeypatch.setattr(cli, "resolve_aurora_settings", _resolve)
-    monkeypatch.setattr(cli, "connect", _connect)
+    # WHY : Refactoring Rationale: the connection seam is patched on the OWNING module, not on
+    #   `cli`. The command imports `connect` inside the handler that uses it -- so that
+    #   `list-datasets`, `decode-record` and `stage-dataset` reach neither the loader nor the
+    #   database driver -- which means a re-export on `cli` no longer exists to patch. Patching
+    #   the authority is the better arrangement anyway: every call path reaches the double,
+    #   including the ones that resolve the name themselves, which a re-export never covered.
+    monkeypatch.setattr(aurora, "connect", _connect)
 
     with caplog.at_level(logging.DEBUG):
         exit_code = cli.main(
@@ -3091,7 +3115,8 @@ def test_the_staged_prefix_is_rendered_by_the_one_canonical_builder(
         dataset=registered.dataset,
         business_date=_BUSINESS_DATE,
         generation=7,
-        source=extract,
+        source=extract.name,
+        staging_root=extract.parent,
     )
 
     # WHY : Assumptions: the expectation is the BUILDER's output, not a string composed here. A
@@ -3170,7 +3195,8 @@ def test_a_binary_ebcdic_extract_is_staged_byte_for_byte(
         dataset=s3_stage.family("transact-bkup").dataset,
         business_date=_BUSINESS_DATE,
         generation=1,
-        source=extract,
+        source=extract.name,
+        staging_root=extract.parent,
     )
 
     body = fake_object_store.body_of(staged.key)
@@ -3233,7 +3259,8 @@ def test_the_byte_size_and_digest_anchors_are_recorded_with_the_object(
         dataset=s3_stage.family("systran").dataset,
         business_date=_BUSINESS_DATE,
         generation=1,
-        source=extract,
+        source=extract.name,
+        staging_root=extract.parent,
     )
 
     assert staged.byte_size == _BINARY_EXTRACT_BYTE_SIZE
@@ -3404,7 +3431,8 @@ def test_staging_never_creates_a_bucket_or_applies_a_lifecycle(
         dataset=s3_stage.family("tranrept").dataset,
         business_date=_BUSINESS_DATE,
         generation=1,
-        source=seed_corpus.ascii_path("trantype.txt"),
+        source=Path(seed_corpus.ascii_path("trantype.txt").name),
+        staging_root=seed_corpus.ascii_path("trantype.txt").parent,
     )
 
     # WHY : Assumptions: the double is asserted to OFFER no provisioning operation, which is a
@@ -3422,13 +3450,21 @@ def test_staging_never_creates_a_bucket_or_applies_a_lifecycle(
         )
 
     # WHY : Assumptions: the loader's reachable operations are read from its own source, so the
-    #   guarantee covers every code path rather than the one this test walked. The four it calls are
-    #   exactly the four its client protocol declares, and none of them can create a bucket or set a
+    #   guarantee covers every code path rather than the one this test walked. The five it calls are
+    #   exactly the five its client protocol declares, and none of them can create a bucket or set a
     #   lifecycle rule.
+    # WHY : Refactoring Rationale: the set gained `head_object`, and the addition is the point of
+    #   asserting an exact set rather than a subset. The staging path now PROBES a generation key
+    #   before writing it, so that a retry presenting identical bytes is idempotent and one
+    #   presenting different bytes is refused rather than silently overwriting a catalogued
+    #   generation. `head_object` reads metadata and cannot create, configure or delete anything,
+    #   so the guarantee this test states is unchanged -- but it had to be re-stated deliberately,
+    #   which is exactly what an exact set forces.
     assert _client_operations(s3_stage) == {
         "get_paginator",
         "put_object",
         "get_object",
+        "head_object",
         "delete_objects",
     }
     for call in fake_object_store.put_calls:
@@ -3794,7 +3830,8 @@ def test_the_business_date_is_a_required_parameter(
             domain=registered.domain,
             dataset=registered.dataset,
             generation=1,
-            source=extract,
+            source=extract.name,
+            staging_root=extract.parent,
         )
 
     assert "business_date" in str(missing.value)
@@ -3805,7 +3842,8 @@ def test_the_business_date_is_a_required_parameter(
             client=fake_object_store,
             settings=staging_settings,
             family_name="discgrp-bkup",
-            source=extract,
+            source=extract.name,
+            staging_root=extract.parent,
             generation=1,
         )
     assert fake_object_store.put_calls == []
@@ -4049,10 +4087,18 @@ def test_the_staging_module_constructs_no_literal_endpoint(
     # WHY : Assumptions: the literal scan skips docstrings, and here that is the difference between
     #   a meaningful check and a guaranteed failure: the staging module's own rationale explains at
     #   length that it passes no ``endpoint_url``, and the phrase appears in that explanation.
+    # WHY : ⚠️ Refactoring Rationale: the bare object-URI SCHEME is admitted, where every "://"
+    #   was previously refused outright. The staging module now resolves a source location that a
+    #   deployment states as `s3://bucket/prefix`, and it names that scheme in one constant and in
+    #   its diagnostics. That is not the property this case exists to protect: a scheme names no
+    #   host, no region, no account and no credential, and the bucket it precedes is still carried
+    #   on validated settings rather than written here -- which the final assertion below still
+    #   proves. Every OTHER scheme stays refused, so an `https://` endpoint literal, which is what
+    #   would create the second code path this case is about, still fails it.
     for module in (aurora, s3_stage):
         for literal in _executable_string_literals(module):
             assert "amazonaws.com" not in literal
-            assert "://" not in literal
+            assert "://" not in literal.replace(_ADMITTED_URI_SCHEME, "")
             assert not literal.startswith("AKIA")
             assert "AWS_ACCESS_KEY" not in literal
             assert "AWS_SECRET" not in literal
@@ -4253,3 +4299,138 @@ def test_connection_settings_never_render_their_credential(
     recorded = fake_aurora.connection_params[-1]
     assert recorded["password"] == REDACTED
     assert SYNTHETIC_PASSWORD_FILL not in repr(recorded)
+
+
+# WHY : Assumptions: S3 names its IAM actions after the WIRE operation rather than the SDK method,
+#   so this mapping is a translation and not a rename. `list_object_versions` is authorised by
+#   `s3:ListBucketVersions` against the BUCKET, and a single `delete_objects` call that carries a
+#   VersionId -- which is the only form the retention path issues -- requires BOTH `s3:DeleteObject`
+#   and `s3:DeleteObjectVersion` against the OBJECT. Deriving the action names from the method names
+#   would produce four wrong strings, so the pairing is declared here and asserted against both
+#   sides.
+_RETENTION_IAM_ACTIONS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
+    {
+        "list_object_versions": ("s3:ListBucketVersions",),
+        "delete_objects": ("s3:DeleteObject", "s3:DeleteObjectVersion"),
+    }
+)
+
+# WHY : Assumptions: both environment roots are asserted, not one. They are separate files that a
+#   change reaches independently, and a grant present in dev and absent in prod fails only in the
+#   environment where the failure costs the most.
+_ENVIRONMENT_ROOTS: Final[tuple[str, ...]] = ("dev", "prod")
+
+
+def _data_migration_runtime_policy(environment: str) -> str:
+    """Read one environment root's data-migration task policy document.
+
+    Purpose
+    -------
+    Give the IAM assertions a text scoped to the one policy document under test, so a grant found
+    anywhere else in a three-thousand-line root -- the batch runtime's, the reporting role's --
+    cannot be mistaken for this role's.
+
+    Parameters
+    ----------
+    environment : str
+        Environment directory name beneath ``infra/envs``, one of :data:`_ENVIRONMENT_ROOTS`.
+
+    Returns
+    -------
+    str
+        The `data "aws_iam_policy_document" "data_migration_runtime"` block, its opening line
+        through its closing brace.
+
+    Raises
+    ------
+    AssertionError
+        If the root holds no such block, which itself means the task role lost its policy.
+    """
+    root = (
+        Path(__file__).resolve().parents[2] / "infra" / "envs" / environment / "main.tf"
+    ).read_text(encoding="utf-8")
+    opening = 'data "aws_iam_policy_document" "data_migration_runtime" {'
+    assert opening in root, f"infra/envs/{environment} declares no data_migration_runtime policy"
+    # WHY : Trade-offs: the block is delimited by the next closing brace in the FIRST column rather
+    #   than by counting braces. Terraform formats top-level blocks that way and `terraform fmt
+    #   -check` is a CI gate, so the delimiter is enforced elsewhere; a brace counter here would be
+    #   a second HCL parser to maintain for no additional certainty.
+    body = root.split(opening, 1)[1]
+    return opening + body.split("\n}\n", 1)[0]
+
+
+def test_both_environment_roots_grant_the_retention_path_the_actions_it_calls() -> None:
+    """Pin the IAM grant the LIMIT(5) scratch depends on, scoped to the dataset prefixes.
+
+    Purpose
+    -------
+    Close the gap between what this module CALLS and what the task role is ALLOWED. The staging
+    module lists object versions and deletes the oldest generation on every stage, so a role without
+    those two grants stages five generations successfully and then fails on the sixth -- the first
+    execution at which the retention rule has anything to scratch, which in a nightly chain is a
+    week after the change that caused it.
+
+    Parameters
+    ----------
+    None
+        Reads the staging module's own source and both environment roots from the repository.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the module calls an operation the mapping does not translate, if either root omits an
+        action, if the version listing is unconditioned, or if the delete grant reaches beyond the
+        dataset prefixes.
+    """
+    # WHY : Assumptions: the module's own source is read first, so the expectation cannot outlive
+    #   the call. If the retention path were rewritten to stop listing versions, this loop
+    #   reports the stale entry rather than leaving a grant asserted for an operation nothing
+    #   performs.
+    staging_source = Path(s3_stage.__file__).read_text(encoding="utf-8")
+    for operation in _RETENTION_IAM_ACTIONS:
+        assert operation in staging_source, (
+            f"the staging module no longer calls {operation}; this expectation is stale and the"
+            " grant asserted below may now be unnecessary privilege"
+        )
+
+    for environment in _ENVIRONMENT_ROOTS:
+        policy = _data_migration_runtime_policy(environment)
+        for operation, actions in _RETENTION_IAM_ACTIONS.items():
+            for action in actions:
+                assert f'"{action}"' in policy, (
+                    f"infra/envs/{environment} does not grant {action}, which the staging module's"
+                    f" {operation} call requires; the sixth generation fails with AccessDenied"
+                )
+
+        # WHY : Assumptions: the version listing is asserted CONDITIONED, not merely present. It is
+        #   granted at the bucket, and a bucket-level listing with no `s3:prefix` condition lets the
+        #   migration task enumerate every key in the dataset bucket including the statement
+        #   prefixes, which hold rendered customer statements this role has no reason to read.
+        listing = policy.split('"ListDatasetGenerationVersions"', 1)[1]
+        listing = listing.split("statement {", 1)[0]
+        assert 'variable = "s3:prefix"' in listing, (
+            f"infra/envs/{environment} grants s3:ListBucketVersions with no prefix condition"
+        )
+        assert "module.s3_datasets.dataset_prefixes" in listing, (
+            f"infra/envs/{environment} conditions the listing on a written prefix list rather than"
+            " the s3-datasets module's own output, so the two can drift apart silently"
+        )
+
+        # WHY : Assumptions: the delete grant is asserted to be PREFIX-scoped and specifically NOT
+        #   bucket-wide. A delete over `${bucket_arn}/*` would let the migration task destroy the
+        #   rendered statements and the exported reports, neither of which any part of it produces
+        #   -- and it would pass every other assertion in this test.
+        scratch = policy.split('"ScratchOldestDatasetGeneration"', 1)[1]
+        scratch = scratch.split("statement {", 1)[0]
+        assert "module.s3_datasets.dataset_prefixes" in scratch, (
+            f"infra/envs/{environment} scopes the delete grant by something other than the dataset"
+            " prefixes"
+        )
+        assert "bucket_arn}/*" not in scratch, (
+            f"infra/envs/{environment} grants the migration task a bucket-wide delete"
+        )

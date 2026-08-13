@@ -223,9 +223,20 @@ import org.hibernate.type.SqlTypes;
  * outputs depend on it: the reject stream is written in the order rejects are encountered, and the
  * interest job derives a transaction identifier per generated row, so a scan whose order varies
  * between runs shifts the contents of files that are compared byte for byte and the comparison then
- * fails for a reason that has nothing to do with logic. Ordering on the identifier column reproduces
- * the key order the baseline's sequential read presents, and it is available without an index
- * because correctness here rests on the ordering being stated rather than on it being cheap.</p>
+ * fails for a reason that has nothing to do with logic. The ordering column is {@code ingestSeq},
+ * not {@code transactionId}: both finders on {@code DailyTransactionRepository} name it -- the whole
+ * scan as {@code findAllByOrderByIngestSeqAsc} and the resumable one as
+ * {@code findByIngestSeqGreaterThanOrderByIngestSeqAsc} -- and it is the arrival ordinal described
+ * two paragraphs above, so ordering by it reproduces the sequence
+ * {@code app/cbl/CBTRN02C.cbl:202-219} reads the physical dataset in.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph previously named the transaction identifier as the
+ * ordering column, and that is wrong for the reason the identity paragraph above gives: this feed
+ * does not promise the identifier to be unique, so ordering on it is not a TOTAL order, and the
+ * resumable finder that pages the feed would skip a duplicated identifier straddling a chunk
+ * boundary. It also claimed the ordering needed no index; ordering on {@code ingestSeq} is served by
+ * the table's own primary key, {@code pk_daily_transactions}, so the ordering that is now stated is
+ * also the one the table is already keyed for.</p>
  *
  * @see Transaction
  */

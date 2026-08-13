@@ -17,7 +17,7 @@
 - **Decision:** Run the **seven online deployables** as **ECS Fargate services**,
   run every batch step as a **Step-Functions-invoked Fargate task** from a task
   definition that has **no long-running service** behind it, and reserve **Lambda
-  for glue only**. Three of the eleven states in the nightly chain are Lambda
+  for glue only**. Three of the twelve states in the nightly chain are Lambda
   invocations; a small number of operational functions outside the chain are too,
   and all of them are enumerated in
   [The glue tier is bounded by role, not by count](#the-glue-tier-is-bounded-by-role-not-by-count)
@@ -228,8 +228,8 @@ count of chain states is not a count of functions:
 | Function | Declared in | Duty |
 |---|---|---|
 | `quiesce` | each environment root | Chain state 1 — sets the read-only flag |
-| `resume` | each environment root | Chain state 11 — clears the flag; **also** the target of the bracket-finalizer rule (`aws_cloudwatch_event_rule.daily_finalizer`), which releases the flag when an execution ends FAILED, TIMED\_OUT or ABORTED without reaching state 11 |
-| `database_admin` | each environment root | Chain state 10 — runs `VACUUM ANALYZE`; **also** invoked once at apply time to run the schema-and-role bootstrap transactionally |
+| `resume` | each environment root | Chain state 12 — clears the flag; **also** the target of the bracket-finalizer rule (`aws_cloudwatch_event_rule.daily_finalizer`), which releases the flag when an execution ends FAILED, TIMED\_OUT or ABORTED without reaching state 12 |
+| `database_admin` | each environment root | Chain state 11 — runs `VACUUM ANALYZE`; **also** invoked once at apply time to run the schema-and-role bootstrap transactionally |
 | `dataset_retention` | each environment root | Not a chain state — triggered by object creation in the dataset bucket to enforce generation retention |
 
 Two clarifications the inventory earns. The maintenance statement is
@@ -331,7 +331,7 @@ rotation supplies a function ARN to the pass-through hook the secrets module alr
 exposes; nothing in this package has to change for it to take effect.
 
 Refactoring Rationale: an earlier revision of this record said "three of the
-eleven states in the nightly chain, and nothing else". The clause was false in two
+states in the nightly chain, and nothing else". The clause was false in two
 independent ways — two functions run outside the chain, and two in-chain
 functions have a second duty — so a reader auditing the decision against the
 Terraform would have found five functions where the record promised three and
@@ -899,7 +899,7 @@ the tag, so a rebuild resolves the same bytes even if a tag is republished.
 |---|---|---|
 | Java runtime | `public.ecr.aws/amazoncorretto/amazoncorretto:21.0.12-al2023-headless` | The eight service images |
 | Java build | `maven:3.9.16-amazoncorretto-21-al2023` | The build stage of the same eight |
-| SPA build | `node:22.23.1-alpine` | The build stage of the user-interface image |
+| SPA build | `node:22.23.2-alpine` | The build stage of the user-interface image |
 | SPA runtime | `nginx:1.30.4-alpine` | The runtime stage of the user-interface image |
 | ETL | `python:3.13.14-slim-trixie` | The data-migration image |
 

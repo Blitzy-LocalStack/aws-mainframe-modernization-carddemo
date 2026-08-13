@@ -4,11 +4,14 @@ import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
+import com.carddemo.reporting.dto.ReportExecutionStatusResponse;
 import com.carddemo.reporting.dto.ReportRequest;
 import com.carddemo.reporting.dto.ReportSubmissionOutcome;
 import com.carddemo.reporting.dto.ReportSubmissionResponse;
 import com.carddemo.reporting.dto.TransactionReportLineResponse;
 import com.carddemo.reporting.dto.TransactionReportTotals;
+import com.carddemo.reporting.service.ArtifactStore;
+import com.carddemo.reporting.service.ReportArtifactLocator;
 import com.carddemo.reporting.service.ReportExecutionService;
 import com.carddemo.reporting.service.TransactionReportService;
 import jakarta.validation.Valid;
@@ -19,9 +22,12 @@ import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.util.Objects;
 import org.springframework.http.HttpStatus;
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -91,7 +97,7 @@ public class ReportController {
      * explicitly, because no servlet context path is configured to prepend one -- a relative
      * assumption would resolve differently once the service sits behind the edge.
      */
-    public static final String BASE_PATH = "/api/v1/reports";
+    public static final String BASE_PATH = ReportArtifactLocator.REPORTS_BASE_PATH;
 
     /**
      * Sub-path of the report-submission operation.
@@ -104,7 +110,8 @@ public class ReportController {
      * the browser client sends, and the disagreement was invisible to a build because no step compares
      * a path constant with a YAML key.
      */
-    public static final String SUBMISSION_PATH = "/transaction-report";
+    public static final String SUBMISSION_PATH =
+            ReportArtifactLocator.TRANSACTION_REPORT_SEGMENT;
 
     /**
      * Sub-path of the paged detail lines.
@@ -122,6 +129,40 @@ public class ReportController {
      * caller that needs both issues the same range twice and the service reads the same snapshot.
      */
     public static final String TOTALS_PATH = SUBMISSION_PATH + "/totals";
+
+    /**
+     * Sub-path of the report-artifact collection operation.
+     *
+     * <p>Assumptions: DERIVED from {@link ReportArtifactLocator#ARTIFACT_PATH}, which is also what the
+     * status operation publishes as a result location, so the route that serves an artifact and the
+     * location advertised for it cannot drift apart. The same reasoning, and the same shape, as the
+     * statement surface's own artifact route.</p>
+     */
+    public static final String ARTIFACT_PATH =
+            SUBMISSION_PATH + ReportArtifactLocator.ARTIFACT_SEGMENT;
+
+    /**
+     * Name of the path variable carrying an execution name.
+     */
+    public static final String EXECUTION_NAME_VARIABLE = "executionName";
+
+    /**
+     * Sub-path of the execution-status operation.
+     */
+    public static final String EXECUTIONS_PATH = "/executions/{" + EXECUTION_NAME_VARIABLE + "}";
+
+    /**
+     * Shape an execution name must have before the orchestration is asked about it.
+     *
+     * <p>Assumptions: the width is the orchestrator's own limit, which
+     * {@link ReportExecutionService#EXECUTION_NAME_LIMIT} publishes, and the alphabet is the one this
+     * service composes names from. Refusing a malformed name here means a value that could not be an
+     * execution name never reaches a describe call, and it is the same asymmetry the statement artifact
+     * route uses: the SHAPE is published in this contract so refusing it discloses nothing, while WHICH
+     * names exist is not, so an unknown name is answered as absent.</p>
+     */
+    public static final String EXECUTION_NAME_PATTERN =
+            "^[A-Za-z0-9_-]{1," + ReportExecutionService.EXECUTION_NAME_LIMIT + "}$";
 
     /**
      * How many detail lines one page of the lines operation carries.
@@ -263,6 +304,18 @@ public class ReportController {
     private final CursorToken cursorToken;
 
     /**
+     * The key convention the produced report artifact is stored under.
+     *
+     * <p>Assumptions: held here as well as by the write path because this controller both PUBLISHES a
+     * result location and SERVES it, and both have to name the object the run actually wrote. The
+     * convention itself lives in the service layer so that neither side owns it.</p>
+     */
+    private final ReportArtifactLocator locator;
+
+    /** The read side of the object store, which answers whether an artifact exists and streams it. */
+    private final ArtifactStore artifacts;
+
+    /**
      * Creates the controller over the two services it delegates to.
      *
      * <p>Assumptions: both collaborators are injected through the constructor rather than resolved
@@ -272,13 +325,18 @@ public class ReportController {
      * @param executions the submission and range-resolution service; must not be {@code null}
      * @param reports the detail-report assembly service; must not be {@code null}
      * @param cursorToken the sealing and opening seam for the lines cursor; must not be {@code null}
+     * @param locator the report-artifact key convention, shared with the run that writes it; must not be
+     *     {@code null}
+     * @param artifacts the read side of the object store; must not be {@code null}
      * @throws NullPointerException if any collaborator is {@code null}
      */
     public ReportController(ReportExecutionService executions, TransactionReportService reports,
-            CursorToken cursorToken) {
+            CursorToken cursorToken, ReportArtifactLocator locator, ArtifactStore artifacts) {
         this.executions = Objects.requireNonNull(executions, "executions");
         this.reports = Objects.requireNonNull(reports, "reports");
         this.cursorToken = Objects.requireNonNull(cursorToken, "cursorToken");
+        this.locator = Objects.requireNonNull(locator, "locator");
+        this.artifacts = Objects.requireNonNull(artifacts, "artifacts");
     }
 
     /**
@@ -333,9 +391,13 @@ public class ReportController {
 
         if (answer == ReportExecutionService.Confirmation.DECLINED) {
             // WHY : Assumptions: a deliberate cancellation answers 200 and a started run answers 201,
-            //       which is what the published contract declares and what the browser client
-            //       switches on -- it reads the status before it reads the body, so the two outcomes
-            //       are distinguishable without inspecting a member.
+            //       which is what the published contract declares. The status separates a run that
+            //       STARTED from one that did not, and that is all it separates: a cancellation and an
+            //       unanswered confirmation both answer 200, so which of those two turns this was is
+            //       recoverable only from the outcome member. An earlier revision of this comment
+            //       claimed the status made every outcome distinguishable without inspecting a member,
+            //       and the browser client written against that claim labelled an unanswered turn a
+            //       cancellation -- which is the defect the three-valued member was introduced for.
             // WHY : Alternatives Considered: two other statuses were weighed for the started run and
             //       both were rejected against the contract of record, which declares 200 and 201 for
             //       this operation at src/main/resources/openapi/reporting-api.yaml and therefore
@@ -352,8 +414,9 @@ public class ReportController {
             //       to L646 of app/cbl/CORPT00C.cbl includes WS-MESSAGE among the fields it clears --
             //       so the operator is shown a blank line, and transformation rule T8 admits no
             //       user-visible string that the baseline does not carry. The ambiguity the invented
-            //       sentence was defending against is already answered by the two members a caller
-            //       actually reads: the status is 200 and the submitted member is false.
+            //       sentence was defending against is already answered by what a caller reads without
+            //       it: the status is 200 and the outcome member reads DECLINED, which says the same
+            //       thing as the withdrawn sentence in a form no locale has to translate.
             return ResponseEntity.ok(ReportSubmissionOutcome.cancelled());
         }
 
@@ -612,6 +675,142 @@ public class ReportController {
     private static String confirmationPrompt(String reportName) {
         return CONFIRM_PROMPT_PREFIX + reportName.trim() + CONFIRM_PROMPT_SUFFIX;
     }
+
+    /**
+     * Reports what became of one submitted report, and where to collect it once it exists.
+     *
+     * <p>⚠️ Refactoring Rationale: this operation is what the submission handle was for. A review found
+     * that {@code executionArn} was returned and consumed by nothing: a caller could not tell a run still
+     * going from one that had failed, and the produced document was reachable by no operation at all. The
+     * two date-range operations beside this one report the CURRENT contents of the ledger, which is not the
+     * same thing as the report a particular run rendered -- so reading them was never an answer to "did my
+     * report succeed, and where is it".
+     *
+     * <p>Assumptions: the run is named by its NAME and never by an ARN. The service composes the ARN from
+     * the configured state machine, so nothing a caller sends can reach another machine, another account or
+     * another environment -- a guarantee by construction rather than by a prefix check that has to be got
+     * right.
+     *
+     * <p>Assumptions: the artifact location is published only where the store HOLDS the object, so a
+     * location this operation returns always resolves. A run that succeeded and whose artifact a lifecycle
+     * rule has since expired reports its status with no location.
+     *
+     * @param executionName the name a submission returned for this run
+     * @return the run's state, its coordinates and, when the artifact exists, where to collect it
+     * @throws NoSuchElementException if this deployment's orchestration knows no run of that name --
+     *     rendered as 404 by the shared advice
+     */
+    @GetMapping(path = EXECUTIONS_PATH)
+    public ResponseEntity<ReportExecutionStatusResponse> readReportExecution(
+            @PathVariable(EXECUTION_NAME_VARIABLE) @Pattern(regexp = EXECUTION_NAME_PATTERN)
+                    String executionName) {
+        ReportExecutionService.ExecutionState state = executions.describeExecution(executionName);
+        ReportExecutionService.ExecutionCoordinates coordinates = state.coordinates();
+        ReportExecutionStatusResponse base = ReportExecutionStatusResponse.withoutResult(
+                state.executionName(),
+                state.status().name(),
+                state.startedAt(),
+                state.stoppedAt(),
+                coordinates == null ? null : coordinates.reportType(),
+                coordinates == null ? null : coordinates.rangeStart().toString(),
+                coordinates == null ? null : coordinates.rangeEnd().toString());
+
+        // WHY : Assumptions: the store is consulted ONLY for a run the orchestration reports as succeeded
+        //       and whose coordinates are known. A running or failed run has published nothing, so a
+        //       metadata call for it would spend a request to learn what the status already says; and a run
+        //       started outside this surface carries an input this service did not compose, so there are no
+        //       coordinates from which to name an object.
+        if (!state.succeeded() || coordinates == null) {
+            return ResponseEntity.ok(base);
+        }
+
+        return artifacts.describe(locator.key(coordinates.reportType(), coordinates.rangeStart(),
+                        coordinates.rangeEnd(), coordinates.rangeEnd()))
+                .map(stored -> ResponseEntity.ok(ReportExecutionStatusResponse.withResult(base,
+                        locator.artifactPath(coordinates.reportType(), coordinates.rangeStart(),
+                                coordinates.rangeEnd()),
+                        stored.lastModified())))
+                .orElseGet(() -> ResponseEntity.ok(base));
+    }
+
+    /**
+     * Streams the produced transaction-report artifact for one type and range.
+     *
+     * <p>⚠️ Refactoring Rationale: the artifact a run writes was reachable by nothing. The dataset bucket
+     * admits only the VPC endpoint, so even an operator holding the object key could not fetch it through a
+     * browser, and no operation served it. This is the delivery half of the lifecycle, and it is deliberately
+     * addressed by the COORDINATES a caller already holds rather than by an opaque token -- the reasoning,
+     * including why a token would be the wrong instrument for a report type and a date range, is recorded on
+     * {@link ReportArtifactLocator}.
+     *
+     * <p>Assumptions: the body is an opaque attachment rather than declared text, for the same reason the
+     * statement artifacts are: the artifact is a fixed-width document compared byte for byte against the
+     * golden masters, and declaring a text media type invites a client to re-encode it.
+     *
+     * <p>Assumptions: the type is admitted against a closed domain and each bound is parsed as a calendar
+     * date, so no caller-supplied text reaches an object key uninterpreted. A type outside the domain is
+     * refused with 400 rather than answered as absent, because the domain is published in this contract.
+     *
+     * @param reportType the report type the run was started for
+     * @param startDate the inclusive lower bound of the reported range, in {@code YYYY-MM-DD} order
+     * @param endDate the inclusive upper bound
+     * @return the artifact bytes as an attachment
+     * @throws ClientInputException if a bound is absent or is not a calendar date
+     * @throws NoSuchElementException if no artifact is stored for those coordinates
+     */
+    @GetMapping(path = ARTIFACT_PATH, produces = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+    public ResponseEntity<InputStreamResource> collectReportArtifact(
+            @RequestParam(ReportArtifactLocator.TYPE_PARAMETER) String reportType,
+            @RequestParam(ReportArtifactLocator.START_DATE_PARAMETER) String startDate,
+            @RequestParam(ReportArtifactLocator.END_DATE_PARAMETER) String endDate) {
+        LocalDate start = parseBound(startDate, ReportArtifactLocator.START_DATE_PARAMETER);
+        LocalDate end = parseBound(endDate, ReportArtifactLocator.END_DATE_PARAMETER);
+        String key = reportArtifactKey(reportType, start, end);
+        ArtifactStore.OpenArtifact artifact = artifacts.open(key);
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, ATTACHMENT_DISPOSITION)
+                .header(CONTENT_TYPE_OPTIONS_HEADER, NOSNIFF)
+                .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                .contentLength(artifact.sizeBytes())
+                .body(new InputStreamResource(artifact.content()));
+    }
+
+    /**
+     * Composes the artifact key for one set of coordinates, refusing an unpublished report type.
+     *
+     * <p>Assumptions: the closed-domain refusal is translated into a CALLER refusal here. The locator
+     * raises an argument failure, which the shared advice would render as an internal error -- correct for
+     * a batch task that passed a bad argument, wrong for a request whose caller can correct it.</p>
+     *
+     * @param reportType the report type as the caller stated it
+     * @param start the inclusive lower bound
+     * @param end the inclusive upper bound
+     * @return the object key
+     * @throws ClientInputException if the type is not one this service publishes
+     */
+    private String reportArtifactKey(String reportType, LocalDate start, LocalDate end) {
+        try {
+            return locator.key(reportType, start, end, end);
+        } catch (IllegalArgumentException unknownType) {
+            throw new ClientInputException(ApiError.CODE_VALIDATION,
+                    ReportArtifactLocator.TYPE_PARAMETER, unknownType.getMessage());
+        }
+    }
+
+    /**
+     * Disposition set on an artifact response.
+     *
+     * <p>Assumptions: stated WITHOUT a filename, matching the statement surface. A filename composed from
+     * a type and a range would be harmless, and omitting it keeps one convention for both artifact routes
+     * rather than two that differ for no reason a reader could infer.</p>
+     */
+    private static final String ATTACHMENT_DISPOSITION = "attachment";
+
+    /** Header forbidding content-type sniffing on an artifact response. */
+    private static final String CONTENT_TYPE_OPTIONS_HEADER = "X-Content-Type-Options";
+
+    /** Value of that header. */
+    private static final String NOSNIFF = "nosniff";
 
     /**
      * Parses one query bound, refusing an unparseable value against its own parameter name.

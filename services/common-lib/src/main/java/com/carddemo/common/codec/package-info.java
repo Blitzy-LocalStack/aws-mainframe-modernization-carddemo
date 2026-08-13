@@ -233,7 +233,7 @@
  * <h2>The six money renderings this package has to handle</h2>
  *
  * <p>Money reaches this package in six distinct forms. Enumerating them is what
- * justifies five classes rather than two, and each entry is anchored to a file
+ * justifies six classes rather than two, and each entry is anchored to a file
  * so the width is checkable rather than asserted:
  *
  * <pre>
@@ -578,25 +578,20 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel holds <b>41 production classes</b> and <b>11</b> package
- * charter files, for <b>52</b> compilation units in total:
+ * <p>The shared kernel holds <b>44 production classes</b> and <b>11</b> package
+ * charter files, for <b>55</b> compilation units in total.
  *
- * <pre>
- * package             production classes   charter   compilation units
- * common (root)                        1         1                   2
- * common.money                         2         1                   3
- * common.codec                         6         1                   7
- * common.error                         7         1                   8
- * common.web                           3         1                   4
- * common.security                      9         1                  10
- * common.observability                 4         1                   5
- * common.time                          1         1                   2
- * common.validation                    2         1                   3
- * common.messaging                     3         1                   4
- * common.control                       4         1                   5
- * </pre>
+ * <p>Refactoring Rationale: the per-package TABLE that stood here is gone, and its
+ * removal is the point rather than an economy. It was a second copy of the table in
+ * {@code com.carddemo.common}'s own charter, nothing re-derived it, and it drifted:
+ * it recorded three production classes for {@code web} and three for
+ * {@code messaging} where the directories held four each, while the two labelled
+ * sums directly below it -- which {@code SharedKernelInventoryTest} does re-derive --
+ * were correct. A reader checking the table and a reader checking the sums reached
+ * different modules. The root charter's table is the one copy, and what remains here
+ * is the pair of cross-checks a test measures.
  *
- * <p>Read down the table. Cross-check by production class:
+ * <p>Cross-check by production class:
  *
  * <pre>
  * root 1 + money 2 + codec 6 + error 7 + web 4 + security 9 + observability 4 + time 1 + validation 2 + messaging 4 + control 4 = 44
@@ -612,8 +607,8 @@
  * whole on one line, and each addend is labelled with the package it counts, so
  * that a single wrong figure is locatable rather than merely detectable.
  *
- * <p>Assumptions: the authoritative figures are <strong>41 production classes
- * across 10 subpackages and the root, in 52 compilation units, of which 11 are charters</strong>.
+ * <p>Assumptions: the authoritative figures are <strong>44 production classes
+ * across 10 subpackages and the root, in 55 compilation units, of which 11 are charters</strong>.
  * Both cross-checks above re-derive them independently, by class and by
  * compilation unit, so any other class count fails both sums and is wrong.
  *

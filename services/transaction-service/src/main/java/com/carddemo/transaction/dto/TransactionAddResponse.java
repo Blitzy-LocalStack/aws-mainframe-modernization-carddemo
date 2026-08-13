@@ -271,4 +271,30 @@ public record TransactionAddResponse(
     public boolean written() {
         return CAPTURE_WRITTEN;
     }
+
+    /**
+     * Renders this response WITHOUT the amount it captured.
+     *
+     * <p>Purpose. The amount is a monetary value and is prohibited from a diagnostic rendering by
+     * {@code docs/architecture/observability.md} L1093 to L1112. This shape is produced on the capture
+     * path, so the compiler-generated rendering printed the value of every transaction the service
+     * accepted onto the ordinary success path of a log.</p>
+     *
+     * <p>Assumptions: the generated transaction identifier is kept, which that rule's third clause
+     * names as identity disclosing nothing, and it is what makes the omission affordable: the captured
+     * amount is a column of the row that identifier names, so withholding it here removes the value
+     * from the log without removing it from reach.</p>
+     *
+     * <p>Trade-offs: the return message is kept verbatim because it is one of the reference sentences
+     * carried across character for character rather than data derived from the submission, and a
+     * capture that reported an advisory rather than a confirmation is diagnosed from it.</p>
+     *
+     * @return a rendering carrying the transaction identifier and the return message, with the amount
+     *     omitted entirely; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "TransactionAddResponse[transactionId=" + this.transactionId
+                + ", returnMessage=" + this.returnMessage + ']';
+    }
 }

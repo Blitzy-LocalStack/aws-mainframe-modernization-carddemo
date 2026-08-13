@@ -2,12 +2,15 @@ package com.carddemo.batch.repository;
 
 import com.carddemo.batch.domain.Transaction;
 import jakarta.persistence.QueryHint;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.stream.Stream;
 import org.hibernate.jpa.HibernateHints;
 import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.jpa.repository.QueryHints;
+import org.springframework.data.repository.query.Param;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -212,6 +215,19 @@ public interface TransactionRepository extends JpaRepository<Transaction, String
      * {@code app/jcl/COMBTRAN.jcl:41-48}. One ordered query expresses that ordering exactly, so the
      * bytes the reload consumes arrive in the same sequence.</p>
      *
+     * <p>⚠️ Assumptions: "exactly" above holds because the COLUMN is collated bytewise, and it did not
+     * hold when this sentence was first written. The reference format {@code CH} compares the sixteen
+     * bytes as they stand, whereas {@code ORDER BY} in SQL compares under the column's collation — and
+     * the column carried no collation of its own, so it inherited the database default, which is a
+     * property of how the cluster was created rather than a contract this schema stated. A deployment
+     * whose default provider is ICU orders the same rows differently, so the same master could be
+     * rebuilt in two different sequences from identical input and nothing would report it. The
+     * collation is now declared on the column by
+     * {@code transaction-service/src/main/resources/db/migration/V3__ledger_bytewise_collation.sql},
+     * which is why this method stays a derived query with no {@code COLLATE} clause of its own: the
+     * guarantee lives on the data, so every ordered read of this key inherits it, including the
+     * continuation finder below and the six keyset browse methods in the owning service.</p>
+     *
      * @return a lazily-populated {@code Stream<Transaction>} delivering every row of the master in
      *     ascending transaction-identifier order, empty when the master holds no rows. The caller
      *     owns two obligations that a materialised return would not impose: it must CONSUME the
@@ -270,6 +286,64 @@ public interface TransactionRepository extends JpaRepository<Transaction, String
     //     deployment behaves identically whichever governs.
     @QueryHints(@QueryHint(name = HibernateHints.HINT_FETCH_SIZE, value = "100"))
     Stream<Transaction> findAllByOrderByTransactionIdAsc();
+
+    /**
+     * Walks the rows whose processing timestamp falls in a half-open window, ordered by card number.
+     *
+     * <p>Purpose: this is the migrated form of the sort step at
+     * {@code app/jcl/TRANREPT.jcl:37-55}, which is the only place the reference produces the
+     * {@code AWS.M2.CARDDEMO.TRANSACT.DALY} generation. That step declares
+     * {@code SORT FIELDS=(TRAN-CARD-NUM,A)} at line 46 and
+     * {@code INCLUDE COND=(TRAN-PROC-DT,GE,PARM-START-DATE,AND,TRAN-PROC-DT,LE,PARM-END-DATE)} at
+     * lines 47-48, and writes the selected records at the input's own record length through
+     * {@code DCB=(*.SORTIN)} at line 53. So the contract is one ordering and one range predicate over
+     * the transaction master, and this finder is both.
+     *
+     * <p>Assumptions: the window is HALF-OPEN -- {@code from} inclusive, {@code untilExclusive}
+     * exclusive -- and the caller is what converts the reference's inclusive END date into it by
+     * passing the following midnight. The conversion has to happen somewhere and it belongs at the
+     * caller because only the caller knows the date, but the reason it is needed belongs here:
+     * {@code proc_ts} is a {@code TIMESTAMP(6)} while {@code TRAN-PROC-DT,305,10,CH} is the first ten
+     * characters of that same value, so the reference compares DATES where this compares INSTANTS. An
+     * inclusive upper bound expressed as a timestamp would have to be the last representable
+     * microsecond of the day, and any row landing after it inside that same second would be dropped
+     * by a rule the reference does not have.
+     *
+     * <p>Alternatives Considered: {@code WHERE cast(proc_ts as date) BETWEEN :from AND :to}, which
+     * reads much closer to the reference's own predicate. Rejected because wrapping the column in a
+     * cast makes the predicate unable to use {@code idx_transactions_proc_ts} -- the index that exists
+     * precisely because {@code app/jcl/TRANIDX.jcl} builds the alternate index on the same field -- so
+     * a nightly range scan would become a full scan of the largest table this module reads. The
+     * half-open form is sargable and selects exactly the same rows.
+     *
+     * <p>Trade-offs: the ordering carries a SECOND key the reference does not declare. DFSORT's
+     * {@code SORT FIELDS=(TRAN-CARD-NUM,A)} names one field, and a sort on one field leaves rows
+     * sharing a card number in an order the utility does not define; SQL is the same. The tie-break on
+     * {@code transaction_id} is added so the emitted generation is byte-deterministic across runs,
+     * which is what lets an operator diff two nights and lets a test assert an exact payload. It
+     * cannot change WHICH rows appear or their card grouping, only the order within one card, so it
+     * refines an undefined order rather than overriding a defined one. The divergence is registered as
+     * {@code D-DALY-CARD-TIE-BREAK} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}.
+     *
+     * @param from the inclusive lower bound of the processing-timestamp window, normally the business
+     *     date at midnight; must not be {@code null}
+     * @param untilExclusive the exclusive upper bound, normally the midnight following the range's
+     *     last date; must not be {@code null} and must be after {@code from}, since an empty or
+     *     inverted window silently selects nothing
+     * @return a lazily-populated {@code Stream<Transaction>} of the selected rows ordered by card
+     *     number ascending and then transaction identifier ascending, empty when the window selects
+     *     no row. The caller owns the same two obligations the unbounded walk above imposes: consume
+     *     the stream inside its own transaction and close it in a try-with-resources block
+     * @throws org.springframework.transaction.IllegalTransactionStateException if the caller holds no
+     *     transaction, because the propagation declared below is {@code MANDATORY}
+     */
+    @Transactional(propagation = Propagation.MANDATORY, readOnly = true)
+    @QueryHints(@QueryHint(name = HibernateHints.HINT_FETCH_SIZE, value = "100"))
+    @Query("SELECT t FROM Transaction t WHERE t.procTs >= :from AND t.procTs < :untilExclusive"
+            + " ORDER BY t.cardNum ASC, t.transactionId ASC")
+    Stream<Transaction> streamProcessedInWindowOrderedByCard(
+            @Param("from") LocalDateTime from, @Param("untilExclusive") LocalDateTime untilExclusive);
 
     /**
      * Continues the ordered walk after a given transaction identifier, which is how a restarted step

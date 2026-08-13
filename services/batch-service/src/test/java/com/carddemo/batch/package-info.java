@@ -2,16 +2,16 @@
  * Test root of the batch bounded context, and the one test tree in this reactor whose results are
  * checked against committed reference output rather than against transcribed prose alone.
  *
- * <h2>What the seven subpackages hold</h2>
+ * <h2>What the eight subpackages hold</h2>
  *
- * <p>Seven subpackages, and no eighth:</p>
+ * <p>Eight subpackages, and no ninth:</p>
  *
  * <ul>
  *   <li><b>{@code com.carddemo.batch.config}</b> -- no-container tests over this module's
  *       configuration classes, asserting what a deployment's properties actually contribute. The
  *       property gated on is the terminal error sink's address, which decides whether a queue client,
  *       a validated sink binding and a failure-notification producer exist at all -- so the assertion
- *       has to observe a context being built from properties, which is the one thing none of the six
+ *       has to observe a context being built from properties, which is the one thing none of the seven
  *       packages below may do.</li>
  *   <li><b>{@code com.carddemo.batch.domain}</b> -- no-container tests over the persistence
  *       entities, covering the properties that neither the compiler nor the schema asserts. Among
@@ -29,6 +29,14 @@
  *       A test here needs neither a database nor a container because a mapping is a function of the
  *       bytes handed to it, which is exactly what makes a record-geometry error catchable here rather
  *       than in an integration run.</li>
+ *   <li><b>{@code com.carddemo.batch.fixtures}</b> -- no-container tests over the fixed-width
+ *       fixture <em>directory</em> rather than over any production type. A test here reads committed
+ *       bytes off the test classpath and holds them to the census, the geometry and the
+ *       discriminating values that {@code src/test/resources/fixtures/README.md} and its sixteen
+ *       scenario documents state. It sits beside {@code mapper} because both reason about record
+ *       bytes and neither needs an environment, and it is separate from it because a mapper test's
+ *       subject is a class while this one's subject is a resource tree -- a directory-wide closed-set
+ *       assertion filed inside a class-shaped suite is a set that drifts.</li>
  *   <li><b>{@code com.carddemo.batch.service}</b> -- unit tests over the transcribed-business-rule
  *       services of the production package of the same name, and over the terminal-sink producer. A
  *       test here needs neither a database nor a container: with the repositories and the transport
@@ -75,6 +83,21 @@
  * package that arrives without amending this list is an ungoverned exception to the charter, and
  * this paragraph is the record that neither of these two was.</p>
  *
+ * <p>Refactoring Rationale: the roster reached eight packages when
+ * {@code services/batch-service/src/test/java/com/carddemo/batch/fixtures/BatchFixtureContractTest.java}
+ * arrived, and it arrived for a reason none of the seven existing homes could absorb. Fifty-one
+ * record files across sixteen scenario directories had almost no executable consumer -- five were
+ * opened as job input and the rest were cited only in prose -- so a one-cent boundary, a one-day
+ * boundary or a deliberately zero-byte file could change with every test staying green. The subject
+ * of the assertion is the RESOURCE TREE, which is why it is neither a {@code mapper} test, whose
+ * subject is a class, nor a {@code job} test, whose subject is a step graph: filing a
+ * directory-wide closed-set census inside either would attach a tree-shaped contract to a
+ * class-shaped suite. The two sibling services reached the same arrangement independently, with
+ * {@code com.carddemo.transaction.fixtures} and {@code com.carddemo.reporting.fixtures}, so the
+ * eighth package follows a house convention rather than inventing one. Every figure derived from
+ * this roster was re-measured in the same change rather than left to the next reader, which is the
+ * discipline the lapse record below asks for.</p>
+ *
  * <p>Alternatives Considered: dividing the tree some other way, or leaving the list open. The
  * division first separates tests by the environment they need, then separates the no-container
  * tier by the independent evidence an assertion checks. That division keeps the fast tests fast:
@@ -86,7 +109,7 @@
  * the two can drift apart.</p>
  *
  * <p>This subtree carries one charter per package and no more: this one, and one in each of those
- * seven subpackages, so eight in all. All eight are present, so there is no longer any distinction
+ * eight subpackages, so nine in all. All nine are present, so there is no longer any distinction
  * between a planned charter and a missing one to draw. This directory holds no shared base class, no helper, no
  * fixture and no resource -- every such thing lives one level down, in the subpackage whose
  * environment it needs. It holds exactly one test class,
@@ -111,7 +134,7 @@
  * assertions of its own. The exception is admitted rather than avoided because the alternative was
  * worse in a specific way: {@code BatchApplication} is a compilation unit of the production package
  * of this same name, so a test of its argument sanitisation, its exit-status mapping and its outcome
- * reporting has no home in any of the seven subpackages above without being misfiled. Filing it under
+ * reporting has no home in any of the eight subpackages above without being misfiled. Filing it under
  * {@code dto} was the closest candidate and is rejected -- that subpackage's charter scopes it to
  * comparisons between a production value and the independent declaration that supplies or consumes
  * it, and a test that captures log events and asserts a severity is not such a comparison. A test
@@ -121,15 +144,15 @@
  * <p>Assumptions: this exception does not weaken the environment-based division above, because the
  * class it admits needs no environment -- no container, no datasource and no migrated schema. Nor
  * does it reopen the question the shared-base-class paragraph below settles: a test class asserting
- * the entry point's own behaviour is not a helper the seven subpackages share, so admitting it here
+ * the entry point's own behaviour is not a helper the eight subpackages share, so admitting it here
  * gives nothing at this level for a later edit to weaken on their behalf.</p>
  *
  * <p>Alternatives Considered: a shared base class or assertion helper at this level, which is where
- * one would naturally go if all seven subpackages came to need it. Rejected, because such a helper
- * sits at the one level none of the seven owns, and an assertion moved into it can afterwards be
+ * one would naturally go if all eight subpackages came to need it. Rejected, because such a helper
+ * sits at the one level none of the eight owns, and an assertion moved into it can afterwards be
  * weakened by an edit to the helper that reads as ordinary maintenance rather than as the
  * relaxation of a parity assertion that it would in fact be. Duplicating a few lines of set-up
- * across seven subpackages is the accepted cost of keeping each assertion visible in the file that
+ * across eight subpackages is the accepted cost of keeping each assertion visible in the file that
  * depends on it. The one test class this directory does hold is not such a helper and is imported by
  * nothing: it covers the entry point that sits at this same level in the production tree, and the
  * paragraph above records why that is the only placement for it.</p>
@@ -249,7 +272,7 @@
  * stand-in either, because it would document an absence the construct is incapable of having.</p>
  *
  * <p>Assumptions: that exemption is this compilation unit's alone and does not travel into the
- * seven subpackages, where a test class, a test method and a private helper alike do have
+ * eight subpackages, where a test class, a test method and a private helper alike do have
  * parameters, return values and thrown types to document. The obligation there rests on the rule's
  * docstring-elements clause, on the house convention the oracle suite states for every new test,
  * fixture builder, helper and mock, and on the shared ruleset's own at-clause validation, which

@@ -211,46 +211,57 @@ locals {
     "kms:GenerateDataKey*",
   ]
 
-  # Assumptions: the S3 key's CloudFront grant is conditioned on a source ARN,
-  # and this expression is the whole of how that ARN is decided -- it is composed
-  # here rather than inline so the fallback and the caller-supplied form are
-  # visibly the same value used by one condition, not two branches that could
-  # drift. When the caller names distributions, the condition matches exactly
-  # those; when it names none, the pattern admits distributions of THIS account
-  # in THIS partition and nothing else.
+  # Assumptions: the S3 key's CloudFront grant is conditioned on a source ARN, and
+  # this expression is the whole of how that ARN is decided. It is composed here
+  # rather than inline so that all three inputs are visibly read by ONE condition
+  # rather than by branches that could drift.
   #
-  # Trade-offs: the fallback contains a wildcard, and a wildcard in a condition
-  # value is normally the thing to avoid. It is accepted here because the
-  # alternative is worse in both available directions: omitting the statement
-  # makes the front end return 403 for every asset, and omitting the condition
-  # makes the grant usable by any account's distribution. The wildcard sits
-  # inside the account and partition segments of the ARN, so what it widens is
-  # WHICH of this account's distributions may decrypt -- never whose.
-  #
-  # Assumptions: the account identifier and the partition are resolved from the
-  # caller's session for the reasons recorded at those two data sources; no part
-  # of this ARN is a literal.
   # Assumptions: ALL THREE module inputs narrow the same grant and are read
   # together -- s3_cloudfront_distribution_arns and cloudfront_distribution_arns
-  # take lists, cloudfront_distribution_arn takes the single SPA distribution an
-  # environment root wires straight from the cloudfront-spa module. Reading only
-  # one of them would leave a root that used another silently falling back to the
-  # account-wide pattern below, which is exactly the widening the condition exists
-  # to prevent.
+  # take lists of ADDITIONAL exact distributions, cloudfront_distribution_arn takes
+  # the single SPA distribution an environment root wires straight from the
+  # cloudfront-spa module. Reading only one of them would leave a root that used
+  # another with a grant that did not admit its distribution, so every asset
+  # request would answer 403 while each resource looked correct in isolation.
   #
-  # Trade-offs: three spellings for one concept is more surface than one, and the
-  # alternative considered was to delete two of them. It is rejected because each
-  # spelling is already consumed by a caller -- the list form by the exact-ARN
-  # narrowing statement and its precondition, the scalar by roots that wire the
-  # distribution output directly -- so removing either would silently widen the
-  # grant for that caller rather than fail its plan.
+  # WHY : Assumptions: this list is NEVER EMPTY, and that is a property of the
+  #       input contract rather than a hope about callers.
+  #       `cloudfront_distribution_arn` is a required, `nullable = false` string
+  #       whose validation demands a full exact distribution ARN, so `compact`
+  #       always leaves at least that one element. Everything downstream depends on
+  #       it: the grant is unconditional, its `ArnEquals` condition always has a
+  #       value, and there is no account-wide fallback shape to fall through to.
+  #
+  # WHY : Refactoring Rationale: a sibling local
+  #       `cloudfront_distribution_source_arns` and a second policy statement,
+  #       `AllowCloudFrontOriginAccessControlDecryptByPattern`, stood here and were
+  #       REMOVED. They implemented an account-wide
+  #       `arn:<partition>:cloudfront::<account>:distribution/*` fallback under
+  #       `ArnLike`, for the case where no distribution ARN was supplied -- a case
+  #       the required scalar above makes unreachable. The statement's `for_each`
+  #       inverted a test that is always true, so it rendered zero statements in
+  #       every plan this module has ever produced. Deleting it changes no emitted
+  #       policy document; what it removes is a documented behaviour that could not
+  #       occur, which is worse than dead code because a reader tightening the grant
+  #       would reason about a fallback that was never in force.
+  #
+  # WHY : Trade-offs: three spellings for one concept is more surface than one, and
+  #       the alternative considered was to delete two of them. Rejected because
+  #       each is already consumed by a caller -- the list forms by roots that name
+  #       additional distributions, the scalar by both environment roots, which pass
+  #       `module.cloudfront_spa.distribution_arn` directly -- so removing either
+  #       would narrow the grant for that caller without failing its plan.
+  # WHY : Assumptions: wiring the distribution ARN back into this module from the
+  #       same root does NOT close a dependency cycle, and both roots do it. The
+  #       cloudfront-spa module depends on the KEY (`module.kms.s3_key_arn`) while
+  #       this list feeds the key POLICY, which is a separate resource, so the chain
+  #       is key policy -> distribution -> key and it terminates. The same reasoning
+  #       is recorded at the call site in `infra/envs/dev/main.tf`.
   cloudfront_distribution_narrowing_arns = compact(concat(
     var.s3_cloudfront_distribution_arns,
     var.cloudfront_distribution_arns,
     [var.cloudfront_distribution_arn],
   ))
-
-  cloudfront_distribution_source_arns = length(local.cloudfront_distribution_narrowing_arns) > 0 ? local.cloudfront_distribution_narrowing_arns : ["arn:${data.aws_partition.current.partition}:cloudfront::${data.aws_caller_identity.current.account_id}:distribution/*"]
 
   # Assumptions: CloudWatch Logs uses a REGIONAL service principal, and the
   # DNS suffix changes with the AWS partition. Composing both values from the
@@ -266,27 +277,40 @@ locals {
   current_account_log_group_arn_pattern               = "^arn:${data.aws_partition.current.partition}:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:[A-Za-z0-9_./#-]+$"
   current_account_sns_topic_arn_pattern               = "^arn:${data.aws_partition.current.partition}:sns:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:[A-Za-z0-9_-]+$"
 
-  # Assumptions: every service grant on the S3 key exists in exactly two shapes --
-  # an EXACT-ARN shape used when the environment root can name the distribution,
-  # log group, delivery source or topic, and a PATTERN shape used when it cannot.
-  # The pair is mutually exclusive by construction: each statement's for_each
-  # inverts the other's emptiness test, so precisely one of the two renders for a
-  # given purpose.
+  # Assumptions: the two service grants whose narrowing input is OPTIONAL exist in
+  # exactly two shapes -- an EXACT-ARN shape used when the environment root can name
+  # the log group or the topic, and a PATTERN shape used when it cannot. Each pair
+  # is mutually exclusive by construction: each statement's for_each inverts the
+  # other's emptiness test, so precisely one of the two renders for a given purpose.
   #
-  # WHY : Assumptions: two independent hazards have to be avoided at once, and
-  #       neither shape avoids both. Emitting only the exact-ARN shape leaves a
-  #       root that supplies no ARNs with NO service grant at all, and CloudWatch
-  #       Logs, SNS and CloudFront then fail closed at create time. Emitting both
-  #       shapes unconditionally makes the broader pattern dominate the narrow
-  #       grant, so the narrowing becomes decorative, and duplicate statement
-  #       identifiers are rejected outright by the key-policy API -- something
-  #       `terraform validate` does not detect. Inverting one for_each against the
-  #       other is the only arrangement that keeps the module deployable from a
-  #       minimal root while still collapsing to least privilege as soon as the
-  #       root can name its resources.
-  emit_exact_cloudfront_grant = length(local.cloudfront_distribution_narrowing_arns) > 0
-  emit_exact_log_group_grant  = length(var.cloudwatch_log_group_arns) > 0
-  emit_exact_topic_grant      = length(var.sns_topic_arns) > 0
+  # WHY : Assumptions: the CloudFront grant is deliberately NOT in this set, and the
+  #       distinction is the input contract rather than the resource. Its narrowing
+  #       input `cloudfront_distribution_arn` is REQUIRED, so there is no
+  #       "root cannot name it" case to carry a pattern shape for, and the grant is
+  #       a single unconditional statement with an `ArnEquals` condition. Listing it
+  #       here previously implied a fallback that no plan could reach.
+  #
+  # WHY : Assumptions: two independent hazards have to be avoided at once for the
+  #       two that remain, and neither shape avoids both. Emitting only the
+  #       exact-ARN shape leaves a root that supplies no ARNs with NO service grant
+  #       at all, and CloudWatch Logs and SNS then fail closed at create time.
+  #       Emitting both shapes unconditionally makes the broader pattern dominate
+  #       the narrow grant, so the narrowing becomes decorative, and duplicate
+  #       statement identifiers are rejected outright by the key-policy API --
+  #       something `terraform validate` does not detect. Inverting one for_each
+  #       against the other is the only arrangement that keeps the module deployable
+  #       from a minimal root while still collapsing to least privilege as soon as
+  #       the root can name its resources.
+  # WHY : Refactoring Rationale: an `emit_exact_cloudfront_grant` member stood
+  #       beside these two and is REMOVED. It gated the CloudFront pair described
+  #       above, and because `cloudfront_distribution_arn` is a required input it
+  #       evaluated to `true` in every plan -- so the pair was not a pair and the
+  #       CloudFront grant is now a single unconditional statement. The two members
+  #       that remain gate genuinely optional inputs: `cloudwatch_log_group_arns`
+  #       and `sns_topic_arns` both default to empty, so for those two the
+  #       exact-shape and pattern-shape statements really do alternate.
+  emit_exact_log_group_grant = length(var.cloudwatch_log_group_arns) > 0
+  emit_exact_topic_grant     = length(var.sns_topic_arns) > 0
 
   # S3 Bucket Keys use the bucket ARN as their encryption context, while direct
   # object data keys use the object ARN. Deriving both forms from exact bucket
@@ -790,59 +814,69 @@ data "aws_iam_policy_document" "s3" {
     }
   }
 
-  dynamic "statement" {
-    for_each = local.emit_exact_cloudfront_grant ? [1] : []
+  # WHY : Refactoring Rationale: this statement is UNCONDITIONAL, where it was
+  #       previously wrapped in `dynamic "statement"` gated on
+  #       `local.emit_exact_cloudfront_grant`. That gate tested whether any
+  #       distribution ARN had been supplied, and `cloudfront_distribution_arn` is a
+  #       required `nullable = false` input, so it was true in every plan. Its inverse
+  #       -- an account-wide `ArnLike` fallback statement -- could therefore never
+  #       render and has been removed with it. The grant the module actually installs
+  #       is this one: always present, always confined by `ArnEquals` to the exact
+  #       distributions the caller named.
+  # WHY : Assumptions: the grant must be present for the front end to work at all.
+  #       An origin access control authorizes the S3 GetObject request and does NOT
+  #       authorize KMS decryption, so without this statement every asset request
+  #       answers 403 while the bucket, the distribution, the origin access control
+  #       and the key each look correct in isolation.
+  statement {
+    sid       = "AllowCloudFrontOriginAccessControlDecrypt"
+    effect    = "Allow"
+    actions   = ["kms:Decrypt"]
+    resources = ["*"]
 
-    content {
-      sid       = "AllowCloudFrontOriginAccessControlDecrypt"
-      effect    = "Allow"
-      actions   = ["kms:Decrypt"]
-      resources = ["*"]
+    principals {
+      type        = "Service"
+      identifiers = ["cloudfront.amazonaws.com"]
+    }
 
-      principals {
-        type        = "Service"
-        identifiers = ["cloudfront.amazonaws.com"]
-      }
+    condition {
+      test     = "StringEquals"
+      variable = "AWS:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
 
-      condition {
-        test     = "StringEquals"
-        variable = "AWS:SourceAccount"
-        values   = [data.aws_caller_identity.current.account_id]
-      }
+    condition {
+      test     = "ArnEquals"
+      variable = "AWS:SourceArn"
+      values   = local.cloudfront_distribution_narrowing_arns
+    }
 
-      condition {
-        test     = "ArnEquals"
-        variable = "AWS:SourceArn"
-        values   = local.cloudfront_distribution_narrowing_arns
-      }
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["s3.${data.aws_region.current.region}.amazonaws.com"]
+    }
 
-      condition {
-        test     = "StringEquals"
-        variable = "kms:ViaService"
-        values   = ["s3.${data.aws_region.current.region}.amazonaws.com"]
-      }
+    # Assumptions: the encryption-context condition can only be asserted when the
+    # caller named the buckets it applies to. Rendering it from an empty list
+    # would emit a condition with no permitted value, which denies every request
+    # the surrounding statement exists to allow, so the block is emitted only
+    # when a value exists. The alternative considered -- defaulting the context
+    # to a wildcard -- was rejected because a wildcard here would let the grant
+    # cover a bucket in this account that this key does not protect.
+    #
+    # Trade-offs: with the block omitted the grant is bounded only by which
+    # buckets reference this key, which is broader than an exact context but
+    # still narrower than the key's own key-user grant. Accepted because the
+    # environment roots that name principals also name their buckets, so the
+    # unbound form is reachable only from a deliberately minimal caller.
+    dynamic "condition" {
+      for_each = length(local.s3_encryption_context_arns) > 0 ? [1] : []
 
-      # Assumptions: the encryption-context condition can only be asserted when the
-      # caller named the buckets it applies to. Rendering it from an empty list
-      # would emit a condition with no permitted value, which denies every request
-      # the surrounding statement exists to allow, so the block is emitted only
-      # when a value exists. The alternative considered -- defaulting the context
-      # to a wildcard -- was rejected because a wildcard here would let the grant
-      # cover a bucket in this account that this key does not protect.
-      #
-      # Trade-offs: with the block omitted the grant is bounded only by which
-      # buckets reference this key, which is broader than an exact context but
-      # still narrower than the key's own key-user grant. Accepted because the
-      # environment roots that name principals also name their buckets, so the
-      # unbound form is reachable only from a deliberately minimal caller.
-      dynamic "condition" {
-        for_each = length(local.s3_encryption_context_arns) > 0 ? [1] : []
-
-        content {
-          test     = "ArnLike"
-          variable = "kms:EncryptionContext:aws:s3:arn"
-          values   = local.s3_encryption_context_arns
-        }
+      content {
+        test     = "ArnLike"
+        variable = "kms:EncryptionContext:aws:s3:arn"
+        values   = local.s3_encryption_context_arns
       }
     }
   }
@@ -1025,47 +1059,6 @@ data "aws_iam_policy_document" "s3" {
   }
 
   dynamic "statement" {
-    for_each = local.emit_exact_cloudfront_grant ? [] : [1]
-
-    content {
-      sid    = "AllowCloudFrontOriginAccessControlDecryptByPattern"
-      effect = "Allow"
-
-      actions   = ["kms:Decrypt"]
-      resources = ["*"]
-
-      principals {
-        type        = "Service"
-        identifiers = ["cloudfront.${data.aws_partition.current.dns_suffix}"]
-      }
-
-      # WHY : Assumptions: the first confines the grant to requests the service
-      #       makes on behalf of THIS account, and the second to requests whose
-      #       source resource is a distribution matching the pattern composed
-      #       below. Either alone would be insufficient: without the account
-      #       condition the grant is usable for another account's resource, and
-      #       without the ARN condition it is usable by any CloudFront feature
-      #       rather than by a distribution reading this origin.
-      #       Assumptions: `ArnLike` rather than `ArnEquals`, because the default
-      #       pattern ends in a wildcard and `ArnEquals` performs no wildcard
-      #       expansion -- it would match nothing and deny every asset request.
-      #       With exact ARNs supplied, `ArnLike` on a pattern containing no
-      #       wildcard is equality, so one operator serves both shapes.
-      condition {
-        test     = "StringEquals"
-        variable = "AWS:SourceAccount"
-        values   = [data.aws_caller_identity.current.account_id]
-      }
-
-      condition {
-        test     = "ArnLike"
-        variable = "AWS:SourceArn"
-        values   = local.cloudfront_distribution_source_arns
-      }
-    }
-  }
-
-  dynamic "statement" {
     for_each = local.emit_exact_log_group_grant ? [] : [1]
 
     content {
@@ -1203,12 +1196,21 @@ resource "aws_kms_key_policy" "s3" {
       error_message = "Every s3_key_user_role_arns value must be an exact IAM role ARN in the account applying this module."
     }
 
+    # WHY : Assumptions: BOTH distribution lists are checked here, not just one.
+    #       They are concatenated into the same `ArnEquals` condition, and that
+    #       statement is additionally gated on `AWS:SourceAccount` being this
+    #       account -- so an entry naming another account's distribution is a value
+    #       that cannot ever match, and admitting it would let a caller believe a
+    #       cross-account distribution had been granted access when nothing had.
+    #       Refactoring Rationale: `s3_cloudfront_distribution_arns` was absent from
+    #       this precondition while its sibling was present, so the same value was
+    #       same-account-checked through one input and not through the other.
     precondition {
       condition = alltrue([
-        for arn in var.cloudfront_distribution_arns :
+        for arn in concat(var.cloudfront_distribution_arns, var.s3_cloudfront_distribution_arns) :
         can(regex(local.current_account_cloudfront_distribution_arn_pattern, arn))
       ])
-      error_message = "Every cloudfront_distribution_arns value must name an exact CloudFront distribution in the account applying this module."
+      error_message = "Every cloudfront_distribution_arns and s3_cloudfront_distribution_arns value must name an exact CloudFront distribution in the account applying this module."
     }
 
     precondition {

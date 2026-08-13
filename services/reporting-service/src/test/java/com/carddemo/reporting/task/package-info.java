@@ -18,6 +18,15 @@
  * it is REGISTERED, and two beans declaring one name or a component outside the scan both satisfy the
  * first while failing the second.</p>
  *
+ * <p>Assumptions: this package holds THREE test classes and the reason they are separate is the
+ * subject rather than the size. {@code TaskDispatchWiringTest} asserts what the three dispatched names
+ * resolve to and what each task then does; {@code CategoryBalanceArtifactPublisherTest} asserts the one
+ * fixed object key the category-balance report lands on, which is observable only from the request the
+ * storage client is handed; {@code GenerationKeysTest} asserts the generation-key convention and the
+ * number a new write is allocated, which is a key grammar shared with
+ * {@code infra/modules/s3-datasets} and with the retention function and is not a property of any one
+ * task. Folding either into the wiring test would file a published contract under a wiring test.</p>
+ *
  * <p>Assumptions: object keys are asserted from the request the storage client is HANDED, which is the
  * only place a key is observable from outside a task. A run producing no record closes its writer
  * without having started a multipart upload, so it publishes by whole-object put -- which is what lets

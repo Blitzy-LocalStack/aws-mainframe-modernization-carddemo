@@ -3,6 +3,8 @@ package com.carddemo.card.config;
 import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.security.CognitoAccessTokenValidator;
 import com.carddemo.common.security.JwtRoleConverter;
+
+import jakarta.servlet.DispatcherType;
 import java.time.Clock;
 import java.util.List;
 import java.util.Objects;
@@ -610,6 +612,36 @@ public class SecurityConfig {
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(requests -> {
+                    // WHY : (1) Refactoring Rationale: the container's ERROR dispatch is admitted, and it
+                    //       was not. A chain authorizes every dispatcher type unless told otherwise, so
+                    //       whenever the framework could not write a response -- a caller whose accept
+                    //       header admits nothing the converters produce is the reachable case, and this
+                    //       context publishes 406 for exactly that -- the container re-dispatched to its
+                    //       own error path, that path matched no rule, and the denying catch-all below
+                    //       answered a caller holding a valid group token with 403 on /error. The
+                    //       rendering failure the caller was owed became an authorization failure it had
+                    //       not committed.
+                    // WHY : (2) Assumptions: the rule matches the DISPATCHER TYPE and not the path, which
+                    //       keeps a direct request to /error refused by the catch-all exactly as it is
+                    //       today. A path-based permit would open that path to any caller, and the
+                    //       container's own error body is not a shape openapi/card-api.yaml publishes for
+                    //       any operation, so an unauthenticated caller could provoke a body no operation
+                    //       of this context declares.
+                    // WHY : (3) Assumptions: the shared defaults narrow the filter chain to the REQUEST
+                    //       and ASYNC dispatches at carddemo-common-defaults.yml line 383, so in a
+                    //       fully-configured application this rule is defence in depth. It is required
+                    //       nonetheless, because a sliced web test builds this chain WITHOUT that
+                    //       property and would then measure the refused-dispatch behaviour rather than
+                    //       the served one -- and because a chain that depends on an external property
+                    //       for a security-visible outcome states its own intent nowhere.
+                    // WHY : (4) Alternatives Considered: narrowing this chain to the REQUEST dispatch
+                    //       alone, which has the same effect on this condition. Rejected because it
+                    //       silently withdraws authorization from ASYNC dispatches as well, and an
+                    //       asynchronous handler added later would then run outside every rule here -- a
+                    //       much wider change than the one condition being fixed. The auth, account,
+                    //       authorization and reference contexts resolve it the same way, so the chains
+                    //       stay comparable.
+                    requests.dispatcherTypeMatchers(DispatcherType.ERROR).permitAll();
                     requests.requestMatchers(HEALTH_PATH).permitAll();
                     // WHY : Assumptions: the two management endpoints are granted by NETWORK
                     //       POSITION and not by authority, because their only configured consumer

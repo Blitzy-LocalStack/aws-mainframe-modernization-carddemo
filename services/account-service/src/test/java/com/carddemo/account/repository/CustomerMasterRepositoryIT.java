@@ -308,7 +308,7 @@ class CustomerMasterRepositoryIT {
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the customer table carries its declared widths, nullability and check constraint")
+    @DisplayName("the customer table carries its declared widths and nullability and no value check")
     void theCustomerTableCarriesItsDeclaredContract() {
         assertThat(typeOf("addr_zip")).isEqualTo("character");
         assertThat(lengthOf("addr_zip")).isEqualTo(POSTAL_CODE_WIDTH);
@@ -332,13 +332,22 @@ class CustomerMasterRepositoryIT {
                 .as("optimistic concurrency replaces the reference's manual before-image comparison")
                 .isEqualTo("bigint");
 
-        assertThat(this.jdbc.queryForObject(
-                "SELECT pg_catalog.pg_get_constraintdef(oid) FROM pg_catalog.pg_constraint"
-                        + " WHERE conrelid = 'account.customers'::regclass"
-                        + " AND conname = 'ck_customers_pri_card_holder_ind'",
+        // WHY : Refactoring Rationale: this block asserted that a check constraint closed
+        //   pri_card_holder_ind at 'Y' and 'N'. That constraint has been REMOVED and the assertion is
+        //   inverted rather than deleted, because an absent constraint that nothing asserts is
+        //   indistinguishable from one that was dropped by accident. The value set it enforced is
+        //   declared on WS-EDIT-PRI-CARDHOLDER -- an edit flag in one online program, at
+        //   app/cbl/COACTUPC.cbl:350 -- and not on CUSTOMER-RECORD, whose L21 states PIC X(01) and no
+        //   88-level, so the storage layer must admit any one character exactly as the VSAM cluster
+        //   does. The Y-or-N rule lives on the update path instead, in
+        //   AccountUpdateService.editYesNo.
+        assertThat(this.jdbc.queryForList(
+                "SELECT conname FROM pg_catalog.pg_constraint"
+                        + " WHERE conrelid = 'account.customers'::regclass AND contype = 'c'",
                 String.class))
-                .as("the indicator domain is closed at the two values the reference admits")
-                .contains("'Y'", "'N'");
+                .as("no column of this table carries a value check, because no field of"
+                        + " CUSTOMER-RECORD declares a value set")
+                .isEmpty();
     }
 
     /**
@@ -537,31 +546,48 @@ class CustomerMasterRepositoryIT {
     }
 
     /**
-     * Confirms an indicator outside the reference's two values is refused by the check constraint.
+     * Confirms any one character survives in the primary-card-holder indicator, as the reference's file does.
      *
-     * <p>Assumptions: the value is written through plain SQL because the entity's own setter refuses it
-     * before the database sees it, and both guards are wanted: the entity refuses what an application path
-     * could supply and the constraint refuses what the ETL or an operator could. A check constraint never
-     * exercised is indistinguishable from one that was mistyped, because PostgreSQL accepts a predicate
-     * that can never be false as readily as one that can.</p>
+     * <p>Purpose: this replaces a case that asserted a check constraint refused anything but Y or N. The
+     * constraint is gone, and what has to be asserted in its place is the property it removed: a value the
+     * baseline's own storage would hold must load and read back unchanged, because the migration ETL writes
+     * this table directly and a schema stricter than the copybook would refuse a record the reference
+     * accepts.</p>
+     *
+     * <p>Assumptions: the row is written through plain SQL, which is the path the ETL takes. The entity
+     * imposes no value set either -- its constructor requires the field to be present and nothing more -- so
+     * an application write of the same value would also be accepted; the SQL path is used because it is the
+     * one a bulk load actually uses.</p>
+     *
+     * <p>Assumptions: the character chosen is {@code X} rather than a blank or a digit, because it is the
+     * value the removed constraint refused, so this case fails immediately if the constraint is ever
+     * reinstated.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("a primary-card-holder indicator outside Y and N is refused")
-    void anUndeclaredCardHolderIndicatorIsRefused() {
-        assertThatThrownBy(() -> insertRow(FIRST_CUSTOMER_ID + SEEDED_ROWS, "X"))
-                .isInstanceOf(DataIntegrityViolationException.class)
-                .hasMessageContaining("ck_customers_pri_card_holder_ind");
+    @DisplayName("a primary-card-holder indicator outside Y and N is preserved, not refused")
+    void anUndeclaredCardHolderIndicatorIsPreserved() {
+        long preservedId = FIRST_CUSTOMER_ID + SEEDED_ROWS;
+
+        insertRow(preservedId, "X");
+
+        assertThat(this.jdbc.queryForObject(
+                "SELECT pri_card_holder_ind FROM account.customers WHERE customer_id = ?",
+                String.class, preservedId))
+                .as("the storage layer admits any one character, as CUST-PRI-CARD-HOLDER-IND PIC X(01)"
+                        + " does")
+                .isEqualTo("X");
     }
 
     /**
      * Inserts one customer row through plain SQL, bypassing the entity's own guards.
      *
      * @param customerId the stored key of the row
-     * @param indicator the primary-card-holder indicator, which one caller sets outside its domain
-     *     deliberately
-     * @throws DataIntegrityViolationException if the engine refuses the row, which both callers provoke
+     * @param indicator the primary-card-holder indicator, which one caller deliberately sets to a character
+     *     the online edit path would refuse, to show the storage layer preserves it
+     * @throws DataIntegrityViolationException if the engine refuses the row, which the duplicate-key caller
+     *     provokes deliberately
      */
     private void insertRow(long customerId, String indicator) {
         this.jdbc.update("INSERT INTO account.customers (customer_id, first_name, last_name,"

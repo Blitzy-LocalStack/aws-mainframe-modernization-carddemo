@@ -299,8 +299,8 @@ queue nothing else publishes to and look idle rather than misconfigured.
 
 ## 6. Test
 
-<!-- test-inventory: 27 tests + 10 integration tests -->
-**37** test classes across nine packages: **27** matching `*Test`, run by
+<!-- test-inventory: 29 tests + 10 integration tests -->
+**39** test classes across nine packages: **29** matching `*Test`, run by
 Surefire, and **10** matching `*IT`, run by Failsafe. Those two totals are
 machine-checked — `ServiceReadmeInventoryTest` in `common-lib` parses the HTML
 comment above this paragraph and re-counts both tiers from this module's test
@@ -308,8 +308,8 @@ tree, so adding a test class without updating the marker fails the build.
 
 | Package | Classes | Package | Classes |
 |---|---|---|---|
-| `service` | 11 (10 `*Test`, 1 `*IT`) | `api` | 4 |
-| `repository` | 9 (all `*IT`) | `config` | 4 |
+| `service` | 11 (10 `*Test`, 1 `*IT`) | `api` | 5 |
+| `repository` | 9 (all `*IT`) | `config` | 5 |
 | `mapper` | 3 | `dto` | 2 |
 | `fixtures` | 2 | `domain` | 1 |
 | root `com.carddemo.reference` | 1 | | |
@@ -1091,4 +1091,3 @@ parity suite under `tests/**` and its runners under `scripts/**` are reference-o
 and are never modified. See [`../../README.md`](../../README.md) for the application
 overview and [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) for contribution
 conventions.</sub>
-

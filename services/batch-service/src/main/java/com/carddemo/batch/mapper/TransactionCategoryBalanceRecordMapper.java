@@ -6,6 +6,7 @@ import com.carddemo.common.codec.FixedWidthCodec;
 import com.carddemo.common.codec.ZonedDecimalCodec;
 import com.carddemo.common.money.Money;
 import java.math.BigDecimal;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -209,7 +210,12 @@ import java.util.Objects;
  * the SECOND ARGUMENT is what makes that true. Two regions of this record survive a decode only as
  * bytes. The first is the {@code FILLER} asymmetry the package charter rules on: the span at
  * {@code app/cpy/CVTRA01Y.cpy} line 10 is dropped on decode and has no entity member to rebuild it
- * from, so the single-argument overload writes blanks there. That matters rather than being
+ * from, so the single-argument overload writes the low value {@code FRESH_RECORD_PAD} there -- which is
+ * right for a create arm and wrong for an update arm, and is the reason the two-argument overload has
+ * to exist. This sentence previously claimed the single-argument overload wrote BLANKS; it does not,
+ * and the claim is corrected here rather than quietly deleted because an expectation in
+ * {@code PostTransactionsJobParityIT} had been written from it and asserted blanks on a span that
+ * holds low values. That matters rather than being
  * hypothetical, and this record demonstrates it twice over with two DIFFERENT non-blank paddings --
  * {@code tests/golden/posting/happy_path/tcatbal.expected} carries twenty-two ASCII zeros in that span,
  * inherited from the seed row the update arm rewrote, while
@@ -304,6 +310,26 @@ public final class TransactionCategoryBalanceRecordMapper {
      * assertion that could not reach it would leave twenty-two of the fifty bytes unproven.</p>
      */
     private static final String FIELD_FILLER = "FILLER";
+
+    /**
+     * The byte the pad of a FRESHLY WRITTEN record of this shape carries, measured from the create arm.
+     *
+     * <p>Assumptions: the value is measured rather than derived, and the measuring file is the one
+     * posting scenario whose fixture holds no category-balance row at all. The twenty-two byte pad slice
+     * of {@code tests/golden/posting/zero_balance/tcatbal.expected} holds this byte and nothing else,
+     * because {@code app/cbl/CBTRN02C.cbl:495-496} reaches the create arm for that scenario and
+     * {@code INITIALIZE} does not touch a {@code FILLER} item, so the record area keeps the low values it
+     * held. The eight scenarios whose fixture DOES hold the row measure ASCII zeros instead -- the seed
+     * row's own bytes, written back by the update arm -- which is what the source-image overload
+     * reproduces.</p>
+     *
+     * <p>Trade-offs: the shared codec would rebuild the pad with the charset's blank, and overriding it
+     * here rather than there is the same decision the sibling transaction mapper records: the blank is
+     * the measured pad of the account, feed and cross-reference records, so a codec-level change would
+     * correct this record by breaking those. Section 6.1 of
+     * {@code services/batch-service/src/test/resources/fixtures/README.md} is the measurement table.</p>
+     */
+    private static final byte FRESH_RECORD_PAD = 0x00;
 
     /**
      * The eleven digit positions {@code PIC 9(11)} declares at {@code app/cpy/CVTRA01Y.cpy} line 6.
@@ -550,7 +576,8 @@ public final class TransactionCategoryBalanceRecordMapper {
      * @return a newly allocated byte array of exactly 50 bytes, carrying the account identifier
      *     zero-filled to eleven digits, the type code at two characters, the category code zero-filled
      *     to four digits, the balance as eleven zoned-decimal display characters with the sign
-     *     overpunched onto the last of them, and twenty-two blank pad bytes at offset 28
+     *     overpunched onto the last of them, and twenty-two low-value pad bytes at offset 28, being the
+     *     bytes the reference's create arm leaves there
      * @throws NullPointerException if {@code entity} is {@code null}
      * @throws IllegalArgumentException if the row's identifier or any of its three components is
      *     {@code null}, if the account identifier is negative or wider than its span, if the category
@@ -565,7 +592,21 @@ public final class TransactionCategoryBalanceRecordMapper {
      *     without losing precision
      */
     public static byte[] toRecord(TransactionCategoryBalance entity) {
-        return FixedWidthCodec.encodeRecord(fieldMap(entity), LAYOUT);
+        byte[] encoded = FixedWidthCodec.encodeRecord(fieldMap(entity), LAYOUT);
+
+        // WHY : Assumptions: the codec's blank rebuild is overwritten with the byte the reference's own
+        //       create arm leaves in this span, so a row this module ORIGINATED encodes to the image the
+        //       reference wrote for an originated row. Measured from
+        //       tests/golden/posting/zero_balance/tcatbal.expected, the one committed scenario whose
+        //       fixture holds no category-balance row and whose expectation therefore shows what a
+        //       freshly written record area contains.
+        // WHY : Refactoring Rationale: this method emitted blanks here, and the paragraph above it said
+        //       "for that row a blank pad is the right pad" -- which was an inference from the codec's
+        //       default rather than a reading of a file. The create-arm expectation contradicts it in
+        //       twenty-two bytes, so the claim and the code are corrected together.
+        CopybookLayout.FieldSpec pad = LAYOUT.field(FIELD_FILLER);
+        Arrays.fill(encoded, pad.start(), pad.end(), FRESH_RECORD_PAD);
+        return encoded;
     }
 
     /**
@@ -597,7 +638,8 @@ public final class TransactionCategoryBalanceRecordMapper {
      *
      * <p>Assumptions: the plain overload REMAINS and is not deprecated. It is the correct entry point
      * for a row this module ORIGINATED -- one the posting or interest service just computed, which has
-     * no source image because no image was ever read -- and for that row a blank pad is the right pad.
+     * no source image because no image was ever read -- and for that row the create arm's low-value pad
+     * is the right pad, which is the byte that overload now writes.
      * The two overloads therefore answer two different questions, "render this row" and "reproduce the
      * record this row came from", and collapsing them would force a caller with no image to invent one.</p>
      *
@@ -651,9 +693,11 @@ public final class TransactionCategoryBalanceRecordMapper {
      * record it produces is a map a reader has to reconcile against the descriptor by hand, and this is
      * the record where a reordering is least visible and most damaging.</p>
      *
-     * <p>Assumptions: the {@code FILLER} span is supplied to the codec by OMISSION. The plain overload
-     * relies on that to get blanks; the source-image overload relies on it so that the copy it performs
-     * afterwards is writing over blanks rather than fighting a value this map had asserted.</p>
+     * <p>Assumptions: the {@code FILLER} span is supplied to the codec by OMISSION, and both overloads
+     * then write it themselves -- the plain one with the create arm's measured low value, the
+     * source-image one by copying the span it read. Omitting it from the map is what keeps a second
+     * opinion about the pad's contents out of this construction, so the two overloads differ in exactly
+     * one statement rather than in what they asserted to the codec.</p>
      *
      * <p>Refactoring Rationale: extracted so the two overloads share one construction of the map rather
      * than each building its own. Two copies would be two places for a field name or an insertion order

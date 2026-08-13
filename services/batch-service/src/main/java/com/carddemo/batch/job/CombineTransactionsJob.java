@@ -11,6 +11,7 @@ import com.carddemo.batch.mapper.TransactionRecordMapper;
 import com.carddemo.batch.repository.TransactionRepository;
 import com.carddemo.batch.service.BatchStepLedger;
 import com.carddemo.batch.service.DatasetGenerationService;
+import com.carddemo.batch.service.InterestCalculationService;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.file.Files;
@@ -52,8 +53,17 @@ import org.springframework.transaction.PlatformTransactionManager;
  * {@code DCB=(*.SORTIN)}, so the sort output inherits its attributes by reference from its first input, and
  * that input was created {@code DCB=(LRECL=350,RECFM=FB,BLKSIZE=0)} at {@code app/jcl/TRANBKP.jcl:31}.
  * Encoding is delegated to {@code TransactionRecordMapper}, which owns the sign overpunch of
- * {@code TRAN-AMT PIC S9(09)V99} and rebuilds the pad as blanks; nothing here trims a span, because a
- * staged generation's bytes are the contract every reader of it holds.</p>
+ * {@code TRAN-AMT PIC S9(09)V99} and rebuilds both pad regions; nothing here trims a span, because a
+ * staged generation's bytes are the contract every reader of it holds. Assumptions: the pad behind the
+ * description is the byte the row's OWN producer leaves there rather than one byte for every row --
+ * blanks behind a posted row and low values behind an accrual row, as the reference's two passes leave
+ * them -- because {@code layoutOf(Transaction)} names the producer per row and the mapper pads from the
+ * named layout. Refactoring Rationale: this paragraph asserted blanks for EVERY row and registered the
+ * accrual rows' difference as {@code D-COMBINE-DESC-PAD}; the per-row layout selection removed the
+ * difference, so that entry is withdrawn in
+ * {@code docs/architecture/cobol-to-service-traceability.md} section 7.4 and what remains of the
+ * mechanism -- the producer being recovered from the record -- is registered there as
+ * {@code D-TRAN-PAD-PROVENANCE}.</p>
  *
  * <h2>Why the two concatenated inputs are satisfied from one relation</h2>
  *
@@ -67,7 +77,11 @@ import org.springframework.transaction.PlatformTransactionManager;
  * object-store generations. Reading the generations would be strictly worse for two concrete reasons: it
  * would reintroduce fixed-width decoding on the READ path for data that is already relational, and it
  * would make this step depend on the serialised form of two upstream artefacts instead of on the ledger
- * those artefacts were themselves derived from.</p>
+ * those artefacts were themselves derived from. Assumptions: the consequence for anyone comparing this
+ * artefact against a reference extract is that the two generations this job NAMES contributed none of its
+ * bytes, which is registered as {@code D-COMBINE-GENERATION-BYPASS} in
+ * {@code docs/architecture/cobol-to-service-traceability.md} together with what it means for a
+ * restore.</p>
  *
  * <p>Assumptions: the ordering is by transaction identifier ascending, and its provenance is
  * {@code app/jcl/COMBTRAN.jcl:27-30} rather than a preference of this module -- the symbol declaration and
@@ -78,9 +92,11 @@ import org.springframework.transaction.PlatformTransactionManager;
  * <p>Trade-offs: one consequence of the two producers sharing a relation is surfaced rather than left to
  * be discovered. Because the interest rows enter the ledger at state five instead of waiting in
  * {@code SYSTRAN} until state seven, the {@code TRANSACT.BKUP} generation that state six produces is a
- * SUPERSET of the reference's -- it contains the interest rows too. The artefact THIS job produces is
- * unaffected and keeps parity, because it is assembled from the whole relation either way, and so does the
- * final content of the ledger. The reason the interest rows are committed at state five anyway is that
+ * SUPERSET of the reference's -- it contains the interest rows too. The artefact THIS job produces
+ * carries the same SET and the same ORDER either way, because it is assembled from the whole relation
+ * rather than from the two objects, and so does the final content of the ledger. Trade-offs: what a reader
+ * must not conclude from that is that the two objects may be concatenated to reconstruct this one -- in
+ * the target they overlap, so a concatenation duplicates every accrual row. The reason the interest rows are committed at state five anyway is that
  * {@code CalculateInterestJob} also updates the account: {@code app/cbl/CBACT04C.cbl:350-356} adds the
  * accumulated interest to the current balance and zeroes both cycle buckets. Committing that balance
  * change while withholding the rows behind it would publish a balance with no transaction to explain it,
@@ -88,9 +104,11 @@ import org.springframework.transaction.PlatformTransactionManager;
  * saga for posting. No committed golden constrains the intermediate generation: the expectation tree holds
  * the {@code interest}, {@code posting}, {@code provisioning}, {@code reporting} and {@code statement}
  * domains only, and no test in {@code tests/} names {@code TRANSACT.BKUP}, {@code SYSTRAN} or
- * {@code TRANSACT.COMBINED} at all. The difference is registered with the load-back omission below, under
- * {@code D-COMBINE-NO-LOADBACK} in {@code docs/architecture/cobol-to-service-traceability.md} section
- * 7.4.</p>
+ * {@code TRANSACT.COMBINED} at all. The difference has its own entry, {@code D-COMBINE-BACKUP-SUPERSET}
+ * in {@code docs/architecture/cobol-to-service-traceability.md} section 7.4, beside the load-back omission
+ * below at {@code D-COMBINE-NO-LOADBACK}; it was moved out of that entry because a superset of a dataset
+ * and an absent job step are different differences, and a reader checking one should not have to read the
+ * other to find it.</p>
  *
  * <h2>Why the load-back into the master is deliberately absent</h2>
  *
@@ -120,7 +138,11 @@ import org.springframework.transaction.PlatformTransactionManager;
  * {@code DISP=SHR} at {@code app/jcl/COMBTRAN.jcl:23-26}, so a run in which an upstream step had produced
  * no generation fails at allocation rather than quietly merging one input; here an absent generation fails
  * the step for the same reason and names the family that is missing, so an operator resolving a broken
- * chain learns WHICH predecessor did not run.</p>
+ * chain learns WHICH predecessor did not run. Trade-offs: a resolution that is not a read is easy to
+ * mistake for one, and the log line this job writes names both generation numbers, so the distinction is
+ * registered as {@code D-COMBINE-GENERATION-BYPASS} rather than left to be inferred from the absence of a
+ * read; {@code CombineTransactionsJobTest.theCombinedImageIsIndependentOfTheTwoNamedGenerations} measures
+ * it by staging the same rows under two different pairs of input generation numbers.</p>
  *
  * <h2>The tier this job reports</h2>
  *
@@ -227,7 +249,7 @@ public class CombineTransactionsJob {
      */
     private RepeatStatus runStep(StepContribution contribution, ChunkContext context) {
         String runId = BatchConfig.runIdOf(context);
-        BusinessDate businessDate = BatchConfig.businessDateOf(context);
+        BusinessDate generationDate = BatchConfig.generationDateOf(context);
 
         // WHY : Assumptions: the ledger keys on the run identifier paired with STEP_NAME, and that pair
         //       is what makes a redriven state a no-op instead of a second pass. It matters here beyond
@@ -235,7 +257,7 @@ public class CombineTransactionsJob {
         //       consume one of the five that app/jcl/DEFGDGB.jcl:55-57 retains, so the run would silently
         //       shorten the history an operator can restore from.
         this.ledgerOfSteps.runStep(runId, STEP_NAME, BatchJobName.COMBINE_TRANSACTIONS,
-                () -> combineIntoNewGeneration(runId, businessDate));
+                () -> combineIntoNewGeneration(runId, generationDate));
         return RepeatStatus.FINISHED;
     }
 
@@ -243,12 +265,13 @@ public class CombineTransactionsJob {
      * Resolves both inputs, stages the ordered output as a new generation, and applies retention.
      *
      * @param runId the orchestrator execution the allocation belongs to; must not be {@code null}
-     * @param businessDate the injected business date the generation is partitioned under; must not be
+     * @param generationDate the injected date the generation is partitioned under, which is
+     *     orchestration metadata rather than business input; must not be
      *     {@code null}
      * @return {@link BatchReturnCode#CLEAN}, because the merge either completes or raises
      */
-    private BatchReturnCode combineIntoNewGeneration(String runId, BusinessDate businessDate) {
-        String datePartition = resolveDatePartitionSegment(businessDate);
+    private BatchReturnCode combineIntoNewGeneration(String runId, BusinessDate generationDate) {
+        String datePartition = resolveDatePartitionSegment(generationDate);
 
         DatasetGeneration backupInput = requireCurrentGeneration(DatasetFamily.TRANSACT_BKUP);
         DatasetGeneration systemInput = requireCurrentGeneration(DatasetFamily.SYSTRAN);
@@ -263,7 +286,7 @@ public class CombineTransactionsJob {
         //       stated because it is what a reader has to know to follow the driver, and because any
         //       later step needing the generation this run produced depends on it holding.
         DatasetGeneration target = this.generations.allocateNewGeneration(
-                DatasetFamily.TRANSACT_COMBINED, businessDate, runId);
+                DatasetFamily.TRANSACT_COMBINED, generationDate, runId);
 
         Path staged = writeOrderedTransactionsToTemporaryFile();
         try {
@@ -329,18 +352,18 @@ public class CombineTransactionsJob {
      * {@code app/cbl/CBACT04C.cbl:474-480} concatenates the token as supplied into
      * {@code TRAN-ID PIC X(16)}.</p>
      *
-     * @param businessDate the injected business date to resolve; must not be {@code null}
+     * @param generationDate the injected generation date to resolve; must not be {@code null}
      * @return the {@code dt=} segment of the generation key, for example {@code dt=2022-07-18}; never
      *     {@code null}
      * @throws IllegalStateException if the token matches neither committed layout, or renders a date that
      *     is not a real calendar day, so no partition value can be derived from it
      */
-    private static String resolveDatePartitionSegment(BusinessDate businessDate) {
+    private static String resolveDatePartitionSegment(BusinessDate generationDate) {
         // WHY : Assumptions: the coordinate built here is a probe and never addresses an object. Only its
         //       rendering is read, so the family and the generation number are the cheapest values that
         //       satisfy the coordinate's own validity rules; the resolver allocates the real number a few
         //       statements later. The sibling resolver documents the same probe idiom for the same reason.
-        return new DatasetGeneration(DatasetFamily.TRANSACT_COMBINED, businessDate,
+        return new DatasetGeneration(DatasetFamily.TRANSACT_COMBINED, generationDate,
                 DatasetGeneration.MINIMUM_GENERATION_NUMBER).datePartitionSegment();
     }
 
@@ -429,7 +452,14 @@ public class CombineTransactionsJob {
                     //       record, and the parity harness records the consequence of trimming it at
                     //       tests/helpers/golden_compare.py:22-28 -- a 350-byte record collapses to about
                     //       278 characters, which no reader of a fixed-width dataset can parse.
-                    sink.write(TransactionRecordMapper.toRecord(row));
+                    // WHY : Assumptions: the layout is chosen PER ROW rather than fixed for the
+                    //       stream, because this generation is the one artefact in the chain that holds
+                    //       both producers' records side by side -- the reference assembles it from
+                    //       TRANSACT.BKUP(0) and SYSTRAN(0) at app/jcl/COMBTRAN.jcl:24 and :26 -- and
+                    //       section 6.3 of the fixture contract measures the description pad as a
+                    //       property of the producer. A single layout for the whole stream would give
+                    //       one of the two row classes another job's pad.
+                    sink.write(TransactionRecordMapper.toRecord(row, layoutOf(row)));
                 }
             }
         } catch (IOException unwritable) {
@@ -439,6 +469,38 @@ public class CombineTransactionsJob {
         }
 
         return staged;
+    }
+
+    /**
+     * Names which producer's padding rule applies to one row of the combined output.
+     *
+     * <p>Assumptions: the combined generation is a concatenation of two producers' records, so the pad
+     * cannot be a property of this job. Section 6.3 of
+     * {@code services/batch-service/src/test/resources/fixtures/README.md} measures the accrual pass
+     * leaving seventy-six low values behind the description it builds with {@code STRING} at
+     * {@code app/cbl/CBACT04C.cbl:485-489}, and the posting pass blank-padding its own at
+     * {@code app/cbl/CBTRN02C.cbl:429}. The producer is recognised from the attribution the accrual
+     * pass writes, because the relational row carries the description's text and not the bytes behind
+     * it.</p>
+     *
+     * <p>Refactoring Rationale: this job encoded every row through the layout-less overload and its own
+     * test recorded the consequence as unreproducible -- "the reference's low-value pad is therefore not
+     * reproduced". It is reproducible from the row's own attribution, which is the same pair of fields
+     * the reference itself uses to tell its two writers apart, so the difference is closed rather than
+     * documented.</p>
+     *
+     * <p>Assumptions: the mechanism -- producer recovered from the record rather than from the dataset it
+     * arrived in -- is registered as {@code D-TRAN-PAD-PROVENANCE} in
+     * {@code docs/architecture/cobol-to-service-traceability.md} section 7.4.</p>
+     *
+     * @param row the ledger row about to be encoded; must not be {@code null}
+     * @return {@code INTEREST_GENERATED} for a row the accrual pass wrote and {@code POSTED_MASTER} for
+     *     every other row, never {@code null}
+     */
+    private static TransactionRecordMapper.Layout layoutOf(Transaction row) {
+        return InterestCalculationService.isAccrualGenerated(row)
+                ? TransactionRecordMapper.Layout.INTEREST_GENERATED
+                : TransactionRecordMapper.Layout.POSTED_MASTER;
     }
 
     /**

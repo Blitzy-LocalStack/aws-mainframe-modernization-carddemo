@@ -11,6 +11,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.time.format.ResolverStyle;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -131,14 +132,26 @@ import java.util.Map;
  *
  * <p>Assumptions: {@code toRecord(toEntity(image))} reproduces {@code image} exactly whenever three
  * conditions hold, and each of the three has a named cause rather than being a general caveat.
- * First, the trailing {@code FILLER} is blank, because the entity carries no member for those 20
- * bytes and the encode direction rebuilds them as blanks. Second, the amount is not a NEGATIVE ZERO:
- * {@code com.carddemo.common.codec.ZonedDecimalCodec} emits the canonical positive-zero overpunch
- * for every zero, since the target decimal type has no negative zero to preserve, and that trailing
- * character is the one span the codec documents as not round-tripping. Third, both timestamps are
- * already in the target 26-character form, for the reason the next section gives. The overload
- * {@link #toRecord(Transaction, Layout, byte[])} removes all three conditions by restoring those
- * exact byte regions from the image the entity was decoded from.</p>
+ * First, the trailing {@code FILLER} holds the low values a producer's own record area holds, because
+ * the entity carries no member for those 20 bytes and the encode direction rebuilds them with the
+ * byte measured in every committed expectation for this record rather than with the codec's blank --
+ * so an image whose pad was blank-filled by some other writer does not round-trip. Second, the amount
+ * is not a NEGATIVE ZERO: {@code com.carddemo.common.codec.ZonedDecimalCodec} emits the canonical
+ * positive-zero overpunch for every zero, since the target decimal type has no negative zero to
+ * preserve, and that trailing character is the one span the codec documents as not round-tripping.
+ * Third, both timestamps are already in the target 26-character form, for the reason the next section
+ * gives. The overload {@link #toRecord(Transaction, Layout, byte[])} removes all three conditions by
+ * restoring those exact byte regions from the image the entity was decoded from.</p>
+ *
+ * <p>Assumptions: the description's own tail is reproduced from the LAYOUT rather than from the image,
+ * because it is a property of the producer and not of the row -- section 6.3 of
+ * {@code services/batch-service/src/test/resources/fixtures/README.md} measures the accrual pass
+ * leaving seventy-six low values behind its text and the posting pass blank-padding its own. A caller
+ * therefore states which producer it is speaking for, and the tail follows; a caller that names the
+ * wrong one emits a description whose text is right and whose pad is another job's. Where a caller has to
+ * recover the producer from a relational row rather than knowing it, the mechanism is registered as
+ * {@code D-TRAN-PAD-PROVENANCE} in {@code docs/architecture/cobol-to-service-traceability.md}
+ * section 7.4.</p>
  *
  * <h2>Two registry layouts for one physical shape</h2>
  *
@@ -278,6 +291,31 @@ public final class TransactionRecordMapper {
     private static final char BLANK = ' ';
 
     /**
+     * The byte a span of this record carries where no statement of either producer ever wrote it.
+     *
+     * <p>Assumptions: the value is MEASURED from the committed parity expectations rather than derived
+     * from the {@code PICTURE} clause, and the measurement is unanimous across both producers and all
+     * eight expectation files. The trailing pad slice {@code [330:350]} of every non-empty
+     * {@code tests/golden/posting/}{@code *}{@code /tranfile.expected} and of all three
+     * {@code tests/golden/interest/}{@code *}{@code /transact.expected} holds this byte and nothing
+     * else, and the interest description's tail holds it too. The mechanism is the same in both cases:
+     * a record area that no {@code MOVE} reaches keeps the low values it held, because
+     * {@code app/cbl/CBTRN02C.cbl:426-438} and {@code app/cbl/CBACT04C.cbl:482-498} each populate the
+     * thirteen mapped fields and neither names {@code FILLER}.</p>
+     *
+     * <p>Trade-offs: the shared codec rebuilds a dropped pad with the charset's blank instead, which is
+     * the right default for a codec that holds no record-specific knowledge and is documented as such
+     * on {@code com.carddemo.common.codec.FixedWidthCodec}. Overriding it HERE rather than changing it
+     * there is deliberate: the blank is correct for the account and cross-reference records, whose pads
+     * are measured as blanks in {@code app/data/ASCII/acctdata.txt} and in the house cross-reference
+     * fixture, so a codec-level change would fix this record by breaking those two. Section 6.1 of
+     * {@code services/batch-service/src/test/resources/fixtures/README.md} is the measurement table
+     * this constant is read from, and it records the codec's blank rebuild as consistent with only
+     * three of the six records it covers.</p>
+     */
+    private static final byte FRESH_RECORD_PAD = 0x00;
+
+    /**
      * The 26-character timestamp form the two baseline producers write.
      *
      * <p>Assumptions: the pattern is transcribed from the record layout itself rather than guessed.
@@ -355,6 +393,18 @@ public final class TransactionRecordMapper {
      * {@code FixedWidthCodec} recognises a trailing pad descriptor only when the specification it was
      * given IS the registered one, so a hand-built copy would silently stop dropping {@code FILLER}
      * on decode and stop rebuilding it on encode.</p>
+     *
+     * <p>Assumptions: each constant ALSO declares the byte its producer leaves behind the description
+     * it wrote, and that declaration is the reason this enumeration reaches the emitted bytes rather
+     * than only a comparator's masking decisions. Section 6.3 of
+     * {@code services/batch-service/src/test/resources/fixtures/README.md} measures the difference:
+     * the accrual pass assembles its description with {@code STRING} at
+     * {@code app/cbl/CBACT04C.cbl:485-489}, which writes only the twenty-four characters it was given
+     * and leaves the remaining seventy-six bytes of the receiving field at the low values the record
+     * area held, while the posting pass performs a plain {@code MOVE} at
+     * {@code app/cbl/CBTRN02C.cbl:429} of a feed field that is already blank-padded. Naming the layout
+     * is therefore a caller's statement of WHICH PRODUCER it is speaking for, and the pad follows from
+     * it.</p>
      */
     public enum Layout {
 
@@ -365,8 +415,13 @@ public final class TransactionRecordMapper {
          * {@code app/cbl/CBTRN02C.cbl:436} and generates only the processing stamp, so under this
          * layout the origination stamp is deterministic feed content that a parity comparator must
          * compare rather than blank.</p>
+         *
+         * <p>Assumptions: the description pad is the blank, because {@code app/cbl/CBTRN02C.cbl:429}
+         * moves an already blank-padded feed field into it and a COBOL {@code MOVE} blank-pads an
+         * alphanumeric receiver over its whole declared width. Measured in the description slice of
+         * every non-empty {@code tests/golden/posting/}{@code *}{@code /tranfile.expected}.</p>
          */
-        POSTED_MASTER("TRAN"),
+        POSTED_MASTER("TRAN", (byte) BLANK),
 
         /**
          * The system-transaction generation written by the interest job, registered as {@code INTTRAN}.
@@ -375,8 +430,14 @@ public final class TransactionRecordMapper {
          * {@code app/cbl/CBACT04C.cbl:496} and moves that same value into both stamps at lines 497
          * and 498, so under this layout the origination stamp is a clock read and carries the
          * {@code normalizeTs} marker that tells a parity comparator to blank it.</p>
+         *
+         * <p>Assumptions: the description pad is the low value, because {@code STRING} at
+         * {@code app/cbl/CBACT04C.cbl:485-489} writes only the characters it was handed and touches
+         * nothing behind them. Measured as exactly seventy-six low values behind the twenty-four
+         * characters {@code Int. for a/c 00000000001} in
+         * {@code tests/golden/interest/happy_path/transact.expected}.</p>
          */
-        INTEREST_GENERATED("INTTRAN");
+        INTEREST_GENERATED("INTTRAN", FRESH_RECORD_PAD);
 
         /** The registry name this constant resolves, held so diagnostics can quote it. */
         private final String registryName;
@@ -384,17 +445,23 @@ public final class TransactionRecordMapper {
         /** The registered specification, resolved once so registry identity is preserved. */
         private final CopybookLayout.RecordSpec spec;
 
+        /** The byte this producer leaves behind the description text it wrote. */
+        private final byte descriptionPad;
+
         /**
-         * Binds one constant to its registry entry.
+         * Binds one constant to its registry entry and to its producer's description pad.
          *
          * @param registryName the String naming this layout in
          *     {@code com.carddemo.common.codec.CopybookLayout}'s registry; it must be a registered
          *     name, and resolution happens here so a missing entry fails at class initialisation
          *     rather than at the first record
+         * @param descriptionPad the byte this layout's producer leaves in the description field behind
+         *     the text it wrote, measured from that producer's own committed expectation
          */
-        Layout(String registryName) {
+        Layout(String registryName, byte descriptionPad) {
             this.registryName = registryName;
             this.spec = CopybookLayout.layout(registryName);
+            this.descriptionPad = descriptionPad;
         }
 
         /**
@@ -417,6 +484,16 @@ public final class TransactionRecordMapper {
          */
         public CopybookLayout.RecordSpec spec() {
             return spec;
+        }
+
+        /**
+         * Returns the byte this layout's producer leaves in the description field behind its text.
+         *
+         * @return the blank for the posting producer and the low value for the accrual producer, being
+         *     the byte measured in that producer's own committed parity expectation
+         */
+        public byte descriptionPad() {
+            return descriptionPad;
         }
     }
 
@@ -503,7 +580,8 @@ public final class TransactionRecordMapper {
      * Encodes an entity into a 350-byte posted-transaction image, under the posting layout.
      *
      * @param transaction the {@link Transaction} to render; its members supply the thirteen mapped
-     *     fields and the trailing pad is rebuilt as blanks
+     *     fields and the trailing pad is rebuilt with the low value the posting producer's own record
+     *     area holds
      * @return a byte array of exactly 350 bytes in the fixed-width form declared by
      *     {@code app/cpy/CVTRA05Y.cpy}, with each timestamp rendered in the target 26-character form
      * @throws RecordMappingException if a required member is absent, if a fixed-width code is not at
@@ -523,16 +601,72 @@ public final class TransactionRecordMapper {
      * and the output has to match it byte for byte, {@link #toRecord(Transaction, Layout, byte[])} is
      * the entry point that preserves the original spans.</p>
      *
+     * <p>Assumptions: the two pad regions this record carries are written with the bytes the NAMED
+     * PRODUCER leaves in them rather than with the shared codec's blank, so an entity holding the
+     * values a producer wrote encodes to that producer's own image. The trailing pad is
+     * {@link #FRESH_RECORD_PAD} under both layouts and the description tail is
+     * {@link Layout#descriptionPad()}. Refactoring Rationale: this method previously emitted the
+     * codec's blank in both regions, which differed from the committed expectations in twenty bytes for
+     * a posted record and in ninety-six for an accrual record -- on spans that carry no data, so every
+     * field matched and the comparison failed anyway. The two comparators that met that gap each
+     * canonicalised the low value to the blank to get past it, which is a normalisation a reader has to
+     * trust rather than a byte a consumer can rely on.</p>
+     *
      * @param transaction the {@link Transaction} to render
-     * @param layout the {@link Layout} naming which producer's registry entry applies
+     * @param layout the {@link Layout} naming which producer's registry entry applies, and therefore
+     *     which byte the description tail is padded with
      * @return a byte array of exactly 350 bytes
      * @throws RecordMappingException if {@code layout} or {@code transaction} is {@code null}, if a
      *     required member is absent, if a fixed-width code is not at its declared width, or if the
      *     amount cannot be represented without discarding precision
      */
     public static byte[] toRecord(Transaction transaction, Layout layout) {
-        CopybookLayout.RecordSpec spec = requireLayout(layout).spec();
-        return FixedWidthCodec.encodeRecord(fieldMap(transaction, spec), spec);
+        Layout selected = requireLayout(layout);
+        CopybookLayout.RecordSpec spec = selected.spec();
+        Map<String, Object> fields = fieldMap(transaction, spec);
+        byte[] encoded = FixedWidthCodec.encodeRecord(fields, spec);
+
+        applyProducerPadding(encoded, spec, selected, fields);
+        return encoded;
+    }
+
+    /**
+     * Overwrites the two pad regions of a freshly encoded image with the bytes its producer leaves.
+     *
+     * <p>Assumptions: the regions are located through the registered descriptors and the content
+     * length through the field map the codec was just handed, so nothing here re-derives an offset or
+     * re-reads the entity. Using the map is what makes the description's boundary exact: the value the
+     * codec wrote is the value the map carries, so the first pad byte is at the description's start
+     * plus that value's own length, and a description occupying the full hundred characters leaves no
+     * pad to write at all.</p>
+     *
+     * <p>Alternatives Considered: scanning the encoded span backwards for the first non-blank byte and
+     * padding from there. Rejected because a description legitimately ENDING in a blank -- a merchant
+     * name copied from a feed field, for instance -- would have that blank overwritten, so the
+     * mechanism would corrupt exactly the values it could not distinguish. Reading the length from the
+     * supplied value cannot make that mistake.</p>
+     *
+     * @param encoded the freshly encoded image, updated in place; must be of the record's declared
+     *     length
+     * @param spec the {@code CopybookLayout.RecordSpec} in force, supplying both pad descriptors
+     * @param layout the {@link Layout} whose producer's description pad applies
+     * @param fields the field map the encode consumed, read for the description's own length
+     */
+    private static void applyProducerPadding(byte[] encoded, CopybookLayout.RecordSpec spec,
+            Layout layout, Map<String, Object> fields) {
+
+        CopybookLayout.FieldSpec trailingPad = spec.field(FILLER);
+        Arrays.fill(encoded, trailingPad.start(), trailingPad.end(), FRESH_RECORD_PAD);
+
+        byte descriptionPad = layout.descriptionPad();
+        if (descriptionPad == (byte) BLANK) {
+            return;
+        }
+
+        CopybookLayout.FieldSpec description = spec.field(TRAN_DESC);
+        int written = String.valueOf(fields.get(TRAN_DESC)).length();
+        Arrays.fill(encoded, Math.min(description.start() + written, description.end()),
+                description.end(), descriptionPad);
     }
 
     /**
@@ -541,8 +675,9 @@ public final class TransactionRecordMapper {
      *
      * <p>Assumptions: three regions of this record survive a decode only as bytes, so an entity alone
      * cannot reproduce them, and each has a named cause. The trailing {@code FILLER} has no entity
-     * member at all, so it is copied unconditionally -- and the committed parity expectations show
-     * why that matters rather than being theoretical: the 20 bytes at offset 330 of
+     * member at all, so it is copied unconditionally -- which is what keeps this overload exact for an
+     * image whose pad was written by something other than the two producers this mapper knows, the
+     * plain encode having no choice but to assume one of them. The 20 bytes at offset 330 of
      * {@code tests/golden/posting/happy_path/tranfile.expected} are low values rather than blanks, so
      * an encode that rebuilt them as blanks would differ from the oracle in exactly those 20
      * positions. The sign carrier of a ZERO amount is copied because
@@ -570,7 +705,8 @@ public final class TransactionRecordMapper {
      *     amount cannot be represented without discarding precision
      */
     public static byte[] toRecord(Transaction transaction, Layout layout, byte[] sourceImage) {
-        CopybookLayout.RecordSpec spec = requireLayout(layout).spec();
+        Layout selected = requireLayout(layout);
+        CopybookLayout.RecordSpec spec = selected.spec();
         Map<String, Object> fields = fieldMap(transaction, spec);
 
         // WHY : Assumptions: the sign-preserving entry point is used rather than the plain one because
@@ -579,6 +715,14 @@ public final class TransactionRecordMapper {
         //       from inside the copy loop below.
         byte[] encoded = FixedWidthCodec.encodeRecordPreservingSign(fields, spec, sourceImage);
 
+        // WHY : Assumptions: the producer's own padding is applied here too, even though the trailing
+        //       pad is overwritten from the source on the next line, because the DESCRIPTION tail is
+        //       not copied from the source anywhere -- the entity carries the description's text but
+        //       not the bytes behind it, so without this call an accrual image decoded and re-encoded
+        //       through this overload would come back with seventy-six blanks where it held seventy-six
+        //       low values. Applying the producer's pad first and then copying the source's trailing
+        //       pad is what makes this overload byte-exact over BOTH regions.
+        applyProducerPadding(encoded, spec, selected, fields);
         copySpan(sourceImage, encoded, spec.field(FILLER));
         restoreUnchangedTimestamp(sourceImage, encoded, spec, TRAN_ORIG_TS, transaction.getOrigTs());
         restoreUnchangedTimestamp(sourceImage, encoded, spec, TRAN_PROC_TS, transaction.getProcTs());

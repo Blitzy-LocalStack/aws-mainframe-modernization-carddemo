@@ -580,4 +580,40 @@ public record BatchRunSummary(
     public Map<String, Long> recordTypeCounts() {
         return recordTypeCounts;
     }
+
+    /**
+     * Renders the run's identity, its outcome and its four counters, with the per-type map summarised.
+     *
+     * <p>Purpose. Eight of the nine components are safe by the third clause of
+     * {@code docs/architecture/observability.md} L1093 to L1112 -- a run identifier, a step name, a job
+     * name, a return code and four record counters are exactly the "identity that discloses nothing" that
+     * clause describes, and they are the whole diagnostic content of a batch step. The ninth is a map, and
+     * a map is rendered as its SIZE for the collection reason: its key set is derived from the data a run
+     * happened to process, so its rendered length is a function of input rather than of this type.</p>
+     *
+     * <p>Alternatives Considered: rendering the map's keys but not its values. Rejected because the keys
+     * are the interesting half only when there are few of them, and nothing bounds how many there are; the
+     * accessor returns the map unmodified to any caller that needs it, which is the right place for a
+     * reader that wants the breakdown.</p>
+     *
+     * <p>Assumptions: the counters print as counts and not as amounts. A record count is not money even
+     * when the records carry money, so no clause of that rule reaches them, and a batch step whose read
+     * and written counts disagree is diagnosed from precisely those two numbers.</p>
+     *
+     * @return a rendering naming the run identifier, the step and job names, the return code, the four
+     *     record counters and the size of the per-type breakdown; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "BatchRunSummary[runId=" + this.runId
+                + ", stepName=" + this.stepName
+                + ", jobName=" + this.jobName
+                + ", returnCode=" + this.returnCode
+                + ", recordsRead=" + this.recordsRead
+                + ", recordsWritten=" + this.recordsWritten
+                + ", recordsRejected=" + this.recordsRejected
+                + ", recordsSkipped=" + this.recordsSkipped
+                + ", recordTypeCounts=" + (this.recordTypeCounts == null ? "absent"
+                        : this.recordTypeCounts.size() + " entries") + ']';
+    }
 }

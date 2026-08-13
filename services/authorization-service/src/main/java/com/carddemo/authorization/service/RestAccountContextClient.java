@@ -5,6 +5,7 @@ import com.carddemo.common.security.InternalServiceToken;
 import java.math.BigDecimal;
 import java.net.http.HttpClient;
 import java.time.Duration;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -293,6 +294,24 @@ public class RestAccountContextClient implements AccountContextClient {
     private static final String LOOKUP_FIELD_ACCOUNT_ID = "accountId";
 
     /**
+     * The account identifier's width in the published request schema, eleven characters.
+     *
+     * <p>⚠️ Assumptions: the schema declares this member as digits-only TEXT of at most this width, so
+     * the number this class holds is rendered before it is sent. It previously travelled as a JSON
+     * number, which the account context accepted only because its reader coerces a number to a string
+     * for a textual member -- so the request conformed to nothing the document declared and would be
+     * refused outright the moment that leniency were withdrawn, exactly as this context has already
+     * withdrawn it for its own request bodies.</p>
+     *
+     * <p>Assumptions: the rendering is left-zero-padded to the declared width rather than written at
+     * whatever length the number happens to have. The pattern admits both forms and they resolve to the
+     * same row, so the padding is not required for acceptance; it is chosen because the width is what
+     * the reference field declares and a fixed-width value is what an operator reading a captured
+     * request would recognise as an account key.</p>
+     */
+    private static final int ACCOUNT_ID_WIDTH = 11;
+
+    /**
      * The body member the customer existence check carries the customer identifier in.
      */
     private static final String LOOKUP_FIELD_CUSTOMER_ID = "customerId";
@@ -539,6 +558,31 @@ public class RestAccountContextClient implements AccountContextClient {
     }
 
     /**
+     * Renders an account identifier as the fixed-width character key the published schema declares.
+     *
+     * <p>Assumptions: the format is composed from {@link #ACCOUNT_ID_WIDTH} rather than written as a
+     * literal specifier, so the width is stated once and the rendering cannot fall out of step with the
+     * constant that documents it.</p>
+     *
+     * <p>Assumptions: a value wider than the declared width is rendered as it stands rather than being
+     * truncated here, and it is then refused by the receiving pattern. Truncating would send a DIFFERENT
+     * account's identifier -- a silently wrong lookup answered 200 -- where refusal names the fault.</p>
+     *
+     * @param accountId the account identifier resolved from the cross-reference
+     * @return the identifier as decimal digits, left-zero-padded to the declared width, never
+     *     {@code null}
+     */
+    private static String renderAccountId(long accountId) {
+        // WHY : Assumptions: the locale is stated rather than defaulted. This renders a fixed-width
+        //       KEY, and the no-locale overload formats with the JVM default, so a non-Latin
+        //       numbering system would substitute its own digits into the identifier and the
+        //       receiving pattern would refuse a value that is arithmetically correct. A build
+        //       runner's default locale is Latin, so no test would have shown it. This matches the
+        //       zero-padding idiom PendingAuthDetailMapper already uses for the same reason.
+        return String.format(Locale.ROOT, "%0" + ACCOUNT_ID_WIDTH + "d", accountId);
+    }
+
+    /**
      * Renders which part of an incomplete successful response was missing.
      *
      * <p>Assumptions: the rendering names COMPONENTS and never values, matching the discipline the queue
@@ -634,7 +678,7 @@ public class RestAccountContextClient implements AccountContextClient {
         try {
             AccountView view = this.client.post()
                     .uri(PATH_ACCOUNT)
-                    .body(Map.of(LOOKUP_FIELD_ACCOUNT_ID, accountId))
+                    .body(Map.of(LOOKUP_FIELD_ACCOUNT_ID, renderAccountId(accountId)))
                     .retrieve()
                     .body(AccountView.class);
             if (view == null || view.creditLimit() == null || view.cashCreditLimit() == null
@@ -891,7 +935,26 @@ public class RestAccountContextClient implements AccountContextClient {
      * @param customerId the customer the card belongs to, or {@code null} when the response omitted it
      */
     private record CardXrefView(Long accountId, Long customerId) {
-    }
+    
+        /**
+         * Renders neither identifier, matching the seam record this wire shape is mapped into.
+         *
+         * <p>Purpose. Both components are identifiers {@code docs/architecture/observability.md} L1093 to
+         * L1112 withholds. This is the JSON-binding shape rather than the seam type, and it is the one that
+         * reaches a diagnostic FIRST: a deserialisation fault is raised while this record is being built,
+         * before any mapping to the seam type has happened.</p>
+         *
+         * <p>Assumptions: the rendering is identical in content to the seam record's rather than
+         * deliberately different. Two shapes for one row that rendered differently would let a reader
+         * conclude the values had changed in the mapping when only the renderer had.</p>
+         *
+         * @return a rendering naming the type with both identifiers withheld; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "CardXrefView[identifiers=[REDACTED]]";
+        }
+}
 
     /**
      * The account read's response body.
@@ -908,7 +971,26 @@ public class RestAccountContextClient implements AccountContextClient {
      */
     private record AccountView(BigDecimal creditLimit, BigDecimal cashCreditLimit,
             BigDecimal currentBalance) {
-    }
+    
+        /**
+         * Renders no value at all: all three components are limits or balances.
+         *
+         * <p>Purpose. This is the JSON-binding shape for the account seam, and its three components are
+         * the credit limit, the cash credit limit and the balance -- withheld as a class by
+         * {@code docs/architecture/observability.md} L1093 to L1112. It is stringified earlier than the
+         * seam record it maps into, because a binding failure names the type being bound.</p>
+         *
+         * <p>Assumptions: the content matches the seam record's rendering exactly, for the reason recorded
+         * on the cross-reference wire shape beside it -- one row rendered two ways makes neither
+         * authoritative.</p>
+         *
+         * @return a rendering naming the type with all three amounts withheld; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "AccountView[amounts=[REDACTED]]";
+        }
+}
 
     /**
      * The nine stored customer fields the display read publishes, exactly as it publishes them.
@@ -943,5 +1025,30 @@ public class RestAccountContextClient implements AccountContextClient {
     private record CustomerDisplayWire(String firstName, String middleName, String lastName,
             String addressLine1, String addressLine2, String addressLine3, String stateCode,
             String zipCode, String phoneNumber1) {
-    }
+    
+        /**
+         * Renders none of the nine values, reporting only which optional members arrived.
+         *
+         * <p>Purpose. Every component is personal data about an identified cardholder: a name in three
+         * parts, an address in five and a telephone number. {@code docs/architecture/observability.md}
+         * L1093 to L1112 withholds all of them, and this shape holds the widest set of them anywhere on
+         * this seam -- it is the wire form of the account context's display projection, so the generated
+         * rendering reproduced a whole customer's postal identity at the point where a binding fault is
+         * reported.</p>
+         *
+         * <p>Assumptions: the two flags cover the two members the published contract permits to be absent,
+         * which are the middle name and the second address line. The other seven are declared non-nullable
+         * by the owning context, so a flag over them would be a constant dressed as an observation -- the
+         * same reasoning the owning projection records for the same nine fields.</p>
+         *
+         * @return a rendering reporting which optional members are present, with all nine personal values
+         *     withheld; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "CustomerDisplayWire[middleNamePresent=" + (this.middleName != null)
+                    + ", addressLine2Present=" + (this.addressLine2 != null)
+                    + ", personalData=[REDACTED]]";
+        }
+}
 }

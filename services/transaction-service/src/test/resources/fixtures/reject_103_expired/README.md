@@ -606,17 +606,22 @@ so no link here points at nothing.
 - [`TransactionRejectRepositoryIT`](../../../java/com/carddemo/transaction/repository/TransactionRejectRepositoryIT.java)
   -- **[present]**, and it **does** drive this folder's `dailytran.txt` into a real
   PostgreSQL container. Its case
-  `anOriginatingDateOneDayBeyondTheExpirationDateYieldsReasonOneHundredAndThree`, at
-  line 1136, reads the record, stores the reject row it produces and asserts
+  `anOriginatingDateOneDayBeyondTheExpirationDateYieldsReasonOneHundredAndThree` reads
+  the record, stores the reject row it produces and asserts
   `reason_code` 103 with the verbatim `reason_desc`
   `TRANSACTION RECEIVED AFTER ACCT EXPIRATION`; the read itself asserts the
   350-character image width. Its case
-  `whenBothBoundaryGuardsFailTheStoredRowCarriesReasonOneHundredAndThreeAndItsDescription`,
-  at line 1177, reads the same record and additionally asserts that neither the
+  `whenBothBoundaryGuardsFailTheStoredRowCarriesReasonOneHundredAndThreeAndItsDescription`
+  reads the same record and additionally asserts that neither the
   over-limit code nor its text survives, which is the later-guard-wins ordering. The
-  paired pass case `anOriginatingDateEqualToTheExpirationDateProducesNoRejectStreamRow`,
-  at line 1106, drives `boundary_expiry_equal` and asserts an empty reject table, so
-  the inclusive guard is straddled from this folder's bytes and from its pair's.
+  paired pass case `anOriginatingDateEqualToTheExpirationDateProducesNoRejectStreamRow`
+  drives `boundary_expiry_equal` and asserts an empty reject table, so the inclusive
+  guard is straddled from this folder's bytes and from its pair's. Refactoring
+  Rationale: the three case citations above named line numbers in that test file as
+  well as the members they mean. The numbers went stale when a case above them was
+  deleted, so they are dropped and the names kept -- a name is searchable and survives
+  any edit that does not rename it, a number only holds for the revision it was read
+  from.
 - The **decision** that this record arrives after expiration -- **[present]**, and
   deliberately asserted elsewhere. It belongs to `PostingValidationService` in the
   batch deployable, the module `app/cbl/CBTRN02C.cbl` migrates to, and

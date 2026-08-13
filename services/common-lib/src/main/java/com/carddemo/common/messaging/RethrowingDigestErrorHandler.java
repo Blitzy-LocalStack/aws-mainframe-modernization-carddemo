@@ -24,7 +24,7 @@ import org.springframework.messaging.MessageHeaders;
  * throwable so the delivery outcome is byte for byte what it would have been with no handler registered
  * at all.</p>
  *
- * <h2>Why the message text is redacted rather than withheld</h2>
+ * <h2>Why the condition is named rather than the message quoted</h2>
  *
  * <p>The exception messages on a listener failure are not written by this repository. They come from a
  * JDBC driver quoting the statement it could not run, a codec quoting the bytes it could not read, or a
@@ -46,19 +46,28 @@ import org.springframework.messaging.MessageHeaders;
  * requester can influence; and the failure's condition through
  * {@link FailureSummary#databaseConditionOf(Throwable)}.</p>
  *
- * <p>⚠️ Assumptions: that second field is DEFAULT-WITHHELD and admitted only on evidence, which is the
- * property that makes it safe on a handler that cannot know what it is holding. A chain carrying a state
- * code was composed by a JDBC driver, whose messages quote DDL names and record values — the names are
- * letters and survive, the values are digit runs and are replaced. A chain carrying none could have been
- * composed by anything, and this handler's own test set already held the case that proves why that matters:
- * a transport failure reporting {@code connect failed to https://... using key AKIA...} carries an
- * access-key identifier, which contains no digit run and would pass any digit rule untouched. Such a
- * message renders as {@link FailureSummary#WITHHELD}, and the digest still names every type in the
+ * <p>⚠️ Assumptions: that second field carries NO MESSAGE TEXT AT ALL, which is the property that makes it
+ * safe on a handler that cannot know what it is holding. It is default-withheld and admitted only on
+ * evidence — a chain carrying a state code was composed by a database driver — and what is then admitted is
+ * the engine's own CONDITION NAME for that code, drawn from a closed map, followed by any constraint,
+ * relation or column name the engine quoted after one of its own keywords. A chain carrying no state code
+ * could have been composed by anything, and this handler's own test set already held the case that proves
+ * why that matters: a transport failure reporting {@code connect failed to https://... using key AKIA...}
+ * carries an access-key identifier, which contains no digit run and would pass any digit rule untouched.
+ * Such a message renders as {@link FailureSummary#WITHHELD}, and the digest still names every type in the
  * chain.</p>
  *
- * <p>⚠️ Trade-offs: a diagnostic message from a non-database failure is therefore lost at this line, and
- * a digit run of three or more is lost from the ones that are shown — a byte offset, a record length. Both
- * are accepted because the located facts are this line's own structured fields: the broker's message
+ * <p>⚠️ Refactoring Rationale: this paragraph previously read that a driver's messages "quote DDL names and
+ * record values — the names are letters and survive, the values are digit runs and are replaced", because
+ * the field then carried the driver's redacted MESSAGE. That was wrong in a measurable way: the PostgreSQL
+ * driver folds the server's {@code DETAIL} field into its message by default, and a check violation's
+ * detail enumerates every column of the rejected row, so a cardholder's given name and surname are letters
+ * and survived exactly as identifiers did. The field now names the condition instead of quoting the
+ * sentence, so there is no message for a digit rule to be wrong about.</p>
+ *
+ * <p>⚠️ Trade-offs: a diagnostic sentence is therefore lost at this line — from a non-database failure
+ * entirely, and from a database one reduced to a condition name and the names of the objects involved. That
+ * is accepted because the located facts are this line's own structured fields: the broker's message
  * identifier, the queue and the redelivery count. A site that DOES know what composed its failure renders
  * the message itself and does not rely on this one; the authorization listener's wire-format refusal is
  * the example, and it names the copybook field the payload broke.</p>
@@ -335,14 +344,18 @@ public final class RethrowingDigestErrorHandler<T> implements ErrorHandler<T> {
             throw rethrowable(failure, message);
         }
 
-        // WHY : ⚠️ Refactoring Rationale: this line carries the failure's own deepest MESSAGE and its
-        //       database state code beside the type chain, where it previously carried the chain alone.
-        //       The chain names what threw and where; it does not name the CONDITION, and for a
-        //       persistence failure the condition is the whole diagnosis -- a numeric overflow, a unique
-        //       violation and a serialisation conflict all arrive as one driver exception type. An
-        //       operator reading the previous line could not tell them apart, and the measured cost of
-        //       that was a diagnosis that required enabling driver debug logging on a live consumer.
-        //       See the section above for why the message is REDACTED rather than logged as written.
+        // WHY : ⚠️ Refactoring Rationale: this line carries the failure's database CONDITION and its
+        //       state code beside the type chain, where it previously carried the chain alone. The chain
+        //       names what threw and where; it does not name the condition, and for a persistence failure
+        //       the condition is the whole diagnosis -- a numeric overflow, a unique violation and a
+        //       serialisation conflict all arrive as one driver exception type. An operator reading the
+        //       previous line could not tell them apart, and the measured cost of that was a diagnosis
+        //       that required enabling driver debug logging on a live consumer.
+        // WHY : ⚠️ Assumptions: the detail field is a CONDITION NAME and object names, not the
+        //       failure's message. This comment previously said the field carried "the failure's own
+        //       deepest MESSAGE" redacted, and it did; the section above records the measured disclosure
+        //       that ended -- the driver's message carries the server's DETAIL line, which enumerates the
+        //       rejected row. Nothing a requester supplied can reach this line.
         LOG.error("{} source={} messageId={} queue={} receiveCount={} failure={} detail={} sqlState={}"
                         + " messageCount=1",
                 EVENT, this.source, identifierOf(message), queueOf(message),

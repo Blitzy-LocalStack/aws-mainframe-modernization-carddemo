@@ -14,6 +14,7 @@ import com.carddemo.transaction.dto.TransactionAddResponse;
 import com.carddemo.transaction.mapper.TransactionMapper;
 import com.carddemo.transaction.repository.TransactionRepository;
 import java.math.BigDecimal;
+import java.util.Locale;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
@@ -1484,6 +1485,32 @@ public class TransactionAddService {
      * because the source picture is numeric. The padding is significant rather than cosmetic wherever
      * the target column has a declared width, which is the case for all three of those fields.</p>
      *
+     * <p>⚠️ Refactoring Rationale: the locale argument is {@link java.util.Locale#ROOT} and is
+     * MANDATORY, not tidiness. {@code String.format} without one renders integral DECIMAL conversions
+     * with the JVM's default locale, and a locale whose numbering system is not Latin substitutes its
+     * own digits: measured on this toolchain, {@code String.format("%011d", 123L)} yields
+     * {@code 00000000123} under {@code Locale.ROOT} but eleven DEVANAGARI characters under
+     * {@code hi-IN-u-nu-deva} and eleven ARABIC-INDIC characters under {@code ar-SA-u-nu-arab}. This
+     * method renders a transaction identifier and two keys into columns declared {@code CHAR}, so the
+     * consequence was not a cosmetic one: a task started with a non-Latin default locale would have
+     * written identifiers no other component could match, no equality comparison could find and no
+     * fixed-width codec could decode -- and every unit test would still have passed, because the
+     * default locale of a build runner is Latin.</p>
+     *
+     * <p>Alternatives Considered: setting the default locale once at start-up, which several
+     * applications do. Rejected because it makes correctness a property of a launch sequence rather
+     * than of the code, so a library, a container image or a test harness that sets it back reopens the
+     * defect silently. Alternatives Considered: hand-rolled ASCII zero-padding, which
+     * {@code common-lib}'s codecs use where they must not depend on a formatter at all. Rejected here
+     * because {@code Locale.ROOT} states the intent in one token at the call site and matches the
+     * precedent already set by {@code AccountViewService}, {@code CardListService},
+     * {@code RejectReason} and {@code DateConversionResponse}.</p>
+     *
+     * <p>Assumptions: HEX conversions need no locale and the {@code %04X} call sites elsewhere in this
+     * reactor are deliberately left alone. Only decimal integral and floating-point conversions are
+     * localised, which was verified on this toolchain rather than assumed: {@code String.format("%04X",
+     * 0x2A)} yields {@code 002A} under both of the locales above.</p>
+     *
      * @param value the number to render; must not be negative, which no identifier or key on this path
      *     can be
      * @param width the declared width of the field to pad to
@@ -1491,6 +1518,6 @@ public class TransactionAddService {
      *     it does not, never {@code null}
      */
     private static String zeroPadded(long value, int width) {
-        return String.format("%0" + width + "d", value);
+        return String.format(Locale.ROOT, "%0" + width + "d", value);
     }
 }

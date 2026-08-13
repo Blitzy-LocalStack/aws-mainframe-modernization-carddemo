@@ -116,7 +116,7 @@ import org.hibernate.annotations.Immutable;
  * models a group as one value, whereas the alternative flattens the group into two loose
  * attributes and so loses the one structural fact the copybook is most explicit about. The nested
  * value type is also declared inside this file rather than beside it, because this package is
- * closed at eight source files, and a top-level identifier class would be a ninth; a nested type
+ * closed at nine source files, and a top-level identifier class would be a tenth; a nested type
  * is neither a projection nor a file, so it adds neither.
  *
  * <p>Alternatives Considered: this projection is a class and its identifier is a record, and the
@@ -390,7 +390,7 @@ public class TransactionCategoryView {
      *
      * <p>Assumptions: the type is serializable because an embedded identifier is required to be,
      * and it is nested inside the projection it identifies rather than declared beside it because
-     * this package is closed at eight source files and a top-level identifier class would be a
+     * this package is closed at nine source files and a top-level identifier class would be a
      * ninth. It shares no base type and no identifier class with the other composite in this
      * package, the 32-byte pair of 16-character items declared at {@code app/cpy/COSTM01.CPY}
      * L21-L23; two composites of entirely different shape have nothing to factor out.</p>

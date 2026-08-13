@@ -371,21 +371,30 @@ import jakarta.validation.constraints.Size;
  *     card, from {@code TR-CNT PIC S9(4)} at L61; it is a tally rather than an amount or an
  *     identifier, carries no scale and is therefore outside the exact-decimal monetary discipline
  *     entirely, and a negative value is refused because no sequence of increments can reach one
- * @param plainTextUri the {@code String} reference to the plain-text artifact the run wrote, whose
+ * @param plainTextUri the {@code String} location the plain-text artifact is collected from, whose
  *     record is {@code FD-STMTFILE-REC PIC X(80)} at L45 and whose declared record length of 80 is
  *     stated at {@code app/jcl/CREASTMT.JCL} L87 to L91; it is opaque to this record, which neither
- *     builds nor interprets it, and a value carrying no content is refused because the artifact is
- *     the only thing this response exists to hand back
- * @param htmlUri the {@code String} reference to the hypertext artifact the same run wrote, whose
- *     record is {@code FD-HTMLFILE-REC PIC X(100)} at L46 and whose declared record length of 100 is
- *     stated at L92 to L96; it is a second reference rather than a variant of the first because the
- *     run writes two artifacts of two different record lengths, and a value carrying no content is
- *     refused for the same reason as the plain-text reference
- * @param generatedAt the {@code String} instant the statement was produced, carried as an opaque
- *     26-character value matching the length
+ *     builds nor interprets it, and it is {@code null} exactly when the store holds no such artifact
+ *     -- but a PRESENT value carrying no content is still refused, because a blank location is not an
+ *     absence, it is an absence a caller cannot detect
+ * @param htmlUri the {@code String} location the hypertext artifact of the same run is collected
+ *     from, whose record is {@code FD-HTMLFILE-REC PIC X(100)} at L46 and whose declared record
+ *     length of 100 is stated at L92 to L96; it is a second location rather than a variant of the
+ *     first because the run writes two artifacts of two different record lengths, and it is
+ *     {@code null} or refused on the same terms as the plain-text location
+ * @param generatedAt the {@code String} instant the statement artifact was written, carried as an
+ *     opaque 26-character value matching the length
  *     {@code com.carddemo.common.time.TimestampFormatter} publishes at its L210; it is neither
- *     parsed nor normalised and an all-blank value round-trips unchanged, so it is deliberately not
- *     refused when blank
+ *     parsed nor normalised, an all-blank value round-trips unchanged and so is deliberately not
+ *     refused, and it is {@code null} when the store holds no artifact to have written
+ * @param firstRecord the zero-based ordinal of the FIRST RECORD this card's statement occupies inside
+ *     the run-wide plain-text artifact, or {@code null} when no artifact is stored or the run's index
+ *     does not name this card; it is a record ordinal rather than a byte offset because the artifact is
+ *     a sequence of records of the fixed width {@code FD-STMTFILE-REC PIC X(80)} declares at L45, so an
+ *     ordinal locates a statement without depending on how the artifact is framed in transport
+ * @param recordCount how many consecutive records the statement occupies from that ordinal, or
+ *     {@code null} on the same terms; the pair is what makes a run-wide artifact usable from a per-card
+ *     response, and the two are always present or absent together
  */
 public record StatementResponse(
         @Size(max = CARD_NUMBER_WIDTH) String cardNumber,
@@ -395,7 +404,9 @@ public record StatementResponse(
         int transactionCount,
         String plainTextUri,
         String htmlUri,
-        @Size(max = TIMESTAMP_WIDTH) String generatedAt) {
+        @Size(max = TIMESTAMP_WIDTH) String generatedAt,
+        Long firstRecord,
+        Long recordCount) {
 
     // WHY : Assumptions: 16 is the width the control-break key WS-SAVE-CARD PIC X(16) declares at
     //       app/cbl/CBSTM03A.CBL L69, and the same 16 that TRNX-CARD-NUM declares at
@@ -440,10 +451,20 @@ public record StatementResponse(
      * has to name the card it covers and the account it is issued for. One protects
      * reconciliation: a total that is absent is not a total of zero. One protects the tally against
      * a value no sequence of increments at {@code app/cbl/CBSTM03A.CBL} L61 can produce. Two
-     * protect collection: a response whose whole purpose is to hand back two artifacts must not be
-     * able to hand back neither. They are asserted here rather than trusted to the caller because
+     * protect collection in the one way still available to them: a location that is PRESENT has to be
+     * followable, so a blank location is refused while an absent one is admitted and means the store
+     * holds no artifact. They are asserted here rather than trusted to the caller because
      * an instance cannot come into being without passing through this constructor, which is what
      * makes the guarantee hold by construction instead of by every mapping site remembering it.
+     *
+     * <p>⚠️ Refactoring Rationale: the two artifact locations were REQUIRED here, and that requirement
+     * was what forced the producer to assert a location whether or not an artifact existed. A review
+     * found the consequence: every location published named an object nothing writes, so a caller
+     * could not distinguish a statement that had been produced from one that had not. Admitting
+     * {@code null} moves the distinction into the contract, where a caller can act on it, and keeping
+     * the blank refusal preserves the only part of the old guarantee that was ever worth having.
+     * Alternatives Considered: keeping both required and publishing a sentinel such as an empty
+     * string, which is the state this constructor exists to refuse.
      *
      * <p>Assumptions: two components are deliberately NOT refused when they carry no content, and
      * the omissions are decisions rather than gaps. The customer name may be blank because the
@@ -468,9 +489,9 @@ public record StatementResponse(
      *     reader reconciles against and an absent total is not a zero; or if
      *     {@code transactionCount} is negative, because the tally at L61 is reached by
      *     initialisation and increment and cannot descend below zero; or if {@code plainTextUri} or
-     *     {@code htmlUri} is {@code null} or carries no content, because the run writes both
-     *     artifacts per {@code app/jcl/CREASTMT.JCL} L87 and L92 and a reference to neither leaves
-     *     the caller nothing to collect
+     *     {@code htmlUri} is PRESENT and carries no content, because a location the caller cannot
+     *     follow is worse than a declared absence -- {@code null} is admitted for either, and means
+     *     the store holds no such artifact
      */
     public StatementResponse {
         // WHY : Assumptions: the card number is checked for content rather than merely for
@@ -514,20 +535,43 @@ public record StatementResponse(
                             + "negative");
         }
 
-        // WHY : Assumptions: both artifact references are required, and neither stands in for the
-        //       other. The reference job writes two artifacts of two different declared record
-        //       lengths from one run, at app/jcl/CREASTMT.JCL L87 and L92, so a response carrying
-        //       one reference would describe a run that did not happen. They are checked in the
-        //       order the header declares them because neither one's treatment depends on the
-        //       other.
-        if (plainTextUri == null || plainTextUri.isBlank()) {
+        // WHY : Assumptions: each artifact location is checked for CONTENT WHEN PRESENT and admitted
+        //       when absent, and the asymmetry is the point. Absent states that the store holds no
+        //       such artifact, which is a fact a caller can act on; blank states nothing at all while
+        //       looking like a location, so a caller would follow it and fail. Trade-offs: the two
+        //       are still checked independently in the order the header declares them, even though
+        //       one run writes both at app/jcl/CREASTMT.JCL L87 and L92 -- an interrupted run or a
+        //       lifecycle rule that expires one artifact leaves the store holding the other, and
+        //       reporting the one that exists beats reporting neither.
+        if (plainTextUri != null && plainTextUri.isBlank()) {
             throw new IllegalArgumentException(
-                    "plainTextUri must refer to the plain-text artifact the run wrote");
+                    "plainTextUri must locate the plain-text artifact or be absent; a blank "
+                            + "location is an absence a caller cannot detect");
         }
 
-        if (htmlUri == null || htmlUri.isBlank()) {
+        if (htmlUri != null && htmlUri.isBlank()) {
             throw new IllegalArgumentException(
-                    "htmlUri must refer to the hypertext artifact the same run wrote");
+                    "htmlUri must locate the hypertext artifact or be absent; a blank location is "
+                            + "an absence a caller cannot detect");
+        }
+
+        // WHY : Assumptions: the two position components are checked as a PAIR, because either alone
+        //       says nothing usable -- an ordinal without a count does not delimit a statement, and a
+        //       count without an ordinal does not locate one. Refusing the half-populated shape here is
+        //       what stops a caller having to guess which of the two it can trust. Trade-offs: a
+        //       negative value is refused separately from the pairing, because a negative ordinal is a
+        //       defect on this side of the boundary while a half-populated pair is a mapping mistake,
+        //       and one message naming both would identify neither.
+        if ((firstRecord == null) != (recordCount == null)) {
+            throw new IllegalArgumentException(
+                    "firstRecord and recordCount locate one statement inside the run artifact and "
+                            + "must be present or absent together");
+        }
+
+        if (firstRecord != null && (firstRecord < 0 || recordCount < 0)) {
+            throw new IllegalArgumentException(
+                    "firstRecord and recordCount are ordinals into the run artifact and cannot be "
+                            + "negative");
         }
     }
 
@@ -589,20 +633,20 @@ public record StatementResponse(
     }
 
     /**
-     * Returns the reference to the plain-text artifact this run wrote.
+     * Returns the location the plain-text artifact is collected from.
      *
-     * @return a non-blank {@code String} reference, opaque to this record, denoting an artifact the
-     *     current run wrote rather than one left by an earlier run
+     * @return a non-blank {@code String} location, opaque to this record, or {@code null} when the
+     *     store holds no plain-text artifact for this statement
      */
     public String plainTextUri() {
         return plainTextUri;
     }
 
     /**
-     * Returns the reference to the hypertext artifact the same run wrote.
+     * Returns the location the hypertext artifact of the same run is collected from.
      *
-     * @return a non-blank {@code String} reference, opaque to this record, denoting the second of
-     *     the two artifacts the current run wrote
+     * @return a non-blank {@code String} location, opaque to this record, or {@code null} when the
+     *     store holds no hypertext artifact for this statement
      */
     public String htmlUri() {
         return htmlUri;
@@ -612,10 +656,29 @@ public record StatementResponse(
      * Returns the opaque production timestamp without parsing or normalisation.
      *
      * @return a {@code String} carrying the timestamp exactly as supplied, including trailing
-     *     blanks, and an all-blank value where the reference data holds one
+     *     blanks, an all-blank value where the reference data holds one, or {@code null} when the
+     *     store holds no artifact whose write instant could be reported
      */
     public String generatedAt() {
         return generatedAt;
+    }
+
+    /**
+     * Returns where this card's statement begins inside the run-wide plain-text artifact.
+     *
+     * @return the zero-based record ordinal, or {@code null} when no stored artifact names this card
+     */
+    public Long firstRecord() {
+        return firstRecord;
+    }
+
+    /**
+     * Returns how many records this card's statement occupies inside that artifact.
+     *
+     * @return the record count, or {@code null} on the same terms as the ordinal
+     */
+    public Long recordCount() {
+        return recordCount;
     }
 
     /**
@@ -637,11 +700,15 @@ public record StatementResponse(
      * confirming which of their own cards they are looking at; it is the wrong answer in a log, where the
      * last four digits combined with a customer name on the same line identify the card outright.</p>
      *
-     * <p>Assumptions: the transaction count and the two artefact references ARE rendered. The count is a
-     * cardinality with no attribution once the identifiers are withheld, and the two references are
-     * object-storage locations an operator needs in order to find the artefact a failure concerns --
-     * which is the single most useful thing this rendering can carry. The generation instant is rendered
-     * for the same reason and carries no personal content.</p>
+     * <p>Assumptions: the transaction count and the two artefact locations ARE rendered. The count is a
+     * cardinality with no attribution once the identifiers are withheld, and each location is a served
+     * path whose only variable part is a keyed opaque selector -- it spells out no account identifier and
+     * no part of a card number, which is precisely why the location is built that way, and it is the
+     * single most useful thing this rendering can carry when a failure concerns one artefact. A
+     * {@code null} renders as such and reports the absence the response declares. The write instant is
+     * rendered for the same reason and carries no personal content. The two artifact positions are
+     * rendered too: they are ordinals into a run-wide document, they identify nobody, and they are the
+     * values an operator needs in order to look at the records a complaint is about.</p>
      *
      * @return a rendering safe to write to any log or exception message, never {@code null}
      */
@@ -655,6 +722,8 @@ public record StatementResponse(
                 + ", plainTextUri=" + plainTextUri
                 + ", htmlUri=" + htmlUri
                 + ", generatedAt=" + generatedAt
+                + ", firstRecord=" + firstRecord
+                + ", recordCount=" + recordCount
                 + "]";
     }
 }

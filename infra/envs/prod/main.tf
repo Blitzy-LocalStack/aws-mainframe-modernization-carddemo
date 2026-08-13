@@ -465,15 +465,31 @@ locals {
   #       with the module's real output so naming drift fails the plan.
   adhoc_report_state_machine_arn = "arn:${data.aws_partition.current.partition}:states:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:stateMachine:${var.name_prefix}-${var.environment}-adhoc-report"
 
-  # Assumptions: these two key prefixes are the complete set of object keys the
-  #   reporting workload touches, and they are transcribed from the workload's
-  #   own configuration rather than invented here:
-  #   services/reporting-service/src/main/resources/application.yml declares
-  #   `report-prefix: reports/transaction-detail/` at L1191 and
-  #   `statement-prefix: statements/` at L1192, and that file records at L1186
-  #   that both are literals in the base document precisely so the layout is the
-  #   same in every environment. Nothing else in the bucket is a reporting
-  #   artifact.
+  # Assumptions: these FOUR key prefixes are the complete set of object keys the
+  #   reporting workload touches, and every one of them is READ FROM THE MODULE
+  #   THAT PROVISIONS IT rather than restated here. Three come from
+  #   `non_generation_prefixes`, whose entries carry the literal prefixes
+  #   services/reporting-service/src/main/resources/application.yml declares --
+  #   `statement-prefix: statements/`, `report-prefix:
+  #   reports/transaction-detail/` and `category-balance-prefix:
+  #   reports/category-balance/`, all three literals in the base document
+  #   precisely so the layout is the same in every environment. The fourth is the
+  #   `tranrept` generation family, which the nightly report publishes its second
+  #   copy to. Nothing else in the bucket is a reporting artifact.
+  #
+  # Refactoring Rationale: this list held two literal strings and now reads the
+  #   module's own outputs. The literals were correct when written and stopped
+  #   being complete twice over: the nightly report gained a second destination
+  #   under the `tranrept` generation prefix -- the family had no production
+  #   writer at all before, so the lifecycle rule provisioned for it governed
+  #   nothing -- and the category-balance report was added as a third fixed-key
+  #   artifact. Both would have been written by a role with no grant for them,
+  #   which fails at run time and not at plan time. Reading the outputs means a
+  #   prefix added to the module is granted here by construction.
+  # Alternatives Considered: keeping the literals and adding two more. Rejected:
+  #   the same prefix would then be written down in the service configuration, in
+  #   the module's variable and in both environment roots, and three of the four
+  #   places have no gate that would notice a disagreement.
   #
   # Refactoring Rationale: the reporting task role held `s3:ListBucket` on the
   #   whole bucket and `s3:GetObject`, `s3:PutObject` and
@@ -484,9 +500,15 @@ locals {
   #   app/cpy/CVTRA05Y.cpy. So the grant let a reporting task enumerate and read
   #   every primary account number the system has ever posted, which is neither
   #   something the workload does nor something it should be able to do. Scoping
-  #   the grant to the two prefixes above removes the capability without removing
+  #   the grant to the four prefixes above removes the capability without removing
   #   any behaviour: the two orchestrated states this role serves write into
   #   those prefixes and read nothing.
+  # Assumptions: `tranrept` is the ONE generation family this role reaches, and it
+  #   is reached for `ListBucket` as well as for writing. The nightly publication
+  #   numbers its generation by listing the date prefix it is about to write
+  #   under, so a write grant alone would leave it unable to choose a number.
+  #   Granting one family's prefix is not the whole-bucket grant this block
+  #   removed: the transaction backup and combined generations stay unreachable.
   #
   # Trade-offs: a prefix condition and an object-ARN restriction are BOTH
   #   applied, rather than either alone, because they bound different calls. An
@@ -495,10 +517,10 @@ locals {
   #   prefix condition does not apply to `GetObject` or `PutObject`, whose scope
   #   is expressed only by the object ARN. Applying one and not the other would
   #   leave the other call unbounded.
-  reporting_object_key_prefixes = [
-    "reports/transaction-detail/",
-    "statements/",
-  ]
+  reporting_object_key_prefixes = concat(
+    values(module.s3_datasets.non_generation_prefixes),
+    [module.s3_datasets.dataset_prefixes["tranrept"]],
+  )
 
   # Assumptions: ONE prefix, and it is the prefix the authorization-extract state
   #   machine composes its two destination keys under. It is declared here rather than
@@ -1354,6 +1376,74 @@ resource "aws_ssm_parameter" "online_writes_enabled" {
   }
 }
 
+# -----------------------------------------------------------------------------
+# Online-write bracket lease
+# -----------------------------------------------------------------------------
+# WHY : Refactoring Rationale: this table did not exist, and without it neither
+#       online-write function could start at all. infra/lambda/online_write_flag.py
+#       resolves LEASE_TABLE_NAME through _required_environment at IMPORT time, so a
+#       deployment with no table and no environment variable fails at the quiesce
+#       function's cold start -- which is the first state of the nightly chain, so
+#       the whole chain could never run. The lease is what makes the bracket an
+#       OWNERSHIP record rather than a bare boolean: the flag reports whether writes
+#       are permitted, and this item records which execution is entitled to change
+#       that.
+# WHY : Alternatives Considered: holding the owner in the SSM parameter alongside the
+#       boolean, which needs no new resource. Rejected because Parameter Store has no
+#       compare-and-set primitive -- a read followed by a write is not atomic, so two
+#       executions starting in the same instant would both conclude they had acquired
+#       the bracket. A conditional write is the whole mechanism, and DynamoDB is the
+#       cheapest managed store in this stack that has one.
+# WHY : Trade-offs: PAY_PER_REQUEST rather than provisioned capacity. The access
+#       pattern is a handful of writes per night plus one strongly-consistent read
+#       per reconcile cycle, so provisioned capacity would bill continuously for a
+#       table that is idle almost all of the time and would additionally need a
+#       capacity decision nobody can inform.
+resource "aws_dynamodb_table" "online_write_lease" {
+  name         = "${var.name_prefix}-${var.environment}-online-write-lease"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "LeaseName"
+
+  attribute {
+    name = "LeaseName"
+    type = "S"
+  }
+
+  # WHY : Assumptions: TTL is CLEAN-UP and never the expiry mechanism. DynamoDB
+  #       deletes an expired item opportunistically -- the documented window is up to
+  #       48 hours -- so a lease's expiry has to be enforced by the condition
+  #       expressions in the function, which compare expiresAt against the current
+  #       time on every write. TTL is enabled anyway so an abandoned item eventually
+  #       leaves the table instead of sitting there for ever confusing an operator
+  #       who reads it.
+  ttl {
+    attribute_name = "expiresAt"
+    enabled        = true
+  }
+
+  server_side_encryption {
+    enabled = true
+
+    # WHY : Assumptions: the SQS key is reused rather than a fifth key created. This
+    #       item is coordination metadata -- an execution name, an ARN and two epoch
+    #       seconds -- and carries no cardholder data, so it belongs with the other
+    #       operational-messaging resources rather than under the Aurora key that
+    #       protects record data.
+    kms_key_arn = module.kms.sqs_key_arn
+  }
+
+  # WHY : Trade-offs: point-in-time recovery is enabled even though the table holds
+  #       one short-lived item. It costs storage on a table measured in bytes, and it
+  #       is what lets an investigation reconstruct who held the bracket at a moment
+  #       in the past -- which is exactly the question asked after a night where
+  #       online writes stayed disabled.
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  tags = { Name = "${var.name_prefix}-${var.environment}-online-write-lease" }
+}
+
 data "aws_iam_policy_document" "lambda_assume_role" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -1376,7 +1466,21 @@ resource "aws_iam_role" "lambda" {
   assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
 }
 
+# WHY : Assumptions: the marker the batch state machines stamp on every task they
+#       launch is composed HERE, in the one place that wires both the state-machine
+#       module and the resume function, because both need the identical literal. The
+#       module stamps it as StartedBy and filters ListTasks by it; the function
+#       filters the same call by it when a reconciling release has to prove no task
+#       is still writing. A second spelling of it in either place would be a filter
+#       that matches nothing, which reads as "no tasks are running" and would let a
+#       release proceed while one was.
+# WHY : Trade-offs: 36 characters is the smallest length any published surface states
+#       for the field, so the value is composed to fit inside it and the module's own
+#       validation REFUSES anything longer rather than truncating. At this root's
+#       8-character name prefix the composed value is well inside the bound.
 locals {
+  batch_task_started_by = substr("${var.name_prefix}-${var.environment}-sfn", 0, 36)
+
   lambda_role_log_keys = {
     online_write      = ["quiesce", "resume"]
     database_admin    = ["database_admin"]
@@ -1413,6 +1517,64 @@ data "aws_iam_policy_document" "online_write_lambda" {
     sid       = "UpdateOnlineWriteGate"
     actions   = ["ssm:GetParameter", "ssm:PutParameter"]
     resources = [aws_ssm_parameter.online_writes_enabled.arn]
+  }
+
+  # WHY : Assumptions: the four item actions are ONE capability and are granted
+  #       together because the handler uses all four across its two edges -- a
+  #       conditional PutItem to acquire, a conditional UpdateItem to claim a
+  #       release, a conditional DeleteItem to complete it, and a
+  #       strongly-consistent GetItem to report who holds a lease it was refused.
+  #       Withholding any one of them turns a working edge into an access-denied at
+  #       the moment the bracket is being taken or given up.
+  # WHY : Trade-offs: scoped to the table ARN rather than to a leading-key condition.
+  #       The table holds exactly one item and this role is the only writer, so a key
+  #       condition would restrict nothing that the table scope does not already.
+  statement {
+    sid = "ArbitrateOnlineWriteLease"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:DeleteItem",
+    ]
+    resources = [aws_dynamodb_table.online_write_lease.arn]
+  }
+
+  # WHY : Assumptions: the lease table is encrypted with a customer-managed key, so
+  #       every item call needs key use as well as table access -- a role with the
+  #       four actions above and no kms grant fails on the first write with an access
+  #       denied naming KMS rather than DynamoDB. The condition ties the grant to
+  #       DynamoDB's use of the key, so it cannot decrypt an SQS message that happens
+  #       to be under the same key.
+  statement {
+    sid       = "UseLeaseTableKey"
+    actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
+    resources = [module.kms.sqs_key_arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["dynamodb.${data.aws_region.current.region}.amazonaws.com"]
+    }
+  }
+
+  # WHY : Assumptions: the second half of the same decision. An ECS task started by a
+  #       synchronous run-task state OUTLIVES the state that started it when that
+  #       state times out or its execution is aborted, so a terminal execution does
+  #       not imply terminal writers; the function lists tasks carrying the chain's
+  #       startedBy marker and reads their lastStatus before releasing. ListTasks and
+  #       DescribeTasks take the cluster condition AWS's own identity-based policy
+  #       example uses for them, so neither can reach another cluster.
+  statement {
+    sid       = "ConfirmBatchTasksTerminal"
+    actions   = ["ecs:ListTasks", "ecs:DescribeTasks"]
+    resources = ["*"]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "ecs:cluster"
+      values   = [module.ecs_cluster.cluster_arn]
+    }
   }
 }
 
@@ -1451,7 +1613,7 @@ data "aws_iam_policy_document" "database_admin_lambda" {
   #       role inventory instead of standing open over every secret sharing the name
   #       prefix. The Cognito seed-user entries sit under that same prefix, which is
   #       what a wildcard here would additionally have reached.
-  # WHY : Trade-offs: this function therefore holds read access to all fifteen database
+  # WHY : Trade-offs: this function therefore holds read access to all sixteen database
   #       credentials at once, which is more than any service task holds -- each task
   #       reads exactly its own. That concentration is inherent to a bootstrap step and
   #       is bounded three ways: the function has no other permission, it is invoked
@@ -1495,6 +1657,43 @@ resource "aws_iam_role_policy" "lambda" {
   policy = each.value
 }
 
+# WHY : Refactoring Rationale: states:DescribeExecution is granted by a SEPARATE inline
+#       policy on the same role, and the separation is forced rather than stylistic. The
+#       grant has to name the daily machine's executions, so it reads
+#       module.step_functions' output -- and that module takes both online-write
+#       function ARNs as inputs, while aws_lambda_function.quiesce and .resume declare
+#       depends_on = [aws_iam_role_policy.lambda]. Folding this statement into that
+#       policy therefore closes a cycle: policy -> state machine -> function -> policy.
+#       A second inline policy carries the same grant to the same role with no edge back
+#       into the functions, and `terraform validate` is what proved the distinction --
+#       the combined form is refused outright with the full cycle printed.
+# WHY : Assumptions: it must NOT be added to either function's depends_on for the same
+#       reason, which is why the attachment is deliberately unordered with respect to
+#       them. The consequence is bounded and self-healing: a reconcile invocation that
+#       fires in the gap between the functions being created and this policy landing
+#       gets an access-denied from DescribeExecution, which the handler treats as
+#       "terminality could not be established" and answers by REFUSING the release. It
+#       reports that refusal and exits successfully, so the gap costs one skipped
+#       reconcile cycle rather than an error, an alarm or a wrongly-granted release.
+# WHY : Trade-offs: the resource is a wildcard over the daily machine's execution
+#       identifiers, because an execution ARN ends in the execution NAME and those are
+#       generated per run. The machine segment is exact, so the grant cannot read
+#       another state machine's history -- and only the daily machine takes the bracket,
+#       so the other three are deliberately absent.
+data "aws_iam_policy_document" "online_write_reconcile" {
+  statement {
+    sid       = "ReadOwningExecutionStatus"
+    actions   = ["states:DescribeExecution"]
+    resources = ["${replace(module.step_functions.daily_state_machine_arn, ":stateMachine:", ":execution:")}:*"]
+  }
+}
+
+resource "aws_iam_role_policy" "online_write_reconcile" {
+  name   = "${var.name_prefix}-${var.environment}-online-write-reconcile"
+  role   = aws_iam_role.lambda["online_write"].id
+  policy = data.aws_iam_policy_document.online_write_reconcile.json
+}
+
 resource "aws_lambda_function" "quiesce" {
   function_name    = local.lambda_names.quiesce
   role             = aws_iam_role.lambda["online_write"].arn
@@ -1510,6 +1709,13 @@ resource "aws_lambda_function" "quiesce" {
       PARAMETER_NAME  = aws_ssm_parameter.online_writes_enabled.name
       EXPECTED_ACTION = "quiesce"
       TARGET_VALUE    = "false"
+
+      # WHY : Assumptions: the lease table is REQUIRED by the handler at import time,
+      #       so it is named on both functions rather than only on the one that
+      #       releases. The quiesce edge is the writer that takes the lease; a
+      #       function configured without this variable does not fail on the write,
+      #       it fails to start.
+      LEASE_TABLE_NAME = aws_dynamodb_table.online_write_lease.name
     }
   }
 
@@ -1531,6 +1737,23 @@ resource "aws_lambda_function" "resume" {
       PARAMETER_NAME  = aws_ssm_parameter.online_writes_enabled.name
       EXPECTED_ACTION = "resume"
       TARGET_VALUE    = "true"
+
+      LEASE_TABLE_NAME = aws_dynamodb_table.online_write_lease.name
+
+      # WHY : Assumptions: these two are set on the RESUME function only, because only
+      #       a release confirms that the chain's tasks are terminal -- the reconciler
+      #       always, and the bracket finalizer because it fires the instant an
+      #       execution ends, when a task abandoned by a timed-out synchronous state
+      #       may still be writing. The handler reads them lazily and REFUSES to
+      #       release when either is blank, so a misconfiguration withholds a release
+      #       rather than granting one it could not justify.
+      # WHY : Assumptions: the marker comes from the root local that is ALSO passed to
+      #       the state-machine module, so the string this function filters by and the
+      #       string the tasks carry have one source. It cannot be read back from the
+      #       module instead: that module takes this function's ARN as an input, so a
+      #       module output here would close a dependency cycle Terraform refuses.
+      BATCH_TASK_CLUSTER_ARN = module.ecs_cluster.cluster_arn
+      BATCH_TASK_STARTED_BY  = local.batch_task_started_by
     }
   }
 
@@ -1561,7 +1784,7 @@ resource "aws_lambda_function" "database_admin" {
       #       module, carddemo_migration.config, its contract test, and here -- where
       #       the copy that goes stale is the one nothing validates.
       # WHY : Trade-offs: a JSON object in an environment variable, roughly 1.5 KB at
-      #       fifteen entries, against Lambda's 4 KB total. Names are used rather than
+      #       sixteen entries, against Lambda's 4 KB total. Names are used rather than
       #       ARNs for exactly that reason: ARNs carry an account, a region and a
       #       six-character suffix each, which would take the same mapping past 2.5 KB
       #       and leave little headroom. GetSecretValue resolves either, and the IAM
@@ -1607,7 +1830,7 @@ resource "aws_lambda_invocation" "database_bootstrap" {
     #       the bootstrap SQL and so is already covered; replacing a stored credential
     #       is not, and the function is what binds a stored value to its PostgreSQL
     #       role. Hashing the mapping rather than embedding it keeps the trigger a fixed
-    #       length and keeps fifteen secret names out of the plan diff.
+    #       length and keeps sixteen secret names out of the plan diff.
     credential_inventory = sha256(jsonencode({
       for role, secret in module.secrets.service_credential_secrets : role => secret.name
     }))
@@ -3033,11 +3256,12 @@ data "aws_iam_policy_document" "reporting_runtime" {
   #   condition the grant enumerates every key in the bucket, which is how a
   #   reporting task could discover the nightly transaction generations.
   # Trade-offs: the match is `StringLike` against each prefix followed by a
-  #   wildcard rather than `StringEquals` against the bare prefix. A list call
-  #   issued for `reports/transaction-detail/2022-07-18/` is a legitimate
-  #   narrower listing inside the workload's own prefix, and `StringEquals`
-  #   would refuse it while permitting only the exact top-level listing -- which
-  #   would make the grant correct on paper and unusable in practice.
+  #   wildcard rather than `StringEquals` against the bare prefix. The nightly
+  #   report ISSUES a narrower listing -- it lists
+  #   `reporting/tranrept/dt=<business date>/` to number the generation it is
+  #   about to write -- so `StringEquals` would permit only the exact top-level
+  #   listing and refuse the one call this grant exists to allow, which would make
+  #   it correct on paper and unusable in practice.
   statement {
     sid       = "ListReportOutputPrefixes"
     actions   = ["s3:ListBucket"]
@@ -3051,7 +3275,9 @@ data "aws_iam_policy_document" "reporting_runtime" {
   }
 
   # Assumptions: the write actions are retained and only their scope is
-  #   narrowed, because this role IS the writer of both artifacts. The nightly
+  #   narrowed, because this role IS the writer of every reporting artifact --
+  #   the two statements, the transaction detail report under both its
+  #   request-scoped and its generation key, and the category-balance report. The nightly
   #   chain's GenerateStatements and GenerateReports states run a Fargate task
   #   whose definition is `module.ecs_service["reporting"].task_definition_arn`
   #   -- the very definition the online reporting service runs, which is why
@@ -3088,6 +3314,24 @@ data "aws_iam_policy_document" "batch_runtime" {
     resources = [module.s3_datasets.bucket_arn]
   }
 
+  # WHY : Assumptions: this ONE statement covers both directions of the dataset
+  #       bucket, and the read half is now load-bearing rather than incidental. The
+  #       seed-refresh state's `refresh-dataset` command READS each exported extract
+  #       out of module.s3_datasets.source_extract_prefix before it stages, decodes and
+  #       loads it; every generation-writing batch state WRITES under the ten
+  #       generation prefixes; and CombineTransactions reads a generation back. All of
+  #       those keys are inside this one bucket, so the resource pattern already grants
+  #       the read the refresh needs.
+  # WHY : Alternatives Considered: splitting this into a read statement scoped to the
+  #       source-extract prefix and a read/write statement scoped to the dataset
+  #       prefixes. Rejected because it would express no narrower privilege while
+  #       creating a way for the two to fall out of step: the prefixes are owned by the
+  #       s3-datasets module and are ALL of the keys this bucket holds -- twelve dataset
+  #       prefixes plus the source-extract prefix -- so a per-prefix enumeration here
+  #       would grant exactly what "/*" grants today and would silently omit whichever
+  #       prefix a later change added. The bucket itself is the privilege boundary: it
+  #       holds only this workload's datasets, it is created by this root, and its own
+  #       policy refuses non-TLS access and any principal outside this account.
   statement {
     sid       = "ReadWriteDatasetGenerations"
     actions   = ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"]
@@ -3168,6 +3412,69 @@ data "aws_iam_policy_document" "data_migration_runtime" {
   #   merely small, and infra/modules/kms asserts the same encryption-context
   #   condition on that key's own policy, so removing it from either side still
   #   leaves the other enforcing it.
+  # WHY : Refactoring Rationale: these two statements were ABSENT, and their absence
+  #   made a DELIVERED retention contract fail on the sixth run rather than leaving a
+  #   feature undone. The baseline defines every one of its ten generation data groups
+  #   with LIMIT(5) SCRATCH -- app/jcl/DEFGDGB.jcl:25-57, app/jcl/DEFGDGD.jcl:28-76 and
+  #   app/jcl/DALYREJS.jcl:24-26 -- so a sixth generation SCRATCHES the oldest, and
+  #   loaders/s3_stage.py reproduces that by listing a family's object versions and
+  #   deleting the oldest generation prefix. It inherited only ListBucket, GetObject,
+  #   PutObject and AbortMultipartUpload, so the first five stagings of each family
+  #   succeeded and the sixth failed with an access denial on the version listing --
+  #   a failed batch step, five runs after the deployment anyone would have tested.
+  # WHY : Assumptions: the version-list action is granted at BUCKET level with a prefix
+  #   condition, and the delete actions at OBJECT level over the same prefixes, because
+  #   that is how S3 authorises them. s3:ListBucketVersions is a bucket operation whose
+  #   only scoping mechanism is the s3:prefix condition key; s3:DeleteObject and
+  #   s3:DeleteObjectVersion are object operations scoped by resource ARN. Granting
+  #   either at the other's level would either be rejected as a malformed policy or
+  #   silently authorise the whole bucket.
+  # WHY : Assumptions: the prefixes come from module.s3_datasets.dataset_prefixes rather
+  #   than being written out, so this grant covers exactly the ten generation families
+  #   that module declares and moves with them. Writing them here would create a second
+  #   inventory free to disagree, and the disagreement's failure mode is a family whose
+  #   retention sweep is denied -- which is the defect being fixed.
+  # WHY : Assumptions: the two STATEMENT prefixes and the inbox prefix are deliberately
+  #   EXCLUDED. Neither is a generation family: the statement artifacts are rewritten in
+  #   place by the reporting task and carry no gen= segment for a sweep to prune, and the
+  #   inbox holds the operator's delivered export, whose retention is the operator's
+  #   decision. A delete grant over either would let the migration task destroy data no
+  #   part of it is responsible for.
+  # WHY : Trade-offs: s3:DeleteObjectVersion is granted alongside s3:DeleteObject rather
+  #   than instead of it. The bucket is versioned, so a delete naming a VersionId --
+  #   which is what the sweep issues, because a plain delete on a versioned bucket adds a
+  #   marker and reclaims nothing -- requires the version-scoped action; the unversioned
+  #   action is granted because the same batched call is authorised against both when any
+  #   entry omits a version, and a partial authorisation reports as a partial failure
+  #   that is far harder to read than a denial.
+  statement {
+    sid       = "ListDatasetGenerationVersions"
+    actions   = ["s3:ListBucketVersions"]
+    resources = [module.s3_datasets.bucket_arn]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values = flatten([
+        for prefix in values(module.s3_datasets.dataset_prefixes) : [prefix, "${prefix}*"]
+      ])
+    }
+  }
+
+  statement {
+    sid = "ScratchOldestDatasetGeneration"
+
+    actions = [
+      "s3:DeleteObject",
+      "s3:DeleteObjectVersion",
+    ]
+
+    resources = [
+      for prefix in values(module.s3_datasets.dataset_prefixes) :
+      "${module.s3_datasets.bucket_arn}/${prefix}*"
+    ]
+  }
+
   statement {
     sid = "EnvelopeEncryptMigratedProtectedColumns"
 
@@ -3662,22 +3969,41 @@ module "step_functions" {
   private_app_subnet_ids        = module.network.private_app_subnet_ids
   task_security_group_id        = module.network.app_security_group_id
 
-  # WHY : Assumptions: every role the state machine may run a task AS is
-  #       enumerated -- the task role and the task EXECUTION role of each of the
-  #       four task definitions above, eight entries for four images. The module
-  #       turns the list into the Resource of one iam:PassRole statement, so an
-  #       omitted entry is not a narrower grant but a run-task that fails with an
-  #       access-denied error naming iam:PassRole rather than the missing role.
-  pass_role_arns = [
-    module.ecs_service["batch"].task_role_arn,
-    module.ecs_service["batch"].execution_role_arn,
-    module.ecs_service["data-migration"].task_role_arn,
-    module.ecs_service["data-migration"].execution_role_arn,
-    module.ecs_service["reporting"].task_role_arn,
-    module.ecs_service["reporting"].execution_role_arn,
-    module.ecs_service["authorization"].task_role_arn,
-    module.ecs_service["authorization"].execution_role_arn,
-  ]
+  # WHY : Assumptions: every role a state machine may run a task AS is enumerated --
+  #       the task role and the task EXECUTION role of each task definition THAT
+  #       machine runs. The module turns each list into the Resource of that machine's
+  #       own iam:PassRole statement, so an omitted entry is not a narrower grant but a
+  #       run-task that fails with an access-denied error naming iam:PassRole rather
+  #       than the missing role.
+  # WHY : Refactoring Rationale: this was one flat list of eight ARNs granted to a
+  #       single execution role every machine shared. It is keyed by machine because
+  #       the roles are now per machine: the ad-hoc report machine runs the reporting
+  #       image and nothing else, so listing the batch and authorization task roles
+  #       under it would have re-created exactly the union grant the split removes.
+  #       The batch image's two roles appear twice on purpose -- the daily chain and
+  #       the dataset round trip both run it.
+  pass_role_arns = {
+    daily = [
+      module.ecs_service["batch"].task_role_arn,
+      module.ecs_service["batch"].execution_role_arn,
+      module.ecs_service["data-migration"].task_role_arn,
+      module.ecs_service["data-migration"].execution_role_arn,
+      module.ecs_service["reporting"].task_role_arn,
+      module.ecs_service["reporting"].execution_role_arn,
+    ]
+    adhoc = [
+      module.ecs_service["reporting"].task_role_arn,
+      module.ecs_service["reporting"].execution_role_arn,
+    ]
+    dataset = [
+      module.ecs_service["batch"].task_role_arn,
+      module.ecs_service["batch"].execution_role_arn,
+    ]
+    authz = [
+      module.ecs_service["authorization"].task_role_arn,
+      module.ecs_service["authorization"].execution_role_arn,
+    ]
+  }
   quiesce_function_arn        = aws_lambda_function.quiesce.arn
   resume_function_arn         = aws_lambda_function.resume.arn
   analyze_tables_function_arn = aws_lambda_function.database_admin.arn
@@ -3699,7 +4025,29 @@ module "step_functions" {
 
   notification_topic_arn = module.observability.notification_topic_arn
   dataset_bucket_name    = module.s3_datasets.bucket_name
-  log_retention_days     = var.log_retention_days
+
+  # WHY : Refactoring Rationale: this input replaces the withdrawn dataset_staging_root,
+  #       which named a filesystem path (/mnt/carddemo-extracts) that nothing in this
+  #       root provisions -- the Fargate tasks carry no volume and the data-migration
+  #       image ships no extract -- so all ten branches of the seed-refresh state read an
+  #       absent file. The value comes from the module that OWNS the prefix, provisions
+  #       its lifecycle rule and publishes it, rather than being restated here, so the
+  #       prefix the refresh reads and the prefix the bucket governs cannot disagree.
+  #       Populating it remains an operator action, and it is the sync
+  #       docs/runbooks/data-migration.md already documents.
+  dataset_source_extract_prefix = module.s3_datasets.source_extract_prefix
+
+  log_retention_days = var.log_retention_days
+
+  # WHY : Assumptions: the same local is passed to the module and set on the resume
+  #       function's environment above, which is the whole reason it is a local. See
+  #       its declaration for why a second spelling would be a silent failure.
+  task_started_by = local.batch_task_started_by
+
+  # WHY : Assumptions: the queue key rather than the S3 key, because what it encrypts
+  #       is the bracket-release dead-letter QUEUE. Every other queue in this
+  #       deployment, including the scheduler's dead-letter target, is under this key.
+  dead_letter_kms_key_arn = module.kms.sqs_key_arn
 
   # WHY : Assumptions: the S3 customer-managed key is the one this stack uses for
   #       CloudWatch log groups as well, so the state machines' two execution log
@@ -3709,6 +4057,20 @@ module "step_functions" {
   #       one, because encryption at rest is one of the properties the migration
   #       adds over a baseline whose every CICS file ran RECOVERY(NONE) JOURNAL(NO).
   log_group_kms_key_arn = module.kms.s3_key_arn
+
+  # WHY : Assumptions: the SQS customer-managed key is supplied here even though this
+  #       root creates no queue in that module's shape. The step-functions module
+  #       declares one queue of its own -- the dead-letter queue holding a
+  #       bracket-release event EventBridge could not deliver -- and its input is
+  #       nullable so the module can be applied without a key module beside it. This
+  #       root has one, and a queue whose contents identify which night's release was
+  #       lost is encrypted under a project-owned key for the same reason every other
+  #       store in this stack is.
+  # WHY : Alternatives Considered: passing the S3 key already wired above, which would
+  #       need no second reference. Rejected because the kms module publishes four keys
+  #       precisely so that one compromised grant does not reach two stores, and reusing
+  #       the object-store key for a queue would undo that at the one call site nobody
+  #       would think to check.
 }
 
 module "eventbridge_scheduler" {

@@ -98,7 +98,13 @@ in ``zoned.py``.
 Trade-offs: no field value is rendered anywhere in this module, not even a masked one, which is
 stricter than the masking the readers apply. A verification report is the artifact most likely to
 be pasted whole into an issue tracker, and these datasets carry primary account numbers, national
-identifiers and names; five of the nine money fields are themselves marked sensitive. Only
+identifiers and names; every money field this module totals is itself marked sensitive by its own
+descriptor except the disclosure group's interest rate, which is a published rate rather than a
+customer's money. The proportion is deliberately not written here as a fraction: it is a property
+of ``declared_money_columns()`` and of the layouts behind it, so a hand-maintained count goes
+stale on the
+next column added and the staleness is invisible to a reader. ``test_money_parity_descriptors``
+derives it from the descriptors instead. Only
 aggregates over a whole dataset and field GEOMETRY -- name, offset, length, storage regime --
 reach a message here. The reference helper ``tests/helpers/record_codec.py``'s ``decode_zoned``
 echoes the offending bytes as ``{raw!r}`` in its own failure message; that is a fixture-level
@@ -108,11 +114,13 @@ convenience and is deliberately not copied.
 from __future__ import annotations
 
 import enum
+import hashlib
 import pathlib
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from functools import lru_cache
 from types import MappingProxyType
 from typing import Any, Final
 
@@ -124,13 +132,13 @@ from carddemo_migration.config import (
 )
 from carddemo_migration.copybook import layouts
 from carddemo_migration.loaders.aurora import TARGETS, connect
-from carddemo_migration.readers import DATASET_READERS, factory, reader_module
+from carddemo_migration.readers import DATASET_READERS, dataset_reader, ships_committed_extract
 
 __all__ = [
-    "MONEY_COLUMNS",
     "MONEY_SCALE",
     "MONEY_TOTAL_COLUMNS",
     "MONEY_TOTAL_COLUMN_COUNT",
+    "MONEY_TOTAL_QUERY_DIGEST",
     "MONEY_TOTAL_QUERY_NAME",
     "MONEY_TOTAL_TABLE_COUNT",
     "REPORTING_SCHEMA",
@@ -148,6 +156,7 @@ __all__ = [
     "SourceMoneyTotal",
     "compare_money_totals",
     "declared_money_columns",
+    "money_columns",
     "fetch_money_total_rows",
     "money_total_query_path",
     "open_reporting_connection",
@@ -158,6 +167,7 @@ __all__ = [
     "reporting_settings",
     "require_reporting_session",
     "total_source_column",
+    "total_source_fields",
     "total_source_money",
     "total_target_money",
     "verify_money_total_rows",
@@ -168,6 +178,15 @@ __all__ = [
 #   the baseline is a display field with two implied decimal places, so a total is compared at
 #   scale 2 exactly. Comparing at the raw decimal's own scale would let 1.5 and 1.50 differ.
 MONEY_SCALE: Final[int] = 2
+
+# WHY : Assumptions: the precision a per-column total is cast to is 38 digits, which is what makes
+#   the cast a SCALE assertion rather than a value constraint. The widest money column is
+#   NUMERIC(12,2), so a total over even three hundred million rows of the largest representable
+#   balance stays inside 38 digits by a wide margin -- while a narrower precision would raise a
+#   numeric-overflow error on a legitimately large total and turn a passing verification into a
+#   failed step. PostgreSQL's own NUMERIC maximum precision is far higher again, so 38 is a
+#   deliberate, generous ceiling rather than a limit anything here can reach.
+_TARGET_TOTAL_PRECISION: Final[int] = 38
 
 # WHY : Assumptions: the eight names and their ORDER are the published contract of
 #   `data-migration/sql/verify/money_totals.sql`, whose final SELECT projects target_table,
@@ -214,6 +233,43 @@ REPORTING_SCHEMA: Final[str] = "reporting"
 #   unpacked and is therefore an argument a caller may override.
 MONEY_TOTAL_QUERY_NAME: Final[str] = "money_totals.sql"
 
+# WHY : Assumptions: the committed query's IDENTITY is pinned, not just its shape, for the reason
+#   its row-count sibling states: the shape checks establish that a text is a harmless read of the
+#   allow-listed view and cannot establish that it is the report an operator believes is running.
+# WHY : Trade-offs: editing `sql/verify/money_totals.sql` requires re-measuring this constant. The
+#   cost is bounded by a test comparing the pin against the shipped file and reporting the measured
+#   digest in its failure, so a forgotten pin fails with the value to paste rather than at an
+#   operator's next run. Re-measure with `sha256sum data-migration/sql/verify/money_totals.sql`.
+MONEY_TOTAL_QUERY_DIGEST: Final[str] = (
+    "08b872c4ccdc2fb3b878c425d234ae38745f9b92885d1bdf2e2400ea60d95a38"
+)
+
+# WHY : Assumptions: the ONE relation the committed query is permitted to read is the aggregate-only
+#   verification view, and naming it here is what makes "this text is harmless" a checkable property
+#   rather than a claim about a file. `sql/V3__verification_surfaces.sql` creates that view as a
+#   security-barrier view projecting a count, an exact NUMERIC sum and a strictly-negative row count
+#   per money column -- no key, no identifier, no row-level value -- and the reporting role holds
+#   SELECT on it and on no base table. A text reading anything else is therefore either not this
+#   query or not entitled to run, and both are refusals rather than results.
+MONEY_TOTAL_QUERY_RELATION: Final[str] = "reporting.v_verification_money_totals"
+
+# WHY : Assumptions: the query executes under a statement timeout, set for the transaction only.
+#   Five minutes is chosen against the work: the view aggregates five tables whose largest is the
+#   three-hundred-thousand-row transaction master, which is seconds of sequential scan on the
+#   smallest Aurora capacity the environments provision. The ceiling therefore never bounds a
+#   healthy run; what it bounds is a pass that has become stuck behind a lock taken by the batch
+#   chain it is meant to gate, so a verification step fails with a named timeout instead of holding
+#   the nightly window open until an operator notices.
+_STATEMENT_TIMEOUT_MILLISECONDS: Final[int] = 300_000
+
+# WHY : Assumptions: read-only-ness is asserted by the SERVER for the transaction the query runs in,
+#   in addition to the role holding no write privilege. The two guards fail differently and that is
+#   why both are kept: the role is what makes writing impossible, and the transaction setting is
+#   what makes an ATTEMPT to write fail loudly on a cluster where the role was mis-provisioned. The
+#   spelling is `SET TRANSACTION`, not `SET SESSION CHARACTERISTICS`, so the setting lasts exactly
+#   as long as the read it protects and cannot leak into a later use of the same connection.
+_READ_ONLY_TRANSACTION_STATEMENT: Final[str] = "SET TRANSACTION READ ONLY"
+
 # WHY : Assumptions: the two seed forms are named as a closed set, matching the choices `cli.py`
 #   offers, because an extract's form is DECLARED and never sniffed. The two are distinguishable
 #   only by inspecting bytes for characters outside the ASCII range, and an EBCDIC extract whose
@@ -236,6 +292,19 @@ SOURCE_ENCODINGS: Final[tuple[str, ...]] = ("ascii", "ebcdic")
 _ABSENT: Final[str] = "n/a"
 _NOT_COMPARABLE: Final[str] = "not comparable"
 
+# WHY : Assumptions: the expectation an unmeasurable column IS held to is named as a constant, so
+#   the rendering and the rule that decides it use one wording. A column whose layout ships no seed
+#   extract must be empty after the migration; the phrase appears in the report beside the verdict
+#   so a reader learns what was actually checked rather than only that a comparison was impossible.
+_EXPECTED_EMPTY: Final[str] = "expected empty:"
+
+# WHY : Assumptions: the summary counts the lines that FAILED rather than the lines that mismatched,
+#   because the two stopped being the same set when the expected-empty rule arrived: an unmeasurable
+#   column can now fail with no source total to have disagreed with. Labelling that count
+#   "mismatched" would name a comparison that never happened. The spelling matches
+#   `row_counts._FAILING` so both reports in one run read as one vocabulary.
+_FAILING: Final[str] = "failing"
+
 # WHY : Assumptions: a migrated money column is required to be NUMERIC at the money scale, and the
 #   pattern is a whitelist rather than a list of refused spellings. That refuses a binary
 #   floating-point column type by construction, which matters because such a type cannot represent
@@ -253,6 +322,31 @@ _SQL_TYPE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^NUMERIC\(\d+,2\)$")
 #   compared at scale 2 would be comparing a different quantity.
 _SIGNED_PICTURE_MARKER: Final[str] = "S9("
 _MONEY_PICTURE_MARKER: Final[str] = "V99"
+
+# WHY : Assumptions: only these two keywords may OPEN the query, and the pair is exact rather than a
+#   list of refused verbs. A single statement beginning `SELECT` or `WITH` cannot modify data unless
+#   one of its own expressions does, which the relation check below also catches, whereas
+#   enumerating every write verb leaves the set open-ended: a future PostgreSQL statement type
+#   nobody listed would pass a deny-list and fail this allow-list.
+_READING_KEYWORDS: Final[frozenset[str]] = frozenset({"SELECT", "WITH"})
+
+# WHY : Assumptions: a relation is recognised after FROM or JOIN, optionally schema-qualified, and
+#   the pattern deliberately reads the COMMENT-STRIPPED text so the query's own prose cannot
+#   contribute a match. It is a shape check rather than a parse: the accepted cost is that a
+#   sub-select's own FROM is treated the same as a top-level one -- which is the safe direction,
+#   because it means every relation anywhere in the text has to be accounted for.
+_RELATION_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?i)\b(?:from|join)\s+([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)?)"
+)
+
+# WHY : Assumptions: a common table expression is recognised by its `<name> [(columns)] AS (` form,
+#   after either the opening WITH or a comma, which is how both shipped verification queries declare
+#   theirs. Recognising them is what lets the relation check above insist on the allow-listed view
+#   without also rejecting the query's own inline vocabulary -- `money_columns` and `aggregated` in
+#   the money query, `expected` and `actual` in its row-count sibling.
+_CTE_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?i)(?:\bwith\b|,)\s*([a-z_][a-z0-9_]*)\s*(?:\([^)]*\))?\s+as\s*\("
+)
 
 
 class MoneyParityVerificationError(RuntimeError):
@@ -390,32 +484,19 @@ class MoneyParityVerdict(enum.Enum):
         """
         return self is not MoneyParityVerdict.NO_SOURCE
 
-    @property
-    def verified(self) -> bool:
-        """Report whether this verdict is acceptable in a passing verification run.
-
-        Parameters
-        ----------
-        None
-            Reads the member.
-
-        Returns
-        -------
-        bool
-            True for :attr:`MATCH` and :attr:`NO_SOURCE`; False only for :attr:`MISMATCH`.
-
-        Raises
-        ------
-        None
-            Reading a member cannot fail.
-        """
-        # WHY : Assumptions: NO_SOURCE is a PASSING state, and this is the single place that
-        #   decision is expressed. It is reached only for a money column whose owning layout ships
-        #   no seed extract at all -- `ledger.transactions`, filled by the posting job from
-        #   `ledger.daily_transactions` -- and a column whose extract merely went UNSUPPLIED is
-        #   refused outright by `verify_money_total_rows` rather than arriving here. Without that
-        #   split, forgetting one extract would read as a clean bill of health for five columns.
-        return self is not MoneyParityVerdict.MISMATCH
+    # WHY : Refactoring Rationale: this enumeration published a `verified` property, returning True
+    #   for MATCH and NO_SOURCE and False only for MISMATCH, and it is REMOVED rather than
+    #   corrected. The defect was where the decision lived, not how it was spelled: a member of
+    #   this enumeration knows which of the three outcomes it is and knows nothing about the target
+    #   table, so "NO_SOURCE is acceptable" could only ever be expressed here as
+    #   unconditional -- and it is not unconditional. A money column whose layout ships no seed
+    #   extract is expected to be EMPTY after the migration, so a nonzero total on it is stale data
+    #   from an earlier run, a load into the wrong table, or a posting job that ran before
+    #   verification, and every one of those was certified as a pass. The rule now lives on
+    #   :class:`MoneyParityLine`, which holds the row count, the total and the negative-row count
+    #   the rule needs. Removing the property rather than leaving it in place is deliberate: a
+    #   published name that answers a question it cannot answer correctly is how the same defect
+    #   comes back through a different caller.
 
 
 @dataclass(frozen=True)
@@ -591,7 +672,8 @@ class MoneyColumn:
         """
         # WHY : Trade-offs: the diagnostic form here is stricter than the readers' masking -- it
         #   reports only name, offset, length and regime, and never a value, masked or otherwise.
-        #   Five of the nine money fields are marked sensitive, and a verification report is the
+        #   Every money field this module totals except the disclosure group's published interest
+        #   rate is marked sensitive by its own descriptor, and a verification report is the
         #   artifact most likely to be pasted whole into an issue tracker. The accepted cost is that
         #   a mismatch tells an operator WHICH column and which field differ and not which record,
         #   which is what the checksum pass localises. The `sensitive` flag drives the closing
@@ -660,8 +742,48 @@ def _derive_money_columns() -> Mapping[tuple[str, str], MoneyColumn]:
     return MappingProxyType(derived)
 
 
-#: Read-only inventory of every migrated money column, keyed by (schema-qualified table, column).
-MONEY_COLUMNS: Final[Mapping[tuple[str, str], MoneyColumn]] = _derive_money_columns()
+@lru_cache(maxsize=1)
+def money_columns() -> Mapping[tuple[str, str], MoneyColumn]:
+    """Return the read-only inventory of every migrated money column, deriving it once.
+
+    Purpose
+    -------
+    Publish the (schema-qualified table, column) to money-column mapping this pass judges a report
+    against, and derive it on FIRST USE rather than at import.
+
+    Parameters
+    ----------
+    None
+        Reads :data:`carddemo_migration.loaders.aurora.TARGETS` and the layout registry through
+        :func:`_derive_money_columns`.
+
+    Returns
+    -------
+    Mapping[tuple[str, str], MoneyColumn]
+        Read-only mapping keyed by (schema-qualified table, column name), memoised so the
+        derivation runs once per process.
+
+    Raises
+    ------
+    MoneyParityVerificationError
+        If a derived binding does not describe a money column, propagated from
+        :meth:`MoneyColumn.__post_init__`. Raised at the first CALL rather than at import, which is
+        the whole point of the deferral.
+    """
+    # WHY : Refactoring Rationale: this replaces a module-level `MONEY_COLUMNS` constant that was
+    #   built at IMPORT time, and the deferral matters for a reason outside this module. `cli.py`
+    #   imports the verification passes to register its subcommands, so a defect in this derivation
+    #   -- a target whose declaration stopped describing a money column, a layout renamed under it
+    #   -- raised while the module was being imported, which took down every unrelated verb with
+    #   it: `list-datasets`, `--help` and `stage-dataset` could not run because a money inventory
+    #   they never touch could not be built. Deriving on first call confines the failure to the pass
+    #   that needs the inventory.
+    # WHY : Trade-offs: memoised with `lru_cache` rather than recomputed per call. The derivation
+    #   walks eleven targets and their fields, so recomputing it inside a per-column loop would be
+    #   wasteful; and the inputs are module-level declarations that cannot change during a process,
+    #   so a cache cannot go stale. The cost is one cached mapping per process, which the read-only
+    #   proxy makes safe to share.
+    return _derive_money_columns()
 
 
 def declared_money_columns() -> Mapping[tuple[str, str], MoneyColumn]:
@@ -676,7 +798,7 @@ def declared_money_columns() -> Mapping[tuple[str, str], MoneyColumn]:
     Parameters
     ----------
     None
-        Reads :data:`MONEY_COLUMNS`.
+        Reads the memoised inventory :func:`money_columns` publishes.
 
     Returns
     -------
@@ -696,13 +818,14 @@ def declared_money_columns() -> Mapping[tuple[str, str], MoneyColumn]:
     #   CVTRA06Y, CVTRA01Y and CVTRA02Y -- and the five is the number of migrated tables those
     #   fields land in. This function reaches the same two figures from the LOADER's declarations
     #   instead, so agreement is two sources agreeing rather than one source repeated.
-    if len(MONEY_COLUMNS) != MONEY_TOTAL_COLUMN_COUNT:
+    inventory = money_columns()
+    if len(inventory) != MONEY_TOTAL_COLUMN_COUNT:
         raise MoneyParityVerificationError(
-            f"the loader declares {len(MONEY_COLUMNS)} money columns and"
+            f"the loader declares {len(inventory)} money columns and"
             f" {MONEY_TOTAL_QUERY_NAME} reports {MONEY_TOTAL_COLUMN_COUNT};"
-            f" the declared columns are {sorted(MONEY_COLUMNS)}"
+            f" the declared columns are {sorted(inventory)}"
         )
-    tables = {column.target_table for column in MONEY_COLUMNS.values()}
+    tables = {column.target_table for column in inventory.values()}
     if len(tables) != MONEY_TOTAL_TABLE_COUNT:
         raise MoneyParityVerificationError(
             f"the loader's money columns span {len(tables)} tables and {MONEY_TOTAL_QUERY_NAME}"
@@ -714,7 +837,7 @@ def declared_money_columns() -> Mapping[tuple[str, str], MoneyColumn]:
     #   hundredths, so the two sides would differ by a rounding this pass had introduced itself.
     off_scale = sorted(
         f"{column.qualified_column} at scale {column.scale}"
-        for column in MONEY_COLUMNS.values()
+        for column in inventory.values()
         if column.scale != MONEY_SCALE
     )
     if off_scale:
@@ -723,7 +846,7 @@ def declared_money_columns() -> Mapping[tuple[str, str], MoneyColumn]:
             " taken at one scale and compared against a column stored at another would differ by a"
             " rounding this pass had introduced"
         )
-    return MONEY_COLUMNS
+    return inventory
 
 
 @dataclass(frozen=True)
@@ -884,8 +1007,75 @@ def total_source_money(
     return total.quantize(Decimal(1).scaleb(-MONEY_SCALE)), counted
 
 
+def total_source_fields(
+    records: Iterable[Mapping[str, str | Decimal | bytes]],
+    fields: Sequence[str],
+) -> Mapping[str, tuple[Decimal, int]]:
+    """Total several money fields of one dataset in a SINGLE pass over its records.
+
+    Purpose
+    -------
+    Let a caller comparing every money field of a dataset read the extract once. Totalling one field
+    at a time forces either a re-read per field or a materialised list of every record, and a seed
+    extract is hundreds of kilobytes today and is the same code path a production extract runs
+    through -- so both shapes make peak memory or read cost scale with the number of money columns.
+
+    Parameters
+    ----------
+    records : Iterable[Mapping[str, str | Decimal | bytes]]
+        The decoded source records. Consumed exactly once, and never materialised.
+    fields : Sequence[str]
+        The money field names to total, each of which must be present on every record.
+
+    Returns
+    -------
+    Mapping[str, tuple[Decimal, int]]
+        Per field, its exact total at scale 2 and the number of records whose value was negative.
+        Read-only. A field list of length zero yields an empty mapping.
+
+    Raises
+    ------
+    ValueError
+        If a named field is absent from a record, or holds a value that is not an exact
+        :class:`~decimal.Decimal` -- which would mean a character field was being totalled.
+    """
+    # WHY : Assumptions: the negative-row count is returned per field alongside the total, matching
+    #   what the committed money-total query reports per column. A total alone cannot distinguish a
+    #   sign-overpunch fault that flipped one debit into a credit and one credit into a debit: that
+    #   leaves the sum unchanged and the two counts different, so returning only the sum would miss
+    #   the one corruption this pass exists to catch.
+    ordered = tuple(fields)
+    zero = Decimal(1).scaleb(-MONEY_SCALE)
+    totals: dict[str, Decimal] = {field: Decimal(0).quantize(zero) for field in ordered}
+    negatives: dict[str, int] = dict.fromkeys(ordered, 0)
+    for record in records:
+        for field in ordered:
+            if field not in record:
+                raise ValueError(
+                    f"field {field} is absent from a source record, so it cannot be totalled;"
+                    " the reader and the requested field list disagree about this record's shape"
+                )
+            value = record[field]
+            if not isinstance(value, Decimal):
+                raise ValueError(
+                    f"field {field} of {type(value).__name__} is not an exact decimal, so it is"
+                    " not a money field; totalling a character field would compare a number"
+                    " against text"
+                )
+            totals[field] += value
+            if value < 0:
+                negatives[field] += 1
+    # WHY : Assumptions: the running totals are exact throughout -- Decimal addition of scale-2
+    #   values never rounds -- and the final quantize only fixes the SCALE for comparison. No
+    #   rounding mode is supplied because none can be needed; if one were, the inputs would not have
+    #   been scale-2 money.
+    return MappingProxyType(
+        {field: (totals[field].quantize(zero), negatives[field]) for field in ordered}
+    )
+
+
 def total_target_money(connection: Any, schema: str, table: str, column: str) -> Decimal:
-    """Read the target's own total for one money column.
+    """Read the target's own total for one money column, refusing an inexact representation.
 
     Parameters
     ----------
@@ -901,18 +1091,36 @@ def total_target_money(connection: Any, schema: str, table: str, column: str) ->
     Returns
     -------
     Decimal
-        The total at scale 2. An empty table totals to zero rather than to null.
+        The total, as an exact decimal already carrying the money scale. An empty table totals to
+        zero at that same scale rather than to null.
 
     Raises
     ------
     ValueError
         If the query returns no row at all.
+    MoneyResultSetContractError
+        If the value the driver returned is not an exact decimal at the money scale -- a bool, an
+        int, a binary float, a string, or a decimal of the wrong exponent. See
+        :func:`_require_exact_money` for why each is refused rather than converted.
     """
     # WHY : Assumptions: COALESCE wraps the SUM because SUM over zero rows is NULL, not zero, and a
     #   null total compared against an exact zero would report a difference on an empty table that
     #   has nothing wrong with it.
+    # WHY : Refactoring Rationale: the substituted zero is written `0.00` and the whole expression
+    #   is CAST to NUMERIC at the money scale, where this read `COALESCE(SUM(col), 0)` and then
+    #   coerced whatever came back through `Decimal(...)`. Two things were wrong with that pairing.
+    #   An integer literal makes the coalesced expression's type numeric of scale ZERO, so an empty
+    #   table answered `0` rather than `0.00` and the pass could not require a scale it had itself
+    #   made impossible. And the coercion accepted a binary float: `Decimal(0.1)` is
+    #   0.1000000000000000055511151231257827, which `quantize` then rounded to a plausible `0.10` --
+    #   so a column whose SUM had been computed over a floating-point representation was certified
+    #   as exact, which is precisely the substitution AAP rule T3 exists to forbid. The cast makes
+    #   the server state the scale, and `_require_exact_money` refuses everything that is not it.
+    #   The scale-2 spelling matches `sql/V3__verification_surfaces.sql`, whose money view writes
+    #   `COALESCE(SUM(...), 0.00)` for the same reason.
     statement = (
-        f"SELECT COALESCE(SUM({quote_identifier(column)}), 0)"  # noqa: S608
+        f"SELECT CAST(COALESCE(SUM({quote_identifier(column)}), 0.00)"  # noqa: S608
+        f" AS NUMERIC({_TARGET_TOTAL_PRECISION},{MONEY_SCALE}))"
         f" FROM {quote_identifier(schema)}.{quote_identifier(table)}"
     )
     candidate = connection.cursor()
@@ -928,7 +1136,7 @@ def total_target_money(connection: Any, schema: str, table: str, column: str) ->
             f"totalling {schema}.{table}.{column} returned no row at all; an aggregate always"
             " returns one, so the connection is not behaving as a database connection"
         )
-    return Decimal(row[0]).quantize(Decimal(1).scaleb(-MONEY_SCALE))
+    return _require_exact_money(row[0], f"{schema}.{table}.{column}")
 
 
 def compare_money_totals(
@@ -1008,7 +1216,7 @@ def _money_columns_of(layout_name: str) -> tuple[MoneyColumn, ...]:
     #   reads in, and a mapping's order would change if the loader's declarations were reordered.
     return tuple(
         sorted(
-            (column for column in MONEY_COLUMNS.values() if column.layout_name == layout_name),
+            (column for column in money_columns().values() if column.layout_name == layout_name),
             key=lambda column: column.field.start,
         )
     )
@@ -1033,18 +1241,14 @@ def _ships_seed_extract(layout_name: str) -> bool:
         Propagated from :func:`carddemo_migration.readers.reader_module` if no reader owns the
         layout, with a message enumerating the layouts that do.
     """
-    # WHY : Assumptions: the reader is reached through the readers' name-keyed dispatch surface
-    #   rather than by importing one reader module by name, which is the surface `cli.py` uses for
-    #   the same purpose. Importing `readers.transaction` here would work today and would silently
-    #   stop tracking the mapping the moment a layout was re-homed to another module.
-    # WHY : Assumptions: the default is TRUE -- a reader that says nothing ships an extract -- and
-    #   only a reader declaring the flag False is unseeded. `readers/transaction.py` is the one that
-    #   declares it, because no `app/data/ASCII/transact.txt` and no TRANSACT extract under
-    #   `app/data/EBCDIC` exist and `app/jcl/TRANFILE.jcl` primes that cluster from a single
-    #   350-byte initializer record. Defaulting to False would make every other layout look
-    #   unseeded, and an unseeded column is a PASSING not-comparable line -- so the wrong default
-    #   would turn a forgotten extract into a clean bill of health.
-    return bool(getattr(reader_module(layout_name), "HAS_COMMITTED_SEED_DATASET", True))
+    # WHY : Refactoring Rationale: the rule itself now lives in
+    #   `carddemo_migration.readers.ships_committed_extract` and this delegates to it, where it used
+    #   to read the reader's attribute here with its own default. It moved because a second caller
+    #   appeared: the combined verification gate must decide which registered datasets it may read
+    #   an extract for, and two copies of "does an extract exist" is how the gate comes to offer an
+    #   extract this pass refuses. The function is kept as a name in this module because its callers
+    #   below read as money-pass logic, and it is one delegation rather than a duplicated default.
+    return ships_committed_extract(layout_name)
 
 
 @dataclass(frozen=True)
@@ -1117,7 +1321,7 @@ class SourceExtract:
             raise MoneyParityVerificationError(
                 f"layout {self.layout_name!r} feeds no money column, so totalling its extract"
                 " would contribute nothing to a money-parity report; the layouts that do are"
-                f" {sorted({column.layout_name for column in MONEY_COLUMNS.values()})}"
+                f" {sorted({column.layout_name for column in money_columns().values()})}"
             )
         # WHY : Trade-offs: BOTH forms are accepted and neither is preferred here, even though the
         #   EBCDIC extracts are authoritative wherever both exist -- and one of the two documented
@@ -1163,25 +1367,32 @@ class SourceExtract:
         OSError
             Propagated if the file cannot be opened or read.
         """
-        # WHY : Alternatives Considered: both forms are decoded through ONE implementation --
-        #   `readers.factory.RecordReader`, the generic reader `cli.py` drives for all four of its
-        #   verification subcommands -- rather than through the readers' `DATASET_READERS` values.
-        #   Those values are the hand-written whole-extract EBCDIC readers and there is no ASCII
-        #   counterpart in that mapping, so dispatching through it would leave an operator holding
-        #   the committed `app/data/ASCII` twin unable to run this pass at all. Using two different
-        #   decode implementations for the two forms was the other alternative and is worse here
-        #   than anywhere: a divergence between two decoders is precisely the defect class this
-        #   pass exists to detect, so the pass must not introduce one of its own. The mapping is
-        #   still consulted -- it is what authorises the layout, above.
+        # WHY : Refactoring Rationale: both forms are now decoded through the module that OWNS the
+        #   record, resolved by `readers.dataset_reader`, where both went through the generic
+        #   `readers.factory.RecordReader` built from the layout. The rationale this replaces argued
+        #   the generic reader was necessary because the readers' dispatch mapping held only the
+        #   EBCDIC entry points, "so dispatching through it would leave an operator holding the
+        #   committed `app/data/ASCII` twin unable to run this pass at all". That was true of the
+        #   package it was written against and is false of this one: `ASCII_DATASET_READERS` now
+        #   publishes the character entry point of every reader that has one, and all five layouts
+        #   that feed a money column -- ACCOUNT, DALYTRAN, DISGROUP, TCATBAL and TRAN -- are among
+        #   them, so no form and no operator loses a route. What the change buys is that this pass
+        #   and `cli.py` reach the same decoder: a generic reader carries the geometry and the
+        #   suppression contract and NONE of the per-record policy the owning modules add, and
+        #   `transaction`'s absent-extract semantics in particular matter here, because
+        #   `ledger.transactions` has no committed extract in either corpus.
+        # WHY : Assumptions: the concern the old rationale was right about is PRESERVED -- both
+        #   forms still go through ONE implementation, because that implementation is now the one
+        #   reader module that owns the record and publishes both of its entry points. A divergence
+        #   between two decoders is precisely the defect class this pass exists to detect, so the
+        #   pass must not introduce one of its own; dispatching by corpus within a single owning
+        #   module keeps that property rather than trading it away.
         # WHY : Assumptions: EBCDIC is decoded through the reader, which decodes per fixed-width
         #   FIELD through `copybook.ebcdic_codec`, and never per record. A record-wide character
         #   decode succeeds and yields a plausible string, so a sign overpunch byte and an embedded
         #   low value are silently replaced and every money value after them is wrong with nothing
         #   raised.
-        reader = factory.RecordReader(layouts.layout(self.layout_name))
-        if self.encoding == "ascii":
-            return reader.read_ascii(self.path)
-        return reader.read_ebcdic(self.path)
+        return dataset_reader(self.layout_name, self.encoding)(self.path)
 
 
 @dataclass(frozen=True)
@@ -1558,6 +1769,74 @@ def _require_exact_total(value: object, label: str) -> Decimal:
     )
 
 
+def _require_exact_money(value: object, label: str) -> Decimal:
+    """Convert one aggregate money value to an exact decimal at the declared money scale.
+
+    Purpose
+    -------
+    Be the single gate every money total this pass reads passes through, so that "the money agrees"
+    is a statement about exact decimals at scale 2 and never about a value that was rounded into
+    looking like one.
+
+    Parameters
+    ----------
+    value : object
+        The value the driver returned for a money aggregate.
+    label : str
+        What was being totalled -- a qualified column, or a report line -- used only in the failure
+        message. No value is ever quoted.
+
+    Returns
+    -------
+    Decimal
+        The same value, unchanged, once it is proven to be an exact decimal whose exponent is the
+        negated money scale.
+
+    Raises
+    ------
+    MoneyResultSetContractError
+        If the value is a ``bool``, an ``int``, a binary ``float``, a ``str``, a non-finite decimal
+        or a decimal at any other scale.
+    """
+    # WHY : Assumptions: `bool` is refused before anything else even though it IS an `int` in
+    #   Python, for the same reason the count validator above refuses it: `True` would otherwise
+    #   total as one cent short of nothing and a substituted boolean would be certified as money.
+    # WHY : Assumptions: a `float` is refused OUTRIGHT and never converted. `Decimal(0.1)` is
+    #   0.1000000000000000055511151231257827, so passing a float through `Decimal(...)` and then
+    #   quantizing produces a plausible `0.10` from a representation that never held ten cents --
+    #   which certifies as exact a total that AAP rule T3 forbids the money path from ever
+    #   computing. The refusal is what makes the rule enforceable at the one boundary where a
+    #   floating-point substitution can enter: the driver's own mapping of the column type.
+    # WHY : Assumptions: an `int` and a `str` are refused as well, so a driver returning a total as
+    #   a whole number or as text cannot be silently reinterpreted. Both mean the aggregate was
+    #   taken over -- or transported as -- something other than NUMERIC, and the remedy is to fix
+    #   the projection rather than to coerce the value here.
+    if isinstance(value, bool) or not isinstance(value, Decimal):
+        raise MoneyResultSetContractError(
+            f"the total of {label} is {type(value).__name__} and not an exact decimal; a money"
+            " total is NUMERIC from the column through the SUM to the output, so any other type"
+            " means it was computed or transported through a representation that cannot hold cents"
+        )
+    if not value.is_finite():
+        raise MoneyResultSetContractError(
+            f"the total of {label} is a non-finite decimal; a sum of exact money values is always"
+            " finite, so this is a substituted value rather than a total"
+        )
+    # WHY : Assumptions: the SCALE is asserted rather than imposed by `quantize`. Quantizing would
+    #   accept a total of any scale and round it into shape, which is indistinguishable afterwards
+    #   from a total that arrived correct -- and a total arriving at scale 0 or 6 means the column,
+    #   the aggregate or the cast is not what this pass believes it is. Asserting turns that into a
+    #   named refusal; rounding would turn it into a passing verification of a different quantity.
+    exponent = value.as_tuple().exponent
+    if exponent != -MONEY_SCALE:
+        raise MoneyResultSetContractError(
+            f"the total of {label} carries decimal exponent {exponent} where the money scale"
+            f" requires {-MONEY_SCALE}; the aggregate is cast to NUMERIC at that scale, so another"
+            " scale means the value did not come from the expression this pass reads"
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class MoneyTotalRow:
     """One line of the report ``data-migration/sql/verify/money_totals.sql`` publishes.
@@ -1709,7 +1988,7 @@ class MoneyTotalRow:
         Returns
         -------
         tuple[str, str]
-            The pair, which is what :data:`MONEY_COLUMNS` and the source-side measurements key on.
+            The pair, which is what :func:`money_columns` and the source-side measurements key on.
 
         Raises
         ------
@@ -1886,19 +2165,44 @@ class MoneyParityLine:
         Parameters
         ----------
         None
-            Reads :attr:`verdict`.
+            Reads :attr:`verdict` and, for a line with no source measurement, the three figures the
+            database published for the column.
 
         Returns
         -------
         bool
-            True unless the verdict is :attr:`MoneyParityVerdict.MISMATCH`.
+            True when the two sides agreed, and -- for the one column whose layout ships no seed
+            extract -- when the target is EXACTLY EMPTY: no row, a zero total and no negative row.
+            False for a disagreement, and false for an unmeasurable column that nevertheless holds
+            money.
 
         Raises
         ------
         None
-            Reading a verdict cannot fail.
+            Reducing validated figures to one verdict cannot fail.
         """
-        return self.verdict.verified
+        # WHY : Refactoring Rationale: a NO_SOURCE line used to pass unconditionally, and this is
+        #   the expected-empty rule that replaces it. The column reached by this branch is
+        #   `ledger.transactions.amount`: no seed extract ships for the transaction master, the
+        #   posting job fills it from `ledger.daily_transactions`, and the ETL therefore leaves it
+        #   EMPTY -- which is a checkable state, not an unknown one. Certifying any total for it was
+        #   the defect, because the three things that produce a nonzero total there are all real
+        #   failures a verification run exists to catch: rows left behind by an earlier cutover
+        #   attempt into a table nothing here can empty (no role holds DELETE), a load pointed at
+        #   the wrong table, or a posting run that started before the migration was verified. Each
+        #   one is now a MISMATCH-equivalent failure naming the column.
+        # WHY : Assumptions: all THREE figures are required to be empty rather than the row count
+        #   alone, even though `MoneyTotalRow.__post_init__` already refuses an empty table that
+        #   reports a nonzero total. The redundancy is deliberate and cheap: this property is the
+        #   one place a passing run is decided, and it should not depend on another class's
+        #   invariant continuing to hold for its verdict to be sound.
+        if self.verdict is MoneyParityVerdict.NO_SOURCE:
+            return (
+                self.row.row_count == 0
+                and self.row.total == Decimal(0)
+                and self.row.negative_rows == 0
+            )
+        return self.verdict is MoneyParityVerdict.MATCH
 
     @property
     def total_matched(self) -> bool:
@@ -2033,7 +2337,15 @@ class MoneyParityLine:
         )
         if self.comparable:
             return line
-        return f"{line} ({_NOT_COMPARABLE})"
+        # WHY : Refactoring Rationale: the per-line note states the verdict as well as the
+        #   impossibility of the comparison, matching `MoneyTotalReport.render`. Before the
+        #   expected-empty rule an unmeasurable line always passed, so `(not comparable)` carried
+        #   the whole story; now the same annotation covers both a correctly-empty column and one
+        #   holding money nothing accounts for, and only the first of those passes.
+        return (
+            f"{line} ({_NOT_COMPARABLE}; {_EXPECTED_EMPTY}"
+            f" {'held' if self.verified else 'VIOLATED'})"
+        )
 
 
 @dataclass(frozen=True)
@@ -2066,7 +2378,7 @@ class MoneyTotalReport:
 
     @property
     def mismatches(self) -> tuple[MoneyParityLine, ...]:
-        """Return the lines whose money disagrees with the source.
+        """Return the lines that do not pass.
 
         Parameters
         ----------
@@ -2076,7 +2388,8 @@ class MoneyTotalReport:
         Returns
         -------
         tuple[MoneyParityLine, ...]
-            The disagreeing lines, in report order. Empty when the load verifies.
+            The failing lines, in report order: a line whose money disagreed with the source, and an
+            unmeasurable line holding money nothing accounts for. Empty when the load verifies.
 
         Raises
         ------
@@ -2206,7 +2519,19 @@ class MoneyTotalReport:
         for line in self.lines:
             source_total = _ABSENT if line.source is None else str(line.source.total)
             source_negatives = _ABSENT if line.source is None else str(line.source.negative_rows)
-            note = "" if line.comparable else f"  ({_NOT_COMPARABLE})"
+            # WHY : Refactoring Rationale: an unmeasurable line's note now states the verdict
+            #   reached over it, where it read only `(not comparable)`. That wording described the
+            #   COMPARISON accurately and described the OUTCOME misleadingly: the reader could not
+            #   tell a column that is correctly empty from one holding money nothing accounted for,
+            #   and both rendered identically while only one of them passes. The expectation is
+            #   named as well as the verdict, so a failure here is self-explanatory in the report an
+            #   operator pastes into a ticket.
+            note = (
+                ""
+                if line.comparable
+                else f"  ({_NOT_COMPARABLE}; {_EXPECTED_EMPTY} "
+                f"{'held' if line.verified else 'VIOLATED'})"
+            )
             rendered.append(
                 f"  {line.verdict.value:<{verdict_width}}"
                 f"  {line.row.qualified_column:<{column_width}}"
@@ -2217,7 +2542,7 @@ class MoneyTotalReport:
         matched = sum(1 for line in self.lines if line.verdict is MoneyParityVerdict.MATCH)
         rendered.append(
             f"money total verification {'PASSED' if self.verified else 'FAILED'}:"
-            f" {matched} matched, {len(self.mismatches)} mismatched,"
+            f" {matched} matched, {len(self.mismatches)} {_FAILING},"
             f" {len(self.not_comparable)} {_NOT_COMPARABLE},"
             f" {len(self.sign_discrepancies)} sign discrepancies"
         )
@@ -2448,10 +2773,11 @@ def _executable_text(text: str) -> str:
 def read_money_total_query(path: pathlib.Path | None = None) -> str:
     """Read the money-total query verbatim, and refuse one a driver cursor could not run whole.
 
-    Purpose ------- Hand back the query's exact text, unmodified, having confirmed the three
-    mechanical properties a cursor depends on. The text is never rewritten, reformatted or
-    interpolated: the file an operator runs with ``psql`` and the text this pass executes are the
-    same bytes.
+    Purpose
+    -------
+    Hand back the query's exact text, unmodified, having confirmed the three mechanical properties a
+    cursor depends on. The text is never rewritten, reformatted or interpolated: the file an
+    operator runs with ``psql`` and the text this pass executes are the same bytes.
 
     Parameters
     ----------
@@ -2492,9 +2818,12 @@ def read_money_total_query(path: pathlib.Path | None = None) -> str:
     #   write verbs was considered and rejected as the weaker guarantee: it would have to strip
     #   comments to avoid matching the file's own prose, and it would still only prove something
     #   about the text this module happened to read. What actually makes the pass incapable of
-    #   writing is the privilege boundary -- it connects as a role holding SELECT on one aggregate
-    #   view and nothing else, in a schema that owns no table -- which holds whatever text is
-    #   supplied. A backslash is refused because a psql meta-command is unusable through a driver
+    #   writing is the privilege boundary, which holds whatever text is supplied: the role it
+    #   connects as holds no privilege on any base table, no INSERT, UPDATE, DELETE or TRUNCATE
+    #   anywhere, and no CREATE even in the one schema it may read. Its whole grant is USAGE on
+    #   `reporting`, SELECT on nine views in it and EXECUTE on one read-only lookup function --
+    #   the topology is inventoried at the subpackage's own __init__. A backslash is refused
+    #   because a psql meta-command is unusable through a driver
     #   cursor; a placeholder is refused because this pass binds no parameter and one would raise
     #   from inside the driver instead; and a second statement is refused because a cursor's
     #   execute() exposes only the LAST result set, so a two-statement file would report a
@@ -2515,7 +2844,115 @@ def read_money_total_query(path: pathlib.Path | None = None) -> str:
             f"the money-total query at {resolved} holds {len(statements)} statements; a cursor"
             " exposes only the last result set, so all but one report would be lost"
         )
+    _require_harmless_query(resolved, executable)
+    _require_committed_query(resolved, text)
     return text
+
+
+def _require_committed_query(resolved: pathlib.Path, text: str) -> None:
+    """Establish that the text read is the committed query, by its digest.
+
+    Purpose
+    -------
+    Close the one substitution the shape checks cannot: a well-formed read of the allow-listed view
+    that is nevertheless not the report this pass publishes. The shape checks bound what a text may
+    DO; this bounds which text it may BE.
+
+    Parameters
+    ----------
+    resolved : pathlib.Path
+        The file the text came from, named in a refusal so an operator knows which artifact differs.
+    text : str
+        The file's contents exactly as read, digested verbatim -- comments included, because the
+        committed artifact is the whole file rather than its executable remainder.
+
+    Returns
+    -------
+    None
+        Returning is the pass; a mismatch raises.
+
+    Raises
+    ------
+    MoneyQueryError
+        If the digest of ``text`` is not :data:`MONEY_TOTAL_QUERY_DIGEST`.
+    """
+    # WHY : Assumptions: the WHOLE file is digested, comments and all, rather than the
+    #   comment-stripped remainder the shape checks read. The comments carry this query's published
+    #   eight-column contract, so a revision rewriting them while leaving the SQL alone has changed
+    #   the artifact an operator reads -- and the digest is the identity of that artifact.
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    if digest != MONEY_TOTAL_QUERY_DIGEST:
+        # WHY : Trade-offs: the refusal reports both digests and no part of the text, so it
+        #   distinguishes a different file from a moved one without putting a query that may hold
+        #   literals into a retained log.
+        raise MoneyQueryError(
+            f"the money-total query at {resolved} has digest {digest}, not the committed"
+            f" {MONEY_TOTAL_QUERY_DIGEST}; this pass executes the committed report and nothing"
+            " else, so a substituted file is refused even when it reads only the permitted view"
+        )
+
+
+def _require_harmless_query(resolved: pathlib.Path, executable: str) -> None:
+    """Establish that a query text can only read, and can only read the verification view.
+
+    Purpose
+    -------
+    Turn "this is the committed money-total query" from a statement about a filename into two
+    checkable properties of the text itself: it begins as a read, and every relation it names is
+    either the one allow-listed aggregate view or a common table expression it declares inline.
+
+    Parameters
+    ----------
+    resolved : pathlib.Path
+        The file the text came from, named in a refusal so an operator knows which artifact to look
+        at. No part of the text is quoted.
+    executable : str
+        The text with its whole-line comments removed, as :func:`_executable_text` produces it.
+
+    Returns
+    -------
+    None
+        Returning is the pass; every refusal raises.
+
+    Raises
+    ------
+    MoneyQueryError
+        If the text does not begin with a reading keyword, or if it reads any relation other than
+        :data:`MONEY_TOTAL_QUERY_RELATION` and its own declared expressions.
+    """
+    # WHY : Refactoring Rationale: these two checks are ADDED because the three that preceded them
+    #   -- no meta-command, no bound parameter, one statement -- established that the text was
+    #   runnable through a cursor and established nothing whatsoever about what it did. The pass
+    #   published an entry point taking arbitrary query text, so a caller could hand it a statement
+    #   that read a base table row by row, or wrote, and the report machinery downstream would judge
+    #   whatever result set came back. The privilege boundary is still the real defence -- the role
+    #   holds SELECT on one aggregate view -- but a defence that lives only in a cluster's grants
+    #   cannot be verified from the repository, and this one can.
+    # WHY : Alternatives Considered: pinning the query's SHA-256 in this module, which is the
+    #   strongest identity check available and was rejected. The digest would have to be updated in
+    #   lockstep with every legitimate edit to the SQL file -- including one made by a sibling
+    #   workstream for its own reasons -- and a stale digest fails the nightly verification gate
+    #   rather than the change that caused it, which is the worst possible place for that failure to
+    #   arrive. Checking the text's SHAPE instead cannot be invalidated by a legitimate edit that
+    #   keeps the query a read of the verification view, and any edit that does not keep it one is
+    #   exactly what should be refused.
+    leading = executable.strip().split(None, 1)[0].upper()
+    if leading not in _READING_KEYWORDS:
+        raise MoneyQueryError(
+            f"the money-total query at {resolved} begins with {leading!r} rather than"
+            f" {' or '.join(sorted(_READING_KEYWORDS))}; a verification pass executes a read and"
+            " nothing else, so a text beginning any other way is refused rather than run"
+        )
+    declared = {match.group(1).lower() for match in _CTE_PATTERN.finditer(executable)}
+    read = {match.group(1).lower() for match in _RELATION_PATTERN.finditer(executable)}
+    unexpected = sorted(read - declared - {MONEY_TOTAL_QUERY_RELATION})
+    if unexpected:
+        raise MoneyQueryError(
+            f"the money-total query at {resolved} reads {unexpected}; this pass is entitled to read"
+            f" only {MONEY_TOTAL_QUERY_RELATION} and the expressions the query declares itself, so"
+            " a text naming another relation is refused -- it is either not this query or not a"
+            " query this role may run"
+        )
 
 
 def reporting_role() -> str:
@@ -2591,9 +3028,13 @@ def _require_reporting_role(settings: AuroraConnectionSettings) -> AuroraConnect
     """
     # WHY : Assumptions: a verification pass must be structurally incapable of mutating what it
     #   verifies, and the ROLE is what makes that true rather than the query text. The reporting
-    #   role holds SELECT on the two aggregate verification views and nothing else, and the schema
-    #   it owns holds no table at all, so a session on it cannot write a row anywhere even if handed
-    #   a statement that tried. Running this pass as the batch role would work and is exactly what
+    #   role holds SELECT on nine views of one schema and EXECUTE on one read-only lookup
+    #   function, and it holds no privilege on a base table, no write privilege of any kind and no
+    #   CREATE, so a session on it cannot write a row anywhere even if handed a statement that
+    #   tried. The schema is NOT empty -- it owns nine views, one protected table and that function
+    #   -- and grounding the guarantee in absent privileges rather than in absent objects is what
+    #   keeps it true as relations are added. Running this pass as the batch role would work and
+    #   is exactly what
     #   is refused here: that role holds INSERT and UPDATE across ledger and account and DELETE on
     #   three tables, so the act of verifying would carry the authority to change the very balances
     #   being verified -- and would additionally make the pass a row-level disclosure of every one
@@ -2693,9 +3134,11 @@ def _one_scalar(connection: Any, statement: str) -> object:
 def require_reporting_session(connection: Any) -> str:
     """Confirm the LIVE session on a connection authenticates as the read-only reporting role.
 
-    Purpose ------- Ask the server who it thinks the caller is, before any supplied query text is
-    executed on that connection, so that a pass which cannot write is a property of the session
-    rather than a property of the settings some earlier call happened to be handed.
+    Purpose
+    -------
+    Ask the server who it thinks the caller is, before any supplied query text is executed on that
+    connection, so that a pass which cannot write is a property of the session rather than a
+    property of the settings some earlier call happened to be handed.
 
     Parameters
     ----------
@@ -2736,16 +3179,72 @@ def require_reporting_session(connection: Any) -> str:
     return text
 
 
-def fetch_money_total_rows(connection: Any, query: str) -> tuple[tuple[object, ...], ...]:
-    """Execute the money-total query exactly as given and return its result set untouched.
+def fetch_money_total_rows(
+    connection: Any,
+    *,
+    query_path: pathlib.Path | None = None,
+) -> tuple[tuple[object, ...], ...]:
+    """Execute the committed money-total query and return its result set untouched.
+
+    Purpose
+    -------
+    Be the one published way to run pass 3's query against a cluster: read the committed text,
+    confirm the live session is the read-only reporting role, execute inside a read-only transaction
+    under a statement timeout, and hand back exactly what came out.
 
     Parameters
     ----------
     connection : Any
         An open database connection, supplied by the caller so a double can stand in. Its live
-        session is confirmed to be the reporting role before the query is executed.
+        session is confirmed to be the reporting role before anything is executed.
+    query_path : pathlib.Path | None
+        Where to read the committed query from. ``None`` resolves it through
+        :func:`money_total_query_path`.
+
+    Returns
+    -------
+    tuple[tuple[object, ...], ...]
+        The result set in the order the query returned it, each row as a tuple of column values.
+
+    Raises
+    ------
+    MoneyQueryError
+        If the committed query cannot be located or read, or does not satisfy the shape and
+        harmlessness checks :func:`read_money_total_query` applies.
+    MoneyParityVerificationError
+        If the connection's live session is not the reporting role.
+    MoneyResultSetContractError
+        If the cursor yields no result set at all, which a ``SELECT`` always does and which
+        therefore means the object supplied is not behaving as a connection.
+    """
+    # WHY : Refactoring Rationale: this function no longer takes QUERY TEXT. It did, and that was
+    #   the whole of the injection surface: a published entry point accepting arbitrary SQL, guarded
+    #   only by checks that the text was runnable, on a connection this module had just certified as
+    #   the one authority allowed to judge the load. A caller -- or a future orchestration step
+    #   reaching for the most convenient signature -- could therefore have this pass execute
+    #   something other than the committed query and then judge its result set as though it were the
+    #   report. Reading the text HERE, from the committed file, makes the executed statement a
+    #   property of the distribution rather than of the call, and the `_money_total_rows` helper
+    #   below keeps a single injectable seam for the tests that must drive a substituted result set.
+    return _money_total_rows(connection, read_money_total_query(query_path))
+
+
+def _money_total_rows(connection: Any, query: str) -> tuple[tuple[object, ...], ...]:
+    """Execute one already-validated query text on a certified read-only session.
+
+    Purpose
+    -------
+    Hold the execution discipline -- session check, read-only transaction, statement timeout, one
+    fetch -- in one place, and keep the text an argument so a test can drive a substituted result
+    set without that seam being reachable from the published surface.
+
+    Parameters
+    ----------
+    connection : Any
+        An open database connection, or the in-process double that stands in for one.
     query : str
-        The query text, executed verbatim. Nothing is appended, wrapped or interpolated.
+        Query text that has already passed :func:`read_money_total_query`, executed verbatim.
+        Nothing is appended, wrapped or interpolated.
 
     Returns
     -------
@@ -2757,19 +3256,28 @@ def fetch_money_total_rows(connection: Any, query: str) -> tuple[tuple[object, .
     MoneyParityVerificationError
         If the connection's live session is not the reporting role.
     MoneyResultSetContractError
-        If the cursor yields no result set at all, which a ``SELECT`` always does and which
-        therefore means the object supplied is not behaving as a connection.
+        If the cursor yields no result set at all.
     """
     # WHY : Assumptions: the session check is made HERE, at the one place in this module where a
-    #   supplied query is executed, rather than in `verify_money_totals` above it. This function is
-    #   published and takes arbitrary query text, so a check placed only in the caller would leave
-    #   the more permissive entry point unguarded -- and that entry point is the one a future
-    #   orchestration step is most likely to reach for. One guard at the single execution site
-    #   cannot be bypassed by any published path.
+    #   query is executed, rather than in `verify_money_totals` above it. A check placed only in the
+    #   caller would leave every other path to this helper unguarded, and one guard at the single
+    #   execution site cannot be bypassed.
     require_reporting_session(connection)
     candidate = connection.cursor()
     cursor = candidate.__enter__() if hasattr(candidate, "__enter__") else candidate
     try:
+        # WHY : Assumptions: both settings are issued as ORDINARY STATEMENTS on the same cursor,
+        #   before the query, so they apply to the transaction the query runs in. `SET TRANSACTION
+        #   READ ONLY` must be the first statement of a transaction, which it is because the driver
+        #   opens one implicitly on this first execute; `SET LOCAL statement_timeout` is
+        #   transaction-scoped for the same reason, so neither leaks into a later use of the
+        #   connection the way a session-level setting would.
+        # WHY : Trade-offs: the timeout is stated in milliseconds from a module constant rather
+        #   than bound as a parameter, because `SET` accepts no bound parameter. The value is an
+        #   `int` constant declared in this module and never caller supplied, so no text from
+        #   outside this file reaches the statement.
+        cursor.execute(_READ_ONLY_TRANSACTION_STATEMENT)
+        cursor.execute(f"SET LOCAL statement_timeout = {_STATEMENT_TIMEOUT_MILLISECONDS}")
         cursor.execute(query)
         fetched = cursor.fetchall()
     finally:
@@ -2787,7 +3295,6 @@ def verify_money_totals(
     connection: Any,
     extracts: Iterable[SourceExtract],
     *,
-    query: str | None = None,
     query_path: pathlib.Path | None = None,
 ) -> MoneyTotalReport:
     """Run verification pass 3 over the whole migration and report every money column of it.
@@ -2810,11 +3317,10 @@ def verify_money_totals(
     extracts : Iterable[SourceExtract]
         The source extracts to recompute totals from, at most one per layout. Every money column
         whose layout ships a committed extract must be covered, or the run is refused.
-    query : str | None
-        The query text to execute. ``None`` reads it from disk through
-        :func:`read_money_total_query`. Supplied text is executed exactly as given.
     query_path : pathlib.Path | None
-        Where to read the query from when ``query`` is ``None``.
+        Where to read the committed query from. ``None`` resolves it through
+        :func:`money_total_query_path`. A path is accepted and query TEXT is not, so the statement
+        this pass executes is always the committed one -- see :func:`fetch_money_total_rows`.
 
     Returns
     -------
@@ -2840,14 +3346,21 @@ def verify_money_totals(
     OSError
         Propagated if an extract cannot be read.
     """
-    # WHY : Assumptions: the query text is read once and executed once. Splitting the read from the
-    #   execution is what makes the text injectable, and injectability is not a convenience here:
-    #   the sql directory ships beside the package rather than inside it, so a caller running from
-    #   an installed wheel has to supply either the text or the root.
+    # WHY : Refactoring Rationale: the caller supplies a query PATH and can no longer supply query
+    #   TEXT. The text parameter existed because the sql directory ships beside the package rather
+    #   than inside it, so a caller running from a wheel needs a way to say where the file is -- and
+    #   the ROOT already says that. Accepting text as well meant the one entry point a batch state
+    #   would reach for could be handed a statement nobody committed, on a session this pass had
+    #   certified as the sole authority entitled to judge the load.
     # WHY : Assumptions: the source side is measured BEFORE the query is executed, and the ordering
-    #   is deliberate. Reading the extracts is where a width fault or a decode fault surfaces, and
-    #   learning that with no query in flight keeps the two diagnoses apart -- an unreadable extract
-    #   is an operator action, a refused query is a privilege or a packaging problem.
+    #   is deliberate. Every fault the source read can raise -- :func:`read_source_totals` documents
+    #   them: an unreadable extract, a record geometry that does not divide, a layout that cannot be
+    #   decoded, two extracts claiming one layout, a value that is not an exact decimal -- therefore
+    #   surfaces with no query in flight, ahead of the whole query-side family the Raises section
+    #   above lists separately. The ordering is not itself a diagnosis of either family: what it
+    #   buys is that the two cannot arrive together, so which SIDE failed follows from the exception
+    #   raised rather than from how far a partly-run pass happened to get.
     source_totals = read_source_totals(extracts)
-    text = read_money_total_query(query_path) if query is None else query
-    return verify_money_total_rows(fetch_money_total_rows(connection, text), source_totals)
+    return verify_money_total_rows(
+        fetch_money_total_rows(connection, query_path=query_path), source_totals
+    )

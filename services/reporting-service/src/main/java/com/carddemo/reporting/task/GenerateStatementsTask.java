@@ -2,9 +2,12 @@ package com.carddemo.reporting.task;
 
 import com.carddemo.reporting.ReportingTask;
 import com.carddemo.reporting.ReportingTaskRunner;
+import com.carddemo.reporting.service.StatementIndexEntry;
+import com.carddemo.reporting.service.StatementRunOutcome;
 import com.carddemo.reporting.service.StatementService;
 import com.carddemo.reporting.sink.S3ArtifactWriter;
 import com.carddemo.reporting.sink.S3StatementSink;
+import java.io.IOException;
 import java.time.LocalDate;
 import java.util.Map;
 import java.util.Objects;
@@ -110,12 +113,14 @@ public class GenerateStatementsTask implements ReportingTask {
         LocalDate businessDate = businessDateOrNull(
                 parameters.get(ReportingTaskRunner.BUSINESS_DATE_PARAMETER));
 
-        int produced;
+        StatementRunOutcome outcome;
         try (S3StatementSink sink = new S3StatementSink(
                 new S3ArtifactWriter(s3, bucket, prefix + S3StatementSink.PLAIN_TEXT_OBJECT),
                 new S3ArtifactWriter(s3, bucket, prefix + S3StatementSink.HTML_OBJECT))) {
-            produced = statements.generateStatements(sink);
+            outcome = statements.generateStatements(sink);
         }
+        publishIndex(outcome);
+        int produced = outcome.statementsProduced();
 
         // WHY : Assumptions: the journal line names the business date and the count and no cardholder
         //       value of any kind. The count is what an operator reconciles against the previous night and
@@ -124,6 +129,40 @@ public class GenerateStatementsTask implements ReportingTask {
         //       operator-read record must omit.
         LOG.info("event=reporting.statements.produced businessDate={} statements={}",
                 businessDate == null ? "unset" : businessDate, produced);
+    }
+
+    /**
+     * Publishes the run's index, one fixed-width record per statement.
+     *
+     * <p>⚠️ Refactoring Rationale: this exists because the two artifacts this task writes are RUN-WIDE
+     * while the response that points a caller at them describes ONE CARD. Without the index a caller was
+     * handed a document covering the whole portfolio and no way to find its own statement inside it,
+     * which is half of what a review found wrong with the statement surface. The index is written here
+     * rather than by the generator because this task owns the object-store client and every other write
+     * of the run, and it is written AFTER the generator returns because a card's record count is not
+     * known until its statement has been emitted.
+     *
+     * <p>Assumptions: the index is written even when the run produced NO statements, and the object it
+     * then writes is empty. Writing it unconditionally is what keeps the three artifacts of a run in
+     * step: a night that produced nothing leaves an empty index rather than the previous night's, so a
+     * read cannot resolve a card into a position in an artifact that no longer contains it.
+     *
+     * <p>Assumptions: the writer is closed before this method returns, in the same
+     * try-with-resources shape as the two artifact writers above, so a failure mid-index abandons the
+     * upload rather than publishing a truncated index -- and a truncated index is the one state the read
+     * path refuses outright, because every position derived from it would name the wrong card.
+     *
+     * @param outcome what the generator produced, carrying one index entry per statement; must not be
+     *     {@code null}
+     * @throws IOException if the index cannot be published
+     */
+    private void publishIndex(StatementRunOutcome outcome) throws IOException {
+        try (S3ArtifactWriter writer =
+                new S3ArtifactWriter(s3, bucket, prefix + StatementService.INDEX_OBJECT)) {
+            for (StatementIndexEntry entry : outcome.index()) {
+                writer.write(entry.encode());
+            }
+        }
     }
 
     /**

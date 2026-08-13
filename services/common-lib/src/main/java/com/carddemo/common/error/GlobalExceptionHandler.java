@@ -3,6 +3,7 @@ package com.carddemo.common.error;
 import com.carddemo.common.control.OnlineWritesDisabledException;
 import com.carddemo.common.observability.LogSafeText;
 import com.carddemo.common.observability.ThrowableDigest;
+import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.validation.FieldValidationFlag;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Clock;
@@ -37,9 +38,6 @@ import org.springframework.web.bind.MissingRequestValueException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
-import org.springframework.web.HttpMediaTypeNotAcceptableException;
-import org.springframework.web.HttpMediaTypeNotSupportedException;
-import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.NoHandlerFoundException;
@@ -594,24 +592,6 @@ public class GlobalExceptionHandler {
     private static final int MAX_CAUSE_DEPTH = 16;
 
     /**
-     * The number of trailing digits of a primary account number that stay legible, four.
-     *
-     * <p>Assumptions: four is the platform-wide masked rendering, published by the card contract as
-     * twelve mask characters followed by four digits. It is the smallest suffix that still lets an
-     * operator and a cardholder agree which card a failure concerned, which is the entire purpose of
-     * retaining any of it.</p>
-     */
-    private static final int ACCOUNT_NUMBER_VISIBLE_DIGITS = 4;
-
-    /**
-     * The character written over each masked digit of a primary account number, an asterisk.
-     *
-     * <p>Assumptions: the asterisk is the character the card contract's own masked examples use, so a
-     * client comparing a payload value with a diagnostic path sees one rendering rather than two.</p>
-     */
-    private static final char ACCOUNT_NUMBER_MASK_CHARACTER = '*';
-
-    /**
      * The operational log this advice writes the caught failure to.
      *
      * <p>Assumptions: one static logger named for this class, so every failure in every service is
@@ -632,53 +612,6 @@ public class GlobalExceptionHandler {
      * import.</p>
      */
     private static final String CORRELATION_ID_MDC_KEY = "correlationId";
-
-    /**
-     * The shortest digit run in a request path that is withheld as a protected identifier, nine.
-     *
-     * <p>Refactoring Rationale: this threshold was thirteen, and thirteen was wrong. It was chosen so
-     * that the run "cannot be one of the identifiers the migrated routes legitimately carry" -- but
-     * those identifiers are themselves protected, and the routes that carry them are exactly the ones
-     * a diagnostic must not disclose. The consequence was concrete: {@code /api/v1/customers/123456789}
-     * and {@code /api/v1/accounts/12345678901} were published in full, in a response body and in a log
-     * line, on every 400, 401, 403, 404, 405, 406, 409 and 415 those routes can return. Nine is the
-     * width of {@code CUST-ID PIC 9(09)} at line 4 of {@code app/cpy/CVCUS01Y.cpy}, the NARROWEST protected
-     * numeric identifier in the migration, so a threshold there is the first one that covers all three
-     * of customer, account and card.</p>
-     *
-     * <p>Alternatives Considered: pinning the rule to each identifier's exact width and narrowing runs
-     * of exactly nine, eleven or sixteen digits. Rejected because it fails open between and beyond
-     * those widths: a ten-, twelve-, seventeen- or nineteen-digit run -- a card number with a check
-     * digit appended, two identifiers a client concatenated, or any longer issuer range this platform
-     * later accepts -- would pass through in the clear. A minimum length fails closed instead, which is
-     * the direction a masking rule has to fail.</p>
-     *
-     * <p>Alternatives Considered: replacing the path with the matched route template, which the review
-     * offered as the other resolution. Rejected because this advice cannot obtain one: it is reached
-     * from every service including the batch context, and the handler-mapping attribute that carries a
-     * template is present only for requests a mapping actually matched -- so the 404 case, the one most
-     * likely to carry a mistyped identifier, would have no template and would fall back to the raw
-     * path. Scanning digit runs needs no mapping and therefore has no such hole.</p>
-     *
-     * <p>Trade-offs: a minimum also withholds a sixteen-digit transaction identifier, declared at that
-     * width by {@code TRAN-ID PIC X(16)} at line 5 of {@code app/cpy/CVTRA05Y.cpy}, and shorter numeric
-     * path values such as a page size or an ordinal remain legible because they are below nine digits.
-     * Nothing is lost operationally: the correlation identity in the same body resolves to the
-     * operational record, which holds the unreduced path.</p>
-     */
-    private static final int IDENTIFIER_REDACTION_THRESHOLD = 9;
-
-    /**
-     * The declared width of a primary account number, sixteen.
-     *
-     * <p>Assumptions: {@code CARD-NUM PIC X(16)} at line 5 of {@code app/cpy/CVACT02Y.cpy} fixes this,
-     * and it is the width at or above which a digit run in a path can be a card number rather than one
-     * of the two shorter identifiers. It is declared here rather than imported from
-     * {@code com.carddemo.common.security.CardNumberMasker} for the reason recorded on the correlation
-     * key above: this advice runs in contexts that hold no web or security dependency, and the two
-     * spellings are asserted equal by this module's tests.</p>
-     */
-    private static final int CARD_NUMBER_WIDTH = 16;
 
     /**
      * The bean-validation constraint names that assert a value was supplied at all.
@@ -1042,13 +975,104 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * The greatest number of characters an undeclared member name may occupy to be reflected.
+     *
+     * <p>Assumptions: forty, derived by MEASURING every schema property name the seven published
+     * contracts declare and rounding up. There are 259 distinct names and the widest is
+     * {@code defaultDisclosureGroupUnreadable} at thirty-two characters, in the reference message
+     * catalogue; the widest a caller could plausibly mistype is narrower still. So a name wider than
+     * forty characters cannot be a misspelling of a declared member — it is either a member of some
+     * other system's schema or a value that has arrived where a key belongs.</p>
+     *
+     * <p>Assumptions: this bound is NOT what refuses an identifier, and saying so is the point of
+     * recording it. A sixteen-digit primary account number is sixteen characters and passes here; it is
+     * the letter requirement and {@link #MAX_MEMBER_NAME_DIGIT_RUN} in
+     * {@link #isPublishableMemberName(String)} that refuse it. This bound refuses a DIFFERENT class —
+     * a whole sentence, an encoded blob or a serialised record arriving where a member name belongs.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the bound was {@link ApiError#MESSAGE_RENDERING_WIDTH}, seventy-five
+     * characters, and it TRUNCATED rather than refused. Truncation is what made the width bound useless
+     * as a control: a seventy-five-character prefix of a longer value is still a reflected value, and a
+     * sixteen-digit primary account number is comfortably inside seventy-five characters, so the bound
+     * never engaged for the value that mattered. Refusing outright, and refusing at a width derived from
+     * the schemas rather than from the message band, is what makes it a rule about member names.</p>
+     */
+    private static final int MAX_MEMBER_NAME_LENGTH = 40;
+
+    /**
+     * The greatest number of consecutive digits an undeclared member name may hold to be reflected.
+     *
+     * <p>Assumptions: two, measured against the published request schemas rather than chosen. No member
+     * name among the 259 the seven contracts declare carries a digit run longer than two: the
+     * twenty-one names holding a digit at all are {@code addressLine1} through {@code addressLine3},
+     * {@code accountStatus1} through {@code accountStatus5}, the {@code phone1}/{@code phone2} family,
+     * {@code ssnPart1} through {@code ssnPart3} and {@code title01}/{@code title02} — every one a single
+     * digit except the last pair, whose run is exactly two. Every identifier width this system carries
+     * exceeds that bound by a wide margin: a nine-digit national identifier, an eleven-digit account
+     * identifier and a sixteen-digit card number are all refused outright, and so is a four-digit
+     * expiry.</p>
+     *
+     * <p>Trade-offs: this is far tighter than {@link #SENSITIVE_DIGIT_RUN}, the thirteen-digit threshold
+     * the carried-sentence gate applies, and the asymmetry is the same one recorded there. A sentence
+     * admitted by that gate is provably from this repository's own catalogue, so the only question about
+     * a digit run inside it is whether the catalogue embeds an identifier. A member name is
+     * caller-authored in full, so it must not be able to carry an identifier at all rather than merely
+     * not a card-shaped one.</p>
+     */
+    private static final int MAX_MEMBER_NAME_DIGIT_RUN = 2;
+
+    /**
+     * Every character besides a letter or a digit that a publishable member name may hold.
+     *
+     * <p>Assumptions: these five and nothing else, and each is admitted for a named reason. The
+     * underscore and the hyphen are how a caller writing snake or kebab case misspells a camel-case
+     * member, which is the commonest mistake this arm answers. The dot and the two brackets are how the
+     * deserialiser itself reports a nested or an indexed member, so refusing them would refuse the
+     * report rather than the value: an undeclared member inside a nested object arrives as
+     * {@code address.line3} and one inside an array as {@code fieldErrors[0].field}.</p>
+     *
+     * <p>Assumptions: the characters a value needs in order to look like a written identifier are all
+     * ABSENT — the space, the slash, the colon, the at sign, the quotation mark and the equals sign —
+     * and so is every character a structured value uses. That absence is what makes this a member-name
+     * test and not merely a tidiness test.</p>
+     */
+    private static final String MEMBER_NAME_PUNCTUATION = "_-.[]";
+
+    /**
      * Extracts the name of an undeclared body member from a parse failure, when that is what failed.
      *
-     * <p>Assumptions: the returned name is sanitised of control characters and bounded to the published
-     * rendering width, because it is caller-supplied text on its way into a response body. It is the
-     * second such value this class carries, the request path being the first, and it is admitted on a
-     * narrower ground: a member NAME is a key the caller chose, so it cannot be the account number or
-     * the amount that the value beside it might be.</p>
+     * <p>⚠️ Refactoring Rationale: the name is now admitted only against a closed grammar, where it was
+     * previously sanitised for control characters and reflected. `LogSafeText.sanitize` answers a
+     * different question from the one this site asks — it removes what could forge a log record, and a
+     * primary account number forges nothing — so a body sent as
+     * {@code {"4859452612877065": 1}} was answered with that key verbatim in
+     * {@link ApiError.FieldError#field}, and from there into whatever the client logs, stores or reports.
+     * The premise the old comment rested on was the error: it held that a member NAME is a key the
+     * caller chose and therefore "cannot be the account number or the amount that the value beside it
+     * might be". A caller composes both sides of a JSON member, so a key is exactly as
+     * caller-controlled as a value is, and an object keyed by identifier is a commonplace shape a client
+     * can send by mistake.</p>
+     *
+     * <p>Assumptions: the grammar admits what a MISSPELLED MEMBER of a published schema looks like and
+     * nothing else — an initial letter or underscore, then letters, digits, underscores, hyphens, dots
+     * and square brackets, at least one letter overall, at most {@link #MAX_MEMBER_NAME_LENGTH}
+     * characters and no digit run longer than {@link #MAX_MEMBER_NAME_DIGIT_RUN}. The bracket and dot
+     * are admitted because a nested or indexed member is reported in that form, which is the shape a
+     * caller most needs echoed back. Anything outside the grammar falls through to the generic
+     * malformed-request refusal, so the response still says the body could not be read and still says
+     * nothing the caller did not already know.</p>
+     *
+     * <p>Alternatives Considered: reflecting a fixed generic key such as {@code requestBody} for every
+     * undeclared member, which the review guidance offers as the simpler option. Rejected because it
+     * discards the one thing this arm exists to provide: runtime testing found a search body carrying
+     * three members the shape does not declare answered HTTP 200 with a page assembled from defaults,
+     * and the correction is worth having only if it tells the caller WHICH member. A generic key is kept
+     * as the fallback for a name the grammar refuses, which is where it is the right answer.</p>
+     *
+     * <p>Alternatives Considered: masking a refused name with the digit-run masker instead of refusing
+     * it. Rejected because a masked key is not a key: a caller cannot match {@code ****} against
+     * anything in the body it sent, so the entry would cost a field slot and inform nobody, while
+     * asserting that a member by that name exists.</p>
      *
      * <p>Trade-offs: only the FIRST undeclared member is reported, even when a body carries several. The
      * deserialiser stops at the first one it cannot bind, so the others have not been seen and reporting
@@ -1056,29 +1080,98 @@ public class GlobalExceptionHandler {
      * this refusal exists to avoid doing.</p>
      *
      * @param failure the parse failure to examine, which may carry no cause at all
-     * @return the sanitised, bounded name of the undeclared member; {@code null} when the failure is not
-     *     an undeclared-member report or when the reported name is absent or blank, in which case the
-     *     caller falls back to the generic refusal
+     * @return the name of the undeclared member when it satisfies the member-name grammar; {@code null}
+     *     when the failure is not an undeclared-member report, when the reported name is absent or
+     *     blank, or when it falls outside the grammar, in every case of which the caller falls back to
+     *     the generic refusal
      */
     private static String unknownMemberOf(HttpMessageNotReadableException failure) {
         if (!(failure.getCause() instanceof UnrecognizedPropertyException unknown)) {
             return null;
         }
 
+        // WHY : Assumptions: the control-character sanitiser still runs FIRST, and it is not made
+        //       redundant by the grammar below. It answers the log-forgery question for the WARN line
+        //       this method's caller has already emitted, while the grammar answers the disclosure
+        //       question for the response body; a name that satisfies the grammar is necessarily free of
+        //       control characters, but the two checks are kept in this order so neither has to be
+        //       re-derived from the other.
         String sanitized = LogSafeText.sanitize(unknown.getPropertyName());
         if (sanitized == null || sanitized.isBlank()) {
             return null;
         }
 
-        // WHY : Assumptions: the bound is the published rendering width rather than a number written
-        //       here, and the choice of that width is the argument for it: a member name wider than the
-        //       whole message band cannot be a member of any published body, and truncating there keeps
-        //       the entry inside the one width contract this package states. The alternative -- refusing
-        //       an over-wide name outright and falling back to the generic sentence -- was rejected
-        //       because the leading characters are usually enough for a caller to recognise its own typo.
-        return sanitized.length() <= ApiError.MESSAGE_RENDERING_WIDTH
-                ? sanitized
-                : sanitized.substring(0, ApiError.MESSAGE_RENDERING_WIDTH);
+        return isPublishableMemberName(sanitized) ? sanitized : null;
+    }
+
+    /**
+     * Reports whether a caller-supplied member name may be reflected into a response body.
+     *
+     * <p>Assumptions: this private helper carries the same complete Javadoc a public method does, for the
+     * reason recorded on {@link #isPrintableWithinDigitRun(String, int)}.</p>
+     *
+     * <p>Assumptions: the alphabet is written as explicit character tests rather than as a compiled
+     * regular expression, which is the form every other shape test in this class uses. A pattern would
+     * read more compactly and would also introduce a second place where the admitted alphabet is
+     * stated; more importantly, a caller-supplied string of unbounded length is the classic input for
+     * catastrophic backtracking, and a single forward pass cannot backtrack at all.</p>
+     *
+     * <p>Assumptions: at least one LETTER is required, which is what rules out a bare identifier
+     * however it is punctuated. A value such as {@code 4859-4526-1287-7065} satisfies the alphabet and
+     * the length, and it is refused by the letter requirement and the digit-run bound together — either
+     * one alone would be enough, and both are stated because they refuse it for different reasons and a
+     * later relaxation of one must not silently relax the other.</p>
+     *
+     * @param candidate the sanitised member name to classify; must not be {@code null} and must not be
+     *     blank, both of which the caller has already established
+     * @return {@code true} when the name looks like a misspelling of a declared member and may be
+     *     echoed, {@code false} when it must fall through to the generic refusal
+     */
+    private static boolean isPublishableMemberName(String candidate) {
+        if (candidate.length() > MAX_MEMBER_NAME_LENGTH) {
+            return false;
+        }
+        char first = candidate.charAt(0);
+        if (!isAsciiLetter(first) && first != '_') {
+            return false;
+        }
+        boolean sawLetter = false;
+        int digitRun = 0;
+        for (int index = 0; index < candidate.length(); index++) {
+            char character = candidate.charAt(index);
+            if (isAsciiLetter(character)) {
+                sawLetter = true;
+                digitRun = 0;
+                continue;
+            }
+            if (character >= '0' && character <= '9') {
+                digitRun++;
+                if (digitRun > MAX_MEMBER_NAME_DIGIT_RUN) {
+                    return false;
+                }
+                continue;
+            }
+            if (MEMBER_NAME_PUNCTUATION.indexOf(character) < 0) {
+                return false;
+            }
+            digitRun = 0;
+        }
+        return sawLetter;
+    }
+
+    /**
+     * Reports whether a character is an ASCII letter.
+     *
+     * <p>Assumptions: ASCII letters and nothing else, rather than {@link Character#isLetter(char)},
+     * which admits the letters of every script. A member of a published schema is spelled in ASCII, so
+     * admitting a wider alphabet would admit a homoglyph spelling of a declared member — a name that
+     * renders identically to a real one and refers to nothing.</p>
+     *
+     * @param candidate the character to classify
+     * @return {@code true} for {@code 'A'} through {@code 'Z'} and {@code 'a'} through {@code 'z'}
+     */
+    private static boolean isAsciiLetter(char candidate) {
+        return (candidate >= 'A' && candidate <= 'Z') || (candidate >= 'a' && candidate <= 'z');
     }
 
     /**
@@ -1319,7 +1412,6 @@ public class GlobalExceptionHandler {
                         HttpStatus.NOT_ACCEPTABLE.value(), correlationId(), pathOf(request),
                         this.clock));
     }
-
 
     /**
      * Renders the three PROVIDER-RAISED conflict conditions as HTTP 409 and every other runtime failure
@@ -2167,7 +2259,6 @@ public class GlobalExceptionHandler {
             fieldErrors = List.copyOf(named);
         }
 
-
         return ResponseEntity.badRequest().body(ApiError.ofFieldErrors(aggregate,
                 HttpStatus.BAD_REQUEST.value(), correlationId(), pathOf(request), fieldErrors,
                 this.clock));
@@ -2381,9 +2472,17 @@ public class GlobalExceptionHandler {
                 : List.of(new ApiError.FieldError(FIELD_VERSION, FieldValidationFlag.NOT_OK,
                         String.valueOf(currentVersion)));
 
+        // WHY : Assumptions: this renderer publishes NO subordinate code, and that is a decision about
+        //       what a SHARED renderer can honestly claim rather than an omission. A subordinate code is a
+        //       discriminator only if the contract receiving it declares the set of values it may take,
+        //       and six of the seven published contracts declare exactly one conflict condition and show
+        //       an empty subordinate code in their examples. Minting a value here would put a code into
+        //       six bodies that no document admits. The one context that publishes three conditions under
+        //       this status -- the card context, whose contract names them as the discriminator -- rebuilds
+        //       the body this method returns with its own code, which is why the factory now takes one.
         return ResponseEntity.status(HttpStatus.CONFLICT).body(ApiError.ofConflict(message,
-                ApiError.Subsystem.RELATIONAL, correlationId(), pathOf(request), fieldErrors,
-                this.clock));
+                ApiError.NO_SECONDARY_CODE, ApiError.Subsystem.RELATIONAL, correlationId(),
+                pathOf(request), fieldErrors, this.clock));
     }
 
     /**
@@ -2438,75 +2537,37 @@ public class GlobalExceptionHandler {
     /**
      * Withholds every protected identifier in a path, preserving the path's length.
      *
-     * <p>Assumptions: a protected identifier is any run of {@value #IDENTIFIER_REDACTION_THRESHOLD} or
-     * more digit characters bounded by non-digits, and the constant's own declaration records why that
-     * length is the boundary. A run of {@value #CARD_NUMBER_WIDTH} or more keeps its last four digits,
-     * which is the rendering the platform already publishes for a card number; a shorter run keeps
-     * none, because no partial rendering of a customer or account identifier is published anywhere.
-     * Each withheld digit is overwritten with its own mask character rather than the run being
-     * collapsed to a fixed marker, so the narrowed path is exactly as long as the one the client called
-     * -- which is what lets a reader line a diagnostic path up against an access record without either
-     * one having to be re-parsed.</p>
+     * <p>Assumptions: the rule itself lives on
+     * {@link com.carddemo.common.security.CardNumberMasker#maskEmbeddedIdentifiers(String)}, which is
+     * where every property of it is recorded -- which digit runs qualify, how much of each survives, why
+     * the value is scanned rather than parsed, and why the operation is idempotent. It is NOT restated
+     * here: a second description of one rule is the shape of drift this delegation exists to remove.</p>
      *
-     * <p>Assumptions: the value is scanned rather than parsed. This advice is reached from every
-     * service and must not know which path shapes exist, so no segment position, prefix or route
-     * template appears here; only the digit run does. The alternative, narrowing only paths known to
-     * carry a card number, was rejected because it fails open: a path added later carries its number
-     * in the clear until somebody remembers to extend the list, and the failure is silent.</p>
-     *
-     * <p>Assumptions: the operation is idempotent, and that property is relied upon rather than
-     * hoped for. A withheld run leaves at most its four trailing digits as a digit run, which is below
-     * the threshold, so a path that has already been narrowed -- by a caller, or by the emitted shape's
-     * own canonical constructor, which applies the shared masker to whatever path it is given -- passes
-     * through this method unchanged.</p>
+     * <p>Assumptions: this method is retained under the advice's own name rather than its callers being
+     * repointed at the shared one, because {@code pathOf} and this class's masking tests both name it and
+     * the operation genuinely belongs to the advice's vocabulary even though the rule does not.</p>
      *
      * @param path the request path to narrow, never {@code null}; a path whose longest digit run is
-     *     shorter than the threshold is returned unchanged
-     * @return the path with every qualifying digit run reduced to mask characters, retaining that run's
-     *     last four digits only when the run could be a card number, of identical length to
-     *     {@code path}
+     *     shorter than the threshold and which carries no card number is returned unchanged
+     * @return the path with every card number reduced to its final four digits and every other
+     *     qualifying run withheld whole, of identical length to {@code path}
      */
     static String maskAccountNumbers(String path) {
-        StringBuilder masked = null;
-        int scanned = 0;
-        int length = path.length();
-        while (scanned < length) {
-            if (!isDigit(path.charAt(scanned))) {
-                scanned++;
-                continue;
-            }
-            int runEnd = scanned;
-            while (runEnd < length && isDigit(path.charAt(runEnd))) {
-                runEnd++;
-            }
-            int runLength = runEnd - scanned;
-            if (runLength >= IDENTIFIER_REDACTION_THRESHOLD) {
-                if (masked == null) {
-                    masked = new StringBuilder(path);
-                }
-                // WHY : Refactoring Rationale: how much of a run survives depends on WHICH protected
-                //       identifier its width can be. A run of at least CARD_NUMBER_WIDTH digits can be
-                //       a primary account number, and last-four is the rendering the platform already
-                //       publishes for one -- masked card numbers appear in list rows, in detail bodies
-                //       and in the card contract at line 192 of
-                //       services/card-service/src/main/resources/openapi/card-api.yaml -- so retaining
-                //       four discloses nothing a successful response would not have. A shorter run
-                //       cannot be a card number: it can only be the nine-digit customer identifier or
-                //       the eleven-digit account identifier, for which the platform publishes NO
-                //       partial rendering anywhere, so nothing justifies retaining part of one and the
-                //       whole run is withheld.
-                int retained = runLength >= CARD_NUMBER_WIDTH ? ACCOUNT_NUMBER_VISIBLE_DIGITS : 0;
-                // WHY : Assumptions: the withheld digits are overwritten in place rather than the run
-                //       being replaced by a fixed marker, so the narrowed path is exactly as long as
-                //       the one the client called -- which is what lets a reader line a diagnostic
-                //       path up against an access record without either one having to be re-parsed.
-                for (int position = scanned; position < runEnd - retained; position++) {
-                    masked.setCharAt(position, ACCOUNT_NUMBER_MASK_CHARACTER);
-                }
-            }
-            scanned = runEnd;
-        }
-        return masked == null ? path : masked.toString();
+        // WHY : ⚠️ Refactoring Rationale: the algorithm was written out here and is now DELEGATED,
+        //       because it was one of two rules for one value. Every site that logs or renders a
+        //       request path chose by hand between this identifier-aware rule and the card-only
+        //       CardNumberMasker.maskEmbeddedCardNumbers, and the sites that chose the card rule --
+        //       the security handlers' three log lines, their problem body, and two filters -- let a
+        //       nine-digit customer identifier and an eleven-digit account identifier through in the
+        //       clear. Moving the rule to the class that already owns the mask character, the visible
+        //       tail and the card width leaves ONE definition and retires three constants this class
+        //       had duplicated from it. This method is kept as the advice's own name for the
+        //       operation so its callers and its tests are unaffected by where the rule lives.
+        //       Assumptions: the shared method additionally recognises a UNIFORMLY SEPARATED card
+        //       number, which this body did not. That is a strengthening rather than a change of
+        //       meaning -- a separated card number in a path was previously left in the clear here --
+        //       and it cannot affect a contiguous run, because the card rule claims those first.
+        return CardNumberMasker.maskEmbeddedIdentifiers(path);
     }
 
     /**

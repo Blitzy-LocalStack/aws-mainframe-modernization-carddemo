@@ -21,6 +21,7 @@ only place the question has a meaningful answer.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import subprocess
 import sys
@@ -373,15 +374,114 @@ def test_all_three_verification_passes_are_reachable_through_the_boundary() -> N
     None
         The assertion is the result.
     """
-    # Assumptions: one entry point and one result type per pass is the published criterion, so
-    #   all six are named here explicitly rather than derived from ``__all__``. Deriving them would
-    #   make this test pass for a surface that published six unrelated names.
+    # Assumptions: the names are listed EXPLICITLY rather than derived from ``__all__``. Deriving
+    #   them would make this test pass for a surface that published the right NUMBER of unrelated
+    #   names, which is the failure it exists to catch.
+    # Refactoring Rationale: the criterion widened from one entry point per pass to one per pass
+    #   PER SCALE, and this test widened with it. The boundary published only the per-dataset
+    #   helpers -- ``compare_counts``, ``digest_records``, ``compare_money_totals`` -- while each
+    #   pass's whole-migration entry point, the entry point orchestration actually calls, was
+    #   reachable only at its owning module. A caller reading the boundary could therefore assemble
+    #   a per-dataset spot check and believe it had run the pass.
+    assert verify.verify_row_counts.__module__.endswith(".row_counts")
+    assert verify.RowCountReport.__module__.endswith(".row_counts")
     assert verify.compare_counts.__module__.endswith(".row_counts")
     assert verify.RowCountComparison.__module__.endswith(".row_counts")
+    assert verify.compare_record_digests.__module__.endswith(".checksum")
+    assert verify.ChecksumComparison.__module__.endswith(".checksum")
     assert verify.digest_records.__module__.endswith(".checksum")
     assert verify.RecordDigest.__module__.endswith(".checksum")
+    assert verify.verify_money_totals.__module__.endswith(".money_parity")
+    assert verify.MoneyTotalReport.__module__.endswith(".money_parity")
     assert verify.compare_money_totals.__module__.endswith(".money_parity")
     assert verify.MoneyParity.__module__.endswith(".money_parity")
+    # Assumptions: the money pass's SOURCE side is asserted too, because ``verify_money_totals``
+    #   pairs the database report against a measurement of the extracts and has nothing to compare
+    #   to without it. Publishing the target half alone would leave the boundary's own entry point
+    #   uncallable from the boundary.
+    assert verify.read_source_totals.__module__.endswith(".money_parity")
+    assert verify.SourceExtract.__module__.endswith(".money_parity")
+    assert verify.money_columns.__module__.endswith(".money_parity")
+
+
+def test_the_combined_gate_is_reachable_through_the_boundary() -> None:
+    """Assert the indivisible gate the package contracts is a callable it publishes.
+
+    Returns
+    -------
+    None
+        The assertion is the result.
+    """
+    # Refactoring Rationale: the package docstring described a combined invocation that runs all
+    #   three passes in order and stops at the first failure, and nothing in the distribution
+    #   implemented it -- the contract was prose. These assertions are what make the claim
+    #   falsifiable: the gate, its result type and its refusal are reachable at the boundary that
+    #   documents them.
+    assert verify.run_verification_gate.__module__.endswith(".gate")
+    assert verify.MigrationVerification.__module__.endswith(".gate")
+    assert verify.PassOutcome.__module__.endswith(".gate")
+    assert verify.CombinedPassResult.__module__.endswith(".gate")
+    assert verify.VerificationGateError.__module__.endswith(".gate")
+    # Assumptions: the gate is reachable as a module too, under its own name, so nothing published
+    #   flat is reachable by only one route.
+    assert verify.gate.__name__ == "carddemo_migration.verify.gate"
+
+
+def test_the_gate_is_not_published_as_a_fourth_pass() -> None:
+    """Assert the orchestration is kept out of the ordered list of measurements.
+
+    Returns
+    -------
+    None
+        The assertion is the result.
+    """
+    # Assumptions: ``PASS_MODULES`` is documented as the order the three passes RUN in, so a
+    #   caller may iterate it to run them. Admitting the gate would hand that caller the
+    #   orchestration as a fourth measurement, and the gate invoked as a pass would raise on its
+    #   own step mapping -- a confusing failure for a list that reads as an inventory.
+    assert "gate" not in verify.PASS_MODULES
+    assert verify.PASS_MODULES == ("row_counts", "checksum", "money_parity")
+
+
+def test_the_gate_runs_exactly_the_passes_the_package_publishes() -> None:
+    """Assert the gate's own pass names equal the package's published pass order.
+
+    Returns
+    -------
+    None
+        The assertion is the result.
+    """
+    # Assumptions: the gate spells the three names itself rather than importing them from its own
+    #   parent package, because that package resolves the gate lazily and importing the parent's
+    #   constant from inside the child would tie a child's import to its parent's initialisation.
+    #   This assertion is the mechanical check that makes the duplication safe: the two tuples
+    #   drifting apart -- a pass renamed, or reordered -- fails here rather than producing a gate
+    #   that refuses every correctly-built step mapping.
+    assert verify.gate.GATE_PASSES == verify.PASS_MODULES
+
+
+def test_the_published_surface_and_the_lazy_registry_agree() -> None:
+    """Assert every resolvable name is declared, and every declared name is resolvable.
+
+    Returns
+    -------
+    None
+        The assertion is the result.
+    """
+    # Assumptions: the private registry IS read here, deliberately. The claim being checked is
+    #   precisely that the two DECLARATIONS agree -- ``__all__`` and the resolver's own table --
+    #   and no public accessor can express it: publishing the table would make it part of the
+    #   surface it describes. Without this assertion a name could be added to the table alone and
+    #   would then be a reachable, undocumented public name, absent from ``dir()`` and from the
+    #   docstring while callers came to depend on it.
+    declared = set(verify.__all__)
+    resolvable = set(verify._EXPORTS) | set(verify._SUBMODULES) | {"PASS_MODULES"}
+
+    assert declared == resolvable
+    # Assumptions: no name is spelled differently at the boundary from the name its owning module
+    #   publishes. A rename here would give one object two public spellings and make every future
+    #   correction in the owning module a breaking change at the boundary as well.
+    assert all(name == attribute for name, (_, attribute) in verify._EXPORTS.items())
 
 
 def test_a_pass_module_name_still_means_the_module() -> None:
@@ -549,3 +649,73 @@ def test_the_loader_package_declares_names_but_no_record_geometry() -> None:
     assert layouts.__name__ in {
         module.__name__ for module in vars(aurora_module).values() if isinstance(module, ModuleType)
     }
+
+
+#: The subcommands that must reach neither the loaders nor the verification passes, paired with the
+#: argument vector each is invoked by in the probe below.
+#:
+#: Assumptions: `--help` is included as a bare parser build rather than as a run, because argparse
+#: exits the process for it; the probe below catches that exit deliberately. The other three run to
+#: completion and touch no database, no object store and no credential, which is why they are the
+#: four an operator can rely on when a verifier or a driver is broken.
+_ISOLATED_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
+    ("list-datasets",),
+    ("list-datasets", "--format", "json"),
+)
+
+
+@pytest.mark.parametrize("argv", _ISOLATED_COMMANDS, ids=lambda argv: " ".join(argv))
+def test_a_read_only_command_imports_neither_the_loaders_nor_the_verifiers(
+    argv: tuple[str, ...],
+) -> None:
+    """Assert the commands that need no database import no loader and no verification pass.
+
+    Parameters
+    ----------
+    argv : tuple of str
+        The command line to run in a child interpreter.
+
+    Returns
+    -------
+    None
+        The assertion is the result.
+    """
+    # WHY : Refactoring Rationale: this probes a CHILD interpreter rather than asserting on
+    #   `sys.modules` here, and it has to: by the time this suite runs, other modules have imported
+    #   the loaders and the verifiers, so an in-process assertion would pass or fail on collection
+    #   order rather than on what the command does. The property is what the deferral was for --
+    #   every one of those modules reaches `config` and through it the AWS SDK and the database
+    #   driver, and `verify.money_parity` derives a money inventory from the loader's target
+    #   registry, so a defect in any of them used to fail `list-datasets` too. That is the command
+    #   an operator runs FIRST to learn the dataset contract, so failing it points the diagnosis at
+    #   the wrong half of the distribution.
+    probe = (
+        "import json, sys\n"
+        "from carddemo_migration import cli\n"
+        f"status = cli.main({list(argv)!r})\n"
+        "loaded = sorted(n for n in sys.modules if n.startswith('carddemo_migration'))\n"
+        "print(json.dumps({'status': status, 'loaded': loaded}))\n"
+    )
+    completed = subprocess.run(  # noqa: S603 -- fixed argument list, no shell, no external input
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    observed = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert observed["status"] == 0
+    loaded = set(observed["loaded"])
+    # WHY : Assumptions: the two loader modules the staging command genuinely needs are named as
+    #   PERMITTED rather than the whole `loaders` package being denied. `loaders.s3_stage` stays at
+    #   module scope because `stage-dataset` cannot run without it and it imports only the standard
+    #   library and `config`; denying the package outright would describe a boundary this
+    #   distribution does not have and would fail on a correct tree.
+    permitted = {"carddemo_migration.loaders", "carddemo_migration.loaders.s3_stage"}
+    forbidden = {
+        name
+        for name in loaded
+        if (name.startswith("carddemo_migration.loaders") and name not in permitted)
+        or name.startswith("carddemo_migration.verify")
+    }
+    assert not forbidden, f"{' '.join(argv)} imported {sorted(forbidden)}"

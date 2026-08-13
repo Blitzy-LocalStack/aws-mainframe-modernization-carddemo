@@ -192,6 +192,8 @@ __all__ = [
     "REQUIRED_SSL_MODE",
     "SCHEMA_NAMES",
     "SCHEMA_ROLES",
+    "VERIFICATION_SCOPE",
+    "VERIFIER_ROLE",
     "AuroraConnectionSettings",
     "ConfigurationError",
     "DatabaseUserAttributes",
@@ -217,6 +219,7 @@ __all__ = [
     "resolve_customer_identifier_key_id",
     "resolve_parameter_prefix",
     "resolve_seed_user_subjects",
+    "resolve_verifier_settings",
     "resolve_ssl_root_cert",
     "role_for_schema",
 ]
@@ -371,13 +374,13 @@ NON_PRODUCTION_ENVIRONMENTS: frozenset[str] = frozenset({"dev", "test", "local"}
 # any schema, so allowlisting one role's rotation clone would simultaneously permit that clone --
 # or any other listed name -- as the credential for all of them. Keying by role keeps each
 # exception scoped to the role it was granted for, and an alternate that is itself one of the
-# fifteen login roles is refused outright, because that spelling is not a rotation clone but a
+# sixteen login roles is refused outright, because that spelling is not a rotation clone but a
 # cross-role substitution.
 ENV_ALTERNATE_DB_USERS = "CARDDEMO_DB_ALTERNATE_USERS"
 
 # Assumptions: the cluster's MASTER credential is named by an environment variable rather
 # than by a composed path, because it is the one credential this stack does not name. The other
-# fifteen live at ``<prefix>/<environment>/aurora/<role>``, composed by
+# sixteen live at ``<prefix>/<environment>/aurora/<role>``, composed by
 # :func:`database_secret_name_for_role` from the same convention the Terraform module that
 # creates them composes; the master credential is created by RDS itself --
 # ``infra/modules/aurora-postgresql`` sets ``manage_master_user_password`` -- and RDS chooses the
@@ -631,18 +634,54 @@ MIGRATION_SCHEMA_ROLES: Mapping[str, str] = MappingProxyType(_MIGRATION_SCHEMA_R
 # script's own order without that order having to be restated.
 SCHEMA_NAMES: tuple[str, ...] = tuple(_SCHEMA_ROLES)
 
+#: The one login role that may READ every migrated record and may write nothing at all.
+#:
+#: Assumptions: post-load verification needs an authority that no other tier can supply, and the
+#: gap is a real one rather than a preference. A per-dataset verification reads back whole rows and
+#: compares them, field by field, against the extract they came from -- so it needs row-level,
+#: UNMASKED ``SELECT`` on the base tables. ``carddemo_reporting`` cannot serve: it holds ``USAGE``
+#: on the reporting schema and ``SELECT`` on masked aggregate views only, precisely so that masking
+#: is a boundary rather than a convention, and widening it would undo that. The eight connection
+#: roles can serve, and that is the defect: each holds ``SELECT``, ``INSERT`` and ``UPDATE`` on the
+#: tables it would be certifying, so a verifier connecting as one could repair the evidence it
+#: exists to judge -- CWE-250, privilege far in excess of the task.
+#:
+#: Alternatives Considered: reading the per-dataset counts and totals out of the aggregate views as
+#: ``carddemo_reporting`` was considered, and it would work for two of the three passes. It cannot
+#: work for the checksum pass, which is the whole point of having three: an aggregate view publishes
+#: counts and sums, and a field corrupted in place changes neither. So the choice was between a
+#: verification that cannot see a corrupted field and a dedicated read-only identity, and this is
+#: the second.
+#:
+#: Trade-offs: a sixteenth credential to generate, store and rotate. It buys the property that the
+#: statement "the verifier cannot alter what it certifies" is enforced by the server rather than
+#: asserted by this package: the role holds no ``INSERT``, ``UPDATE``, ``DELETE``, ``TRUNCATE`` or
+#: ``CREATE`` anywhere, and ``data-migration/sql/V0__schemas_and_roles.sql`` additionally sets
+#: ``default_transaction_read_only`` on it, so even a statement that slipped past review would be
+#: refused by the transaction it ran in.
+VERIFIER_ROLE: str = "carddemo_verifier"
+
+#: The scope label the verifier's settings are resolved under, reported in failure messages.
+#:
+#: Assumptions: the verifier belongs to NO bounded-context schema -- it reads five of them and owns
+#: none -- so it has no schema name to be reported under. A label is used rather than borrowing one
+#: of the eight, because borrowing would make a failure message name a context that has nothing to
+#: do with the fault.
+VERIFICATION_SCOPE: str = "verification"
+
 # Assumptions: this is the inventory of roles that can AUTHENTICATE, and it is therefore
-# exactly the inventory that needs a credential: the eight connection roles plus the seven
-# migration roles, fifteen in all. The eight ``carddemo_<context>_owner`` roles are deliberately
-# absent -- they are ``NOLOGIN``, so their ``rolpassword`` is null permanently and correctly, and
-# a verification that expected one there could never pass on a cluster that was in fact fully
-# bootstrapped.
-# Trade-offs: derived from the two mappings rather than written out, and sorted so that any log
-# or report built from it is diffable between runs. The alternative -- a third hand-maintained
-# list -- is the copy that goes stale silently, because a role V0 creates but this tuple omits
-# would be reported as missing only if it appeared here, so the omission would hide itself.
+# exactly the inventory that needs a credential: the eight connection roles, the seven
+# migration roles and the one verifier role, sixteen in all. The eight
+# ``carddemo_<context>_owner`` roles are deliberately absent -- they are ``NOLOGIN``, so their
+# ``rolpassword`` is null permanently and correctly, and a verification that expected one there
+# could never pass on a cluster that was in fact fully bootstrapped.
+# Trade-offs: derived from the two mappings and the one constant rather than written out, and
+# sorted so that any log or report built from it is diffable between runs. The alternative -- a
+# hand-maintained list -- is the copy that goes stale silently, because a role V0 creates but this
+# tuple omits would be reported as missing only if it appeared here, so the omission would hide
+# itself.
 LOGIN_ROLE_NAMES: tuple[str, ...] = tuple(
-    sorted({*_SCHEMA_ROLES.values(), *_MIGRATION_SCHEMA_ROLES.values()})
+    sorted({*_SCHEMA_ROLES.values(), *_MIGRATION_SCHEMA_ROLES.values(), VERIFIER_ROLE})
 )
 
 
@@ -954,7 +993,7 @@ def migration_role_for_schema(schema: str) -> str:
     Answer the third of the three distinct questions this module keeps apart: which credential
     may apply DDL to a schema. :func:`role_for_schema` answers which credential serves requests
     and :func:`owner_role_for_schema` answers which principal owns the objects; this one answers
-    which of the fifteen login roles is permitted to become that owner.
+    which of the sixteen login roles is permitted to become that owner.
 
     Parameters
     ----------
@@ -1621,11 +1660,19 @@ def error_code(exc: BaseException) -> str:
     # ``response`` at all, and a client error can carry one whose ``Error`` member is missing,
     # so indexing would raise a ``KeyError`` or ``TypeError`` from inside an exception handler
     # and mask the failure the caller actually needs to see.
+    # Refactoring Rationale: both members are tested against ``Mapping`` rather than ``dict``,
+    # where they were tested against ``dict``. botocore builds the response as a plain ``dict``, so
+    # the narrower test worked in production and failed silently everywhere else: a caller wrapping
+    # the document in ``MappingProxyType`` -- which is how this package's own doubles publish an
+    # immutable response, and how a defensive caller would publish one -- got ``""`` back, and
+    # ``""`` matches no error code, so every refusal read as an unrecognised failure. That turned a
+    # generation-claim conflict into a re-raised error at the one moment two concurrent runs met.
+    # ``Mapping`` admits both and excludes nothing the narrower test admitted.
     response = getattr(exc, "response", None)
-    if not isinstance(response, dict):
+    if not isinstance(response, Mapping):
         return ""
     error = response.get("Error")
-    if not isinstance(error, dict):
+    if not isinstance(error, Mapping):
         return ""
     code = error.get("Code")
     return code if isinstance(code, str) else ""
@@ -2359,7 +2406,7 @@ def resolve_alternate_database_users() -> Mapping[str, frozenset[str]]:
 
     The accepted syntax is a comma-separated list of ``role=alternate`` pairs, for example one
     entry per role that is under alternating rotation. The role on the left must be one of the
-    **fifteen** login roles in :data:`LOGIN_ROLE_NAMES` -- the eight connection roles of
+    **sixteen** login roles in :data:`LOGIN_ROLE_NAMES` -- the eight connection roles of
     :data:`SCHEMA_ROLES` together with the seven ``_migrator`` roles -- and a role may appear more
     than once, which is how a rotation that has provisioned more than one clone is expressed.
 
@@ -2390,8 +2437,8 @@ def resolve_alternate_database_users() -> Mapping[str, frozenset[str]]:
     ------
     ConfigurationError
         If any entry is empty, does not contain exactly one ``=``, names a role that is not one of
-        the fifteen login roles, has an alternate that is not a plain PostgreSQL role name, or has
-        an alternate that is itself one of the fifteen login roles. Assumptions: widening the KEY
+        the sixteen login roles, has an alternate that is not a plain PostgreSQL role name, or has
+        an alternate that is itself one of the sixteen login roles. Assumptions: widening the KEY
         domain does not widen what may be allowlisted -- a login role is still refused as another
         role's alternate, which is what keeps this variable from being usable to grant one role
         the credential of another.
@@ -2401,7 +2448,7 @@ def resolve_alternate_database_users() -> Mapping[str, frozenset[str]]:
         return MappingProxyType({})
 
     description = f"the environment variable {ENV_ALTERNATE_DB_USERS}"
-    # Assumptions: the accepted keys are ALL FIFTEEN login roles, not just the eight connection
+    # Assumptions: the accepted keys are ALL SIXTEEN login roles, not just the eight connection
     # roles. A ``_migrator`` credential is rotated by the same operator procedure as a runtime
     # one, so an allowlist that could not name it would refuse a legitimately rotated migration
     # credential -- and the refusal would present as a service failing to start rather than as a
@@ -2436,7 +2483,7 @@ def resolve_alternate_database_users() -> Mapping[str, frozenset[str]]:
             # Assumptions: an unrecognised role is refused rather than ignored. An ignored
             # entry is the worst outcome available here, because the operator believes an
             # exception is in force, the misspelling means it is not, and the discovery comes as
-            # a refused connection during a rotation window. The fifteen accepted roles are named
+            # a refused connection during a rotation window. The sixteen accepted roles are named
             # in the message for the same reason :func:`role_for_schema` names the eight schemas:
             # they are published by the bootstrap script, so nothing resolved is disclosed.
             raise ConfigurationError(
@@ -2457,7 +2504,7 @@ def resolve_alternate_database_users() -> Mapping[str, frozenset[str]]:
             # write grants on the ledger and account schemas -- and be treated as legitimate.
             raise ConfigurationError(
                 f"{description} allowlists an owning role as the alternate for role {role!r}; "
-                f"an alternate must be a rotation user distinct from all fifteen login roles"
+                f"an alternate must be a rotation user distinct from all sixteen login roles"
             )
         allowlist.setdefault(role, set()).add(alternate)
 
@@ -2862,7 +2909,7 @@ def database_secret_name_for_role(role: str) -> str:
     Raises
     ------
     ConfigurationError
-        If the role is not text, is blank, or is not one of the fifteen login roles the bootstrap
+        If the role is not text, is blank, or is not one of the sixteen login roles the bootstrap
         script creates.
 
     Notes
@@ -3101,8 +3148,49 @@ def resolve_migration_settings(schema: str) -> AuroraConnectionSettings:
     return _resolve_settings_for_role(schema, migration_role_for_schema(schema))
 
 
+def resolve_verifier_settings() -> AuroraConnectionSettings:
+    """Resolve the connection parameters for the read-only role that certifies a load.
+
+    Purpose
+    -------
+    Supply the one credential that may read every migrated record and write none of them, so that
+    a post-load verification authenticates as an identity incapable of altering its own evidence.
+    It is a separate entry point rather than a schema passed to :func:`resolve_aurora_settings`
+    because the verifier spans five schemas and owns none, and because a caller reaching for
+    verification authority has to say so.
+
+    Parameters
+    ----------
+    None
+        The role is :data:`VERIFIER_ROLE` and the scope reported in a failure is
+        :data:`VERIFICATION_SCOPE`; neither is a caller's choice. Accepting a role here would
+        reintroduce exactly the defect this entry point removes -- a verification that runs as
+        whichever identity it was handed.
+
+    Returns
+    -------
+    AuroraConnectionSettings
+        A frozen descriptor whose rendering masks the password, resolved through the same
+        endpoint, user-name assertion and transport requirements every other role goes through.
+
+    Raises
+    ------
+    ConfigurationError
+        If the environment name or prefix cannot be resolved; if any parameter or the secret is
+        absent, unreadable or malformed; if the secret's user name is neither
+        :data:`VERIFIER_ROLE` nor an alternate allowlisted for it; if the requested SSL mode is
+        weaker than :data:`REQUIRED_SSL_MODE`; or if the TLS trust anchor is absent or unreadable.
+    """
+    # Assumptions: the shared resolver is reused rather than the secret being read directly, so
+    # the verifier's credential is subject to the SAME user-name assertion every other role's is.
+    # That assertion is what catches a secret populated with another role's payload -- which here
+    # would mean a verification silently running as a write-capable identity, the one outcome
+    # this role exists to make impossible.
+    return _resolve_settings_for_role(VERIFICATION_SCOPE, VERIFIER_ROLE)
+
+
 def _resolve_settings_for_role(schema: str, role: str) -> AuroraConnectionSettings:
-    """Assemble one validated connection descriptor for a named role in a named schema.
+    """Assemble one validated connection descriptor for a named role in a named scope.
 
     Purpose
     -------
@@ -3113,7 +3201,9 @@ def _resolve_settings_for_role(schema: str, role: str) -> AuroraConnectionSettin
     Parameters
     ----------
     schema : str
-        The bounded-context schema the settings were requested for. Reported in failure messages.
+        The scope the settings were requested for, reported in failure messages: one of the eight
+        bounded-context schema names, or :data:`VERIFICATION_SCOPE` for the verifier, which spans
+        five schemas and owns none.
     role : str
         The login role to resolve, already derived by the calling entry point.
 

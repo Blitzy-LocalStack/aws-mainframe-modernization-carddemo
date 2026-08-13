@@ -296,13 +296,17 @@ READMEs' business:
 | Outcome | Mechanism | Where it lives |
 |---|---|---|
 | **Direct hit**, file status `00` | composed key found; its rate is used | **this folder** |
-| **`'DEFAULT'` fallback**, file status `23` | `:436-437` moves the literal `'DEFAULT'` into the group id and `:438` re-reads through `1200-A-GET-DEFAULT-INT-RATE` (`:443-460`) | `../default_fallback` |
-| **Zero rate** | `:214` `IF DIS-INT-RATE NOT = 0` is false, so **no interest transaction is written at all** and the fee paragraph is skipped | documented as a contrast inside `../zero_balance`, whose own driver is a zero **balance** and which therefore still writes a transaction |
+| **`'DEFAULT'` fallback**, file status `23` | `:436-437` moves the literal `'DEFAULT'` into the group id and `:438` re-reads through `1200-A-GET-DEFAULT-INT-RATE` (`:443-460`) | [`../default_fallback`](../default_fallback/README.md) |
+| **Zero rate** | `:214` `IF DIS-INT-RATE NOT = 0` is false, so **no interest transaction is written at all** and the fee paragraph is skipped | documented as a contrast inside [`../zero_balance`](../zero_balance/README.md), whose own driver is a zero **balance** and which therefore still writes a transaction |
 
-Those two paths are written as plain code spans rather than as links because neither sibling
-README exists at the time this file is authored, and `docs/CODE_DOCUMENTATION_STANDARD.md`
-lines 932-933 require a path to a document that does not exist yet to be a plain code span so
-that no reader follows a reference to nothing.
+Refactoring Rationale: those two paths were written as plain code spans rather than as links,
+because neither sibling README existed when this file was authored and
+`docs/CODE_DOCUMENTATION_STANDARD.md` requires a path to a document that does not exist yet to be a
+plain code span so that no reader follows a reference to nothing. **Both now exist** -- master
+section 10's mandate is satisfied for all sixteen scenarios and machine-checked by
+`BatchFixtureContractTest` -- so the condition that required the code spans no longer holds and they
+are links. The convention itself is unchanged and still governs any future scenario documented
+before its siblings.
 
 ---
 
@@ -334,16 +338,33 @@ than a rounding choice. **`12.50` is asserted exactly, with no tolerance.** Mone
 point at every hop under master section 5.5, which also fixes what is excluded from the money
 path; that contract is cited rather than restated here.
 
-**Account balances.** One row per account, both carried in `acctdat.expected`:
+**Account balances.** Two values are stated per account and they are **not the same claim**.
+The *reference golden* column is the byte content of `acctdat.expected` under
+`tests/golden/interest/happy_path/`, which is what the immutable COBOL produces. The *migrated
+expectation* column is what the Java produces. They agree on the non-final account and diverge on
+the final one, because of the unreachable final flush established in section 2.2:
 
-| Account | Input `ACCT-CURR-BAL` | Expected | Encoded | Why |
-|---|---|---|---|---|
-| `00000000001` | `194.00` | **`206.50`** | `00000002065{` | `194.00 + 12.50` -- the control break to account 2 fired, so the `REWRITE` at `:356` executed |
-| `00000000002` | `158.00` | **`158.00`** | `00000001580{` | unchanged -- no control break follows it, so `1050-UPDATE-ACCOUNT` never runs for it (section 2.2) |
+| Account | Input `ACCT-CURR-BAL` | Reference golden | Encoded in the golden | Migrated expectation | Why the two columns read as they do |
+|---|---|---|---|---|---|
+| `00000000001` | `194.00` | **`206.50`** | `00000002065{` | **`206.50`**, identical | `194.00 + 12.50` -- the control break to account 2 fired, so the `REWRITE` at `:356` executed. Both implementations flush this account, so there is nothing to distinguish here |
+| `00000000002` | `158.00` | **`158.00`** | `00000001580{` | **`170.50`**, different | the reference never writes the final account back (section 2.2), so its golden carries the opening balance unchanged. The migrated rule flushes every account, adding the same `12.50`: `158.00 + 12.50 = 170.50`. Registered divergence **D-3** |
 
-`ACCT-CURR-BAL` is the **only** field of account `00000000001` that changes. Both cycle fields
-remain `00000000000{` in the golden, exactly as section 2.2 predicts, because the resets at
-`:353-354` write a zero over a zero.
+Assumptions: the `158.00` in the reference column is a **consequence of the baseline defect**, not
+a target result, and reading it as the expected outcome of a migrated run is the specific mistake
+this table exists to prevent. The value the migrated code is asserted against is `170.50` --
+`InterestCalculationServiceTest`, case *flush every account including the final one, the documented
+D-3 divergence*, which states both figures side by side for the same reason.
+
+Assumptions: nothing in `app/**` and nothing under `tests/golden/**` is edited to reconcile the two
+columns. The reference tree records what the reference does; the divergence is registered in
+`docs/architecture/cobol-to-service-traceability.md` under D-3; and the two artifacts are allowed to
+disagree because that disagreement is the documented behaviour rather than a fixture error.
+
+`ACCT-CURR-BAL` is the only field of account `00000000001` that changes, in both implementations.
+Both cycle fields remain `00000000000{` in the golden, exactly as section 2.2 predicts, because the
+resets at `:353-354` write a zero over a zero. Under the migrated rule account `00000000002` has its
+balance changed too, and its cycle fields are likewise rewritten from zero to zero, so the encoding
+of those two fields is the same either way.
 
 **Transaction count.** **Two** interest transactions, one per `TCATBAL` category row. The reason
 is structural rather than incidental: `:468` `PERFORM 1300-B-WRITE-TX` sits **inside**
@@ -463,9 +484,15 @@ exactly. Rejected for this folder for two reasons. First, the committed scenario
 32 bytes this folder asserts across its two `TRAN-ID` fields while proving nothing new about the
 rate path the scenario exists to exercise. Second, and more importantly, **the token is an
 opaque ten-character passthrough**, so the domain has to exercise both shapes for the
-passthrough to be genuinely tested rather than assumed: `../zero_balance` carries the compact
-form, this folder carries the ISO form, and neither is privileged. Master section 8.2 is the
-tree-level ruling and records the same division of labour.
+passthrough to be genuinely tested rather than assumed, and neither shape is privileged.
+Master section 8.2 is the tree-level ruling, and its measurement fixes where each shape
+lives: **all three** interest scenario goldens carry the ISO prefix -- this folder,
+`../default_fallback` and `../zero_balance` alike -- while the two interest end-to-end
+goldens, `tests/golden/interest/e2e_full_cycle_interest.expected` and
+`tests/golden/interest/e2e_interest_cycle_transactions.expected`, carry the compact
+`2022071800`. The module discharges the two-shape requirement by parameterising **one**
+launch over both tokens rather than by splitting them across scenario folders, which is
+why no scenario folder in this domain is the compact exemplar.
 
 Assumptions: `services/batch-service/README.md` line 506 describes the compact token as
 `yyyyMMdd` followed by the literal `00` and "not an ISO date". That is accurate as a description

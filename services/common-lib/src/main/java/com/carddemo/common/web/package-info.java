@@ -31,7 +31,7 @@
  *
  * <h2>What this package holds, and what it deliberately does not</h2>
  *
- * <p>Three production types sit beside this charter:
+ * <p>Four production types sit beside this charter:
  *
  * <ul>
  *   <li>{@code PageResponse} -- the keyset page envelope, a record of FIVE
@@ -72,7 +72,12 @@
  * document that claims to close this package's set. A roster that omits a type is
  * worse than no roster: it is the document a reviewer consults when deciding
  * whether a proposed class belongs here, so an omission reads as a judgement that
- * the omitted type does not belong.</p>
+ * the omitted type does not belong. It then said THREE once the body ceiling had
+ * been added beside them, which is the same omission a second time and by the same
+ * mechanism: the count sits in a sentence that adding a class never has to touch.
+ * The roster and its count are now re-derived from this directory by
+ * {@code SharedKernelInventoryTest}, so a fifth type arriving here fails the build
+ * instead of being left out of the document that closes the set.</p>
  *
  * <p>Assumptions: the middle step of that resolution is what makes the identity
  * canonical rather than merely present. Without it a request carrying no
@@ -296,7 +301,7 @@
  * <h2>The three contracts this package owns</h2>
  *
  * <p>Everything above reduces to three commitments, stated plainly so that they
- * can be checked against the three production types rather than inferred from
+ * can be checked against the four production types rather than inferred from
  * them:
  *
  * <ol>
@@ -322,28 +327,22 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel holds <b>42 production classes</b> and <b>11</b> package
- * charters -- one at the kernel root and one for each subpackage -- for <b>53</b>
- * compilation units in total. This package contributes four of the forty-two
- * and one of the eleven. The breakdown is given so that a reader can re-derive the
- * total instead of trusting it:
+ * <p>The shared kernel holds <b>44 production classes</b> and <b>11</b> package
+ * charters -- one at the kernel root and one for each subpackage -- for <b>55</b>
+ * compilation units in total. This package contributes four of the production
+ * classes and one of the charters.
  *
- * <pre>
- * package           production classes
- * common (root)                      1
- * money                              2
- * codec                              6
- * error                              7
- * web                                4
- * security                           9
- * observability                      4
- * time                               1
- * validation                         2
- * messaging                          3
- * control                            4
- * </pre>
+ * <p>Refactoring Rationale: the per-package BREAKDOWN that stood here is gone, and
+ * the deletion is deliberate. It was a third copy of the table in
+ * {@code com.carddemo.common}'s charter -- {@code codec} carried the second -- nothing
+ * re-derived it, and it drifted: it recorded three production classes for
+ * {@code messaging} where that directory held four, and the totals beside it read 42
+ * and 53 while the two labelled sums below, which {@code SharedKernelInventoryTest}
+ * re-derives on every build, read 44 and 55. The breakdown was written so a reader
+ * could re-derive a total rather than trust it, and an unmeasured copy inverted that:
+ * the derivation was the stale part. What remains is the pair of sums a test measures.
  *
- * <p>Those eleven sum to 42, the kernel root itself contributing one -- the
+ * <p>Cross-check by production class, the kernel root contributing one -- the
  * auto-configuration class that registers this package's two filters, and the
  * meter filter, the money codec module and the error advice, in every service:
  *
@@ -351,7 +350,7 @@
  * root 1 + money 2 + codec 6 + error 7 + web 4 + security 9 + observability 4 + time 1 + validation 2 + messaging 4 + control 4 = 44
  * </pre>
  *
- * <p>Adding the eleven charters gives 53:
+ * <p>Cross-check by compilation unit, adding one charter per package:
  *
  * <pre>
  * root 2 + money 3 + codec 7 + error 8 + web 5 + security 10 + observability 5 + time 2 + validation 3 + messaging 5 + control 5 = 55
@@ -363,11 +362,12 @@
  * this package: web 4 production + 1 charter = 5 compilation units
  * </pre>
  *
- * <p>Assumptions: the authoritative totals are <strong>42 production classes and
- * 53 compilation units, 11 of the latter being charters</strong>. The canon above
- * is stated as a breakdown and not merely as a total for a reason: a bare total
- * invites a reader to trust it, whereas a per-subpackage list can be re-derived,
- * so any figure that does not reproduce these two sums is wrong on its face.
+ * <p>Assumptions: the authoritative totals are <strong>44 production classes and
+ * 55 compilation units, 11 of the latter being charters</strong>. They are stated
+ * beside the two labelled sums and not merely as bare totals for a reason: a bare
+ * total invites a reader to trust it, whereas a labelled sum is re-derived from the
+ * directory by a test, so any figure that does not reproduce these two sums is wrong
+ * on its face.
  *
  * <p>Refactoring Rationale: this section stated the migration plan's TARGET as the
  * canon -- 21 classes, 9 charters, 30 units, and a nine-row breakdown. The delivered

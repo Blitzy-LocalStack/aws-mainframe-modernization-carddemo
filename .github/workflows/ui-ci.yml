@@ -154,10 +154,21 @@ jobs:
         with:
           persist-credentials: false
 
-      # Assumptions: Node 22.23.1 matches the pinned UI build-stage line. The ACTION
-      # major and the Node version it installs are independent: setup-node v7 runs
-      # its own code on node24 and still installs whatever `node-version` names, so
-      # the reviewed 22.23.1 line is unchanged by the move below.
+      # Assumptions: Node 22.23.2 matches the pinned UI build-stage line and the
+      # engines floor ui/package.json declares, and all three move together. The
+      # ACTION major and the Node version it installs are independent: setup-node v7
+      # runs its own code on node24 and still installs whatever `node-version` names,
+      # so the reviewed 22.23.2 line is unaffected by the move below.
+      # Refactoring Rationale: this was 22.23.1, advanced for the same reason as the
+      # image pin rather than for anything about this workflow. Node's 29 July 2026
+      # release fixed eleven CVEs including three HIGH -- CVE-2026-56846 (HTTP/2
+      # maxSessionMemory evasion), CVE-2026-56848 (heap use-after-free in bundled
+      # nghttp2) and CVE-2026-58043 (Permission Model radix-prefix over-grant) --
+      # and 22.23.1 predates all three. Trade-offs: none of the three is reachable by
+      # a typecheck, lint or vite build, so this is hygiene rather than a fix for an
+      # exploitable path here; it is taken because leaving CI one patch behind the
+      # image it validates is how the two silently diverge, and because the version
+      # this job installs is the one whose `npm ci` resolution the reviewer trusts.
       # Trade-offs: TypeScript remains 6.0.3 because typescript-eslint 8.65.0
       # accepts >=4.8.4 <6.1.0; raising the compiler alone disables the
       # type-aware lint/JSDoc gate while leaving installation apparently green.
@@ -179,7 +190,7 @@ jobs:
       - name: Configure the reviewed Node runtime
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22.23.1"
+          node-version: "22.23.2"
           cache: npm
           cache-dependency-path: ui/package-lock.json
 

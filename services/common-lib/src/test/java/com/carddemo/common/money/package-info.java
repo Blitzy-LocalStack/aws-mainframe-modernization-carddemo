@@ -19,15 +19,16 @@
  * </pre>
  *
  * <p>Five contracts are exercised here, and they are deliberately five rather than one. Money is
- * exact fixed point carried at scale 2, and the kernel re-establishes that scale half-up wherever a
- * general scale reduction is needed. The monthly interest accrual is the one exception and needs its
- * own expectations: it truncates, once, after a full-precision product has been divided, because that
- * is what the reference statement does, and it is the one computation where the mode is observable at
- * all. Posting weighs an amount against a credit limit on an inclusive boundary. A disclosure-group key that is not found selects a named
- * default group's rate rather than failing the run. And an amount crosses an interface as
- * characters, never as a bare number. Each is asserted separately, because each fails independently
- * of the other four and a single aggregate expectation would report only that something differed
- * without saying which of the five it was.</p>
+ * exact fixed point carried at scale 2, and the kernel re-establishes that scale half-up wherever any
+ * scale reduction is needed. The monthly interest accrual needs its own expectations even though it
+ * shares that one mode, because what is particular to it is WHERE the single reduction falls -- once,
+ * after a full-precision product has been divided -- and because it is the one computation whose mode
+ * is observable against a reference statement at all. Posting weighs an amount against a credit limit
+ * on an inclusive boundary. A disclosure-group key that is not found selects a named default group's
+ * rate rather than failing the run. And an amount crosses an interface as characters, never as a bare
+ * number. Each is asserted separately, because each fails independently of the other four and a single
+ * aggregate expectation would report only that something differed without saying which of the five it
+ * was.</p>
  *
  * <p>Nothing here defines behaviour. Every expectation in this package is read out of an immutable
  * reference artifact and restated as a Java assertion: the money and rate pictures in
@@ -38,29 +39,32 @@
  * which requires a fixture record to match its copybook layout exactly, sign overpunch included.
  * Those artifacts are read as evidence and are never modified.</p>
  *
- * <h2>The monthly accrual truncates, once, and the vector that proves it</h2>
+ * <h2>The monthly accrual rounds half up, once, and the vectors that prove it</h2>
  *
  * <p>{@code app/cbl/CBACT04C.cbl} line 168 declares {@code 05 WS-MONTHLY-INT PIC S9(09)V99.}, a
  * receiving field of scale 2, and lines 464 and 465 compute
  * {@code ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200} into it carrying no {@code ROUNDED} phrase, so the
- * reference discards the excess fraction digits rather than rounding them. The target reproduces that
- * exactly: {@code Money#monthlyInterest} reduces its quotient with {@code BASELINE_INTEREST_ROUNDING},
- * which truncates toward zero, while every general scale reduction elsewhere in the type uses
- * {@code GENERAL_ROUNDING}, which is half-up. Expectations here pin both modes and pin which one
- * governs the accrual, because the two constants make the choice explicit in one place and a caller
- * cannot select a mode from any accrual signature.</p>
+ * reference discards the excess fraction digits rather than rounding them. The target does NOT
+ * reproduce that mode: {@code Money#monthlyInterest} reduces its quotient with
+ * {@code GENERAL_ROUNDING}, half up, which is the mode transformation rule T3 states for the money
+ * path without exception, and the resulting cent is registered as divergence {@code C-ROUNDING} in
+ * {@code docs/architecture/cobol-to-service-traceability.md}. Expectations here pin the mode, pin that
+ * it is the one mode the type declares, and pin the difference from the reference in both directions,
+ * so neither a silent revert to truncation nor a silent disappearance of the divergence passes.</p>
  *
- * <p>Assumptions: the mode is only observable on a quotient whose third fraction digit is five or
- * greater, so an expectation that does not reach that input class asserts nothing about rounding at
- * all. This is not a theoretical caution: the reference fixtures do not reach it. The happy-path
- * interest fixture supplies a category balance of {@code 1000.00} against a disclosure-group rate of
- * {@code 15.00}, where the formula yields {@code 12.5000} exactly, and at a rate of {@code 2.50}
- * against the same balance the quotient is {@code 2.08333...}; truncation and half-up agree on both.
- * Expectations here therefore carry a discriminating vector alongside the fixture vectors: a category
- * balance of {@code 1000.80} at a rate of {@code 2.50}, whose quotient is {@code 2.0850} exactly. The
- * required result is {@code 2.08} -- what the reference field receives -- where half-up would yield
- * {@code 2.09}, so the vector fails on any implementation that reaches for the general mode. Without
- * it the suite would report a passing rounding contract while never having exercised the rounding.</p>
+ * <p>Assumptions: the mode is only observable on a quotient landing exactly on a half cent, so an
+ * expectation that does not reach that input class asserts nothing about rounding at all. This is not a
+ * theoretical caution: the reference fixtures do not reach it, which is also why the divergence is
+ * unreachable on the shipped interest corpus. The happy-path interest fixture supplies a category
+ * balance of {@code 1000.00} against a disclosure-group rate of {@code 15.00}, where the formula yields
+ * {@code 12.5000} exactly, and at a rate of {@code 2.50} against the same balance the quotient is
+ * {@code 2.08333...}; truncation and half up agree on both. Expectations here therefore carry
+ * discriminating vectors alongside the fixture vectors: a category balance of {@code 1000.80} at a rate
+ * of {@code 2.50}, whose quotient is {@code 2.0850} exactly, and {@code 1000.00} at {@code 2.71}, whose
+ * quotient is {@code 2.2583...}. The required results are {@code 2.09} and {@code 2.26} where the
+ * reference field would receive {@code 2.08} and {@code 2.25}, so the vectors fail on any
+ * implementation that reduces by discarding the surplus digits. Without them the suite would report a
+ * passing rounding contract while never having exercised the rounding.</p>
  *
  * <p>The operand order is part of the same contract and is asserted with it. The product is formed
  * at full precision and only then divided, which is the order lines 464 and 465 use. Dividing

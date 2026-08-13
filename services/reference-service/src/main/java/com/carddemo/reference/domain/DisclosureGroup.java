@@ -121,24 +121,25 @@ import org.hibernate.type.SqlTypes;
  * rounding at all.</p>
  *
  * <p>Assumptions: the rounding contract is likewise cited and not restated. {@code Money} declares
- * two modes, each fixed to its operation and neither selectable by a caller, because a selectable
- * mode would be a second money contract in disguise: {@code Money.GENERAL_ROUNDING} is
- * {@code RoundingMode.HALF_UP} and governs the reduction of a supplied amount and general
- * multiplication and division, while {@code Money.BASELINE_INTEREST_ROUNDING} is
- * {@code RoundingMode.DOWN} and governs {@code Money.monthlyInterest(BigDecimal)} alone.
+ * ONE mode, fixed at the type and selectable by no caller, because a selectable mode would be a second
+ * money contract in disguise: {@code Money.GENERAL_ROUNDING} is {@code RoundingMode.HALF_UP} and
+ * governs every reduction that type performs, the accrual quotient included.
  * {@code Money.MONTHLY_RATE_DIVISOR} preserves the reference literal 1200 of L465 as one combined
  * divisor, and {@code Money.monthlyInterest(BigDecimal)} reproduces L464 to L465 by forming the
  * product first and reducing exactly once at the division. The token {@code ROUNDED} appears nowhere
- * in the 652 lines of {@code app/cbl/CBACT04C.cbl}, so the reference program truncates toward zero --
- * which is what the accrual mode reproduces, and which is why the accrual is the one operation not
- * governed by the general mode.</p>
+ * in the 652 lines of {@code app/cbl/CBACT04C.cbl}, so the reference program discards its surplus
+ * digits where the target rounds them; that difference is registered as divergence {@code C-ROUNDING}
+ * and belongs to the accrual, not to this type, which holds a rate and reduces nothing.</p>
  *
- * <p>Refactoring Rationale: this paragraph described a single half-up mode and recorded the resulting
- * cent as divergence C-ROUNDING, settled elsewhere. The divergence is withdrawn and the identifier
- * survives only as a withdrawal record in
- * {@code docs/architecture/cobol-to-service-traceability.md} section 7.5. This entity is worth
- * correcting even though it performs no arithmetic, because the rate it carries is one of the two
- * operands of that formula and a reader arrives here looking for the contract the rate feeds.</p>
+ * <p>Refactoring Rationale: this paragraph twice described the opposite disposition -- first a single
+ * half-up mode with the resulting cent registered, then a second truncating mode with the divergence
+ * withdrawn. The half-up reading is restored and {@code C-ROUNDING} is a LIVE entry in section 7.4 of
+ * {@code docs/architecture/cobol-to-service-traceability.md} rather than a withdrawal record in 7.5,
+ * because transformation rule T3 names one mode for the money path and states no exception for the
+ * accrual, and the plan admits a registered behavioural difference from the reference where it does not
+ * admit an unstated departure from a frozen rule. This entity is worth keeping accurate even though it
+ * performs no arithmetic, because the rate it carries is one of the two operands of that formula and a
+ * reader arrives here looking for the contract the rate feeds.</p>
  *
  * <p>Alternatives Considered: this member is a {@code BigDecimal} rather than a
  * {@code com.carddemo.common.money.Money}. {@code Money} was weighed and deliberately not used on

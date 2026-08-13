@@ -13,11 +13,15 @@
 #   contexts rather than by a browser. Five are DECISION-PATH reads that the
 #   pending-authorization and transaction contexts issue while deciding: the
 #   three cross-reference lookups, the account lookup and the customer presence
-#   check. The remaining two -- the ascending customer scan and the keyed
-#   customer record read -- are the migrated surface of app/cbl/CBCUS01C.cbl and
-#   disclose a whole customer record; they require a DIFFERENT scope, declared on
-#   each as an x-carddemo-required-scope, and no caller in this deployment issues
-#   either. The decision-path client is
+#   check. One of those five -- the account-keyed cross-reference lookup -- is
+#   additionally the ONLY operation in this document that answers with an unmasked
+#   primary account number, and it therefore carries a scope of its own, granted to
+#   the transaction context alone; every other card number this document publishes
+#   is masked to its last four digits by pattern. The remaining two -- the
+#   ascending customer scan and the keyed customer record read -- are the migrated
+#   surface of app/cbl/CBCUS01C.cbl and disclose a whole customer record; they
+#   require a DIFFERENT scope, declared on each as an x-carddemo-required-scope,
+#   and no caller in this deployment issues either. The decision-path client is
 #   services/authorization-service/src/main/java/com/carddemo/authorization/
 #   service/RestAccountContextClient.java, which builds each path itself and
 #   deserialises each response into its own record. The modules are separate
@@ -82,14 +86,40 @@
 #       this entry read "No query parameter is accepted by any operation", which
 #       was true of the three-operation surface it was written for and false of
 #       both paged walks added since.
-#     - The correlation header the platform propagates is accepted on every path
-#       in this system and is not redeclared per operation here.
+#     - X-Correlation-Id, optional on EVERY operation, declared once at
+#       components/parameters/CorrelationIdHeader and referenced by each.
+#       ⚠️ Refactoring Rationale: this entry read "the correlation header the
+#       platform propagates is accepted on every path in this system and is not
+#       redeclared per operation here", and treating it as a platform concern was
+#       the error. The shared filter does not merely propagate the value, it
+#       VALIDATES it and answers 400 for one that is over-long, carries a
+#       character outside the admitted set, or has the shape of a primary account
+#       number -- so the inbound shape was part of this contract while being
+#       absent from it, and a caller could not learn which values would be
+#       refused. The response side was omitted for the same reason and was wrong
+#       for a further one: the filter sets the header on every response including
+#       the refusals, so this document withheld the only handle a caller has into
+#       this service's diagnostics. Both directions are now declared, on every
+#       operation and every response, and asserted by AccountContextContractTest.
 #
 # Return values:
-#     - CardXrefView, from the two internal cross-reference lookups: the account
-#       and the customer the card belongs to. It does not echo the card number.
+#     - X-Correlation-Id on every response of every operation, successful or not,
+#       declared once at components/headers/XCorrelationId.
+#     - CardXrefView, from the CARD-keyed internal cross-reference lookup: the
+#       account and the customer the card belongs to. It does not echo the card
+#       number, because its caller supplied one.
+#     - CardXrefByAccountView, from the ACCOUNT-keyed internal cross-reference
+#       lookup: the same two identifiers plus the selected card number IN FULL,
+#       because its consumer writes that value into its ledger row as the row's
+#       key. It is the only unmasked card number in this document, it is the reason
+#       that operation carries a scope of its own, and the schema records why a
+#       masked value could not serve.
+#       ⚠️ Refactoring Rationale: this entry read "CardXrefView, from the two
+#       internal cross-reference lookups", which described a state in which the
+#       account-keyed caller received no card number at all and could produce no
+#       ledger row.
 #     - CardXrefPage, from the internal by-account cross-reference search: one
-#       keyed page of rows with its two boundary tokens.
+#       keyed page of rows with its two boundary tokens, every card number masked.
 #     - AccountContextView, from the internal account lookup: the credit limit,
 #       the cash credit limit and the posted balance, each rendered as a JSON
 #       string.
@@ -334,6 +364,8 @@ paths:
         path.
       security:
         - internalServiceToken: []
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
       requestBody:
         description: >-
           The primary account number to resolve, as the sole input. It travels in
@@ -352,6 +384,9 @@ paths:
             customer it belongs to and does not echo the card number: the caller
             supplied it, so returning it would place a primary account number in
             a further response body and a further client's memory for no gain.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
             application/json:
               schema:
@@ -364,15 +399,26 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           description: >-
-            No cross-reference row exists for the card. The problem document's
-            detail names no part of the card number, because the caller already
+            No cross-reference row exists for the card. The error body's
+            message names no part of the card number, because the caller already
             knows which card it asked about. The calling context reads this
             status as its card-not-found decision input, which corresponds to
             reject reason 100 in the reference posting program.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -380,6 +426,13 @@ paths:
     post:
       tags: [internal, card-cross-reference]
       operationId: lookupCardCrossReferenceByAccount
+      # WHY : Purpose: this operation states its required scope on ITSELF, as the two
+      #   whole-customer-record reads do, because it is the one cross-reference address
+      #   whose answer carries an unmasked primary account number. The scope is granted
+      #   to the transaction context alone in the shared per-caller table, so a token
+      #   minted by the authorization context for the card-keyed lookup beside this one
+      #   is refused here rather than admitted to a disclosure it has no use for.
+      x-carddemo-required-scope: internal:account-context.card-xref.resolve-card-number
       summary: Resolve an account to the cross-reference row its lowest card holds.
       description: >-
         This is the CXACAIX access path as a single keyed read. The baseline
@@ -408,6 +461,8 @@ paths:
         may not hold.
       security:
         - internalServiceToken: []
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
       requestBody:
         description: >-
           The internal account identifier whose cross-reference row is wanted, as
@@ -444,10 +499,32 @@ paths:
             primary account number has no reader, while this one answers a machine
             operation whose consumer writes the value into a ledger row as a KEY, so
             a masked value would be a different key and the transaction would be
-            written against a card that does not exist. What limits the exposure is
-            reachability instead -- this prefix requires a machine token, the public
-            gateway publishes no route to it, and the load balancer forwards it only
-            from inside the network.
+            written against a card that does not exist.
+
+
+            Assumptions: the disclosure is bounded by a scope of its own rather than
+            by reachability alone. This prefix requires a machine token, the public
+            gateway publishes no route to it and the load balancer forwards it only
+            from inside the network -- but every internal caller shares that network
+            position, so reachability could not distinguish the one caller that needs
+            the value from the one that does not. The operation demands
+            internal:account-context.card-xref.resolve-card-number, granted to the
+            transaction context alone, so the authorization context's credential no
+            longer reaches it.
+
+
+            Alternatives Considered: answering with a purpose-bound opaque reference
+            and resolving the digits behind this context. Rejected because the
+            consumer PERSISTS the value as a parity-mandated ledger key --
+            TRAN-CARD-NUM PIC X(16) -- so a handle stored in its place would be a key
+            no reference program could produce and no golden-master comparison could
+            match, and exchanging the handle for the digits one call later discloses
+            the same digits to the same caller for an extra round trip. The full
+            reasoning, and the third alternative of moving the ledger write into this
+            context, are recorded on CardXrefByAccountView.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
             application/json:
               schema:
@@ -465,10 +542,21 @@ paths:
             DID-NOT-FIND-ACCT-IN-CARDXREF with the sentence "Did not find this
             account in account card xref file". The calling context reads this
             status as its account-not-cross-referenced decision input.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -523,6 +611,7 @@ paths:
       security:
         - internalServiceToken: []
       parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
         - name: cursor
           in: query
           required: false
@@ -530,8 +619,7 @@ paths:
             The sealed boundary token the previous page ended on. Omitted to read
             the first page.
           schema:
-            type: string
-            maxLength: 256
+            $ref: '#/components/schemas/CursorToken'
         - name: direction
           in: query
           required: false
@@ -561,6 +649,9 @@ paths:
             no card yields an EMPTY page rather than a 404, matching an
             alternate-index browse that ends immediately. Every card number is
             masked to its last four digits.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
             application/json:
               schema:
@@ -571,14 +662,25 @@ paths:
             could not be opened because it was sealed for another query, another
             subject or the other direction. The fieldErrors array names the
             member at fault.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -612,6 +714,8 @@ paths:
         about to commit or roll back, so neither would reuse a cached answer.
       security:
         - internalServiceToken: []
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
       requestBody:
         description: >-
           The internal account identifier to resolve, as the sole input. This
@@ -626,6 +730,9 @@ paths:
       responses:
         '200':
           description: The account exists. Every monetary value is a JSON string.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
             application/json:
               schema:
@@ -641,10 +748,21 @@ paths:
             The account master holds no such row. The calling context reads this
             status as its account-not-found decision input, which corresponds to
             reject reason 101 in the reference posting program.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -716,6 +834,7 @@ paths:
         - bearerAuth: []
       x-required-authorities: [carddemo-admin, carddemo-user]
       parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
         - $ref: '#/components/parameters/IfMatchHeader'
       requestBody:
         description: >-
@@ -740,6 +859,8 @@ paths:
           headers:
             ETag:
               $ref: '#/components/headers/RevisionETag'
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
             application/json:
               schema:
@@ -757,8 +878,11 @@ paths:
             numeric picture cannot carry, or was one part of a telephone number
             or date of birth whose other parts were not supplied; or a submitted
             state, postal or area code lies outside a reference allow-list.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
         '401':
@@ -769,10 +893,21 @@ paths:
           description: >-
             The account master or the customer the account resolves to holds no
             such row. Nothing was written.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        # WHY : Assumptions: this status is emitted by the SHARED advice in common-lib and
+        #       not by any local handler, so the wording below and the wording that advice
+        #       carries must agree. Recording the coupling here is what stops one of the
+        #       two being edited alone.
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         # WHY : Assumptions: the sentence in the example below is reproduced BYTE-FOR-BYTE
         #       from app/cbl/COACTUPC.cbl, where 88 DATA-WAS-CHANGED-BEFORE-UPDATE is
         #       declared at L521 with its literal at L522, and two of its properties are
@@ -784,10 +919,6 @@ paths:
         #       value. No character count is asserted for it here on purpose: the physical
         #       line is the only authority for its length, and a count written into prose
         #       is a second place for that fact to be wrong.
-        # WHY : Assumptions: this status is emitted by the SHARED advice in common-lib and
-        #       not by any local handler, so the wording below and the wording that advice
-        #       carries must agree. Recording the coupling here is what stops one of the
-        #       two being edited alone.
         '409':
           description: >-
             The precondition does not name the stored state, so the row was
@@ -798,8 +929,11 @@ paths:
             without a second round trip to discover what it changed to. The same
             status answers a blank precondition and a version the persistence
             provider found stale between this transaction's read and its flush.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
               # WHY : Assumptions: every member below is the value the shared advice actually
@@ -813,6 +947,15 @@ paths:
               #       the FieldError schema reserves for a 409. An example that disagreed
               #       with the advice would be a client's binding failure rather than a
               #       documentation nit, since this body is the only one a 409 ever carries.
+              # WHY : ⚠️ Refactoring Rationale: the fieldErrors entry below carried a fourth
+              #       member, `error: true`, and it has been removed. It was invalid twice
+              #       over: FieldError below declares three properties with
+              #       additionalProperties false, so this example did not validate against
+              #       the schema in the same document; and the emitted record suppresses the
+              #       derived predicate with @JsonIgnore, so no response has carried it since
+              #       that member was withdrawn at the source. An example is the part of a
+              #       contract a reader copies, so an invalid one propagates into client
+              #       fixtures and test doubles that then fail against the real body.
               example:
                 code: 'CARDDEMO-0409'
                 secondaryCode: ''
@@ -827,8 +970,11 @@ paths:
                   - field: version
                     state: NOT_OK
                     message: 'Record changed by some one else. Please review'
-                    error: true
                 abend: null
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -893,6 +1039,8 @@ paths:
       security:
         - bearerAuth: []
       x-required-authorities: [carddemo-admin, carddemo-user]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
       requestBody:
         description: >-
           The account to read, as the sole input. It is carried in the body rather than
@@ -923,6 +1071,8 @@ paths:
           headers:
             ETag:
               $ref: '#/components/headers/RevisionETag'
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
             application/json:
               schema:
@@ -947,8 +1097,11 @@ paths:
           description: >-
             The submitted account identifier was absent, would not convert to a
             number, or converted to zero. The fieldErrors array names accountId.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
               # WHY : Assumptions: the code, severity and subsystem below are read from
@@ -965,6 +1118,12 @@ paths:
               #       null because the ApiError schema reserves it for a 500, and its
               #       presence is what distinguishes a service fault from a refusal the
               #       caller can correct.
+              # WHY : ⚠️ Refactoring Rationale: the fieldErrors entry below carried a fourth
+              #       member, `error: true`, and it has been removed for the reason recorded
+              #       at the 409 example on the update operation: FieldError declares three
+              #       properties with additionalProperties false, so the example did not
+              #       validate against its own document, and the emitted record suppresses
+              #       the derived predicate with @JsonIgnore, so no response carries it.
               example:
                 code: 'CARDDEMO-0400'
                 secondaryCode: ''
@@ -979,7 +1138,6 @@ paths:
                   - field: accountId
                     state: NOT_OK
                     message: 'Account Filter must  be a non-zero 11 digit number'
-                    error: true
                 abend: null
         '401':
           $ref: '#/components/responses/Unauthorized'
@@ -990,10 +1148,21 @@ paths:
             The account master holds no such row, or the account has no
             cross-reference row, or the row names a customer the customer master
             does not hold.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -1088,6 +1257,7 @@ paths:
             schema:
               $ref: '#/components/schemas/AccountLookupRequest'
       parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
         - name: cursor
           in: query
           required: false
@@ -1107,8 +1277,7 @@ paths:
             so without it a page could begin part way through another account's
             rows, or come back empty, with nothing in the response saying so.
           schema:
-            type: string
-            maxLength: 256
+            $ref: '#/components/schemas/CursorToken'
         - name: direction
           in: query
           required: false
@@ -1131,6 +1300,9 @@ paths:
             immediately: an account legitimately has no card, and that is not an
             absence of the account. Every card number is masked to its last four
             digits.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
             application/json:
               schema:
@@ -1142,14 +1314,25 @@ paths:
             could not be opened -- altered, expired, or issued for another query,
             caller, account or direction. The fieldErrors array names accountId,
             direction or cursor accordingly.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -1199,6 +1382,7 @@ paths:
       security:
         - internalServiceToken: []
       parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
         - name: cursor
           in: query
           required: false
@@ -1208,8 +1392,7 @@ paths:
             page, because blank is treated as a subset of error rather than as a
             third state and is therefore never carried into the sealer.
           schema:
-            type: string
-            maxLength: 256
+            $ref: '#/components/schemas/CursorToken'
         - name: size
           in: query
           required: false
@@ -1230,6 +1413,9 @@ paths:
             One ascending page. An exhausted scan answers 200 with no rows and no
             boundaries rather than 404, because reaching the end of a master is a
             normal outcome of a walk and not a missing resource.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
             application/json:
               schema:
@@ -1240,6 +1426,10 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -1290,6 +1480,8 @@ paths:
         than by construction.
       security:
         - internalServiceToken: []
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
       requestBody:
         description: >-
           The nine-digit customer identifier whose existence is being tested, as the
@@ -1303,6 +1495,9 @@ paths:
       responses:
         '204':
           description: The customer master holds the row. There is no body.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
         # WHY : Assumptions: 400 is declared because a caller can provoke it. The
         #       identifier is bound as a bounded number, so a non-numeric or
         #       out-of-range value is refused at the binding stage and the shared
@@ -1319,6 +1514,17 @@ paths:
           description: >-
             The customer master holds no such row. There is no body on this answer
             either, so both outcomes of the check have one shape.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -1379,6 +1585,8 @@ paths:
         the whole-record read below requires.
       security:
         - internalServiceToken: []
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
       requestBody:
         description: >-
           The nine-digit customer identifier whose display fields are wanted, as the
@@ -1395,6 +1603,9 @@ paths:
           description: >-
             The customer exists. The body carries exactly nine fields and no
             protected value of any kind.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
             application/json:
               schema:
@@ -1410,10 +1621,21 @@ paths:
             The customer master holds no such row. The consumer reads this status as
             its own absent-customer outcome and renders the screen with the display
             fields unpopulated.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -1465,6 +1687,8 @@ paths:
         a whole customer record.
       security:
         - internalServiceToken: []
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
       requestBody:
         description: >-
           The nine-digit customer identifier whose record is wanted, as the sole
@@ -1483,6 +1707,9 @@ paths:
             which is the separation the reference itself keeps: app/cbl/COACTUPC.cbl
             L671 declares the screen value as characters and L672 with L673
             redefines the same storage as digits.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
             application/json:
               schema:
@@ -1497,10 +1724,21 @@ paths:
           description: >-
             The customer master holds no such row, carrying the reference sentence
             for that outcome verbatim.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
           content:
-            application/problem+json:
+            application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -1532,8 +1770,20 @@ components:
       #   is identical and only the claim value differs -- so two schemes would describe one mechanism
       #   twice. Which of the two an operation requires is stated in that operation's description,
       #   which is where an operation-specific fact belongs.
+      # WHY : ⚠️ Refactoring Rationale: the extension names FIVE scopes where it named four,
+      #   and the addition is a narrowing rather than a new capability. The three
+      #   cross-reference addresses answered to ONE scope, and one of them --
+      #   /api/v1/card-xrefs/lookup-by-account -- answers with an UNMASKED primary account
+      #   number, because its consumer writes that value into its ledger row as the row's
+      #   key. Every holder of the cross-reference read scope could therefore provoke that
+      #   disclosure, including the authorization context, which calls the card-keyed form
+      #   and has no use for a clear card number. The disclosing address now demands
+      #   internal:account-context.card-xref.resolve-card-number, which the shared
+      #   per-caller table grants to the transaction context alone, so the exposure is
+      #   bound to the one purpose that requires it.
       x-carddemo-required-scope:
         - internal:account-context.card-xref.read
+        - internal:account-context.card-xref.resolve-card-number
         - internal:account-context.account.read
         - internal:account-context.customer.read
         - internal:customer-master.read
@@ -1563,14 +1813,18 @@ components:
         a fresh one per request.
 
 
-        Four scopes exist and each governs one group of routes. The five
-        decision-path reads take one scope per operation family -- three
-        cross-reference reads, one account read and one customer read -- each
-        named in x-carddemo-required-scope above. The two operations that
-        disclose a whole customer record require
-        x-carddemo-customer-master-scope instead, and each declares that
-        requirement on itself. A token carrying one scope does not satisfy any
-        other group.
+        Five scopes exist and each governs one group of routes. The decision-path
+        reads take one scope per operation family -- two non-disclosing
+        cross-reference reads, one account read and one customer read -- each named
+        in x-carddemo-required-scope above. The one cross-reference read that
+        answers with an unmasked primary account number,
+        /api/v1/card-xrefs/lookup-by-account, takes a fifth scope of its own,
+        internal:account-context.card-xref.resolve-card-number, which is granted to
+        the transaction context alone because it is the only caller that persists
+        that value as a ledger key. The two operations that disclose a whole
+        customer record require internal:customer-master.read instead, and each
+        declares that requirement on itself. A token carrying one scope does not
+        satisfy any other group.
 
     bearerAuth:
       type: http
@@ -1591,7 +1845,44 @@ components:
         DIFFERENT credential from internalServiceToken above and neither
         satisfies the other's operations.
 
+  # WHY : ⚠️ Refactoring Rationale: this document declared NO correlation header in either
+  #       direction, and said so deliberately -- the operation list above recorded that
+  #       "the correlation header the platform propagates is accepted on every path in
+  #       this system and is not redeclared per operation here". That reading was wrong
+  #       on both directions of one exchange. Inbound, the shared filter at
+  #       services/common-lib/src/main/java/com/carddemo/common/web/CorrelationIdFilter.java
+  #       does not merely propagate a value, it VALIDATES one and answers 400 when the
+  #       value is over-long, carries a character outside the admitted set, or has the
+  #       shape of a primary account number -- so the inbound shape is part of this
+  #       contract whether or not the contract stated it, and a caller had no way to
+  #       learn what would be refused. Outbound, that filter sets the header on EVERY
+  #       response including the refusals, so this document omitted a response header
+  #       every one of its operations actually emits, which is the one handle a caller
+  #       has into this service's diagnostics.
+  # WHY : Trade-offs: the header is declared through two shared components referenced
+  #       from every operation and every response, rather than being written out at each
+  #       of the eleven operations. A header re-typed per operation is a header that will
+  #       eventually be typed differently, and the six sibling contracts in this
+  #       repository already use exactly this pair of component names -- so a client
+  #       generated against two CardDemo documents sees one shape rather than two.
   headers:
+    XCorrelationId:
+      description: >-
+        Identity of the unit of work that produced this response. Echoed from the
+        request where the caller supplied a conforming value and minted by the
+        service where it did not. Quote it when reporting a failure.
+
+
+        Assumptions: it is REQUIRED on every response this document declares,
+        including the failures and the two bodiless answers of the presence check.
+        The shared filter sets it before any handler runs and does not remove it on
+        a refusal, so a response without it would be a response no code path
+        produces -- and it is least dispensable exactly when a caller is reporting a
+        failure it cannot see the cause of.
+      required: true
+      schema:
+        $ref: '#/components/schemas/CorrelationId'
+
     RevisionETag:
       description: >-
         The revision of the account and customer pair, as an opaque entity tag.
@@ -1611,6 +1902,45 @@ components:
       example: 'W/"7:3"'
 
   parameters:
+    CorrelationIdHeader:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: >-
+        Identity of the unit of work this request belongs to, echoed back on the
+        response. Supply it to tie this request to one a caller has already named, or
+        omit it and the service mints one.
+
+
+        Assumptions: it is OPTIONAL, and omitting it is a supported choice rather than
+        a degraded one. The shared filter mints a conforming identity when none
+        arrives and returns it on the response either way, so a caller with no
+        identity of its own to propagate still receives one it can quote.
+
+
+        A value longer than the published bound, or carrying a character outside the
+        published set, is refused with 400 rather than being silently replaced -- so a
+        caller cannot believe it is correlating requests that this service is in fact
+        correlating under a different identity. A value whose shape is that of a
+        primary account number, meaning only digits and the three admitted separators
+        with thirteen or more digits, is refused on the same terms, because this
+        identity is echoed on the response and written to every log line for the
+        request. The refusal carries the shared problem body and the response
+        correlation header like any other 400, and it names the rule it applied
+        without ever repeating the value it refused.
+      # WHY : Measured: the shared CorrelationId schema admits the EMPTY string, because
+      #       ApiError normalises an absent identity to "" at L619 and every problem
+      #       document carries the member, so the schema a BODY member names has to admit
+      #       it. A REQUEST header must not: conformsWithin in CorrelationIdFilter
+      #       declines an empty value and the filter then answers 400. This parameter
+      #       therefore narrows the shared schema by one facet instead of restating its
+      #       alphabet and width, which would be a second statement of both. Omitting the
+      #       header entirely stays valid -- that is governed by required above.
+      schema:
+        allOf:
+          - $ref: '#/components/schemas/CorrelationId'
+          - minLength: 1
+
     IfMatchHeader:
       name: If-Match
       in: header
@@ -1665,8 +1995,11 @@ components:
         The request does not satisfy its declared constraints. The body is a
         problem document carrying one entry per rejected field, which is the
         target form of the reference programs' per-field validation flags.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
       content:
-        application/problem+json:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiError'
 
@@ -1677,8 +2010,11 @@ components:
         audience, one that has expired -- produces this same status and the same
         body, deliberately: telling a caller which check refused it tells an
         unauthorized caller how to make progress.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
       content:
-        application/problem+json:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiError'
 
@@ -1695,8 +2031,11 @@ components:
         previous revision declared it on none, which left a client with no branch
         for the one refusal it can provoke by presenting the wrong credential type
         to the right path.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
       content:
-        application/problem+json:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiError'
 
@@ -1723,8 +2062,11 @@ components:
         sent, because the window is reopened by a state machine whose remaining work
         this service cannot see, so any value would be a guess a client would then
         schedule against.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
       content:
-        application/problem+json:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiError'
 
@@ -1744,12 +2086,223 @@ components:
         status a failure of the reference-context lookup produces, which is a
         transport failure rather than a validation outcome and is deliberately not
         reported as the caller's mistake.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
       content:
-        application/problem+json:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    PayloadTooLarge:
+      description: >-
+        The request body exceeds the byte ceiling this service accepts, and
+        carries the machine code CARDDEMO-0413. The ceiling is 65536 bytes unless
+        the deployment names another under carddemo.web.max-request-body-bytes,
+        and it is enforced by a servlet filter ordered ahead of the security
+        chain rather than by a handler -- which is why it applies to every
+        operation that accepts a body and why the refusal reaches a caller that
+        presented no token at all.
+
+
+        Assumptions: the body of this response carries no fieldErrors entry and
+        cannot. The refusal is raised before any member is parsed, so there is no
+        bound object to have fields; the message names the ceiling and the size
+        the request declared, which is what distinguishes a misconfigured client
+        from a deliberate flood.
+
+
+        Assumptions: a body that declares no length is not refused for that alone.
+        It is read up to the ceiling and refused only if it exceeds it, and the
+        bytes already read are forwarded to the handler when it does not, so a
+        chunked request within the bound is served normally. For that case the
+        message states that the body declares no length and exceeds the bound,
+        because the exact size is the one thing that was never learned.
+
+
+        Assumptions: this response carries the correlation identifier like every
+        other, and that is a property of filter ORDER rather than of this filter.
+        The correlation filter is registered one position ahead of it and has
+        already put the identifier on the response before the body is written.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+
+    # WHY : Refactoring Rationale: the transport refusals below were UNDECLARED while the shared
+    #       advice in services/common-lib produces every one of them, so each was reachable on
+    #       every operation of this contract with no published shape. A client had no branch for
+    #       them: ui/src/api/client.ts could only treat each as an unrecognised body. Declaring
+    #       them here and handling them there are two halves of one correction, and declaring one
+    #       half alone would have documented a response no caller could recognise.
+    # WHY : Assumptions: each carries the same ApiError shape as every other refusal of this
+    #       contract, with its own machine code -- CARDDEMO-0405, CARDDEMO-0406 and
+    #       CARDDEMO-0415. A distinct code per condition is what lets a client branch without
+    #       reading the sentence, which is the same reason the 400 and the 401 do not share one.
+    # WHY : Assumptions: the body is declared application/json because that is what the shared
+    #       advice writes -- it returns a plain ApiError record and this build registers no
+    #       problem+json converter -- and because the 406 arm pins MediaType.APPLICATION_JSON
+    #       explicitly, which is the single call that lets a body be produced at all for a caller
+    #       whose Accept header matched nothing.
+    MethodNotAllowed:
+      description: >-
+        The route addressed does not publish the method the request named. The response
+        carries an Allow header naming the methods it does publish, which is where a client
+        reads them; the body does not repeat that list, so the two cannot disagree.
+
+
+        Assumptions: this has no reference counterpart. A 3270 terminal cannot address a
+        transaction with a verb the program did not define, so no reference literal or
+        condition name corresponds to this outcome. It exists because a target route is
+        addressed by callers this system does not control.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+        Allow:
+          description: >-
+            The methods the addressed route publishes, joined with a comma and a space.
+            Composed from the methods the framework's handler mapping reports, which are
+            server-authored; the method the caller USED is echoed nowhere. It is omitted
+            rather than sent empty when the framework reported no supported set, because an
+            empty Allow states that the route supports no method at all, which would be a
+            different and false claim.
+          required: false
+          schema:
+            type: string
+            example: 'GET, PUT'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    UnsupportedMediaType:
+      description: >-
+        The request carried a body in a media type this route does not accept, or carried a
+        body with no Content-Type at all. Every operation of this contract that accepts a
+        body accepts application/json and nothing else.
+
+
+        The body carries no fieldErrors entry and cannot: the refusal is raised before any
+        member has been parsed, so there is no bound object to have fields. That is why this
+        is a distinct code from CARDDEMO-0400 rather than a 400 with an empty array, which a
+        caller could not tell from a body it had mis-spelled.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    NotAcceptable:
+      description: >-
+        The request's Accept header names no media type this service can produce. The shared
+        advice answers with JSON and nothing else.
+
+
+        Assumptions: the body of this response is itself application/json, which is a type
+        the caller has just said it will not accept. That is deliberate. The alternative is
+        an empty 406, which carries neither the machine code nor the correlation identifier
+        a support enquiry needs and tells the caller nothing about which header to change.
+        The content type is set explicitly by the shared advice for a second reason recorded
+        there: a body left to content negotiation would be negotiated against the same
+        Accept header that already matched nothing, and the request would then be forwarded
+        to the container error path, which this service publishes no route for.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
           schema:
             $ref: '#/components/schemas/ApiError'
 
   schemas:
+
+    CorrelationId:
+      type: string
+      maxLength: 24
+      pattern: '^$|^(?!(?:[._-]*[0-9]){13,}[._-]*$)[A-Za-z0-9_.-]{1,24}$'
+      description: >-
+        Identity of one unit of work. At most twenty-four characters drawn from the
+        ASCII letters, the digits, the hyphen, the underscore and the full stop. A
+        value this service mints is the two-character prefix CD followed by
+        twenty-two upper-case hexadecimal characters over eleven bytes of entropy; a
+        value a caller supplies need only fit the bound and the set. The empty string
+        appears only inside an error body, and only for a failure raised before any
+        identity had been established -- which is why the pattern admits it and the
+        response header does not carry it.
+
+
+        Assumptions: the pattern additionally refuses one narrow class the character
+        set alone admits -- a value made up only of digits and the three separators
+        carrying thirteen or more digits. That is the shape of a primary account
+        number in contiguous form and in every separated form, and the shared filter
+        refuses it because this identity is echoed on the response and written to
+        every log line for the request, so accepting one would copy a card number
+        into both. Ordinary values are unaffected: a timestamp-like 2022-07-18-0930
+        carries nine digits and is accepted, and any value containing a letter is
+        accepted whatever its digits. A minted value begins CD, a non-numeric prefix
+        chosen so a minted identity can never fall into the refused class.
+
+
+        Assumptions: the facets are the ones five sibling contracts in this
+        repository already publish, character for character, rather than a set chosen
+        here. The value is validated by ONE shared filter, so a document declaring a
+        narrower or wider shape than that filter enforces would describe a service
+        that does not exist -- and a client generated from two CardDemo documents
+        would carry two incompatible bounds for one header.
+      example: CD4F1C0E423A554D219B7E6C0F
+
+    # WHY : ⚠️ Refactoring Rationale: the three cursor parameters and the four page
+    #       boundary members each declared `type: string, maxLength: 256` inline, which
+    #       published a bound and no SHAPE -- so every string of at most 256 characters
+    #       was contract-valid while the service accepts only a token it sealed itself.
+    #       com.carddemo.common.web.CursorToken.open refuses anything that is not the
+    #       version literal, a sixteen-character nonce and an enciphered payload joined
+    #       by full stops, and answers 400 keyed to the cursor. A caller reading only
+    #       this document could not tell a cursor from any other string, and a generated
+    #       client had nothing to validate before sending.
+    # WHY : Trade-offs: the shape is published even though the value is OPAQUE, and
+    #       publishing it discloses nothing -- the version literal is a constant, the
+    #       nonce is random and the payload is enciphered and authenticated, so the
+    #       pattern tells a caller what to keep intact rather than what the token means.
+    #       What it buys is that a client can refuse a value it has mangled, and that a
+    #       hand-composed token is refused by the contract rather than reaching the
+    #       sealer to be refused there.
+    # WHY : Assumptions: the pattern and the bound are the same ones the six sibling
+    #       contracts publish under this component name, and both are derived from the
+    #       same compiled constants -- CursorToken.SEALED_SHAPE_PATTERN at L157 with the
+    #       version literal at L114, and MAX_TOKEN_LENGTH at L126. AccountContextContractTest
+    #       asserts the published pattern against those constants, so a change to the
+    #       seal cannot leave this document describing the previous one.
+    CursorToken:
+      type: string
+      maxLength: 256
+      pattern: '^v2\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{1,200}$'
+      description: >-
+        An opaque paging position minted by this service. It stands for a key in the
+        ordered set without disclosing it, and it is sealed to the query, to the
+        authenticated caller and to the direction it was issued for, so a caller
+        cannot compose one, edit one or replay another caller's.
+
+
+        Assumptions: sealing rather than encoding is load-bearing on these operations
+        specifically, because the physical key inside the token IS a primary account
+        number -- XREF-CARD-NUM PIC X(16) at L5 of app/cpy/CVACT03Y.cpy -- so a
+        base64-encoded cursor would publish in every page the value this context masks
+        everywhere else.
+
+
+        The three parts are the version literal v2, a base64url nonce and a base64url
+        enciphered payload carrying its own authentication tag, separated by full
+        stops. A caller stores the value it received and replays it unchanged; it is
+        meaningful only to the service that sealed it, and an altered, expired or
+        foreign token is refused with 400 naming the cursor.
+      example: v2.HVQ7yGm2rTnB4kLd.Q0FSRERFTU8tZXhhbXBsZS1jdXJzb3I
 
     CardXrefLookupRequest:
       type: object
@@ -2493,14 +3046,39 @@ components:
         without something to tell the rows apart. CardXrefView omits the card
         entirely because its caller supplied it.
       properties:
+        # WHY : ⚠️ Refactoring Rationale: this member declared a WIDTH and no SHAPE --
+        #       `maxLength: 16` alone -- and a raw sixteen-digit primary account number is
+        #       exactly sixteen characters, so the stored value satisfied the contract for
+        #       the masked one. The member whose entire purpose is to withhold twelve
+        #       digits was therefore the one member of this document a full card number
+        #       could travel in without violating anything published. The browser client
+        #       had already compensated with a runtime guard -- requireMaskedCardNumber in
+        #       ui/src/api/accounts.ts throws a RangeError on any row that is not twelve
+        #       mask characters and four digits -- which is defence in depth and is kept,
+        #       but a client-side check cannot be the contract: a client generated from
+        #       this document alone had nothing to check against.
+        # WHY : Assumptions: the pattern is the compiled one, not a hand-written twin.
+        #       com.carddemo.common.security.MaskedCardNumber.DOMAIN composes it from
+        #       CardNumberMasker.MASK_CHARACTER and VISIBLE_TAIL_LENGTH, the same two
+        #       constants the renderer masks with, and AccountContextContractTest asserts
+        #       this published value against that constant -- so the contract cannot come
+        #       to describe a mask the service does not produce.
+        # WHY : Trade-offs: the width is pinned as an EXACT sixteen through matching
+        #       minLength and maxLength rather than left as an upper bound. What that gives
+        #       up is any shorter rendering; what it buys is that the mapper's refusal of a
+        #       row whose stored key is not the declared width is a contract obligation
+        #       rather than an implementation choice, so no consumer has to handle a second
+        #       masked form.
         cardNumberMasked:
           type: string
+          minLength: 16
           maxLength: 16
+          pattern: '^\*{12}[0-9]{4}$'
           description: >-
-            XREF-CARD-NUM PIC X(16), masked to its last four digits. The mask is
-            applied by the shared masker so that every context narrows a card
-            number the same way, and the length is preserved so the rendering
-            still aligns in a fixed-pitch column.
+            XREF-CARD-NUM PIC X(16), masked to its last four digits: exactly twelve
+            asterisks followed by four digits. The mask is applied by the shared
+            masker so that every context narrows a card number the same way, and the
+            length is preserved so the rendering still aligns in a fixed-pitch column.
           example: '************1111'
         customerId:
           type: string
@@ -2531,8 +3109,14 @@ components:
     CustomerDisplayView:
       type: object
       additionalProperties: false
-      required: [firstName, lastName, addressLine1, addressLine3, stateCode,
-                 zipCode, phoneNumber1]
+      # WHY : Refactoring Rationale: every property below is REQUIRED, including the nullable
+      #       ones, and that is a correction rather than a tightening. carddemo-common-defaults.yml
+      #       pins default-property-inclusion to always, so every record component is written on
+      #       every response and a nullable member arrives as null, NEVER absent. Publishing such
+      #       a member as optional described an omission this service cannot produce, and generated
+      #       a type that was optional AND nullable -- two states for one fact.
+      required: [firstName, middleName, lastName, addressLine1, addressLine2, addressLine3,
+                 stateCode, zipCode, phoneNumber1]
       description: >-
         The nine customer fields a neighbouring context's screen renders. No
         protected value appears here at all: the national identifier at L17 of
@@ -2802,8 +3386,20 @@ components:
         withholds a backward control on its opening page does so from the ordinal
         it keeps itself.
       properties:
+        # WHY : Assumptions: the upper bound is declared on the ARRAY and not left as
+        #       prose above it, and it is the value AccountViewService.CUSTOMER_SCAN_MAX_PAGE_SIZE
+        #       carries -- the CEILING on a caller-chosen size rather than the size itself. This
+        #       operation publishes a size parameter bounded at the same 100 with a
+        #       default of 20, and the service clamps whatever arrives to that ceiling,
+        #       so a page can hold anything from zero rows to 100 and no more.
+        #       A page carrying one row more would be a defect in this service, which
+        #       is worth failing a contract check rather than reaching a client that
+        #       had sized its rendering for the published bound. No lower bound is
+        #       declared: an empty page is legitimate for an exhausted set and for a
+        #       filter that removed every row it read.
         items:
           type: array
+          maxItems: 100
           description: >-
             The rows of this page in ascending CUST-ID order, which is the order
             the reference walk produces by construction from ACCESS MODE IS
@@ -2813,8 +3409,7 @@ components:
             $ref: '#/components/schemas/CustomerResponse'
         firstKey:
           oneOf:
-            - type: string
-              maxLength: 256
+            - $ref: '#/components/schemas/CursorToken'
             - type: 'null'
           description: >-
             The opaque position of the FIRST row of this page. Null on an
@@ -2825,8 +3420,7 @@ components:
             it retains names a record the terminal never showed.
         lastKey:
           oneOf:
-            - type: string
-              maxLength: 256
+            - $ref: '#/components/schemas/CursorToken'
             - type: 'null'
           description: >-
             The opaque position of the LAST row of this page, to be sent back as
@@ -2859,8 +3453,19 @@ components:
         app/cbl/CBACT03C.cbl states with ACCESS MODE IS SEQUENTIAL at L31 beside
         RECORD KEY IS FD-XREF-CARD-NUM at L32.
       properties:
+        # WHY : Assumptions: the upper bound is declared on the ARRAY and not left as
+        #       prose above it, and it is the value AccountViewService.CARD_XREF_PAGE_SIZE
+        #       carries -- a fixed server-owned size a caller cannot vary, so it is a property of
+        #       every response rather than of a request. The walk reads one row beyond
+        #       it to answer hasNext and returns at most the seven.
+        #       A page carrying one row more would be a defect in this service, which
+        #       is worth failing a contract check rather than reaching a client that
+        #       had sized its rendering for the published bound. No lower bound is
+        #       declared: an empty page is legitimate for an exhausted set and for a
+        #       filter that removed every row it read.
         items:
           type: array
+          maxItems: 7
           description: >-
             The rows of this page in ascending card-number order, at most seven of
             them. Empty when the account holds no card.
@@ -2868,16 +3473,14 @@ components:
             $ref: '#/components/schemas/CardXrefResponse'
         firstKey:
           oneOf:
-            - type: string
-              maxLength: 256
+            - $ref: '#/components/schemas/CursorToken'
             - type: 'null'
           description: >-
             The opaque boundary of the FIRST row of this page, to be sent back as
             the cursor of a backward request. Null on an empty page.
         lastKey:
           oneOf:
-            - type: string
-              maxLength: 256
+            - $ref: '#/components/schemas/CursorToken'
             - type: 'null'
           description: >-
             The opaque boundary of the LAST row of this page, to be sent back as
@@ -2891,6 +3494,30 @@ components:
             app/cbl/COCRDLIC.cbl L242 to L244. The surplus row is trimmed before
             the page is published and appears nowhere in it.
 
+    # WHY : Refactoring Rationale: the single property was declared type integer with
+    #       format int64, and it is now the digits-only STRING every other identifier in
+    #       this migration travels as. It was the only account identifier in any request
+    #       body of any of the seven contracts declared as a number: this document's own
+    #       AccountUpdateRequest.accountId and AccountViewResponse.accountId are patterned
+    #       strings, card-api declares its account narrowing '^[0-9]{11}$', and
+    #       reporting-api declares its own '^[0-9]+$'. Section 0.7.2 of the plan states the
+    #       rule the outlier broke -- these fields transport as strings validated
+    #       digits-only, because the reference holds each of them as characters and
+    #       reinterprets them as numbers only for arithmetic, CC-ACCT-ID PIC X(11) at L34 of
+    #       app/cpy/CVCRD01Y.cpy redefined as PIC 9(11) at L36 being the pattern.
+    # WHY : Assumptions: the change is one of REPRESENTATION and not of domain. One to
+    #       eleven digits spell exactly the zero-through-eleven-nines range the integer form
+    #       declared, so no value that was acceptable becomes unacceptable and no value that
+    #       was refused becomes admissible; a caller that sent 12345678901 now sends
+    #       '12345678901'. What it buys is that the eleven-character width is expressible at
+    #       all: a browser holds what an operator typed into an eleven-character screen
+    #       field, and a number cannot carry the leading zeroes that width produces.
+    # WHY : Trade-offs: a caller that has been sending a bare number now sends a quoted one.
+    #       That cost is accepted because the alternative was worse in a way that had already
+    #       shown up in the browser client: with a number on the wire, EVERY consumer had to
+    #       convert, so the one typed client in this repository grew a digits-to-integer fold
+    #       whose result discarded the very width the field declares. The conversion now
+    #       happens once, on the service side, at the point the row is addressed by its key.
     AccountLookupRequest:
       type: object
       additionalProperties: false
@@ -2904,14 +3531,20 @@ components:
         a durable diagnostic may not hold.
       properties:
         accountId:
-          type: integer
-          format: int64
-          minimum: 0
-          maximum: 99999999999
+          type: string
+          minLength: 1
+          maxLength: 11
+          pattern: '^[0-9]{1,11}$'
           description: >-
-            The account identifier, within the eleven-digit range XREF-ACCT-ID
-            PIC 9(11) declares at L7 of app/cpy/CVACT03Y.cpy.
-          example: 12345678901
+            The account identifier as characters, at most the eleven-digit width
+            XREF-ACCT-ID PIC 9(11) declares at L7 of app/cpy/CVACT03Y.cpy. Digits
+            only and never signed: the reference field is unsigned display, so a
+            sign, a space, a decimal point or a thousands separator names no
+            account and is refused before any lookup is attempted. A value shorter
+            than the declared width is accepted and resolves to the same account
+            as its zero-padded form, which is what an eleven-character screen
+            field and a keyed row respectively hold.
+          example: '12345678901'
 
     CustomerLookupRequest:
       type: object
@@ -2979,8 +3612,23 @@ components:
       # WHY : Alternatives Considered: suppressing the two keys when null, with an inclusion setting, so
       #       the omission became true. Rejected because the aggregate sentence is the reference's own
       #       75-character message field and a client renders the band from it unconditionally, so a
-      #       key that comes and goes moves that decision into every client; and because the services
-      #       set `default-property-inclusion: always`, which the money contract depends on.
+      #       key that comes and goes moves that decision into every client; and because
+      #       always-inclusion is PINNED for every service in
+      #       services/common-lib/src/main/resources/carddemo-common-defaults.yml, which the
+      #       money contract SEPARATELY depends on -- a money member with no value must be
+      #       present and null rather than absent, because absent reads as "no balance" where
+      #       null reads as "no amount applies". That is a second consumer of the same pin and
+      #       NOT the reason these two keys are required here: the reason is the record shape
+      #       above, and this schema carries no monetary member at all. An earlier revision ran
+      #       the two together, which read as though a problem document's nullability followed
+      #       from a money rule.
+      # WHY : ⚠️ Refactoring Rationale: that last clause used to read "the services set
+      #       default-property-inclusion: always" and it named no place, which is how it came
+      #       to be inaccurate -- exactly one of the seven services actually set the key, and
+      #       the other six, this one included, rested a published contractual promise on the
+      #       serialiser's own default. The key is now set once in the shared defaults every
+      #       service imports, so the claim is true for all of them and is verifiable by
+      #       reading one file. The reasoning is unchanged; only its subject is now real.
       required:
         - code
         - secondaryCode
@@ -3008,9 +3656,18 @@ components:
             the message, because a token inside a sentence is matchable only by
             substring.
           example: 'CARDDEMO-0400'
+          # WHY : ⚠️ Refactoring Rationale: the bound is 22 and was 13. Thirteen is the width of
+          #       `code` above -- `CARDDEMO-` and four digits -- and this member is NOT drawn from that
+          #       vocabulary: it carries a subordinate condition name, and the widest the shared writer
+          #       can emit is 22, measured on CARD-LOCK-NOT-ACQUIRED and CARD-WRITE-NOT-APPLIED in
+          #       services/card-service/src/main/java/com/carddemo/card/api/CardController.java. This
+          #       service emits only the empty string today, so 13 was not violated here -- but one
+          #       generated client type reads a problem document from any of the seven services, and a
+          #       bound that differs between them is a type that differs between them. Bounding it at
+          #       the writer's own maximum is what makes the seven agree.
         secondaryCode:
           type: string
-          maxLength: 13
+          maxLength: 22
           description: >-
             A narrowing identifier where the kind has one, and the empty string
             otherwise. It is never null, so a client need not distinguish absent
@@ -3037,19 +3694,38 @@ components:
           minimum: 400
           maximum: 599
           description: The HTTP status code, repeated in the body.
+        # WHY : Refactoring Rationale: this member was declared as a bare string with no
+        #       bound and no shape, which described a value the shared filter would refuse
+        #       to accept and never emits. It now references the same CorrelationId schema
+        #       the request parameter and the response header reference, so one identity has
+        #       ONE published shape wherever it appears in this document -- which is what
+        #       four sibling contracts already do. The schema admits the empty string, which
+        #       matters here specifically: a failure raised before any identity had been
+        #       established carries one, and a non-empty bound would have made that body
+        #       invalid against its own contract.
         correlationId:
-          type: string
+          allOf:
+            - $ref: '#/components/schemas/CorrelationId'
           description: >-
             The correlation identifier of the request, echoed so a caller can find
-            the same request in this service's logs.
+            the same request in this service's logs. It is the same value the
+            X-Correlation-Id response header carries, except on a failure raised
+            before any identity was established, where the body carries the empty
+            string.
         path:
           type: string
           description: >-
             The path the failure occurred on. Every digit run in it long enough to
             be a primary account number is narrowed to a mask and its last four
             digits before the value is emitted or logged.
+          # WHY : Assumptions: 26 characters and the pattern together, not either alone. The width is the
+          #       reference declaration -- TRNX-ORIG-TS and TRNX-PROC-TS are PIC X(26) -- and the pattern
+          #       is what makes the six microsecond digits a contract rather than a suggestion. A width
+          #       with no pattern admits 26 characters of anything; a pattern with no width leaves a
+          #       client sizing a column from prose.
         timestamp:
           type: string
+          maxLength: 26
           description: >-
             When the failure was rendered, in the reference's own 26-character
             form. It is NOT an RFC 3339 instant and is deliberately not declared

@@ -17,9 +17,11 @@ import com.carddemo.batch.repository.AccountRepository;
 import com.carddemo.batch.repository.CardRepository;
 import com.carddemo.batch.repository.CardXrefRepository;
 import com.carddemo.batch.repository.CustomerRepository;
+import com.carddemo.batch.repository.DailyFeedWatermarkRepository;
 import com.carddemo.batch.repository.DailyTransactionRepository;
 import com.carddemo.batch.repository.TransactionRepository;
 import com.carddemo.batch.service.BatchStepLedger;
+import com.carddemo.batch.service.DailyFeedWatermarkService;
 import com.carddemo.common.codec.CopybookLayout;
 import com.carddemo.common.codec.FixedWidthCodec;
 import java.io.ByteArrayInputStream;
@@ -1009,8 +1011,18 @@ class DatasetJobBodiesTest {
                     return new BatchStepLedger.StepOutcome(outcome, false);
                 });
 
-        PreflightDailyTransactionsJob configuration =
-                new PreflightDailyTransactionsJob(feed, crossReferences, accounts, ledgerOfSteps);
+        // WHY : Assumptions: the watermark table answers EMPTY, so the preflight reports on the whole
+        //       feed exactly as it did before the cursor existed and every count this method's
+        //       callers assert stays a measurement of the inspection rather than of the cursor. The
+        //       service over it is real, because the position it returns for an absent row is the
+        //       service's rule and not the repository's.
+        DailyFeedWatermarkRepository watermarks = mock(DailyFeedWatermarkRepository.class);
+        when(watermarks.findById(anyString())).thenReturn(Optional.empty());
+        when(watermarks.findByFeedName(anyString())).thenReturn(Optional.empty());
+
+        PreflightDailyTransactionsJob configuration = new PreflightDailyTransactionsJob(
+                feed, crossReferences, accounts, ledgerOfSteps,
+                new DailyFeedWatermarkService(watermarks, Clock.systemUTC()));
         Job job = configuration.preflightDailyTransactions(new ResourcelessJobRepository(),
                 new ResourcelessTransactionManager(), new BatchConfig().carddemoJobParametersValidator());
 

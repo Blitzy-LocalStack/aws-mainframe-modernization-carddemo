@@ -3,12 +3,25 @@
  *
  * <h2>Purpose</h2>
  *
- * <p>This directory holds the tests that need a real database engine to say anything at all. The
- * five repository roles beside them declare queries -- derived from method names and, for the report
- * join, written out -- and a query that names a property the metamodel does not carry, or joins two
- * entities on a path that does not exist, is a defect no compiler reports and no unit test reaches.
- * It surfaces when the repository proxy is created, which needs an entity manager factory, which
- * needs a data source. That is the whole reason a test in this directory starts an engine.
+ * <p>This directory holds the tests that need a real database engine to say anything at all, and
+ * there are two of them because there are two such properties.
+ *
+ * <p>The first is whether the queries PARSE. The five repository roles beside them declare queries --
+ * derived from method names and, for the report join, written out -- and a query that names a property
+ * the metamodel does not carry, or joins two entities on a path that does not exist, is a defect no
+ * compiler reports and no unit test reaches. It surfaces when the repository proxy is created, which
+ * needs an entity manager factory, which needs a data source. {@code ReportingQueryBootstrapIT} makes
+ * that claim and deliberately creates no relation, because parsing happens against the metamodel.
+ *
+ * <p>The second is whether the statement heading walk's keyset predicate reproduces its own
+ * {@code ORDER BY}. {@code StatementHeadingChunkIT} makes that claim, and unlike the first it needs
+ * ROWS: a predicate that compares one component of a two-component ordering parses perfectly, so the
+ * first class passes on it, and a mocked repository answers whatever it is arranged to answer, so the
+ * service's unit tests pass on it too. It supplies three relations as plain tables through a
+ * Testcontainers init script under {@code db/testharness}, and that script records at length why a
+ * stand-in is used rather than the real views. Refactoring Rationale: the second class was added
+ * after exactly that defect shipped -- cards were skipped and repeated by a chunk walk with no gate
+ * anywhere able to see it -- so the directory's purpose is stated as two properties rather than one.
  *
  * <p>Assumptions: the tests here are named with the integration suffix, so the surefire execution
  * that runs the module's unit tests does not select them and the failsafe execution does. That split

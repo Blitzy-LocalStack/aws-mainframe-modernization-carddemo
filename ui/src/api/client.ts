@@ -44,11 +44,25 @@
  */
 
 import axios, { AxiosError } from 'axios';
-import type { AxiosInstance, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
+import type {
+  AxiosInstance,
+  AxiosRequestConfig,
+  AxiosResponse,
+  InternalAxiosRequestConfig,
+} from 'axios';
 
 import { runtimeApiBaseUrl } from './runtimeConfig';
 import { recordServerDate } from './serverClock';
-import type { ApiError, ContractOperation, Severity } from './types';
+import type {
+  AbendDetail,
+  ApiError,
+  ContractOperation,
+  FieldError,
+  FieldValidationState,
+  PageDirection,
+  Severity,
+  Subsystem,
+} from './types';
 
 // WHY : Alternatives Considered: ONE instance for the whole package, memoised below, rather than one
 //       per typed client module. Seven instances would each need the bearer header, the correlation
@@ -71,6 +85,59 @@ const MIN_TIMEOUT_MS = 1_000;
 const MAX_TIMEOUT_MS = 60_000;
 const DEFAULT_CORRELATION_HEADER = 'X-Correlation-Id';
 const HTTP_TOKEN_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u;
+
+/*
+ * WHY : Refactoring Rationale: the request configuration is augmented with ONE optional member rather
+ *       than a second axios instance being created for the unauthenticated operations. Three requests
+ *       in the whole application are declared `security: []` by their contract -- the sign-on, the
+ *       token refresh and the challenge answer -- and each of them was nevertheless dispatched with
+ *       whatever bearer this tab happened to hold, because the interceptor attaches one to everything.
+ *       A held token that has expired or been revoked is therefore processed by the resource-server
+ *       filter BEFORE the permit-all rule for these paths is reached, so a stale credential could
+ *       refuse the very exchange whose purpose is to replace it -- and the operator would read
+ *       "unauthorized" at the sign-on screen having presented nothing.
+ * WHY : Alternatives Considered: a second axios instance with no authentication interceptor, which is
+ *       the obvious shape. Rejected because the other four boundaries this module owns -- the
+ *       correlation identifier, the clamped timeout, the failure normalisation and the server-clock
+ *       anchoring -- would then exist twice, and the copy that fell behind would do so silently: the
+ *       concrete failure is a sign-on whose requests carry no correlation identifier, which reports
+ *       nothing and simply stops joining traces up.
+ * WHY : Alternatives Considered: classifying by TARGET inside the interceptor, matching the three
+ *       token-exchange paths. Rejected because it would put a copy of the contract's own security
+ *       declaration inside this module, keyed by path text: an operation renamed on the service side
+ *       would leave the classification silently stale, and this module deliberately knows no endpoint.
+ *       Metadata supplied by the caller keeps the decision beside the operation that owns it.
+ * WHY : Assumptions: the member is unknown to axios, which carries unknown configuration members
+ *       through its merge untouched and puts none of them on the wire, so the flag reaches the
+ *       interceptor and never reaches a service. It is declared through a module augmentation rather
+ *       than smuggled in as a sentinel header, because a sentinel would have to be removed again and
+ *       the one that was not removed would be sent.
+ */
+declare module 'axios' {
+  interface AxiosRequestConfig {
+    /**
+     * Whether this request must be dispatched WITHOUT the session token this module stores.
+     *
+     * Assumptions: absent and `false` mean the same thing -- attach the stored token if there is one --
+     * so every existing call site keeps its behaviour with no change. Only `true` suppresses, and it
+     * suppresses by REMOVING the header rather than by declining to add one, so a header inherited
+     * from the instance's own defaults cannot survive the suppression.
+     */
+    carddemoOmitStoredSession?: boolean;
+  }
+}
+
+/**
+ * The request configuration the three unauthenticated token exchanges are dispatched with.
+ *
+ * Assumptions: frozen and shared rather than constructed per call, because axios merges a supplied
+ * configuration into a fresh object and never writes back into it, so one immutable value is safe for
+ * every caller and makes "this request carries no session" a single named fact rather than a boolean
+ * repeated at three call sites.
+ */
+export const WITHOUT_STORED_SESSION: Readonly<AxiosRequestConfig> = Object.freeze({
+  carddemoOmitStoredSession: true,
+});
 
 /**
  * The header a request carries its bearer token in, spelled as the edge authorizer reads it.
@@ -107,20 +174,68 @@ const CLIENT_ERROR_STATUS = 400;
 const NO_HTTP_STATUS = 0;
 
 /**
+ * The widest correlation identifier the services will carry, twenty-four characters.
+ *
+ * Assumptions: this is not a preference here. It is `CORRELATION_ID_MAX_LENGTH` in
+ * `services/common-lib/src/main/java/com/carddemo/common/web/CorrelationIdFilter.java`, and a longer
+ * value is refused with HTTP 400 before any handler runs, so a request carrying one never reaches the
+ * operation it was issued for.
+ */
+const CORRELATION_ID_MAX_LENGTH = 24;
+
+/**
+ * The two-character prefix every generated correlation identifier begins with.
+ *
+ * Assumptions: this is `GENERATED_ID_PREFIX` in
+ * `services/common-lib/src/main/java/com/carddemo/common/web/CorrelationIdFilter.java`, reproduced
+ * here character for character. It is not decoration and it is not a provenance signal: it is the
+ * one thing that guarantees a generated identifier carries a letter, and a value carrying a letter
+ * at any position is admitted by that filter's `isAccountNumberShaped` test without its digits
+ * being counted at all.
+ *
+ * Refactoring Rationale: this client used to mint twenty-four BARE hexadecimal characters and the
+ * comment here argued the prefix was deliberately not imitated, because "a browser that stamped
+ * `CD` would claim that provenance falsely". That argument was answered by the contract it was
+ * reasoning about. The filter refuses an inbound identifier consisting only of digits and accepted
+ * separators once its digits number thirteen or more — `ACCOUNT_NUMBER_MIN_DIGITS`, the shortest
+ * primary account number in circulation — because a conforming identifier is published to the
+ * mapped diagnostic context and therefore onto every log line. Twelve random bytes rendered as
+ * hexadecimal are all digits whenever every byte falls in one of the ten decimal-only ranges, which
+ * is (100/256)^12, roughly one generated identifier in seventy-eight thousand. Each of those was
+ * answered HTTP 400 before the handler ran, on a request the operator had made correctly, and the
+ * failure was indistinguishable at the screen from a rejected payload.
+ *
+ * Trade-offs: the cost accepted is that a browser-minted identifier is no longer distinguishable
+ * from a service-minted one by inspection. That is a real loss and it is the smaller one: the
+ * provenance was only ever readable by a human reading a log, whereas the refusal broke requests.
+ * Nothing in the migrated services branches on the prefix — it appears in `CorrelationIdFilter`
+ * alone, as the value that mint prepends and as the reason its own identities are never
+ * account-number-shaped — so imitating it changes no behaviour beyond removing the refusal.
+ */
+const CORRELATION_ID_PREFIX = 'CD';
+
+/**
  * Bytes of entropy each generated correlation identifier carries.
  *
- * Assumptions: twelve, because the identifier is rendered two hexadecimal characters per byte and
- * the services accept at most twenty-four characters. That bound is not a preference here: it is
- * `CORRELATION_ID_MAX_LENGTH` in
- * `services/common-lib/src/main/java/com/carddemo/common/web/CorrelationIdFilter.java`, and a
- * longer value is refused with HTTP 400 before any handler runs. The WIDTH is what makes a request
- * the browser named and a request the service named indistinguishable in shape: that filter mints its
- * own as a two-character `CD` prefix followed by eleven random bytes rendered as upper-case
- * hexadecimal, which is the same twenty-four upper-case hexadecimal characters twelve bytes produce
- * here. The prefix is deliberately not imitated — a minted identity is meant to be recognisable as
- * one the service minted, and a browser that stamped `CD` would claim that provenance falsely.
+ * Assumptions: eleven, and the number is DERIVED rather than chosen, exactly as
+ * `GENERATED_ID_RANDOM_BYTES` derives it on the service side: the services accept at most
+ * twenty-four characters — {@link CORRELATION_ID_MAX_LENGTH}, mirrored from the same filter — the
+ * prefix consumes
+ * two of them, and hexadecimal renders two characters per byte, so `(24 - 2) / 2` bytes fill the
+ * remainder exactly. Stating the arithmetic rather than the literal is what keeps this value
+ * correct if either the width or the prefix ever moves.
  */
-const CORRELATION_ID_ENTROPY_BYTES = 12;
+const CORRELATION_ID_ENTROPY_BYTES = (CORRELATION_ID_MAX_LENGTH - CORRELATION_ID_PREFIX.length) / 2;
+
+/**
+ * The exact number of characters a generated correlation identifier occupies.
+ *
+ * Assumptions: this is asserted by `client.test.ts` rather than merely documented, because it is
+ * the width the services bound and a value one character wider is refused with HTTP 400 before any
+ * handler runs.
+ */
+export const CORRELATION_ID_LENGTH =
+  CORRELATION_ID_PREFIX.length + CORRELATION_ID_ENTROPY_BYTES * 2;
 
 let client: AxiosInstance | undefined;
 
@@ -316,8 +431,19 @@ function correlationHeaderName(): string {
  * long — thirty-two hexadecimal digits and four hyphens. The shared correlation filter accepts at
  * most twenty-four, so EVERY request this client sent was refused with HTTP 400 before reaching a
  * handler, and the failure was invisible to both builds because a header value is a string on each
- * side. Twenty-four upper-case hexadecimal characters over twelve random bytes is the exact
- * construction that filter uses when it mints one itself, so the two are interchangeable.
+ * side.
+ *
+ * Refactoring Rationale: the construction is now the filter's own, prefix included, where an
+ * intermediate revision minted twenty-four BARE hexadecimal characters. Matching the width alone was
+ * not enough, and the residue was a rare refusal rather than a cosmetic difference: see
+ * {@link CORRELATION_ID_PREFIX} for the measured rate and for why the provenance argument that kept
+ * the prefix off was the weaker side of the trade.
+ *
+ * Alternatives Considered: keeping the bare form and re-minting whenever the generated value turned
+ * out to be all digits. Rejected because it makes the guarantee probabilistic and untestable — a
+ * property test could only sample it — where prepending a letter makes the refusal
+ * unrepresentable by construction, which is what `client.test.ts` asserts exhaustively over the
+ * whole byte domain.
  *
  * Alternatives Considered: truncating a UUID to twenty-four characters, which would have been a
  * one-line change. Rejected because a truncated UUID still carries a hyphen at position nine and
@@ -329,21 +455,26 @@ function correlationHeaderName(): string {
  * which the contract explicitly permits. Rejected because the response identifier would then be the
  * only record of the request, so a browser-side failure before the response arrived — a timeout, an
  * aborted navigation — would leave nothing to quote to support.
- * @returns {string} Exactly twenty-four upper-case hexadecimal characters.
+ * @returns {string} Exactly {@link CORRELATION_ID_LENGTH} characters: the two-character
+ *   {@link CORRELATION_ID_PREFIX} followed by upper-case hexadecimal, and therefore never a value
+ *   the services classify as account-number-shaped.
  */
-function newCorrelationId(): string {
+export function newCorrelationId(): string {
   const entropy = new Uint8Array(CORRELATION_ID_ENTROPY_BYTES);
   crypto.getRandomValues(entropy);
-  return Array.from(
-    entropy,
-    /**
-     * Renders one byte as two upper-case hexadecimal characters.
-     * @param {number} byte - One byte of entropy, 0 through 255.
-     * @returns {string} Its two-character upper-case hexadecimal rendering, zero-padded so that
-     *   every byte contributes exactly two characters and the total length is fixed.
-     */
-    (byte: number): string => byte.toString(16).toUpperCase().padStart(2, '0'),
-  ).join('');
+  return (
+    CORRELATION_ID_PREFIX +
+    Array.from(
+      entropy,
+      /**
+       * Renders one byte as two upper-case hexadecimal characters.
+       * @param {number} byte - One byte of entropy, 0 through 255.
+       * @returns {string} Its two-character upper-case hexadecimal rendering, zero-padded so that
+       *   every byte contributes exactly two characters and the total length is fixed.
+       */
+      (byte: number): string => byte.toString(16).toUpperCase().padStart(2, '0'),
+    ).join('')
+  );
 }
 
 /**
@@ -363,14 +494,29 @@ function newCorrelationId(): string {
  * rather than one carrying an empty or undefined bearer. Sign-on is the one unauthenticated request
  * in the system, and a service reading `Authorization: Bearer undefined` would refuse it as a
  * malformed credential — reporting a rejected token where the operator has not yet presented one.
+ *
+ * Refactoring Rationale: the stored token is attached CONDITIONALLY on the request's own metadata,
+ * and the condition is checked first. A request marked {@link WITHOUT_STORED_SESSION} has the header
+ * removed rather than merely not added, which is what makes the guarantee hold for the three token
+ * exchanges however their configuration was composed: the reasoning for the flag, and the two
+ * alternatives rejected in its favour, are recorded on its declaration above.
+ *
+ * Assumptions: the correlation identifier is attached to EVERY request including the suppressed ones.
+ * It carries no credential and confers no authority — it is a name for a unit of work — so an
+ * unauthenticated exchange is exactly as much in need of being traceable as any other, and a sign-on
+ * that could not be found in the logs would be the one failure an operator reports most often.
  * @param {InternalAxiosRequestConfig} config - Axios request configuration being dispatched.
  * @returns {InternalAxiosRequestConfig} The same configuration with bounded security headers
  *   applied.
  */
 function applyRequestHeaders(config: InternalAxiosRequestConfig): InternalAxiosRequestConfig {
-  const token = sessionStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
-  if (token !== null && token.length > 0) {
-    config.headers.set(AUTHORIZATION_HEADER, `Bearer ${token}`);
+  if (config.carddemoOmitStoredSession === true) {
+    config.headers.delete(AUTHORIZATION_HEADER);
+  } else {
+    const token = sessionStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
+    if (token !== null && token.length > 0) {
+      config.headers.set(AUTHORIZATION_HEADER, `Bearer ${token}`);
+    }
   }
   config.headers.set(correlationHeaderName(), newCorrelationId());
   return config;
@@ -564,6 +710,13 @@ const authenticationRequiredListeners = new Set<AuthenticationRequiredListener>(
  * would put the whole failure-classification path behind a rendering fixture. The app shell owns the
  * route change; this owns the fact.
  *
+ * Assumptions: the PRODUCTION subscriber is `ui/src/hooks/useAuth.ts`, which is the module that owns
+ * every session key and is held by the route guards. That placement matters rather than being an
+ * arrangement detail: this module owns the access token alone, so the signal is the only way the
+ * identity token, the retained identifier and the refresh token get discarded when the services stop
+ * accepting the session. A signal with no subscriber left the browser holding a signed claim and a
+ * refresh token for a session that had already been refused, and reporting itself signed on.
+ *
  * Assumptions: the token is discarded BEFORE any listener runs, so a listener that re-reads the
  * session observes it already gone rather than racing the interceptor for it.
  * @param {AuthenticationRequiredListener} listener - Called once per 401 that invalidated a session.
@@ -621,6 +774,8 @@ function correlationIdOf(failure: TransportFailure): string {
   return headerValue(failure.config?.headers, name) ?? '';
 }
 
+/** Trailing digits a card-number-width run keeps, matching the masked rendering every row carries. */
+/** The character a withheld digit is overwritten with, matching the service's own rendering. */
 /**
  * Builds the problem document for a failure no service described.
  *
@@ -638,12 +793,21 @@ function correlationIdOf(failure: TransportFailure): string {
  * Assumptions: `subsystem` is `APPLICATION` because the enumeration transcribes the baseline's own
  * attribution vocabulary and has no browser member; the `CARDDEMO-UI-` code is what identifies the
  * classifier, so nothing is lost by not inventing one.
+ *
+ * Assumptions: `path` is a MASKED template and never a dispatched target. The member is enumerable and
+ * travels with the document into whatever a screen or an error sink does with a caught failure, so a
+ * concrete target here would carry an account identifier, a card number, a cursor or a selector into a
+ * console or a bug report for a failure no service saw. `maskedTarget` is the one place that reduction
+ * happens.
  * @param {string} code - One of this module's `CARDDEMO-UI-` codes.
  * @param {number} status - HTTP status received, or `0` when none was.
  * @param {string} correlationId - Identifier the request was carried out under, possibly empty.
- * @param {string} path - Request target the failure concerns, relative to the configured base URL.
- * @returns {ApiError} A complete problem document carrying no invented field entries and no
- *   fabricated instant.
+ * @param {string} path - Request target the failure concerns, relative to the configured base URL,
+ *   already narrowed by {@link maskedTarget}. Callers must not pass a raw target: this
+ *   document is enumerable and reachable from a caught error, so an unnarrowed selector reaching
+ *   here is an unnarrowed selector reaching an error reporter.
+ * @returns {ApiError} A complete problem document carrying no invented field entries, no
+ *   fabricated instant and no protected identifier.
  */
 function synthesisedProblem(
   code: string,
@@ -704,7 +868,21 @@ function diagnosticFor(
  */
 function normaliseFailure(failure: TransportFailure): ApiRequestError {
   const correlationId = correlationIdOf(failure);
-  const target = failure.config?.url ?? '';
+  // WHY : Assumptions: the target is withheld HERE, at the one place it enters a document a caller
+  //       can serialise, rather than at each of the two construction sites below. Both sites reach the
+  //       same variable, so narrowing it once is what makes "no synthetic problem carries a raw
+  //       selector" a property of this function instead of a rule two call sites have to remember, and
+  //       it means no later edit can introduce a path that skipped the step.
+  // WHY : Alternatives Considered: narrowing by the SERVER's rule instead -- mask each digit run of
+  //       nine or more, keep the last four of a card-width run, preserve length -- so that a browser
+  //       diagnostic lines up character for character against a gateway access record. Rejected as the
+  //       weaker of the two: it withholds digits only, so a non-numeric selector such as a sealed
+  //       cursor, and any query or fragment, would survive it, whereas the published-template mask
+  //       admits a segment only when a contract publishes it as a literal and drops the query and
+  //       fragment outright. PUBLISHED_PATH_SEGMENTS is asserted complete by contracts.test.ts, so the
+  //       set this depends on cannot drift silently. The cost accepted is that a masked browser target
+  //       no longer has the same length as the one the gateway logged.
+  const target = maskedTarget(failure.config?.url ?? '');
   const response = failure.response;
 
   if (response !== undefined) {
@@ -785,9 +963,16 @@ function scheduleAuthenticationSignal(
  * the normalised failure — independent of any listener's behaviour, and a listener's own defect still
  * surfaces, attributed to itself. The cost is that a listener runs after the rejection reaches the
  * caller, which is harmless because the session state it reads was already cleared here.
+ * Assumptions: what is discarded HERE is the access token alone, because that is the only session
+ * value this module owns and writes. The identity token, the retained identifier and the refresh token
+ * are `ui/src/hooks/useAuth.ts`'s, and the signal below is what tells that module to discard them —
+ * so the complete sign-out is the two halves together, and neither half is sufficient. Reaching into
+ * the other module's keys from here would put two writers on one session and leave a sign-out
+ * ambiguous about which of them had to run.
  * @param {TransportFailure} failure - The rejected Axios failure, read for the header it carried.
  * @param {ApiRequestError} normalised - The normalised failure, passed on to each listener.
- * @returns {void} Nothing; the effect is the discarded token and the notified listeners.
+ * @returns {void} Nothing; the effect is the discarded access token and the notified listeners, each
+ *   of which completes the sign-out for the state it owns.
  */
 function invalidateSessionOnUnauthorized(
   failure: TransportFailure,
@@ -927,6 +1112,9 @@ export function getApiClient(): AxiosInstance {
  * before the first render and therefore before any request, but tests construct clients in several
  * configurations within one module, and without this they would all observe whichever one ran
  * first.
+ * @returns {void} Nothing; the memoized instance is discarded. The next `getApiClient` call constructs
+ *   a fresh one from whatever configuration is loaded at that moment, so nothing is returned here for
+ *   a caller to hold -- holding the discarded instance is exactly what this exists to prevent.
  */
 export function resetApiClient(): void {
   client = undefined;
@@ -960,6 +1148,129 @@ export function resetApiClient(): void {
  * target repeating it would resolve to `/api/v1/api/v1/...`.
  */
 export const API_PATH_PREFIX = '/api/v1';
+
+/**
+ * Every literal path segment the seven published contracts use, and nothing else.
+ *
+ * Assumptions: this is an ALLOW-LIST, and a segment absent from it is treated as a value. The
+ * alternative was a shape rule -- keep a segment of lower-case letters and hyphens, mask the rest --
+ * which is shorter but has a hole: a sealed cursor or an artifact selector is twenty-two URL-safe
+ * characters, and one that happened to be all lower-case letters would be kept in the clear. An
+ * allow-list has no such case, because a value is kept only when it EQUALS a published literal, and no
+ * value this system puts in a target can: identifiers are digits, user identifiers and state codes are
+ * upper case, and execution names carry digits.
+ *
+ * Assumptions: `v1` is a member like any other. It is a literal segment of every published path, so it
+ * is listed rather than special-cased, which keeps this set exactly what the documents say and lets the
+ * gate compare the two for equality.
+ *
+ * Assumptions: the set is stated here as data rather than derived from the client modules' operation
+ * manifests, because those modules import this one -- reading their manifests here would close an
+ * import cycle through every one of the seven. `ui/src/api/contracts.test.ts` reads the seven documents
+ * from disk and asserts this set equals their literal segments, so the statement is machine-checked
+ * against its source instead of being maintained by hand.
+ */
+export const PUBLISHED_PATH_SEGMENTS: ReadonlySet<string> = new Set([
+  'accounts',
+  'admin',
+  'api',
+  'artifact',
+  'artifacts',
+  'auth',
+  'authorizations',
+  'billpay',
+  'card-cross-references',
+  'card-xrefs',
+  'cards',
+  'challenge',
+  'copy-last',
+  'customers',
+  'date-evaluations',
+  'disclosure-groups',
+  'display',
+  'executions',
+  'fraud',
+  'lines',
+  'lookup',
+  'lookup-by-account',
+  'maintenance-actions',
+  'next',
+  'record',
+  'reference',
+  'refresh',
+  'reports',
+  'screen',
+  'search',
+  'search-by-account',
+  'signon',
+  'statements',
+  'totals',
+  'transaction-categories',
+  'transaction-report',
+  'transaction-types',
+  'transactions',
+  'update',
+  'us-phone-area-codes',
+  'us-state-zip-prefixes',
+  'us-states',
+  'users',
+  'v1',
+  'view',
+]);
+
+/**
+ * What stands in a masked target where a value stood.
+ *
+ * Assumptions: one generic marker rather than the parameter's published name -- `{accountId}`,
+ * `{selector}` and so on. Alternatives Considered: recovering the exact template by matching the target
+ * against every operation manifest, which would name the parameter. Rejected for the same reason the
+ * segment set is data here: it would close an import cycle. And the name adds nothing a reader of a
+ * diagnostic needs, because what matters is that a value stood in that position, not what the contract
+ * calls it.
+ */
+const MASKED_SEGMENT = '{id}';
+
+/**
+ * Reduces a request target to the masked template of the operation it addressed.
+ *
+ * Purpose: the problem document this module SYNTHESISES is enumerable and reaches whatever a screen or
+ * an error sink does with a caught failure. A target carries account identifiers, card numbers,
+ * transaction identifiers, sealed cursors, opaque artifact selectors and query values, so copying one
+ * into that document would put every one of them wherever the document goes -- a browser console, a
+ * bug report, a support attachment -- for a failure no service ever saw.
+ *
+ * Assumptions: the query and the fragment are DROPPED rather than masked. A masked query would still
+ * disclose which parameters were sent and how many, and no diagnostic needs that: the operation is
+ * identified by its path, and the parameters a screen sent are the screen's own to report.
+ *
+ * Assumptions: this is deliberately STRICTER than the server's own rule, and the two are answering
+ * different questions. `GlobalExceptionHandler` in `services/common-lib` narrows a card number inside a
+ * path and leaves other segments alone, because its `path` travels back to the caller that composed the
+ * target and has to stay recognisable as the request that was made. A document synthesised here is a
+ * local diagnostic no service produced, so it can carry the template alone -- and the server's
+ * card-number rule would not touch an account identifier, a cursor or a selector, all of which reach
+ * this function.
+ * @param {string} target - The request target as dispatched, relative to the configured base URL.
+ * @returns {string} The same path with every value segment replaced by {@link MASKED_SEGMENT} and with
+ *   no query and no fragment; the empty string when no target was recorded.
+ */
+function maskedTarget(target: string): string {
+  const withoutFragment = target.split('#', 1)[0] ?? '';
+  const withoutQuery = withoutFragment.split('?', 1)[0] ?? '';
+  /**
+   * Keeps one segment when the contracts publish it as a literal, and masks it otherwise.
+   *
+   * Assumptions: the empty segment is kept, because it is what separates two slashes and dropping it would
+   * change the shape of the path rather than mask a value.
+   * @param {string} segment - One path segment, already free of any query or fragment.
+   * @returns {string} The segment itself, or {@link MASKED_SEGMENT} where a value stood.
+   */
+  function maskSegment(segment: string): string {
+    return segment === '' || PUBLISHED_PATH_SEGMENTS.has(segment) ? segment : MASKED_SEGMENT;
+  }
+
+  return withoutQuery.split('/').map(maskSegment).join('/');
+}
 
 /** Matches one path-template placeholder, for example `{cardSelector}`. */
 const PATH_PLACEHOLDER = /\{([A-Za-z][A-Za-z0-9]*)\}/gu;
@@ -1032,32 +1343,364 @@ export function requestPath(
 }
 
 /**
- * Reports whether an unknown value is a problem document a screen may read field errors from.
+ * Refuses a reading direction supplied without the cursor it would step from.
  *
- * Assumptions: the members probed are the ones a caller acts on -- the status, the correlation
- * identifier a user quotes to support, and the field-error array a form binds to -- rather than every
- * member the interface declares. Probing all eleven would reject a body from a future service that
- * added a member, and the guard exists to decide whether the body is USABLE, not whether it is
- * exhaustive.
+ * Assumptions: every browse contract in this migration declares `direction` meaningful ONLY alongside
+ * a cursor, defaults it to forward when a cursor arrives without one, and answers 400 keyed on the
+ * direction when a direction arrives without a cursor. There is therefore no request in which a
+ * direction alone carries meaning: it would describe a position relative to nothing.
+ *
+ * Refactoring Rationale: this guard exists because each of the seven paged clients previously DROPPED
+ * a direction it received without a cursor, silently. That behaviour was defended in
+ * `./authorization.ts` on the grounds that answering the opening page is kinder than a guaranteed
+ * refusal, and the reasoning is reversed here deliberately. A dropped value is a caller defect made
+ * invisible: the caller asked to step backward, received the first page, and nothing anywhere said
+ * why — so a screen whose PF7 handler forgot to thread its cursor through looks like a service that
+ * pages wrongly. It also made a neighbouring docstring untrue, since `./transactions.ts` claimed to
+ * pass "every individual value through untouched" while dropping this one. Refusing locally turns a
+ * silent wrong answer into an immediate, attributable error naming both inputs.
+ *
+ * Assumptions: this mirrors the mutually-exclusive check the transaction browse already applied to a
+ * starting identifier combined with a cursor, so both of the two combinations a browse contract
+ * cannot satisfy are now refused the same way, in one place, rather than one being refused locally
+ * and the other quietly rewritten.
+ *
+ * Trade-offs: refusing is NOT a substitute for server-side validation, and no caller may read it as
+ * one. The service remains the authority on every value, including whether a cursor is well-formed,
+ * unexpired and sealed for this caller and direction, and it is the side that returns the per-field
+ * error array a screen renders. This guard refuses exactly one combination that cannot be meaningful
+ * and inspects nothing else — in particular it never parses, compares or reformats the cursor.
+ *
+ * Refactoring Rationale: this paragraph recorded a shared assembler returning the two page members as
+ * "the better shape if a paged client is ever added and forgets this call", and rejected it as
+ * disproportionate on three grounds -- two of the seven clients put these members in a request BODY
+ * and five in a query string, one treated a blank cursor as no cursor, and two named their forward
+ * default in a local constant. That rejection is WITHDRAWN, because the assembler was built and
+ * answers all three: {@link keysetPagingMembers} returns the pair and leaves each client to place it
+ * in the body or the query string it publishes, it normalises the blank cursor for every caller, and
+ * it holds the single forward default the seven local constants were copies of. All seven clients call
+ * it, so the pair can no longer be assembled without the refusal.
+ *
+ * Assumptions: this function REMAINS, delegating to that assembler and discarding its result, and it
+ * is not a second implementation of the rule -- there is exactly one refusal, raised in one place,
+ * with one message. It is kept because it names the rule for a caller that wants to check the pair
+ * without assembling anything, which is what `./pageDirectionGuard.test.ts` measures directly, and
+ * because a client added later may reach for a guard rather than an assembler.
+ * @param {string | undefined} cursor - The sealed cursor the caller supplied, or `undefined` when it
+ *   supplied none. A blank string counts as absent, because the delegate normalises it -- so a caller
+ *   need no longer normalise before calling, and one that already does loses nothing by it.
+ * @param {PageDirection | undefined} direction - The reading direction the caller supplied, or
+ *   `undefined`.
+ * @returns {void} Nothing when the pair is admissible; the caller proceeds to assemble its request.
+ * @throws {RangeError} If a direction was supplied with no usable cursor to step from, carrying the
+ *   message the assembler raises, so a caller sees one wording however it reached the rule.
+ */
+export function requireCursorForDirection(
+  cursor: string | undefined,
+  direction: PageDirection | undefined,
+): void {
+  keysetPagingMembers(cursor, direction);
+}
+
+/**
+ * The four severities a service classifies a problem document with.
+ *
+ * Assumptions: transcribed from the `Severity` union in `./types`, which mirrors the enumeration
+ * `services/common-lib/src/main/java/com/carddemo/common/error/ApiError.java` serialises by name. The
+ * values are listed here because a union is erased at compile time and cannot be consulted at run
+ * time, and this guard has to decide whether a value a SERVICE sent is one of them.
+ */
+const SEVERITIES = ['LOG', 'INFO', 'WARNING', 'CRITICAL'] as const satisfies readonly Severity[];
+
+/**
+ * The six subsystems a failure may be attributed to.
+ *
+ * Assumptions: transcribed from the `Subsystem` union in `./types` for the same erasure reason as the
+ * severities. Three members name mainframe runtimes the migrated system has none of, and they are
+ * accepted rather than pruned because the enumeration carries the baseline's own attribution
+ * vocabulary and a client must accept every value a service may send.
+ */
+const SUBSYSTEMS = [
+  'APPLICATION',
+  'CICS',
+  'IMS',
+  'RELATIONAL',
+  'QUEUE',
+  'OBJECT_STORE',
+] as const satisfies readonly Subsystem[];
+
+/**
+ * The two states one field error may report.
+ *
+ * Assumptions: transcribed from the `FieldValidationState` union in `./types`. The two are not
+ * interchangeable in rendering — the baseline's templated highlight writes a literal asterisk into a
+ * field for the blank case and not for the not-acceptable one — so admitting a third value here would
+ * hand a screen a state it has no rendering for.
+ */
+const FIELD_VALIDATION_STATES = [
+  'NOT_OK',
+  'BLANK',
+] as const satisfies readonly FieldValidationState[];
+
+/**
+ * Fails to compile if any of the three domains above stops covering the union it transcribes.
+ *
+ * Assumptions: the two halves catch opposite mistakes and both are needed. `satisfies` on each
+ * declaration above rejects an entry that is NOT a member of the union, so a typo or a value removed
+ * from `./types` is caught there; the three `Exclude` types below resolve to `never` only while the
+ * sequence covers the union completely, so a value ADDED to a union in `./types` and not added here
+ * makes this declaration's type `never` and the assignment fails. A sequence typed as
+ * `readonly Severity[]` catches neither, which is why this pair exists at all.
+ *
+ * Alternatives Considered: declaring each domain as `Readonly<Record<Union, true>>` instead, which
+ * makes a missing key an incomplete record and an extra key unassignable, so it needs no companion
+ * assertion. Rejected on integration grounds rather than on merit: {@link isMemberOf} narrows an
+ * `unknown` through a SEQUENCE, seven paged clients and the client contract suite read it, and a
+ * record-keyed domain would replace that helper's signature and every call to it to buy a property
+ * these three lines already buy. The record form's argument is preserved rather than discarded -- it
+ * is the reason this assertion is here.
+ *
+ * Trade-offs: the three witnesses are declared and never read, which reads as dead code. Accepted
+ * because a type-level assertion has no runtime form: the check happens when `npm run typecheck`
+ * elaborates the declaration, and the alternative -- a runtime assertion in a module every screen
+ * imports -- would spend startup work to discover a fault that cannot survive a build.
+ */
+type CoversUnion<Domain extends readonly string[], Union extends string> =
+  Exclude<Union, Domain[number]> extends never ? true : never;
+
+const SEVERITIES_COVER_SEVERITY: CoversUnion<typeof SEVERITIES, Severity> = true;
+const SUBSYSTEMS_COVER_SUBSYSTEM: CoversUnion<typeof SUBSYSTEMS, Subsystem> = true;
+const STATES_COVER_FIELD_VALIDATION_STATE: CoversUnion<
+  typeof FIELD_VALIDATION_STATES,
+  FieldValidationState
+> = true;
+
+// Assumptions: the three witnesses are referenced once, here, so the module's own lint rule against an
+//   unused declaration passes without an exemption -- a suppression comment would have to be renewed
+//   every time the set changes, and a reader would have to decide whether it still applied.
+void SEVERITIES_COVER_SEVERITY;
+void SUBSYSTEMS_COVER_SUBSYSTEM;
+void STATES_COVER_FIELD_VALIDATION_STATE;
+
+/**
+ * Reports whether a value is one of a fixed set of accepted strings, narrowing it to that set.
+ *
+ * Assumptions: the domain is compared through a widened `readonly string[]` view because the argument
+ * is `unknown` and the platform's membership test is typed to accept only a member of the array's own
+ * element type — so the widening is what lets an unvalidated value be tested at all, and it discards
+ * no check, since the comparison is by value.
+ * @template T The accepted string literals, which the narrowed result carries.
+ * @param {readonly T[]} domain - Every value the member may hold, in the order `./types` declares.
+ * @param {unknown} value - A member of a response body, of unknown shape.
+ * @returns {boolean} `true` when the value is a string and is one of the accepted values, narrowing
+ *   it to the domain's own type.
+ */
+function isMemberOf<T extends string>(domain: readonly T[], value: unknown): value is T {
+  return typeof value === 'string' && (domain as readonly string[]).includes(value);
+}
+
+/**
+ * Reports whether a value is a non-null object whose members can be read individually.
+ * @param {unknown} value - A response body or one of its members.
+ * @returns {boolean} `true` for a non-null object, narrowing it to a bag of unknown members so each
+ *   one is checked before use rather than asserted.
+ */
+function isMemberBag(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+/**
+ * Reports whether a value is one complete field error a form may bind a mark to.
+ *
+ * Assumptions: all three members are required and the state is restricted to its declared domain,
+ * because this array is the WHOLE field-marking mechanism on a 400 — the target keeps no
+ * pseudo-conversational re-entry flag to gate a highlight with, so an entry naming no field, or
+ * carrying no sentence to show beside it, marks a form position with nothing in it.
+ * @param {unknown} value - One element of a candidate field-error array.
+ * @returns {boolean} `true` when the element carries a field name, an accepted state and a sentence,
+ *   narrowing it to {@link FieldError}.
+ */
+function isFieldError(value: unknown): value is FieldError {
+  if (!isMemberBag(value)) {
+    return false;
+  }
+  // Assumptions: the members are read through a destructuring rather than by indexing the bag at each
+  //   test, because a local declared from an index access narrows reliably while a repeated element
+  //   access does not — and a guard whose narrowing depends on the compiler's flow analysis surviving a
+  //   refactor is a guard that can silently stop checking.
+  const { field, state, message } = value;
+  return (
+    typeof field === 'string' &&
+    isMemberOf(FIELD_VALIDATION_STATES, state) &&
+    typeof message === 'string'
+  );
+}
+
+/**
+ * Reports whether a value is the structured abend detail, or its documented absence.
+ *
+ * Assumptions: `null` is accepted as readily as a complete detail, because every published contract
+ * declares this member nullable and an ordinary refusal carries none. A PARTIAL detail is refused: the
+ * four members are the baseline's `ABEND-CODE`, `ABEND-CULPRIT`, `ABEND-REASON` and `ABEND-MSG` group,
+ * and a diagnostic surface showing three of the four reads as though the fourth were empty rather than
+ * missing.
+ * @param {unknown} value - The `abend` member of a candidate problem document.
+ * @returns {boolean} `true` for `null` or for a complete detail, narrowing it accordingly.
+ */
+function isAbendDetail(value: unknown): value is AbendDetail | null {
+  if (value === null) {
+    return true;
+  }
+  if (!isMemberBag(value)) {
+    return false;
+  }
+  const { abendCode, abendCulprit, abendReason, abendMsg } = value;
+  return (
+    typeof abendCode === 'string' &&
+    typeof abendCulprit === 'string' &&
+    typeof abendReason === 'string' &&
+    typeof abendMsg === 'string'
+  );
+}
+
+/**
+ * Reports whether an unknown value is a complete problem document a screen may render from.
+ *
+ * Refactoring Rationale: this probed THREE members — the status, the correlation identifier and the
+ * presence of a field-error array — and its answer was then used as proof of the whole document.
+ * {@link normaliseFailure} reads `code` from the value the moment this returns true and hands the
+ * value on as {@link ApiRequestError.problem}, which a screen reads a sentence, a severity, an
+ * instant and per-field marks out of. A partial or mistyped body therefore became TRUSTED data: a
+ * JSON object carrying a numeric status and an empty array satisfied the old probe, so an undefined
+ * code reached a message band and an element of the field array that was not a field error reached a
+ * form's mark. Every member is checked here because every member is consumed somewhere.
+ *
+ * Assumptions: what is checked of each member is exactly what the shared advice guarantees, so a
+ * conforming service is never refused. Its canonical constructor normalises an absent code to
+ * `CARDDEMO-0500` and an absent secondary code, correlation identifier, path and timestamp to the
+ * empty string, requires the severity and the subsystem, and copies an absent field-error array to an
+ * empty one — so a present-and-string test on the five text members, a domain test on the two
+ * enumerated ones, an integer test on the status and an element-wise test on the array admit every
+ * document a service can produce. Only `message` and `abend` are nullable there, and only those two
+ * are accepted as null here.
+ *
+ * Trade-offs: a body from a future service that added a member still passes, because unknown members
+ * are ignored rather than refused. The alternative — refusing anything with an unexpected member —
+ * would make this client reject documents it can render perfectly, which is a worse failure than
+ * ignoring a member it has no use for.
+ *
+ * Trade-offs: a service that stopped emitting one member would have its problem documents classified
+ * `RESPONSE` rather than `PROBLEM` by {@link normaliseFailure}, so its own sentence and field errors
+ * would be replaced by a synthesised document. That is accepted because the alternative is worse in
+ * the same situation: admitting the body would hand a screen a value whose members it reads without
+ * them being there. The wire shape is gated on the service side, so the case is a contract break
+ * rather than a variation to tolerate.
  *
  * Alternatives Considered: narrowing with a cast at each call site instead, which needs no helper.
  * Rejected because a cast asserts the shape without checking it, so a screen reading `fieldErrors`
  * from an HTML error page returned by a misconfigured gateway would throw on `undefined.length` and
  * report as a rendering bug rather than as a non-JSON response.
  * @param {unknown} value - A response body of unknown shape, typically from a rejected request.
- * @returns {boolean} `true` when the value carries the three members a caller acts on, narrowing it
- *   to {@link ApiError}.
+ * @returns {boolean} `true` only when every member the interface declares is present and within its
+ *   declared domain, narrowing the value to {@link ApiError}. A value failing any check is classified
+ *   as a response whose body is not a problem document, and a synthesised document is used instead.
  */
 export function isApiError(value: unknown): value is ApiError {
-  if (typeof value !== 'object' || value === null) {
+  if (!isMemberBag(value)) {
     return false;
   }
-  const candidate = value as Partial<ApiError>;
+  const { code, secondaryCode, message, severity, subsystem, status } = value;
+  const { correlationId, path: reportedPath, timestamp, fieldErrors, abend } = value;
+  if (!Array.isArray(fieldErrors)) {
+    return false;
+  }
+  // Assumptions: the array is retyped as a read-only sequence of unknown members before it is walked.
+  //   The platform's array test narrows to an implicitly-typed array, and every element read off one is
+  //   an unchecked value the rule set refuses — so naming the element type here is what keeps each entry
+  //   checked by {@link isFieldError} rather than trusted because its container was an array.
+  const entries: readonly unknown[] = fieldErrors;
   return (
-    typeof candidate.status === 'number' &&
-    typeof candidate.correlationId === 'string' &&
-    Array.isArray(candidate.fieldErrors)
+    typeof code === 'string' &&
+    code.length > 0 &&
+    typeof secondaryCode === 'string' &&
+    (message === null || typeof message === 'string') &&
+    isMemberOf(SEVERITIES, severity) &&
+    isMemberOf(SUBSYSTEMS, subsystem) &&
+    Number.isInteger(status) &&
+    typeof correlationId === 'string' &&
+    typeof reportedPath === 'string' &&
+    typeof timestamp === 'string' &&
+    entries.every(isFieldError) &&
+    isAbendDetail(abend)
   );
+}
+
+/**
+ * The reading direction every contract applies to a cursor that arrives without one.
+ *
+ * Assumptions: forward is the six contracts' own default and is stated here once rather than in each
+ * client, because a default spelled per module is a default that can come to differ per module while
+ * every module still looks right on its own.
+ */
+const DEFAULT_PAGE_DIRECTION: PageDirection = 'next';
+
+/**
+ * Establishes the two paging members a keyset request may carry, refusing a direction sent alone.
+ *
+ * Purpose
+ * -------
+ * Decide, in ONE place for all seven clients, what a caller's cursor and direction mean: nothing to
+ * send, a cursor read forward by default, a cursor read in the direction asked for, or a request that
+ * cannot be made at all.
+ *
+ * Refactoring Rationale: ⚠️ each client used to assemble these two members itself, and all seven
+ * dropped a supplied direction when no cursor accompanied it -- `if (cursor !== undefined) { ... }`
+ * with the direction assigned inside the block. That silently rewrote the caller's request into a
+ * different one: a screen asking to step BACKWARD from nowhere received the opening page and rendered
+ * it as though the step had been taken, so a paging defect surfaced as rows that did not move rather
+ * than as an error. Every contract declares the pair asymmetrically -- a cursor without a direction is
+ * read forward, a direction without a cursor is refused with 400 keyed on the direction -- so the
+ * combination has a defined answer on the service side and had none here.
+ *
+ * Alternatives Considered: modelling each query as a discriminated union that admits the pair only
+ * together, which would move the refusal to compile time and is the stronger form. Rejected for now
+ * because the cursor and the direction are separate optional members of seven published request
+ * schemas, and a union would either change those wire shapes or add a client-only shape that no
+ * contract describes -- while `ui/src/api/contracts.test.ts` holds every client shape to its contract
+ * member for member. A runtime refusal keeps the published shapes exact and still turns a guaranteed
+ * 400 into an immediate, attributable error.
+ *
+ * Trade-offs: this is deliberately NOT a substitute for the service's own validation. The service
+ * remains the authority on whether a cursor can be opened at all -- it is sealed against the query,
+ * the caller and the direction it was minted for -- and it answers with the per-field entry a form
+ * binds to. This guard refuses only the one combination that names no page.
+ * @param {string | undefined} cursor - The sealed cursor a previous page issued, replayed verbatim, or
+ *   `undefined` for an opening read. A blank string is treated as absent, because a caller holding an
+ *   empty cursor holds no position and the service reads a blank value the same way.
+ * @param {PageDirection | undefined} direction - Which way to step from that cursor, or `undefined` to
+ *   accept the contract's forward default.
+ * @returns {{ readonly cursor: string; readonly direction: PageDirection } | undefined} Both members
+ *   when a usable cursor was supplied, or `undefined` when neither member is to be sent.
+ * @throws {RangeError} If a direction is supplied without a usable cursor, naming both inputs. The
+ *   cursor's value is never included in the message: it is opaque, it is bound to the caller, and this
+ *   message reaches consoles and issue trackers.
+ */
+export function keysetPagingMembers(
+  cursor: string | undefined,
+  direction: PageDirection | undefined,
+): { readonly cursor: string; readonly direction: PageDirection } | undefined {
+  const positioned = cursor !== undefined && cursor.length > 0;
+  if (!positioned) {
+    if (direction !== undefined) {
+      throw new RangeError(
+        `A paging direction states which way to step from a position, so '${direction}' cannot be` +
+          " sent without a cursor: replay the page envelope's lastKey to read forward or its" +
+          ' firstKey to read backward, or omit the direction to read the opening page.',
+      );
+    }
+    return undefined;
+  }
+  return { cursor, direction: direction ?? DEFAULT_PAGE_DIRECTION };
 }
 
 /**
@@ -1075,6 +1718,11 @@ export function isApiError(value: unknown): value is ApiError {
  * tab and is discarded when it closes; a token surviving in `localStorage` would outlive the operator's
  * session on a shared workstation, which is the setting this application is used in.
  * @param {string | null} token - Access token issued by auth-service, or `null` to sign out.
+ * @returns {void} Nothing; the effect is the stored value. A token REPLACES whatever this tab held
+ *   under this module's single key, and `null` REMOVES it, so the request interceptor stops attaching
+ *   an `Authorization` header from the very next request. Discarding the access token is not by itself
+ *   a sign-out: the identity and refresh tokens belong to `ui/src/hooks/useAuth.ts`, which clears them
+ *   alongside this one.
  * @throws {RangeError} If a non-null token is blank or contains controls.
  */
 export function setAccessToken(token: string | null): void {

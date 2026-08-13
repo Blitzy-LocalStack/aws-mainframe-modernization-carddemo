@@ -218,6 +218,7 @@ __all__ = [
     "SequenceReconciliation",
     "TableTarget",
     "connect",
+    "driver_errors",
     "key_columns_of",
     "load_records",
     "prepare_record",
@@ -280,18 +281,35 @@ class _Cursor(Protocol):
         ...  # pragma: no cover - Protocol declaration
 
     def execute(self, statement: str) -> Any:
-        """Run one statement that returns no rows.
+        """Run one statement.
 
         Parameters
         ----------
         statement : str
-            The statement to run. This module issues only the two statements the
-            stage-and-merge path needs: a temporary-table creation and one insert.
+            The statement to run. This module issues only the statements the stage-and-merge path
+            needs: a temporary-table creation, the content-conflict probe, and one insert.
 
         Returns
         -------
         Any
-            Whatever the driver returns; this module reads only :attr:`rowcount` afterwards.
+            Whatever the driver returns; this module reads :attr:`rowcount` or calls
+            :meth:`fetchone` afterwards, never both for one statement.
+        """
+        ...  # pragma: no cover - Protocol declaration
+
+    def fetchone(self) -> Any:
+        """Return the single row the last execution projected, or ``None``.
+
+        Purpose
+        -------
+        Let the content-conflict probe read its one aggregate row. Declared on the Protocol rather
+        than reached through ``getattr`` so a double that omits it fails type checking here rather
+        than at run time on a load.
+
+        Returns
+        -------
+        Any
+            A sequence of column values, or ``None`` when the statement projected no row.
         """
         ...  # pragma: no cover - Protocol declaration
 
@@ -461,6 +479,19 @@ class Projection(enum.Enum):
     """
 
 
+#: The projections whose stored bytes are not a function of their source value.
+#:
+#: WHY : Refactoring Rationale: the pair is named ONCE here where three members used to spell the
+#:   same two-element set inline -- `comparable_fields`, `content_columns` and the new
+#:   `sealed_fields`. The three are complements of one another by construction, so a set that
+#:   drifted in one of them would silently produce a column that is digested as comparable AND
+#:   audited as sealed, or one that is neither. Deriving all three from one declaration makes that
+#:   class of disagreement unrepresentable rather than merely unlikely.
+_SEALING_PROJECTIONS: Final[frozenset[Projection]] = frozenset(
+    {Projection.SEALED_IDENTIFIER, Projection.SEALED_VERIFICATION_VALUE}
+)
+
+
 class LoadStrategy(enum.Enum):
     """How a re-run of one dataset avoids adding a row the target table already holds.
 
@@ -577,14 +608,25 @@ class LoadOutcome:
 
     @property
     def skipped(self) -> int:
-        """Report how many staged rows the target already held.
+        """Report how many staged rows the target already held IDENTICALLY.
 
         Returns
         -------
         int
             The difference between the two counts, which is zero for a load into a table that
             held none of the staged rows.
+
+        Raises
+        ------
+        None
         """
+        # WHY : Refactoring Rationale: this count used to mean "the table already held these rows"
+        #   on the strength of the merge having skipped them, and the merge skips a key WITHOUT
+        #   reading it -- so a staged row disagreeing with the stored one was counted here and the
+        #   load returned success. `_conflicting_content` now runs before the merge and refuses that
+        #   case, which is what makes the word "identically" above true rather than assumed. The
+        #   one difference it cannot see is inside a sealed column, and `content_columns` records
+        #   why.
         return self.staged - self.inserted
 
     def describe(self) -> str:
@@ -938,11 +980,44 @@ class TableTarget:
         #   a difference on every single run. Excluding it is not a weakening of the check: the
         #   ciphertext cannot be verified by comparison at all, only by decryption, which this
         #   package deliberately cannot perform.
-        sealing = {Projection.SEALED_IDENTIFIER, Projection.SEALED_VERIFICATION_VALUE}
         return tuple(
             name
             for name in self.columns
-            if self.projections.get(name, Projection.VERBATIM) not in sealing
+            if self.projections.get(name, Projection.VERBATIM) not in _SEALING_PROJECTIONS
+        )
+
+    def sealed_fields(self) -> Mapping[str, str]:
+        """Map each field this target seals to the column its envelope is stored in.
+
+        Purpose
+        -------
+        Name the exact complement of :meth:`comparable_fields`, so the verification pass that
+        certifies a sealed column by presence and framing can find those columns without
+        re-deriving which projections seal. Excluding them from the digest is correct and was
+        argued at :meth:`comparable_fields`; leaving them certified by NOTHING was not, and a load
+        that silently dropped every stored identifier would have been reported as verified.
+
+        Returns
+        -------
+        Mapping[str, str]
+            Copybook field name to stored column name, in the target's own mapping order. Empty
+            for the nine loadable targets that seal nothing, which is the common case.
+
+        Raises
+        ------
+        None
+        """
+        # WHY : Assumptions: the returned mapping is keyed by FIELD and valued by COLUMN, because
+        #   the audit needs both halves and they are read from different sides. The expected count
+        #   comes from the source record, which is keyed by field name; the stored count comes from
+        #   a read of the target, which is keyed by column name. Returning only one of the two
+        #   would push the other lookup onto every caller.
+        return MappingProxyType(
+            {
+                field: column
+                for field, column in self.columns.items()
+                if self.projections.get(field, Projection.VERBATIM) in _SEALING_PROJECTIONS
+            }
         )
 
     @property
@@ -1125,6 +1200,119 @@ class TableTarget:
             f"INSERT INTO {self.qualified_name} ({names})"
             f" SELECT {names} FROM {self.stage_name}"
             f" ON CONFLICT ({key}) DO NOTHING"
+        )
+
+    def content_columns(self) -> tuple[str, ...]:
+        """List the columns whose disagreement between a staged and a stored row is real.
+
+        Purpose
+        -------
+        Name the columns a content comparison may read, so that the conflict probe compares only
+        values that are a DETERMINISTIC function of the source record.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Every mapped target column that is neither a key column nor the product of a sealing
+            projection, in the mapping's own order.
+
+        Raises
+        ------
+        None
+        """
+        # WHY : Assumptions: the KEY columns are excluded because the probe joins on them -- they
+        #   are equal by construction in every row it examines, so including them would add
+        #   predicates that can never fire.
+        # WHY : Assumptions: a SEALED column is excluded for the reason `comparable_fields`
+        #   records, and here the consequence is sharper. An envelope draws a fresh initialisation
+        #   vector per value, so the same card verification value enciphered twice is different
+        #   bytes: a probe that read `cvv_encrypted` would report a conflict on EVERY row of every
+        #   re-run of the card and customer loads, and the refusal it produced would be
+        #   indistinguishable from a genuine content disagreement. The cost is real and is stated
+        #   rather than hidden: a stored row whose only difference from the extract is inside a
+        #   sealed column is accepted as already present. Nothing in this package can detect that
+        #   difference, because detecting it would require decrypting, which this package
+        #   deliberately cannot do.
+        keys = set(self.key_columns)
+        return tuple(
+            column
+            for field, column in self.columns.items()
+            if column not in keys
+            and self.projections.get(field, Projection.VERBATIM) not in _SEALING_PROJECTIONS
+        )
+
+    def conflict_statement(self) -> str:
+        """Compose the statement that finds staged rows the table already holds DIFFERENTLY.
+
+        Purpose
+        -------
+        Give the load a way to tell the two things ``ON CONFLICT ... DO NOTHING`` cannot tell
+        apart: a staged row the table already holds exactly, which a re-run may skip, and a staged
+        row whose key the table holds against different content, which no load may skip silently.
+
+        Returns
+        -------
+        str
+            A statement projecting exactly one row: the number of staged rows whose key is present
+            with differing content, followed by one count per column of
+            :meth:`content_columns` -- in that order -- giving how many of those rows differ in
+            that column. The columns are read POSITIONALLY rather than by alias, so no identifier
+            of this module's own invention reaches the statement.
+
+        Raises
+        ------
+        AuroraLoadError
+            If the target declares no key columns, or declares no comparable content column, so
+            the question this statement asks is not expressible for it. Both are refused rather
+            than answered with an empty statement, because a caller that received one would
+            conclude there was no conflict.
+        """
+        if not self.key_columns:
+            raise AuroraLoadError(
+                f"target {self.schema}.{self.table} is bound to no record, so its key columns"
+                " could not be derived and a same-key content comparison is not expressible"
+                " for it"
+            )
+        content = self.content_columns()
+        if not content:
+            raise AuroraLoadError(
+                f"target {self.schema}.{self.table} maps no column that is both outside its key"
+                " and comparable, so a same-key content comparison is not expressible for it"
+            )
+        # WHY : Assumptions: the key join uses `=` while the whole-row anti-join in
+        #   `merge_statement` uses `IS NOT DISTINCT FROM`, and the asymmetry is deliberate rather
+        #   than an inconsistency. Every column joined here belongs to a unique constraint, so it
+        #   is `NOT NULL` and the two operators agree -- and `=` is the form the index on that
+        #   constraint can be used for, which matters because this probe runs over the whole
+        #   staged dataset on every load.
+        join = " AND ".join(
+            f"{_MERGE_TARGET_ALIAS}.{quote_identifier(column)}"
+            f" = {_MERGE_STAGE_ALIAS}.{quote_identifier(column)}"
+            for column in self.key_columns
+        )
+        # WHY : Assumptions: the per-column predicate is `IS DISTINCT FROM`, which is the correct
+        #   operator here for the mirror of the reason `=` is correct above. A content column MAY
+        #   be null -- the daily feed's two stamps are, and so are several customer address lines
+        #   -- and `<>` against a null yields unknown, so a row that gained or lost a value in a
+        #   nullable column would not be counted as differing. That is precisely the drift this
+        #   probe exists to catch.
+        differs = [
+            f"{_MERGE_TARGET_ALIAS}.{quote_identifier(column)}"
+            f" IS DISTINCT FROM {_MERGE_STAGE_ALIAS}.{quote_identifier(column)}"
+            for column in content
+        ]
+        # WHY : Trade-offs: one statement returning one row, rather than a query per column or a
+        #   query returning the differing rows. A per-column query would multiply the join by the
+        #   column count -- fifteen times over the customer master -- and a query returning rows
+        #   would put cardholder values into this process, where the next mistake puts them in a
+        #   log. Aggregate counts answer both questions an operator has (how many rows, which
+        #   columns) and can carry no value at all.
+        projections = ", ".join(f"count(*) FILTER (WHERE {predicate})" for predicate in differs)
+        return (
+            f"SELECT count(*), {projections}"
+            f" FROM {self.stage_name} AS {_MERGE_STAGE_ALIAS}"
+            f" JOIN {self.qualified_name} AS {_MERGE_TARGET_ALIAS} ON {join}"
+            f" WHERE {' OR '.join(differs)}"
         )
 
 
@@ -1973,6 +2161,51 @@ def target_for(record_name: str) -> TableTarget:
         ) from exc
 
 
+def driver_errors() -> tuple[type[BaseException], ...]:
+    """Return the database driver's own exception types, so a caller can classify one.
+
+    Purpose
+    -------
+    Let a command translate a query failure into its own documented exit tier without importing
+    the driver -- which no module outside this one and ``credentials`` is permitted to do -- and
+    without catching every exception to find one.
+
+    Parameters
+    ----------
+    None
+        The driver is resolved by import, from the same environment every other call in this
+        module resolves it from.
+
+    Returns
+    -------
+    tuple[type[BaseException], ...]
+        ``(psycopg.Error,)`` when the driver is installed, and an EMPTY tuple when it is not.
+
+    Raises
+    ------
+    None
+        An absent driver is answered with an empty tuple rather than raised for. A caller
+        catching an empty tuple catches nothing, which is correct: with no driver installed there
+        is no connection to have failed, and the absence itself surfaces as the
+        ``ConfigurationError`` :func:`connect` raises.
+    """
+    # WHY : Alternatives Considered: the alternative was for each caller to catch `Exception`
+    #   around every query it issues, which is what the verification handlers effectively had to do
+    #   -- and it cannot distinguish a driver failure from a programming error, so a mis-spelled
+    #   attribute in a comparison would have been reported to an operator as a failed database step.
+    #   Publishing the driver's own base class keeps that distinction and keeps the driver import
+    #   inside the two modules that already own it.
+    # WHY : Assumptions: `psycopg.Error` is the ONE type named, because the driver documents it as
+    #   the base of every exception it raises -- interface, database, data, operational, integrity,
+    #   internal, programming and not-supported errors all derive from it. Naming the subclasses
+    #   would be a list to keep in step with a dependency for no gain.
+    try:
+        import psycopg
+    except ImportError:  # pragma: no cover - exercised only on an incomplete install
+        return ()
+    return (psycopg.Error,)
+
+
 def connect(settings: AuroraConnectionSettings, *, expected_role: str | None = None) -> Any:
     """Open a database connection from resolved settings, optionally proving the login role.
 
@@ -2210,6 +2443,141 @@ def _discard(connection: _Connection, operation: str, target: TableTarget, stage
     return ""
 
 
+@dataclass(frozen=True, slots=True)
+class _ContentConflict:
+    """One dataset's same-key, different-content disagreement, counted and never quoted.
+
+    Purpose
+    -------
+    Carry the two facts a refusal must state -- how many staged rows the table already holds under
+    the same key with different content, and which columns those rows differ in -- in a form that
+    structurally cannot carry a value.
+
+    Parameters
+    ----------
+    rows : int
+        How many staged rows conflict.
+    columns : tuple[str, ...]
+        The columns at least one conflicting row differs in, in the target's own column order.
+
+    Returns
+    -------
+    None
+        A dataclass is constructed, not returned. :meth:`describe` renders it.
+
+    Raises
+    ------
+    None
+        Construction validates nothing; the probe that builds it has already.
+    """
+
+    rows: int
+    columns: tuple[str, ...]
+
+    def describe(self, target: TableTarget) -> str:
+        """Render the refusal an operator acts on.
+
+        Parameters
+        ----------
+        target : TableTarget
+            The target being loaded, whose schema and table the message names.
+
+        Returns
+        -------
+        str
+            One sentence naming the row count, the qualified table and the differing columns, and
+            stating that nothing was loaded.
+
+        Raises
+        ------
+        None
+        """
+        # WHY : Assumptions: the message names COLUMNS and COUNTS and no value, for the same reason
+        #   `_safe_diagnostic` withholds the driver's DETAIL: every one of these tables carries a
+        #   primary account number, a national identifier or a cardholder name, and `cli.py` writes
+        #   this text straight to a container log.
+        # WHY : Assumptions: the remedy is stated, because the correct action is not obvious from
+        #   the fault. The load is re-runnable once the disagreement is resolved, and resolving it
+        #   is a decision about WHICH side is authoritative -- a decision this package cannot take,
+        #   since no role it holds may update or delete a loaded row.
+        return (
+            f"{self.rows} staged row(s) for {target.schema}.{target.table} carry a key the table"
+            f" already holds against different content, in column(s)"
+            f" {', '.join(self.columns)}; nothing was loaded and the transaction was rolled back."
+            " Establish which side is authoritative before re-running: this loader inserts rows"
+            " the table does not hold and never overwrites one it does, so it cannot resolve the"
+            " disagreement itself"
+        )
+
+
+def _conflicting_content(cursor: _Cursor, target: TableTarget) -> _ContentConflict | None:
+    """Ask the server whether any staged row disagrees with a stored row of the same key.
+
+    Purpose
+    -------
+    Close the gap ``ON CONFLICT ... DO NOTHING`` leaves open. The merge skips a key the table
+    already holds WITHOUT reading it, so a staged row that disagrees with the stored one is
+    reported as an exact duplicate and the load returns success -- which is the one outcome that
+    makes a wrong table look like a re-run.
+
+    Parameters
+    ----------
+    cursor : _Cursor
+        A cursor on the open load transaction, with the staging table already populated.
+    target : TableTarget
+        The target being loaded.
+
+    Returns
+    -------
+    _ContentConflict | None
+        The conflict, or ``None`` when every staged row the table already holds is held
+        identically -- which includes the ordinary case of a table holding none of them.
+
+    Raises
+    ------
+    AuroraLoadError
+        If the probe projects no row, or a row of the wrong arity. Either means the object in hand
+        is not answering as a database cursor, which is reported here rather than surfacing later
+        as an index error naming nothing.
+    """
+    cursor.execute(target.conflict_statement())
+    row = cursor.fetchone()
+    if row is None:
+        raise AuroraLoadError(
+            f"the content-conflict probe for {target.schema}.{target.table} returned no row; it"
+            " projects exactly one by construction, so the cursor is not behaving as a database"
+            " cursor"
+        )
+    values = tuple(row)
+    content = target.content_columns()
+    expected = 1 + len(content)
+    if len(values) != expected:
+        raise AuroraLoadError(
+            f"the content-conflict probe for {target.schema}.{target.table} projected"
+            f" {len(values)} column(s) where it projects {expected}; the cursor is not behaving as"
+            " a database cursor"
+        )
+    # WHY : Assumptions: a non-integer count is treated as ABSENT EVIDENCE and refused, not
+    #   coerced. `int("0")` and `int(None)` fail differently and `int(0.4)` succeeds while losing
+    #   the answer; a probe whose count cannot be read as a whole number has not established that
+    #   there is no conflict, and the safe reading of "I do not know" here is to refuse.
+    counts: list[int] = []
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise AuroraLoadError(
+                f"the content-conflict probe for {target.schema}.{target.table} projected a"
+                f" {type(value).__name__} where every column is a count, so whether the staged"
+                " rows agree with the stored ones could not be established"
+            )
+        counts.append(value)
+    if counts[0] == 0:
+        return None
+    return _ContentConflict(
+        rows=counts[0],
+        columns=tuple(column for column, count in zip(content, counts[1:], strict=True) if count),
+    )
+
+
 def load_records(
     connection: _Connection,
     target: TableTarget,
@@ -2241,14 +2609,15 @@ def load_records(
     -------
     LoadOutcome
         Rows staged and rows the table gained. The two differ by the number of staged rows the
-        target already held, so a re-run of a completed load reports every row skipped.
+        target already held IDENTICALLY, so a re-run of a completed load reports every row skipped.
 
     Raises
     ------
     AuroraLoadError
-        If a record does not carry a mapped field, a projection cannot be applied, or the staging,
-        the copy, the merge or the commit fails. The transaction is rolled back before the error
-        is raised, and the message names no value the records carried.
+        If a record does not carry a mapped field, a projection cannot be applied, any staged row
+        carries a key the table already holds against DIFFERENT content, or the staging, the copy,
+        the conflict probe, the merge or the commit fails. The transaction is rolled back before
+        the error is raised, and the message names no value the records carried.
     """
     # WHY : Trade-offs: ONE transaction spans the whole dataset, rather than a commit every N
     #   rows. The cost is a longer-held transaction and its accumulated locks and WAL, which on a
@@ -2276,6 +2645,21 @@ def load_records(
                 for record in records:
                     stream.write_row(target.row_of(prepare_record(target, record, context)))
                     staged += 1
+            # WHY : Assumptions: the conflict probe runs BEFORE the merge and inside the same
+            #   transaction. Before, because after the merge the disagreeing rows have already been
+            #   silently skipped and the outcome reports them as duplicates -- which is the defect.
+            #   Inside, because the staging table is session-temporary and the comparison must see
+            #   the stored rows under the same snapshot the merge would.
+            # WHY : Assumptions: the probe is skipped for a WHOLE_ROW_MERGE target, and DALYTRAN is
+            #   the only one. Its merge is an anti-join over every column, so a staged row that
+            #   differs anywhere is a row the table does not hold and is inserted; "same key,
+            #   different content" is not a conflict there but a second, distinct feed row, which
+            #   the baseline's own daily file genuinely contains.
+            if target.strategy is LoadStrategy.KEYED_MERGE:
+                operation = "content-conflict check"
+                conflict = _conflicting_content(cursor, target)
+                if conflict is not None:
+                    raise AuroraLoadError(conflict.describe(target))
             operation = "merge"
             cursor.execute(target.merge_statement())
             # Assumptions: the inserted count is read from the driver's affected-row count for

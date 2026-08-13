@@ -11,6 +11,8 @@ import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.MACSigner;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
+import jakarta.servlet.DispatcherType;
+import jakarta.servlet.RequestDispatcher;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
@@ -30,6 +32,7 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtClaimNames;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtException;
+import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
 
 /**
  * Asserts what the account context accepts as proof that a caller is the authorization service.
@@ -98,6 +101,16 @@ class InternalApiSecurityConfigTest {
      * that ignores it.</p>
      */
     private static final String OTHER_SUBJECT = InternalServiceToken.SUBJECT_TRANSACTION_SERVICE;
+
+    /**
+     * The address a container re-dispatches a failed request to.
+     *
+     * <p>Assumptions: this is the framework's conventional error path and it is stated as a literal here on
+     * purpose, because the matcher under assertion deliberately does NOT depend on it -- the rule matches
+     * the dispatcher TYPE and the ORIGINAL target, so a deployment that renamed its error page would keep
+     * working. A constant read from the configuration would make this test look like a test of the path.</p>
+     */
+    private static final String ERROR_PATH = "/error";
 
     /**
      * Builds the deployed decoder over both callers' keys.
@@ -877,10 +890,17 @@ class InternalApiSecurityConfigTest {
     void theRequiredAuthoritiesAreTheScopesUnderTheFrameworkPrefix() {
         // Assumptions: the decision authorities are read as the published LIST rather than as one value,
         //   because the single read authority this case once pinned was split into one per operation
-        //   family. The composition rule is the same for all four, which is why they are still one case.
+        //   family. The composition rule is the same for all of them, which is why they are still one case.
+        // WHY : ⚠️ Refactoring Rationale: the list carries FOUR entries where it carried three, and the
+        //   order is the order the chain states its rules in -- the narrowest first. The
+        //   card-number-disclosing address was split out of the cross-reference family, so an assertion
+        //   naming three would pass against a chain that had lost the split and gone back to authorising
+        //   an unmasked primary account number with the same credential as a masked page.
         assertThat(InternalApiSecurityConfig.requiredAuthorities())
                 .extracting(GrantedAuthority::getAuthority)
-                .containsExactly("SCOPE_" + InternalServiceToken.SCOPE_CARD_XREF_READ,
+                .containsExactly(
+                        "SCOPE_" + InternalServiceToken.SCOPE_CARD_XREF_RESOLVE_CARD_NUMBER,
+                        "SCOPE_" + InternalServiceToken.SCOPE_CARD_XREF_READ,
                         "SCOPE_" + InternalServiceToken.SCOPE_ACCOUNT_READ,
                         "SCOPE_" + InternalServiceToken.SCOPE_CUSTOMER_READ);
         assertThat(InternalApiSecurityConfig.requiredCustomerRecordsAuthority().getAuthority())
@@ -889,8 +909,16 @@ class InternalApiSecurityConfigTest {
         assertThat(InternalApiSecurityConfig.INTERNAL_CUSTOMER_MASTER_AUTHORITY)
                 .as("one authority under two names would separate nothing")
                 .isNotIn(InternalApiSecurityConfig.CARD_XREF_READ_AUTHORITY,
+                        InternalApiSecurityConfig.CARD_XREF_RESOLVE_AUTHORITY,
                         InternalApiSecurityConfig.ACCOUNT_READ_AUTHORITY,
                         InternalApiSecurityConfig.CUSTOMER_READ_AUTHORITY);
+        // WHY : Assumptions: the two cross-reference authorities are asserted DIFFERENT, because they are
+        //   composed from two constants that differ by one path segment of their scope name. Two
+        //   authorities that happened to spell the same string would satisfy every matcher assertion in
+        //   this class while leaving the disclosure reachable with the credential the split withheld it
+        //   from -- the same failure mode the customer-master assertion above exists for.
+        assertThat(InternalApiSecurityConfig.CARD_XREF_RESOLVE_AUTHORITY)
+                .isNotEqualTo(InternalApiSecurityConfig.CARD_XREF_READ_AUTHORITY);
     }
 
     /**
@@ -915,6 +943,7 @@ class InternalApiSecurityConfigTest {
                 .isEqualTo("SCOPE_" + InternalServiceToken.SCOPE_CUSTOMER_MASTER_READ)
                 .as("a shared value would leave one credential reaching every internal address")
                 .isNotIn(InternalApiSecurityConfig.CARD_XREF_READ_AUTHORITY,
+                        InternalApiSecurityConfig.CARD_XREF_RESOLVE_AUTHORITY,
                         InternalApiSecurityConfig.ACCOUNT_READ_AUTHORITY,
                         InternalApiSecurityConfig.CUSTOMER_READ_AUTHORITY);
 
@@ -972,6 +1001,149 @@ class InternalApiSecurityConfigTest {
     }
 
     /**
+     * Verifies the ONE cross-reference address that discloses an unmasked card number is governed by its
+     * own authority group, and that the credential for it is minted for one caller only.
+     *
+     * <p>Purpose: this is the assertion that makes the purpose-bound split real rather than nominal. The
+     * account-keyed lookup answers with a whole primary account number, because its consumer writes that
+     * value into its ledger row as the row's key; the two addresses beside it answer with none. While all
+     * three shared one authority, any holder of the cross-reference scope could provoke that disclosure --
+     * so the property worth pinning is that the disclosing address is matched by the narrow group and by
+     * NEITHER of the wider ones, and that the other two are matched by the wider group and not by the
+     * narrow one.</p>
+     *
+     * <p>Assumptions: the minter's own table is asserted in the same case, because a chain rule demanding a
+     * scope that both callers may carry would be a separation that separates nothing. The two halves are
+     * enforced in different modules -- the rule here, the table in the shared kernel -- and neither alone
+     * is the control.</p>
+     *
+     * <p>Assumptions: both groups are asserted to sit inside {@code decisionReadPaths()} as well, because
+     * that is the matcher the chain composes its own boundary from; an address in a group the chain does
+     * not claim reaches no handler at all.</p>
+     */
+    @Test
+    @DisplayName("the card-number-disclosing address is governed by its own authority group alone")
+    void theDisclosingAddressIsGovernedByItsOwnGroup() {
+        var resolve = InternalApiSecurityConfig.cardXrefResolvePaths(
+                PathPatternRequestMatcher.withDefaults());
+        var read = InternalApiSecurityConfig.cardXrefPaths(
+                PathPatternRequestMatcher.withDefaults());
+        var decisions = InternalApiSecurityConfig.decisionReadPaths();
+        var chain = InternalApiSecurityConfig.internalPaths();
+
+        MockHttpServletRequest disclosing = request(HttpMethod.POST,
+                CardXrefController.BASE_PATH + CardXrefController.LOOKUP_BY_ACCOUNT_PATH);
+        List<MockHttpServletRequest> nonDisclosing = List.of(
+                request(HttpMethod.POST,
+                        CardXrefController.BASE_PATH + CardXrefController.LOOKUP_PATH),
+                request(HttpMethod.POST,
+                        CardXrefController.BASE_PATH + CardXrefController.SEARCH_BY_ACCOUNT_PATH));
+
+        assertThat(resolve.matches(disclosing))
+                .as("the account-keyed lookup is the address that answers with a whole card number")
+                .isTrue();
+        assertThat(read.matches(disclosing))
+                .as("if the wider cross-reference group still claimed it, the rule order in the chain"
+                        + " would be irrelevant and the split would grant nothing")
+                .isFalse();
+        assertThat(decisions.matches(disclosing)).isTrue();
+        assertThat(chain.matches(disclosing)).isTrue();
+
+        for (MockHttpServletRequest address : nonDisclosing) {
+            assertThat(read.matches(address))
+                    .as("%s %s discloses no card number", address.getMethod(), address.getRequestURI())
+                    .isTrue();
+            assertThat(resolve.matches(address))
+                    .as("%s %s must not demand the disclosure scope, which is minted for one caller",
+                            address.getMethod(), address.getRequestURI())
+                    .isFalse();
+            assertThat(decisions.matches(address)).isTrue();
+            assertThat(chain.matches(address)).isTrue();
+        }
+
+        assertThat(InternalServiceToken.permits(InternalServiceToken.SUBJECT_TRANSACTION_SERVICE,
+                InternalServiceToken.SCOPE_CARD_XREF_RESOLVE_CARD_NUMBER))
+                .as("the transaction context keys its ledger row on this value, so it must reach it")
+                .isTrue();
+        assertThat(InternalServiceToken.permits(InternalServiceToken.SUBJECT_AUTHORIZATION_SERVICE,
+                InternalServiceToken.SCOPE_CARD_XREF_RESOLVE_CARD_NUMBER))
+                .as("the authorization context calls the card-keyed form only, so it must NOT reach it")
+                .isFalse();
+    }
+
+    /**
+     * Verifies the enumerated address census agrees with the matcher the chain is built from.
+     *
+     * <p>Purpose: {@code internalAddresses()} is a second derivation of the same addresses, existing so
+     * that the error-dispatch matcher can decide against the ORIGINAL request target -- which survives an
+     * error dispatch only as an attribute. Two derivations can drift, and the symptom of drift is silent:
+     * an address added to a path group but not to the census would have its error page authenticated by
+     * the identity provider's decoder, and the only visible effect would be an occasional 401 replacing an
+     * occasional 406.</p>
+     *
+     * <p>Assumptions: each address is offered under both methods and accepted if EITHER matches, because
+     * the census is deliberately method-free while the path groups are method-bound -- the collection
+     * address publishes GET and every other address publishes POST.</p>
+     */
+    @Test
+    @DisplayName("every enumerated internal address is claimed by the chain's own matcher")
+    void theAddressCensusAgreesWithTheChainMatcher() {
+        var chain = InternalApiSecurityConfig.internalPaths();
+
+        assertThat(InternalApiSecurityConfig.internalAddresses())
+                .as("eight addresses are claimed: three cross-reference, one account and four customer")
+                .hasSize(8)
+                .doesNotHaveDuplicates();
+
+        for (String address : InternalApiSecurityConfig.internalAddresses()) {
+            boolean claimed = chain.matches(request(HttpMethod.POST, address))
+                    || chain.matches(request(HttpMethod.GET, address));
+            assertThat(claimed)
+                    .as("%s is enumerated for the error-dispatch matcher but claimed by no path group,"
+                            + " so its error page would fall to the identity-provider chain", address)
+                    .isTrue();
+        }
+    }
+
+    /**
+     * Verifies the container's ERROR dispatch of an internal request stays on THIS chain, and that no other
+     * dispatch is drawn onto it.
+     *
+     * <p>Purpose: an error dispatch reaches the filters as a request to the deployment's error page, so
+     * without this matcher it belongs to the identity-provider chain -- which would hand the caller's
+     * still-present machine token to a decoder pinned to the provider's issuer and keys, and refuse it.
+     * The caller's real failure would be replaced by a 401 attributing it to authentication.</p>
+     *
+     * <p>Assumptions: four cases are asserted together because the property is a conjunction, and each
+     * clause fails a different way if dropped. An error dispatch of an internal address must be claimed;
+     * an error dispatch of an END-USER address must not be, or the machine decoder would authenticate a
+     * browser caller's error page; an ordinary request to the error path must not be, or a caller could
+     * reach the container's error body under a machine credential; and the context path must be tolerated,
+     * because the attribute carries the full target while the census carries within-application paths.</p>
+     */
+    @Test
+    @DisplayName("an error dispatch of an internal address is claimed and no other dispatch is")
+    void theErrorDispatchOfAnInternalAddressIsClaimed() {
+        var chain = InternalApiSecurityConfig.internalPaths();
+        String internal = CardXrefController.BASE_PATH + CardXrefController.LOOKUP_BY_ACCOUNT_PATH;
+        String endUser = AccountController.BASE_PATH + AccountController.VIEW_PATH;
+
+        assertThat(chain.matches(errorDispatch(internal, "")))
+                .as("the error page of an internal request must keep the machine-token decoder")
+                .isTrue();
+        assertThat(chain.matches(errorDispatch(endUser, "")))
+                .as("the error page of an end-user request must stay on the identity-provider chain")
+                .isFalse();
+        assertThat(chain.matches(request(HttpMethod.GET, ERROR_PATH)))
+                .as("an ordinary request to the error path is not an error dispatch and is not claimed")
+                .isFalse();
+        assertThat(chain.matches(errorDispatch(internal, "/account")))
+                .as("the attribute carries the context path, so a deployment mounted under a prefix must"
+                        + " still match")
+                .isTrue();
+    }
+
+    /**
      * Builds a request for the matcher assertions.
      *
      * @param method the request method
@@ -981,6 +1153,34 @@ class InternalApiSecurityConfigTest {
     private static MockHttpServletRequest request(HttpMethod method, String path) {
         MockHttpServletRequest request = new MockHttpServletRequest(method.name(), path);
         request.setServletPath(path);
+        return request;
+    }
+
+    /**
+     * Builds the container's ERROR dispatch of a request that was addressed elsewhere.
+     *
+     * <p>Assumptions: the dispatch is addressed to the error path and carries the original target in the
+     * standard attribute, which is exactly what a container does -- the request object is the same instance
+     * with a new dispatcher type and the error attributes added. A test that merely set the dispatcher type
+     * without the attribute would assert against a shape no container produces.</p>
+     *
+     * @param originalTarget the within-application path the failing request was addressed to; must not be
+     *     {@code null}
+     * @param contextPath the deployment's context path, empty for a root deployment; must not be
+     *     {@code null}
+     * @return the error-dispatched request, never {@code null}
+     */
+    private static MockHttpServletRequest errorDispatch(String originalTarget, String contextPath) {
+        // WHY : Assumptions: the request target is built WITH the context path, because a container reports
+        //   a request URI that includes it and the mock refuses a context path that is not a prefix of the
+        //   URI -- which is the same invariant. Setting the servlet path to the error page alone keeps the
+        //   two halves consistent for a matcher that reads either.
+        MockHttpServletRequest request =
+                new MockHttpServletRequest(HttpMethod.POST.name(), contextPath + ERROR_PATH);
+        request.setContextPath(contextPath);
+        request.setServletPath(ERROR_PATH);
+        request.setDispatcherType(DispatcherType.ERROR);
+        request.setAttribute(RequestDispatcher.ERROR_REQUEST_URI, contextPath + originalTarget);
         return request;
     }
 }

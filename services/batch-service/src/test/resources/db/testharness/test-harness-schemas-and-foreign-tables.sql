@@ -23,9 +23,11 @@
 --   Flyway rather than adding a migration to that set.
 --
 --   Execution mechanism: a Testcontainers init script, run once at container
---   start and therefore strictly BEFORE Flyway opens its first connection. The
---   three integration tests of com.carddemo.batch.repository each supply it the
---   same way, through
+--   start and therefore strictly BEFORE Flyway opens its first connection. Five
+--   test classes supply it the same way -- the three of
+--   com.carddemo.batch.repository (BatchRunRepositoryIT, CrossSchemaFeedRepositoryIT
+--   and PostingUnitOfWorkIT) and two of com.carddemo.batch.job
+--   (CombineTransactionsJobTest and PreflightDailyTransactionsJobTest) -- through
 --   `new PostgreSQLContainer(image).withInitScript(HARNESS_SCRIPT)` where
 --   HARNESS_SCRIPT is the classpath-relative path
 --   db/testharness/test-harness-schemas-and-foreign-tables.sql; a `jdbc:tc:` URL
@@ -33,10 +35,15 @@
 --   caller that has no container handle. That classpath-relative path is fixed by
 --   this file's location, so renaming or moving the file breaks the reference with
 --   no compiler to catch it: the container simply starts without schemas and every
---   repository test fails on an unrelated-looking undefined-table error. Each of
---   the three tests therefore asserts the post-state below before asserting
---   anything else, so a broken reference is reported as a missing schema at the
---   point it occurs rather than as a query failure much later.
+--   repository test fails on an unrelated-looking undefined-table error. Two of
+--   the five therefore assert the post-state below before asserting anything else
+--   -- CrossSchemaFeedRepositoryIT reads information_schema.tables for the four
+--   schemas and their nine tables, and BatchRunRepositoryIT reads pg_namespace for
+--   the same four plus the owner of `batch` -- so a broken reference is reported as
+--   a missing schema at the point it occurs rather than as a query failure much
+--   later. A sixth class, com.carddemo.batch.dto.DisclosureGroupSeedParityTest,
+--   reads this file's BYTES off the classpath instead of running it, to compare the
+--   seeded disclosure rows against the reference data.
 --
 -- Inputs and preconditions:
 --   A reachable PostgreSQL database, empty or already carrying the objects
@@ -58,10 +65,6 @@
 --                                          account_id
 --   account.card_xref                      3 columns, primary key on card_num,
 --                                          plus idx_card_xref_account_id
---   account.customers                      19 columns, primary key on
---                                          customer_id
---   card.cards                             7 columns, primary key on card_num,
---                                          plus idx_cards_account_id
 --   account.customers                      19 columns, primary key on
 --                                          customer_id
 --   card.cards                             7 columns, primary key on card_num,
@@ -129,10 +132,11 @@
 -- Section 1 of 5 -- schemas
 -- -----------------------------------------------------------------------------
 
--- Assumptions: the three schemas created below are the FOREIGN ones this module
---       connects across, and `batch` is deliberately NOT among them -- see the note
---       that follows this statement group. Two independent reasons require the three,
---       neither of which alone would be sufficient.
+-- Assumptions: the four schemas created below -- ledger, account, reference and
+--       card -- are the FOREIGN ones this module connects across, and `batch` is
+--       deliberately NOT among them, see the note that follows this statement group.
+--       Two independent reasons require the four, neither of which alone would be
+--       sufficient.
 --       (1) Flyway here is scoped to a single schema, so it can never provision
 --           these four. Both profiles set `schemas: batch` and
 --           `default-schema: batch` -- application.yml L590-L591 and
@@ -144,7 +148,7 @@
 --           true at application-test.yml L214, and the difference does not
 --           reach this decision: that setting governs only whether Flyway
 --           creates the schema it is scoped to, so under either value `ledger`,
---           `account` and `reference` remain uncreated.
+--           `account`, `reference` and `card` remain uncreated.
 --       (2) Ordering within this one script is load-bearing rather than
 --           stylistic: `CREATE TABLE ledger.transactions` issued against a
 --           missing `ledger` fails with SQLSTATE 3F000 invalid_schema_name, so
@@ -186,7 +190,7 @@ CREATE SCHEMA IF NOT EXISTS reference;
 --       already has it before Flyway opens a connection.
 CREATE SCHEMA IF NOT EXISTS card;
 
--- Assumptions: `batch` is NOT created here, and its absence from the three
+-- Assumptions: `batch` is NOT created here, and its absence from the four
 --       statements above is required rather than an oversight. Flyway creates it,
 --       under `create-schemas: true` at application-test.yml L214.
 -- Refactoring Rationale: this file did carry
@@ -241,10 +245,11 @@ CREATE SCHEMA IF NOT EXISTS card;
 --       build. In both cases the reported failure would point at the migration
 --       rather than at this file. `flyway_schema_history` is likewise not created
 --       here; Flyway creates and owns it inside `batch`.
--- WHY : Assumptions: no schema beyond these three is created. The mapped
---       entity set of this module spans these three plus `batch`, so a fifth
---       schema would be structure no test can reach and drift no owner would
---       notice.
+-- WHY : Assumptions: no schema beyond these four is created. The mapped
+--       entity set of this module spans these four plus `batch` -- five in total,
+--       which is why the section headers below count five sections and the header
+--       block calls `batch` the fifth schema -- so a SIXTH schema would be
+--       structure no test can reach and drift no owner would notice.
 
 
 -- -----------------------------------------------------------------------------
@@ -338,9 +343,14 @@ CREATE TABLE IF NOT EXISTS account.customers (
     pri_card_holder_ind         CHAR(1)         NOT NULL,
     fico_credit_score           SMALLINT        NOT NULL,
     version                     BIGINT          NOT NULL DEFAULT 0,
-    CONSTRAINT pk_customers PRIMARY KEY (customer_id),
-    CONSTRAINT ck_customers_pri_card_holder_ind
-        CHECK (pri_card_holder_ind IN ('Y', 'N'))
+    -- WHY : Assumptions: NO check on pri_card_holder_ind, mirroring
+    --       account-service's V1__account.sql, which removed one. The record
+    --       copybook app/cpy/CVCUS01Y.cpy:21 declares PIC X(01) and no
+    --       88-level value set, so the owning schema admits any one
+    --       character; a harness that constrained the column would refuse a
+    --       fixture the real schema accepts and would leave this mirror the
+    --       stricter of the two.
+    CONSTRAINT pk_customers PRIMARY KEY (customer_id)
 );
 
 
@@ -434,8 +444,62 @@ ON CONFLICT (acct_group_id, tran_type_cd, tran_cat_cd) DO NOTHING;
 --       NUMERIC(12,2), because the transaction amount is PIC S9(09)V99 at
 --       app/cpy/CVTRA05Y.cpy L11 -- nine integer digits, not ten. Widening it
 --       would let a test insert an amount the owning schema refuses.
+-- WHY : Assumptions: the four columns pinned to the bytewise `C` collation below
+--       carry the pin because the OWNING schema pins them, at
+--       services/transaction-service/src/main/resources/db/migration/
+--       V3__ledger_bytewise_collation.sql. A harness that mirrors a schema has to
+--       mirror its comparison behaviour too, and this one did not: it declared
+--       these columns without a collation, so every ordered read in this module
+--       resolved through the container's initdb default -- which for the pinned
+--       image happens to BE bytewise. The batch parity gate therefore passed for a
+--       reason production did not have, which is the defect the owning migration
+--       was written to close and this note keeps closed on the test side.
+-- WHY : Alternatives Considered: leaving the harness unpinned and instead starting
+--       the container with a linguistic default, so that an unpinned column would
+--       fail the ordering gate loudly. Rejected because the harness's job is to be
+--       INDISTINGUISHABLE from the owned schema; a harness that deliberately
+--       differs from production in a comparison-affecting way makes every ordering
+--       assertion in this module a statement about the harness. The discriminating
+--       control lives in the gate instead -- CombineTransactionsJobTest declares a
+--       linguistic collation and proves the pin is load-bearing -- which keeps the
+--       mirror faithful and the proof explicit.
+-- WHY : Assumptions: transaction_id is COLLATED "C" here, matching the owning
+--       schema after the migration named above. The collation is what makes ORDER
+--       BY on this column a BYTE order, and THREE walks in this module reproduce
+--       that order through a derived finder that names no COLLATE clause of its own
+--       -- the combine, the backup and the export -- so the column is what decides
+--       for all three. The reference sorts the field at app/jcl/COMBTRAN.jcl:28-30
+--       as `TRAN-ID,1,16,CH` ascending. Omitting it
+--       here would leave the harness on the container's DEFAULT collation while
+--       production ran on "C", so a combine assertion could pass against an order
+--       production does not produce, or fail against one it does; either way the
+--       harness would be testing a different schema from the one deployed.
+-- WHY : Trade-offs: the clause is repeated here rather than the harness importing
+--       the owning service's migration. The duplication is the same one this whole
+--       file accepts and states at its head -- this module does not own the ledger
+--       schema and cannot run another service's Flyway history -- so the cost is a
+--       literal that has to be kept in step, and the mitigation is that
+--       CombineTransactionsJobTest asserts the DEPLOYED collation from the
+--       catalogue, so a harness that drifted from production fails that assertion
+--       rather than passing quietly.
+-- WHY : Assumptions: the owning declaration is in TWO places and both are cited, because
+--       checking only one reads as though the other were unpinned. V1__ledger.sql line 127
+--       creates the column as `transaction_id  CHAR(16) COLLATE "C" NOT NULL`, and
+--       V3__ledger_bytewise_collation.sql pins the remaining three columns and re-asserts this
+--       one, so the clause is present from the create rather than acquired by a later ALTER.
+-- WHY : ⚠️ Assumptions: what makes this pin load-bearing rather than tidy is that the key can
+--       carry PUNCTUATION, and a linguistic collation gives punctuation no primary weight. The
+--       accrual identifier is built at app/cbl/CBACT04C.cbl L478-481 by STRINGing PARM-DATE
+--       into TRAN-ID, and the committed goldens show the result: every 350-byte record in
+--       tests/golden/interest/{happy_path,default_fallback,zero_balance}/transact.expected
+--       carries the key `2024-01-15000001` -- a hyphenated ten-character date token with a
+--       six-digit suffix. Those hyphens are precisely what a linguistic order moves. The
+--       contrast with the sibling column is the reason this is written down rather than
+--       assumed: card_num is sixteen digits, and ordering the fifty committed card numbers
+--       under "C", "default" and "en-US-x-icu" returns one identical sequence, so the pin
+--       there guarantees an order rather than changing one.
 CREATE TABLE IF NOT EXISTS ledger.transactions (
-    transaction_id  CHAR(16)      NOT NULL,
+    transaction_id  CHAR(16) COLLATE "C" NOT NULL,
     type_cd         CHAR(2),
     category_cd     CHAR(4),
     source          CHAR(10),
@@ -445,7 +509,7 @@ CREATE TABLE IF NOT EXISTS ledger.transactions (
     merchant_name   VARCHAR(50),
     merchant_city   VARCHAR(50),
     merchant_zip    CHAR(10),
-    card_num        CHAR(16),
+    card_num        CHAR(16) COLLATE "C",
     orig_ts         TIMESTAMP(6),
     proc_ts         TIMESTAMP(6)  NOT NULL,
     CONSTRAINT pk_transactions PRIMARY KEY (transaction_id)
@@ -459,7 +523,7 @@ CREATE TABLE IF NOT EXISTS ledger.transactions (
 --       its own sequence when a test needs a deterministic order.
 CREATE TABLE IF NOT EXISTS ledger.daily_transactions (
     ingest_seq      BIGINT GENERATED BY DEFAULT AS IDENTITY,
-    transaction_id  CHAR(16),
+    transaction_id  CHAR(16) COLLATE "C",
     type_cd         CHAR(2),
     category_cd     CHAR(4),
     source          CHAR(10),
@@ -507,8 +571,8 @@ CREATE TABLE IF NOT EXISTS ledger.transaction_rejects (
 --       the same unit of work, which is the order the reference performs.
 CREATE TABLE IF NOT EXISTS ledger.transaction_category_balances (
     account_id   BIGINT       NOT NULL,
-    type_cd      CHAR(2)      NOT NULL,
-    category_cd  CHAR(4)      NOT NULL,
+    type_cd      CHAR(2) COLLATE "C" NOT NULL,
+    category_cd  CHAR(4) COLLATE "C" NOT NULL,
     balance      NUMERIC(11,2) NOT NULL DEFAULT 0,
     CONSTRAINT pk_transaction_category_balances
         PRIMARY KEY (account_id, type_cd, category_cd)

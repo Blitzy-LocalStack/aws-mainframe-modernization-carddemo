@@ -314,4 +314,53 @@ public record TransactionDetailResponse(
     //       field and null is what represents it. Spaces are a different state and are not
     //       substituted for it.
     String returnMessage) {
+
+    /**
+     * Renders this detail WITHOUT its amount, its card number, its description or any merchant field.
+     *
+     * <p>Purpose. Seven of the fourteen components are prohibited from a diagnostic rendering by
+     * {@code docs/architecture/observability.md} L1093 to L1112: the amount as a monetary value, the
+     * three merchant free-text fields by name, and the merchant identifier, the description and the
+     * card number for the reasons given below. The compiler-generated rendering printed a whole primary
+     * account number beside a sum and a place -- the combination the rule exists to prevent -- on the
+     * body of an ordinary successful read.</p>
+     *
+     * <p>Assumptions: the card number is OMITTED rather than masked, and the sibling
+     * {@code TransactionAddRequest} masks its own. The difference is which value names the row. That
+     * request may arrive with only a card number, so a rendering that dropped it could not show what
+     * was submitted; this response is keyed by a transaction identifier that is always present, so the
+     * rule's second clause does not apply -- there IS another way to say which row this describes, and
+     * the sanctioned abbreviation is available only where there is not.</p>
+     *
+     * <p>Assumptions: the merchant identifier is omitted with the three free-text merchant fields
+     * rather than kept as a bounded numeric code. The four are one unit: this migration stores no
+     * merchant table, so the identifier's only meaning comes from the name, city and postal code stored
+     * beside it on the same row, and keeping the identifier alone would let any reader recover the
+     * omitted three from the row it points at.</p>
+     *
+     * <p>Alternatives Considered: keeping the description, which no clause names explicitly. Rejected
+     * for the reason its own component documentation gives -- it is free text a submitter authors, so it
+     * is the one component whose content nothing in this type constrains, and rendering it makes the log
+     * the sink for whatever arrives in it.</p>
+     *
+     * <p>Trade-offs: what remains is the transaction identifier, the two reference codes, the source,
+     * the two timestamps and the return message: enough to say WHAT KIND of transaction was read and
+     * when, and not enough to say whose it was, what it was worth or where it was made. The cost is
+     * that a detail read cannot be reconciled against an amount from logs alone; the identifier this
+     * rendering keeps reaches the row that holds every omitted value.</p>
+     *
+     * @return a rendering carrying the transaction identifier, the type and category codes, the source,
+     *     the two timestamps and the return message, with the amount, the card number, the description
+     *     and all four merchant components omitted entirely; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "TransactionDetailResponse[transactionId=" + this.transactionId
+                + ", typeCode=" + this.typeCode
+                + ", categoryCode=" + this.categoryCode
+                + ", source=" + this.source
+                + ", originTimestamp=" + this.originTimestamp
+                + ", processTimestamp=" + this.processTimestamp
+                + ", returnMessage=" + this.returnMessage + ']';
+    }
 }

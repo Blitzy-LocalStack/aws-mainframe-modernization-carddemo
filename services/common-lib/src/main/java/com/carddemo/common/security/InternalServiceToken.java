@@ -153,15 +153,62 @@ public final class InternalServiceToken {
     public static final String KEY_ID_HEADER = "kid";
 
     /**
-     * The scope authorising the card cross-reference reads of the account context.
+     * The scope authorising the card cross-reference reads of the account context that disclose NO card
+     * number: the card-keyed lookup, whose caller supplied the card, and the paged walk, whose rows carry
+     * the card masked to its last four digits.
      *
-     * <p>Assumptions: the three cross-reference addresses share ONE scope, where the account and customer
-     * families have their own. They are one operation family in the sense that matters: all three resolve a
-     * cross-reference row, differing only in which column they are keyed by, so a caller entitled to one is
-     * entitled to the others on the same grounds. Splitting them further would produce three values always
-     * issued together, which is a distinction with no decision behind it.</p>
+     * <p>Refactoring Rationale: this scope covered all THREE cross-reference addresses, on the ground that
+     * they "resolve a cross-reference row, differing only in which column they are keyed by, so a caller
+     * entitled to one is entitled to the others on the same grounds" -- and that splitting them "would
+     * produce three values always issued together, which is a distinction with no decision behind it".
+     * Both halves of that reading are withdrawn, because one of the three differs in WHAT IT DISCLOSES
+     * rather than in how it is keyed. The account-keyed lookup answers with an unmasked primary account
+     * number; the other two answer with none at all. There is therefore a decision behind the split, and
+     * the two scopes are NOT always issued together: the transaction context resolves a card number to key
+     * its ledger row and holds both, while the authorization context resolves cross-reference identifiers
+     * and holds only this one -- so a credential minted for its decision path can no longer obtain a clear
+     * card number it never reads. The narrower disclosure scope is
+     * {@link #SCOPE_CARD_XREF_RESOLVE_CARD_NUMBER}.</p>
+     *
+     * @see #SCOPE_CARD_XREF_RESOLVE_CARD_NUMBER
      */
     public static final String SCOPE_CARD_XREF_READ = "internal:account-context.card-xref.read";
+
+    /**
+     * The scope authorising the ONE cross-reference address that discloses an unmasked primary account
+     * number: the account-keyed lookup.
+     *
+     * <p>Purpose. The migration plan masks a primary account number to its last four digits on every
+     * published surface except the administrative card detail, at its sections 0.4.1.9 and 0.7.8. One
+     * machine operation nevertheless has to answer with the whole value, because its consumer writes that
+     * value into {@code transactions.card_num} as the ledger row's KEY -- {@code READ-CXACAIX-FILE} at
+     * lines 576 to 604 of {@code app/cbl/COTRN02C.cbl} takes {@code XREF-CARD-NUM} from the record it
+     * reads and writes the transaction under it, and {@code app/cbl/COBIL00C.cbl} performs the same read at
+     * line 414 for the payment it writes. A masked value would be a different key, so the disclosure is
+     * required for functional parity and cannot be traded away. What CAN be bounded is who may provoke it,
+     * and that is what this scope is for: the disclosure is purpose-bound to the one caller whose purpose
+     * requires it.</p>
+     *
+     * <p>Alternatives Considered: answering with a purpose-bound OPAQUE reference and resolving the clear
+     * value behind the owning context. Rejected because the consumer does not merely read the value, it
+     * PERSISTS it as a parity-mandated key in a column the reference declares as
+     * {@code TRAN-CARD-NUM PIC X(16)} -- so an opaque reference would either have to be stored in place of
+     * the key, which no golden-master comparison could match, or be exchanged for the clear value one call
+     * later, which discloses exactly the same digits to exactly the same caller while adding a round trip
+     * and a second credential-bearing surface. Alternatives Considered: moving the ledger write itself into
+     * the account context so the clear number never crosses a boundary. Rejected because the ledger belongs
+     * to the transaction context by the plan's own service boundaries at its section 0.4.1.3, and moving a
+     * write to follow a field would put two contexts' data under one owner.</p>
+     *
+     * <p>Assumptions: this scope is granted to the TRANSACTION subject alone in the table below, and that
+     * asymmetry is the whole control. The authorization context calls the card-keyed lookup only, so
+     * withholding this scope from it removes a reach it never used rather than a capability it needs, and
+     * a captured authorization credential can no longer resolve an account to a clear card number.</p>
+     *
+     * @see #SCOPE_CARD_XREF_READ
+     */
+    public static final String SCOPE_CARD_XREF_RESOLVE_CARD_NUMBER =
+            "internal:account-context.card-xref.resolve-card-number";
 
     /** The scope authorising the account reads of the account context. */
     public static final String SCOPE_ACCOUNT_READ = "internal:account-context.account.read";
@@ -268,6 +315,15 @@ public final class InternalServiceToken {
      * because its decision path resolves a cross-reference, an account and the customer identifier the
      * fraud row carries.</p>
      *
+     * <p>Refactoring Rationale: the two rows now differ WITHIN the cross-reference family as well as
+     * between families. {@link #SCOPE_CARD_XREF_RESOLVE_CARD_NUMBER} appears in the transaction row and not
+     * in the authorization one, because the account-keyed lookup answers with an unmasked primary account
+     * number and only the transaction context has a use for it -- it keys its ledger row on that value.
+     * While one scope covered all three cross-reference addresses, an authorization credential could
+     * resolve any account to a clear card number, which is a disclosure that context never reads and could
+     * not have been refused by anything except the caller's own restraint. Removing the entry is what
+     * converts that restraint into a refusal the callee makes.</p>
+     *
      * <p>Refactoring Rationale: the transaction row also held {@link #SCOPE_ACCOUNT_READ} until its client
      * stopped reading the account master over HTTP. Bill payment now reads and reduces the balance on its
      * own connection under a named cross-schema grant, so the account context is not called for it at all,
@@ -284,7 +340,7 @@ public final class InternalServiceToken {
             SUBJECT_AUTHORIZATION_SERVICE,
             Set.of(SCOPE_CARD_XREF_READ, SCOPE_ACCOUNT_READ, SCOPE_CUSTOMER_READ),
             SUBJECT_TRANSACTION_SERVICE,
-            Set.of(SCOPE_CARD_XREF_READ));
+            Set.of(SCOPE_CARD_XREF_READ, SCOPE_CARD_XREF_RESOLVE_CARD_NUMBER));
 
     /**
      * The longest lifetime this class will mint.

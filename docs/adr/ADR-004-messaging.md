@@ -763,6 +763,26 @@ service itself enforces does not. There is no configuration that reproduces
    > there rather than in a field whose only consumer is deciding whether to act on
    > the message in front of it.
    >
+   > ⚠️ Assumptions: **the rebased instant is now PERSISTED with the broker's
+   > acceptance**, in `send_expires_at`, alongside `sent_at` and the broker's own
+   > message identity and sequence number — the four columns
+   > `V4__authorization_outbox_send_acceptance.sql` adds. The record above stands
+   > unchanged: the instant is still computed at the send and still rebased on every
+   > attempt. What is new is that once the broker has accepted an attempt, the value it
+   > carried is durable, so the row states the deadline the requester's message actually
+   > holds rather than one a later pass would have recomputed. Refactoring Rationale:
+   > freezing the deadline at the FIRST attempt was considered as an alternative way to
+   > stop two attempts disagreeing, and rejected for precisely the reason recorded
+   > above — the first attempt may never have reached the broker, and a frozen deadline
+   > would then be stamped on a message sent after it had already passed, which is the
+   > guaranteed non-delivery this record exists to prevent. Persisting the accepted
+   > value achieves the same end without reintroducing that failure: a row carrying an
+   > acceptance is reconciled rather than sent again, so no second attempt is composed
+   > and there is nothing left to disagree. The residual interval — the broker accepting
+   > and the acceptance statement not yet committing — is one statement wide, is far
+   > inside the five-minute deduplication window, and is recorded on
+   > `OutboxPublisher.recordSendAccepted`.
+   >
    > ⚠️ Refactoring Rationale: a **producer**-side expiry check was also removed, and
    > it is named here because it read as an implementation of this record and was the
    > opposite of one. The reply publisher treated a passed deadline as terminal — it

@@ -9,9 +9,15 @@
 
 ## Executive Summary
 
-This module owns the **`account`** PostgreSQL schema — the `accounts`,
-`customers` and `card_xref` tables — and it is the only deployable permitted to
-write them. It replaces **six** COBOL programs: the two online CICS
+This module owns the **`account`** PostgreSQL schema — **four** tables, of which
+three descend from a copybook record (`accounts`, `customers` and `card_xref`) and
+the fourth, `inquiry_reply_ledger`, descends from no copybook at all and is
+operational, being what stops a redelivered inquiry from being answered twice. It
+is the only deployable permitted to write any of the four. The schema is created by
+**two** migrations rather than one, and both the ledger and the second migration are
+described under [`account.inquiry_reply_ledger`](#accountinquiry_reply_ledger).
+
+This module replaces **six** COBOL programs: the two online CICS
 transactions [`app/cbl/COACTVWC.cbl`](../../app/cbl/COACTVWC.cbl) (account view,
 941 lines, transaction `CAVW`) and
 [`app/cbl/COACTUPC.cbl`](../../app/cbl/COACTUPC.cbl) (account update, 4236 lines
@@ -71,8 +77,8 @@ here into one schema owned by one deployable.
 | Packaging | `jar` (bootable, via `spring-boot-maven-plugin`) |
 | Java package root | `com.carddemo.account` |
 | Entry point | `com.carddemo.account.AccountApplication` |
-| Owned schema | `account` — `accounts`, `customers`, `card_xref` |
-| Schema migration | `src/main/resources/db/migration/V1__account.sql` |
+| Owned schema | `account` — `accounts`, `customers`, `card_xref`, `inquiry_reply_ledger` |
+| Schema migrations | `src/main/resources/db/migration/V1__account.sql` (the three copybook-derived tables) and `V2__account_inquiry_reply_ledger.sql` (the duplicate-reply ledger) |
 | API contract | `src/main/resources/openapi/account-api.yaml` (OpenAPI 3.1) |
 | Listening port | 8080 |
 
@@ -81,13 +87,23 @@ is mechanically enforced rather than merely intended:
 
 ```text
 api/         3 controllers — request binding, validation, status selection; no business rule
-service/     6 types       — the rules transcribed from the COBOL paragraphs
-repository/  4 types       — Spring Data JPA plus the keyset query methods
+service/     7 types       — the rules transcribed from the COBOL paragraphs, plus the inquiry consumer
+repository/  5 types       — Spring Data JPA, the keyset projection, and the reply ledger
 domain/      3 entities    — one per copybook record
-dto/        10 types       — field-for-field from the copybook and symbolic-map layouts
+dto/        12 types       — field-for-field from the copybook and symbolic-map layouts
 mapper/      5 types       — the hand-written anti-corruption layer
 config/      7 types       — security, datasource, OpenAPI, SQS, KMS, identifier protection
 ```
+
+Every count above is production types only, excluding each package's `package-info.java`
+charter, and each is re-measured rather than adjusted:
+`find src/main/java/com/carddemo/account/<package> -maxdepth 1 -name '*.java' ! -name
+'package-info.java' | wc -l`. Refactoring Rationale: three of the seven had drifted low —
+`service/` by the inquiry consumer, `repository/` by the reply ledger, and `dto/` by the
+account-context and customer-display projections — because a listing of this kind is
+maintained by incrementing it and an increment is skipped exactly when a type arrives
+alongside other work. Stating the command beside the figures makes the next reader able to
+re-derive all seven in one line instead of trusting them.
 
 The one permitted intra-reactor dependency is `common-lib`. This module declares
 **no dependency on any sibling service module**, and a cross-service
@@ -603,7 +619,8 @@ contract test reads it directly — `ui/src/api/contracts.test.ts` resolves
 `account-api.yaml`, so drift between this module's contract and what the SPA
 expects fails the UI build rather than surfacing at run time.
 
-The ten operations fall into two tiers, and the contract tags every one of them
+The eleven operations — three end-user and eight internal — fall into two tiers,
+and the contract tags every one of them
 so the tier is machine-readable. `end-user` operations are reached by the browser
 through the API gateway and are authorized from a Cognito JWT. `internal`
 operations are service-to-service and additionally require the internal service
@@ -654,12 +671,39 @@ published words, so neither is a value the contract prohibits.
 | `GET` | `/api/v1/customers` | Read one ascending page of the customer master |
 | `POST` | `/api/v1/customers/lookup` | Report whether the customer master holds one customer |
 | `POST` | `/api/v1/customers/record` | Read one customer of the customer master by its key |
+| `POST` | `/api/v1/customers/display` | Read the nine screen-display fields of one customer |
 
 Three of these are the by-account access path that replaces the `CXACAIX`
 alternate index — `lookup-by-account`, `search-by-account` and the end-user
 `card-cross-references/search` walk. See [The alternate index is a real access
 path](#the-alternate-index-is-a-real-access-path) for why that path has to exist
 at all.
+
+`POST /api/v1/customers/display` is the one whose scope is a decision rather than
+the obvious choice, so it is worth a paragraph. It answers with exactly nine
+members — `firstName`, `middleName`, `lastName`, `addressLine1`, `addressLine2`,
+`addressLine3`, `stateCode`, `zipCode` and `phoneNumber1` — and with no protected
+value of any kind: the two encrypted identifiers and the credit score are **absent
+rather than masked**, because a masked member is still a member a future consumer
+would begin reading. It exists because a neighbouring context's pending-authorization
+detail screen had nowhere to read those fields from and was reading them from the
+wrong place — it issued the existence check at `/api/v1/customers/lookup`, which
+answers 204 or 404 with **no body at all** by contract, so a bodiless answer
+deserialised to nothing and the screen's cardholder fields rendered as absent on
+every request while nothing anywhere failed.
+
+Its scope is `internal:account-context.customer.read`, the **decision-read** authority
+that consumer already holds, and deliberately **not** `internal:customer-master.read`.
+That second scope is what `/api/v1/customers/record` requires and this system mints it
+for no context, because the record read answers with all eighteen fields including a
+national identifier, a government-issued identifier and a credit score for any
+customer. Pointing the consumer at the record read would have needed no new type at
+all; it was rejected on least privilege, since granting the master scope to a context
+that renders nine fields is exactly the escalation the scope split was introduced to
+prevent. What the projection costs is coupling accepted on purpose — this contract now
+carries a field list belonging to another context's screen, so widening that screen
+later requires a change here. What it buys is that the exposure is a decision this
+context takes and can refuse, which is what owning the customer master means.
 
 ### The update endpoint returns 409 on a version conflict
 
@@ -704,9 +748,13 @@ Neither is re-implemented here, and neither should be.
 
 ## Data Model
 
-This module owns the `account` schema and nothing else. Its three tables descend
-directly from three copybook records, and every column type was derived
-mechanically from a `PICTURE` clause rather than chosen.
+This module owns the `account` schema and nothing else. **Three of its four tables**
+descend directly from a copybook record, and every column type in those three was
+derived mechanically from a `PICTURE` clause rather than chosen. The fourth,
+`inquiry_reply_ledger`, derives from no copybook — it carries no migrated record and
+no reference field — so it is documented separately below and is deliberately absent
+from the derivation table that follows, whose whole purpose is to record a baseline
+provenance for every column it lists.
 
 | Record | Declared length | Copybook |
 |---|---|---|
@@ -760,7 +808,7 @@ silently changed ordering behaviour and could not have been done this way.
 | `govt_issued_id_encrypted` | `BYTEA` nullable | `CUST-GOVT-ISSUED-ID PIC X(20)` |
 | `dob` | `DATE` | `CUST-DOB-YYYY-MM-DD PIC X(10)` |
 | `eft_account_id` | `CHAR(10)` | `CUST-EFT-ACCOUNT-ID PIC X(10)` |
-| `pri_card_holder_ind` | `CHAR(1)`, `CHECK IN ('Y','N')` | `CUST-PRI-CARD-HOLDER-IND PIC X(01)` |
+| `pri_card_holder_ind` | `CHAR(1)`, no check — the copybook declares no value set; the Y-or-N rule is enforced on the update path by `AccountUpdateService.editYesNo`, where `1220-EDIT-YESNO` enforces it | `CUST-PRI-CARD-HOLDER-IND PIC X(01)` |
 | `fico_credit_score` | `SMALLINT` | `CUST-FICO-CREDIT-SCORE PIC 9(03)` (line 22) |
 | `version` | `BIGINT NOT NULL DEFAULT 0` | *no source* — the JPA `@Version` column |
 
@@ -802,6 +850,56 @@ One secondary index exists on this table and it is not an optimisation:
 CREATE INDEX idx_card_xref_account_id ON account.card_xref (account_id);
 ```
 
+### `account.inquiry_reply_ledger`
+
+The fourth table, created by `V2__account_inquiry_reply_ledger.sql` rather than by
+`V1__account.sql`, and the only one here with **no copybook behind it**. It exists
+because the asynchronous inquiry consumer sends its reply and then returns, and the
+queue acknowledges the request only on that clean return — so a task killed between
+the two leaves the request visible again, and the next delivery would send a *second*
+reply for one question. The ledger records the answer, commits it, and only then
+sends; a redelivery finds the recorded answer and re-sends **the same bytes** instead
+of composing a new one.
+
+| Column | Type | Holds |
+|---|---|---|
+| `request_key` | `VARCHAR(128)` (primary key) | The claim key: the queue service's own identifier for the delivery, which is stable across every redelivery of one message and unique per accepted send |
+| `status` | `VARCHAR(8) NOT NULL` | `PENDING` or `SENT`, and no third value — `ck_inquiry_reply_ledger_status` |
+| `reply_payload` | `TEXT NOT NULL` | The framed reply, verbatim, exactly as it went to the queue |
+| `reply_to_queue_url` | `VARCHAR(1024) NOT NULL` | The resolved destination the first send used |
+| `correlation_id`, `message_id` | `VARCHAR(128)` nullable | The two identities the request supplied, echoed back unchanged; null where it supplied none, or where the consumer refused one |
+| `claimed_at` | `TIMESTAMP(6) NOT NULL` | When the answer was recorded — the column pruning is expressed over |
+| `sent_at` | `TIMESTAMP(6)` nullable | When it reached the queue; tied to `status` by `ck_inquiry_reply_ledger_sent_instant` |
+| `attempts` | `INTEGER NOT NULL DEFAULT 0` | Sends of this answer, and nothing else |
+
+One index exists, and like the cross-reference index above it is not an optimisation
+of a read this module performs:
+
+```sql
+CREATE INDEX idx_inquiry_reply_ledger_claimed_at
+    ON account.inquiry_reply_ledger (claimed_at);
+```
+
+Every read the exchange performs is by primary key, so the exchange needs no index at
+all. This one exists for **pruning**, which is worth stating plainly because the
+lifecycle is not self-managing. The table grows by one row per distinct request and
+**nothing in the exchange ever removes a row** — deliberately, since the runtime role
+holds no `DELETE` on this schema. Retention is therefore an operator action under a
+privileged role, and a row is safe to remove once it is older than the request queue's
+**message-retention period**: past that point the request it answers can no longer be
+redelivered, so the row can no longer suppress anything. Without the index a prune
+would scan the whole ledger; with it the prune is bounded by the rows it deletes.
+
+Assumptions: this is a claim-then-send ledger and **not** a transactional outbox, and
+the difference is a requirement rather than a preference. The authorization context
+does use an outbox for its reply, because it writes business rows the reply describes
+and must guarantee a reply **exists** for every committed decision. This exchange
+writes nothing — the account read is read-only — so there is no committed state a
+missing reply would contradict. What it needs is the opposite guarantee, that a reply
+is not sent **twice**, and a claim-then-send ledger provides that with no second
+background component to operate. See [NO transactional outbox in this service — and
+why](#no-transactional-outbox-in-this-service--and-why).
+
 ### `FILLER` is dropped, and each drop is recorded
 
 `FILLER` in these records is padding to a fixed length, not data. Every drop is
@@ -816,13 +914,28 @@ list is always reproducible:
 
 ### Migration and ownership
 
-`V1__account.sql` carries a file header block plus an adjacent `-- WHY :` comment
-on every non-obvious constraint and index — specifically the two `BYTEA`
-encryption choices, the secondary index standing in for `CXACAIX`, the `DATE`
-narrowing, and the two version columns. A reader who wants the reasoning for a
-column reads it next to the column, not in this file.
+**Two** migrations exist in `src/main/resources/db/migration`, and a reader looking
+for a table must know which one to open:
 
-Flyway applies that migration at startup. Two artifacts are required, not one:
+| Migration | Creates | Why it is separate |
+|---|---|---|
+| `V1__account.sql` | `accounts`, `customers`, `card_xref`, and `idx_card_xref_account_id` | The three copybook-derived tables, versioned together because they migrate together |
+| `V2__account_inquiry_reply_ledger.sql` | `inquiry_reply_ledger` and `idx_inquiry_reply_ledger_claimed_at` | Purely additive — it creates one table and one index and alters nothing that exists. Folding it into `V1` would have rewritten a migration that had already been applied, which Flyway refuses by checksum, so a separate version is the only shape that reaches an existing database at all |
+
+Both carry a file header block plus an adjacent `-- WHY :` comment on every
+non-obvious constraint and index — in `V1` the two `BYTEA` encryption choices, the
+secondary index standing in for `CXACAIX`, the `DATE` narrowing and the two version
+columns; in `V2` the claim key's width and provenance, the two-state domain, the
+verbatim payload, and the pruning index. A reader who wants the reasoning for a column
+reads it next to the column, not in this file.
+
+Assumptions: `V2` needs no grant of its own. `V0__schemas_and_roles.sql` sets default
+privileges for tables the schema owner `carddemo_account_owner` creates, granting
+`SELECT`, `INSERT` and `UPDATE` to the runtime role `carddemo_account` — exactly the
+three verbs the ledger uses, and deliberately **not** `DELETE`, which is why pruning is
+an operator action rather than something the exchange can do to itself.
+
+Flyway applies both migrations at startup, in version order. Two artifacts are required, not one:
 `flyway-core` and **`flyway-database-postgresql`**, both at 13.0.0 and both
 inherited from the parent POM. The companion is mandatory because Flyway 10 and
 later moved PostgreSQL support out of core, so core alone compiles and packages
@@ -1486,8 +1599,8 @@ preserved too, for the same reason as the double space.
 
 ## Testing
 
-<!-- test-inventory: 28 tests + 8 integration tests -->
-**36** test classes: **28** unit and web-layer tests matching `*Test`, run by
+<!-- test-inventory: 32 tests + 8 integration tests -->
+**40** test classes: **32** unit and web-layer tests matching `*Test`, run by
 Surefire, and **8** integration tests matching `*IT`, run by Failsafe. Every one of
 the seven test packages also carries a `package-info.java`, because the
 documentation gate audits test sources too.
@@ -1502,22 +1615,44 @@ paragraph is not decoration: `ServiceReadmeInventoryTest` in `common-lib` parses
 and re-measures both figures against this module's test tree, so this count now
 fails the build when it drifts instead of ageing quietly.
 
+Refactoring Rationale: the unit figure then read 28 while the tree held 29, and the
+build said so: `ProtectedValueIsolationTest` was added to the `domain` package to
+hold the copy-in and copy-out property of `Customer.ProtectedValueUpdate`, and the
+marker above was not moved with it. That is the census check working as intended —
+the figure is re-measured here rather than incremented, and the `domain` row below
+names the new class so the row and the figure can be compared by reading.
+
 Refactoring Rationale: the integration figure then read 5 while the `repository`
 row below named only two of the classes in that package, and the sentence after the
 table still said three. `AccountRepositoryIT` — which holds the account master's own
 storage contract, its exact-decimal columns, its date narrowing and its keyed
-windows — took the count to 6 and made that drift fail the build, which is how it
-was found. All six are now named in the table, so the row and the figure can be
-compared by reading rather than by counting files.
+windows — took the count higher and made that drift fail the build, which is how it
+was found.
+
+Refactoring Rationale: the paragraph above then said "all six are now named in the
+table", and that figure was wrong in two directions at once, which is why it is
+restated here rather than edited in place. The `repository` package holds **seven**
+integration tests — `AccountRepositoryIT`, `AccountScreenProjectionIT`,
+`AccountUpdateAtomicityIT`, `CardXrefRepositoryIT`, `CustomerMasterRepositoryIT`,
+`CustomerRepositoryIT` and `InquiryReplyLedgerIT` — and the module holds **eight**,
+because `AwsStarterRuntimeIT` lives in `config` and is not a repository test at all.
+So a reader checking "six" against the table found seven and checking it against the
+tree found eight, with no way to tell which of the three numbers was the defect. Both
+are re-measured rather than adjusted: `find src/test -name '*IT.java' | wc -l` gives
+eight, and the same command under `src/test/java/com/carddemo/account/repository`
+gives seven. Assumptions: the two counts are deliberately kept as two, because the
+`*IT` suffix is what Failsafe selects on while the package is what says whether a
+class needs a database container — and a single figure covering both would hide that
+one of the eight needs neither.
 
 | Package | Classes | What they cover |
 |---|---|---|
 | `api` | `AccountControllerTest`, `AccountDispatcherTest`, `AccountContextContractTest`, `CustomerReadRouteTest`, `CardXrefControllerTest`, `CustomerControllerTest` | Web-layer binding, routing, status selection and the published contract, including the cross-reference and customer read routes |
 | `service` | `AccountUpdatePreservationTest`, `CustomerMasterReadTest`, `CardXrefByAccountReadTest`, `AccountAddressValidationTest`, `InquiryMessageListenerTest`, `RestReferenceAddressLookupTest`, `CustomerIdentifierCipherTest` | The transcribed rules — the update path including the 409-on-version-conflict branch, the read composition, the by-account cross-reference read, address validation, the inquiry consumer, and identifier protection |
-| `config` | `SecurityConfigTest`, `InternalApiSecurityConfigTest`, `SqsConfigTest`, `OpenApiDocumentTest`, `AccountConfigPackageTest`, `CustomerIdentifierProtectionConfigTest`, `CustomerIdentifierProtectionWiringTest`, `AwsIntegrationStartupTest`, `AwsStarterRuntimeIT` | Filter chain and authority mapping, the internal-token chain, listener wiring, the served OpenAPI document, and startup |
-| `mapper` | `AccountMapperTest`, `AccountInquiryReplyMapperTest` | The anti-corruption layer — masking, the misspelling correction, `FILLER` removal, the fixed-width reply |
+| `config` | `SecurityConfigTest`, `InternalApiSecurityConfigTest`, `SecurityChainDispatchTest`, `SqsConfigTest`, `OpenApiDocumentTest`, `AccountApiContractGateTest`, `AccountConfigPackageTest`, `CustomerIdentifierProtectionConfigTest`, `CustomerIdentifierProtectionWiringTest`, `AwsIntegrationStartupTest`, `AwsStarterRuntimeIT` | Filter chain and authority mapping, the internal-token chain, how BOTH chains decide a container ERROR dispatch, listener wiring, the served OpenAPI document, the committed contract's agreement with the runtime it describes, and startup |
+| `mapper` | `AccountMapperTest`, `CardXrefMapperTest`, `AccountInquiryReplyMapperTest` | The anti-corruption layer — masking at the shared contract width, the misspelling correction, `FILLER` removal, the fixed-width reply |
 | `repository` | `AccountRepositoryIT`, `AccountScreenProjectionIT`, `AccountUpdateAtomicityIT`, `CardXrefRepositoryIT`, `CustomerMasterRepositoryIT`, `CustomerRepositoryIT`, `InquiryReplyLedgerIT` | Testcontainers-backed PostgreSQL — the account master's column contract, exact-decimal scale, date narrowing, version conflict and keyed windows; the joined screen projection and its outer-join arms; the two-write commit boundary of the update path; the cross-reference table's own contract together with the query plan the engine chooses for the by-account read that replaces `CXACAIX`; the customer master's column widths and schema ownership; the customer record's own contract — its layout, fixture bytes, keyed read, version column and keyed windows; and the inquiry reply ledger's second-delivery conflict |
-| `domain` | `DiagnosticRenderingTest` | Entity rendering — that no protected value leaks into a diagnostic string |
+| `domain` | `DiagnosticRenderingTest`, `ProtectedValueIsolationTest` | Entity rendering — that no protected value leaks into a diagnostic string — and that a protected-value update intent is fixed when it is created, so neither the caller's array nor the value handed back can alter what is stored |
 | `dto` | `AccountUpdateResponseShapeTest` | Response shape, including money as a JSON string |
 
 All eight integration tests are named individually rather than described as a
@@ -1528,7 +1663,7 @@ All eight integration tests are named individually rather than described as a
 ```bash
 # WHY : Assumptions: Failsafe binds to `integration-test` and `verify`, so the
 #       eight `*IT` classes run under `verify` and NOT under `test`. A run that
-#       stops at `test` therefore exercises the 28 `*Test` classes and skips all
+#       stops at `test` therefore exercises the 32 `*Test` classes and skips all
 #       eight, and with them every Testcontainers-backed database assertion --
 #       including the by-account query that stands in for the CXACAIX alternate
 #       index and the plan assertion that proves it resolves through an index,

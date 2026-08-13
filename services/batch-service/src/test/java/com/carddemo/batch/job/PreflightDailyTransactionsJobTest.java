@@ -26,12 +26,15 @@ import com.carddemo.batch.mapper.DailyTransactionMapper;
 import com.carddemo.batch.repository.AccountRepository;
 import com.carddemo.batch.repository.BatchRunRepository;
 import com.carddemo.batch.repository.CardXrefRepository;
+import com.carddemo.batch.repository.DailyTransactionRepository;
 import com.carddemo.batch.service.BatchStepLedger;
 import com.carddemo.batch.service.BatchStepLedgerWriter;
+import com.carddemo.batch.service.DailyFeedWatermarkService;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -77,7 +80,10 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  *
  * <p>Purpose: this is the tier-2 case set for {@link PreflightDailyTransactionsJob}, the migration of
  * {@code app/cbl/CBTRN01C.cbl} and state 3 of the eleven-state {@code carddemo-daily-batch} chain the
- * migration plan defines in AAP 0.4.1.7. It asserts what the pass DOES NOT do — it writes no row to
+ * migration plan defines in AAP 0.4.1.7 -- delivered as state 4 of TWELVE, because the chain as built
+ * inserts a VerifyMigration state after staging, which shifts this pass and everything after it by
+ * one. Both figures are stated because the plan's number is the contract and the delivered number is
+ * what an operator reads in the console, and quoting only one of them makes the other look wrong. It asserts what the pass DOES NOT do — it writes no row to
  * any table, it produces no rejected record, and it cannot report the soft-warn tier — alongside the
  * three input outcomes it reports, the one behavioural divergence it deliberately carries, and the
  * durable step record that makes a redriven state a no-op.</p>
@@ -120,10 +126,13 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * statements at {@code :170-171}, the lookup at {@code :172} and the guarded account read that follows
  * it through {@code :184} all sit outside that guard. So on the iteration whose read reaches end of
  * file, the reference moves a card number out of a record it did not read and looks it up again,
- * producing a spurious final diagnostic. The divergence is registered as {@code D-7} in
+ * producing a spurious final diagnostic. The divergence is registered as
+ * {@code D-PREFLIGHT-LOOKUP-PAST-END-OF-FILE} in
  * {@code docs/architecture/cobol-to-service-traceability.md} and {@code app/cbl/CBTRN01C.cbl} is NOT
  * edited: the whole of {@code app/} is reference-only evidence, cited by path and line and never
- * modified.</p>
+ * modified. {@code D-7} above is the class-local label the job's own documentation gives this
+ * difference, not a register heading -- the register's {@code D-7} is the online header clock, which
+ * belongs to a different program, and citing the number here previously sent a reader to it.</p>
  *
  * <h2>What this case set does not assert</h2>
  *
@@ -327,6 +336,18 @@ class PreflightDailyTransactionsJobTest {
      */
     @MockitoSpyBean
     private AccountRepository accounts;
+
+    /**
+     * The feed the pass walks, wrapped so the cursor each page was requested from can be read back.
+     *
+     * <p>Assumptions: a SPY and not a mock, so the walk still reads the rows the container holds and the
+     * arrangement stays what the other cases seed with SQL. What the spy adds is the argument the pass
+     * passed as its continuation ordinal on each read, which is the only place the keyset cursor is
+     * observable from -- the pass reports its totals and not its cursor, so a walk that reset the cursor
+     * and a walk that advanced it correctly are indistinguishable from the outside.</p>
+     */
+    @MockitoSpyBean
+    private DailyTransactionRepository feed;
 
     /**
      * The boundary every seeding statement below is issued inside.
@@ -675,16 +696,22 @@ class PreflightDailyTransactionsJobTest {
 
         assertThat(this.execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
         // WHY : Trade-offs: the template is asserted verbatim from app/cbl/CBTRN01C.cbl:181-183 while
-        //       the interpolated card number is asserted MASKED to its last four digits. The reference
-        //       renders all sixteen; reproducing that would put a primary account number into a durable
-        //       log, which the migration plan's data-exposure rule forbids, so the job masks it and
-        //       records that as the one place the verbatim-text rule is knowingly qualified. Note the
-        //       middle fragment ends "ID-" with a hyphen and no trailing space, so the transaction
-        //       identifier abuts it; inserting the space a reader expects would change published text.
+        //       both interpolated values are asserted REDACTED -- the card number to its last four
+        //       digits and the transaction identifier to its declared width. The reference renders both
+        //       in full; reproducing that would put a primary account number and the ledger's own
+        //       primary key into a durable log, which the migration plan's data-exposure rule forbids,
+        //       so the job redacts them and records that as the one place the verbatim-text rule is
+        //       knowingly qualified. Note the middle fragment ends "ID-" with a hyphen and no trailing
+        //       space, so the identifier position abuts it; inserting the space a reader expects would
+        //       change published text.
+        // WHY : ⚠️ Refactoring Rationale: this case asserted the transaction identifier PRESENT and in
+        //       full, describing it as identity that names no one. It is the ledger's primary key, so
+        //       the expectation encoded the disclosure rather than guarding against it; it now asserts
+        //       the redaction, and the case below asserts the raw value appears nowhere in the run's log.
         assertThat(warningDiagnostics())
                 .containsExactly("CARD NUMBER " + maskOf(cardNumberOf("unmatched_card"))
                         + " COULD NOT BE VERIFIED. SKIPPING TRANSACTION ID-"
-                        + transactionIdOf("unmatched_card"));
+                        + TRANSACTION_ID_REDACTION_IN_LOG);
         // WHY : Assumptions: the skip is pinned as the ABSENCE of the read, which is the reference's own
         //       short-circuit at app/cbl/CBTRN01C.cbl:173 -- the account read at :176 sits inside the
         //       block that line opens and the unresolvable-card branch at :180-184 is its alternative.
@@ -694,6 +721,56 @@ class PreflightDailyTransactionsJobTest {
         assertThat(rowCountOf("account.accounts"))
                 .as("the master that was never read is nevertheless present, so the skip is genuine")
                 .isOne();
+    }
+
+    /**
+     * No line this pass logs carries the feed's raw transaction identifier, at any level.
+     *
+     * <p>⚠️ Purpose: this is the absence assertion that makes the redaction a property of the CLASS
+     * rather than of the two statements a sibling case happens to inspect. The identifier is
+     * {@code TRAN-ID}, the ledger's primary key, so a line carrying it links log storage to a posted
+     * financial record; a case that only checked the diagnostic text would pass while a structured field
+     * beside it published the same value, which is exactly the shape the defect had -- it appeared twice
+     * per record, once in each.
+     *
+     * <p>⚠️ Assumptions: the job's logger is driven to {@code DEBUG} for this case and restored
+     * afterwards, because the per-record trace is off by default and is the statement most likely to
+     * regain the identifier -- it once rendered the feed entity, whose own diagnostic form names it. A
+     * level that is off by default is not a control against an operator who raises it, so the assertion
+     * has to see that statement.
+     *
+     * <p>⚠️ Assumptions: the expected value is read from the COMMITTED fixture rather than written down
+     * here, so the case cannot drift into asserting the absence of a string the feed never contained --
+     * which would pass for the wrong reason. It is asserted non-blank first for the same reason.
+     *
+     * @throws Exception if the framework's own launch path raises, which this case does not provoke
+     */
+    @Test
+    @DisplayName("no logged line carries the feed's raw transaction identifier")
+    void noLoggedLineCarriesTheRawTransactionIdentifier() throws Exception {
+        seedFeedFromFixture("unmatched_card", 1L);
+        seedAccount(AccountRecordMapper.toEntity(fixtureImage("unmatched_card", "acctdata.txt")));
+
+        Logger jobLogger = preflightLogger();
+        Level restored = jobLogger.getLevel();
+        jobLogger.setLevel(Level.DEBUG);
+        try {
+            runPass(BUSINESS_DATE);
+        } finally {
+            jobLogger.setLevel(restored);
+        }
+
+        String rawIdentifier = transactionIdOf("unmatched_card").trim();
+        assertThat(rawIdentifier)
+                .as("the fixture must carry an identifier, or the absence below proves nothing")
+                .isNotEmpty();
+        assertThat(this.capturedLog.list)
+                .as("the pass must have logged something, or the absence below proves nothing")
+                .isNotEmpty();
+        assertThat(this.capturedLog.list)
+                .extracting(ILoggingEvent::getFormattedMessage)
+                .as("no line at any level may carry the ledger key the feed record was read under")
+                .noneMatch(line -> line.contains(rawIdentifier));
     }
 
     /**
@@ -728,7 +805,8 @@ class PreflightDailyTransactionsJobTest {
     /**
      * Confirms the pass performs exactly one lookup per record and none past end of file.
      *
-     * <p>Registers as {@code D-7}. Three records are seeded and three lookups must follow.</p>
+     * <p>Registers as {@code D-PREFLIGHT-LOOKUP-PAST-END-OF-FILE}, the job's class-local
+     * {@code D-7}. Three records are seeded and three lookups must follow.</p>
      *
      * <p>Refactoring Rationale: what is wrong with the reference is guard placement, not logic. The inner
      * test at {@code app/cbl/CBTRN01C.cbl:167} closes with its own {@code END-IF} at {@code :169} and so
@@ -741,7 +819,8 @@ class PreflightDailyTransactionsJobTest {
      * The migrated walk drives its inspection from the batch the query returned, which makes an
      * iteration with no record unrepresentable.</p>
      *
-     * <p>Assumptions: the divergence is REGISTERED and not absorbed. It is recorded as {@code D-7} in
+     * <p>Assumptions: the divergence is REGISTERED and not absorbed. It is recorded as
+     * {@code D-PREFLIGHT-LOOKUP-PAST-END-OF-FILE} in
      * {@code docs/architecture/cobol-to-service-traceability.md}, and {@code app/cbl/CBTRN01C.cbl} is
      * NOT edited — the reference stays byte-identical because it is the behavioural oracle. No byte
      * comparison can observe the difference either, because {@code tests/golden/} holds no
@@ -768,6 +847,138 @@ class PreflightDailyTransactionsJobTest {
         assertThat(warningDiagnostics())
                 .as("no trailing diagnostic follows the last real record")
                 .isEmpty();
+    }
+
+    /**
+     * The walk crosses the commit interval, inspecting every feed row exactly once and in key order.
+     *
+     * <p>Pins the continuation of the keyset walk at
+     * {@code PreflightDailyTransactionsJob.inspectEveryFeedRecord}, which reads
+     * {@code BatchConfig.CHUNK_SIZE} rows at a time and advances its cursor to the ordinal of the last
+     * row it saw. One row MORE than the interval is seeded, so the pass has to make a second read that
+     * returns a non-empty page and a third that returns nothing before it stops.</p>
+     *
+     * <p>Refactoring Rationale: every other case here seeds at most three rows, so the loop's
+     * continuation and its cursor arithmetic were reached by no case at all. Two opposite defects hide
+     * below the interval and both are severe: a walk that failed to advance its cursor would re-read
+     * page one forever, and one that advanced past the page's last row would silently drop a row per
+     * page. Neither is visible in a one-page pass, which is why the boundary is crossed here against the
+     * real database rather than argued about.</p>
+     *
+     * <p>Assumptions: each seeded row carries a DISTINCT card number, and the distinctness is what makes
+     * the claim provable. The pass performs one cross-reference lookup per row, so the sequence of card
+     * numbers the spy recorded is the sequence of rows the walk visited -- which shows exactly-once and
+     * key ORDER together. Seeding one card on every row would make the same total pass for a walk that
+     * read the first row a hundred and one times.</p>
+     *
+     * <p>Assumptions: the cursor positions are asserted as an ORDERED list, not counted. The sequence is
+     * the property: the walk must open before the first ordinal, resume from the last ordinal of page one
+     * and then from the last ordinal of page two. A count of three reads would accept a walk that asked
+     * from zero every time.</p>
+     *
+     * <p>Assumptions: the read-only contract is re-asserted at this size rather than assumed from the
+     * one-row case, because the second page is where a pass that accumulated something per page would
+     * first write it.</p>
+     *
+     * @throws Exception if the framework's own launch path raises, which this case does not provoke
+     */
+    @Test
+    @DisplayName("cross the commit interval, inspecting every feed row exactly once in key order")
+    void theWalkCrossesTheCommitIntervalInspectingEveryRowExactlyOnce() throws Exception {
+        int seeded = BatchConfig.CHUNK_SIZE + 1;
+        List<String> cardNumbers = seedDistinctFeedRows(seeded);
+        seedAccount(resolvableAccount(RESOLVED_ACCOUNT_ID));
+
+        runPass(BUSINESS_DATE);
+
+        assertThat(this.execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
+        assertThat(cursorsRequested())
+                .as("the walk opens before the first ordinal and resumes from each page's last row")
+                .containsExactly(0L, (long) BatchConfig.CHUNK_SIZE, (long) seeded);
+        assertThat(cardNumbersLookedUp())
+                .as("one lookup per seeded row, in ingestion order, none repeated and none missed")
+                .containsExactlyElementsOf(cardNumbers);
+        assertThat(lookupCount())
+                .as("%d rows inspected across two pages", seeded)
+                .isEqualTo(seeded);
+        assertThat(warningDiagnostics())
+                .as("every seeded row resolves, so neither diagnostic branch is reached")
+                .isEmpty();
+        assertThat(completedEvent())
+                .as("the closing event totals every row both pages carried")
+                .contains("read=" + seeded, "unresolvedCards=0", "unresolvedAccounts=0");
+        assertThat(rowCountOf("ledger.transactions"))
+                .as("a second page changes nothing about the pass writing no posted row")
+                .isZero();
+        assertThat(rowCountOf("ledger.daily_transactions"))
+                .as("the feed is input at every size, so no row is consumed or stamped")
+                .isEqualTo(seeded);
+    }
+
+    /**
+     * An initially empty feed inspects nothing, reports nothing, and still records its step.
+     *
+     * <p>Pins the first read of the walk against an empty table, which is the case
+     * {@code app/cbl/CBTRN01C.cbl} reaches when its first {@code READ} sets end-of-file: the program
+     * opens its files, reads once, falls straight through its {@code PERFORM UNTIL} and closes. Nothing
+     * is displayed because both diagnostic branches sit inside the loop body.</p>
+     *
+     * <p>Refactoring Rationale: an empty feed was covered only implicitly, by cases that seeded rows and
+     * asserted the tables those rows did not change. Implicit is not enough here, because the empty feed
+     * is the shape a real nightly run takes whenever the extract is empty, and two of the ways it could
+     * fail are silent: a walk that treated an empty first page as an error would fail a legitimate
+     * night, and one that skipped its ledger write when it had read nothing would leave a redrive unable
+     * to tell that night's step from one that never ran.</p>
+     *
+     * <p>Assumptions: the ledger row is asserted PRESENT and clean, which is the half of the claim a
+     * count of zero lookups cannot make. The pass grading nothing is not the same as the pass having
+     * nothing to record: the durable row is what the orchestrator's redrive decision reads, so an empty
+     * night must still leave one.</p>
+     *
+     * <p>Assumptions: exactly ONE read is asserted, from before the first ordinal. A pass that read a
+     * second time after an empty page would be issuing a query whose answer cannot differ, which is
+     * harmless at this size and is a wasted round trip per page on every night.</p>
+     *
+     * @throws Exception if the framework's own launch path raises, which this case does not provoke
+     */
+    @Test
+    @DisplayName("inspect nothing and report nothing on an initially empty feed, and still record it")
+    void anInitiallyEmptyFeedInspectsNothingAndStillRecordsItsStep() throws Exception {
+        assertThat(rowCountOf("ledger.daily_transactions"))
+                .as("the arrangement is the ABSENCE of an arrangement, so the emptiness is asserted"
+                        + " rather than assumed from the reset having run")
+                .isZero();
+
+        runPass(BUSINESS_DATE);
+
+        assertThat(this.execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
+        assertThat(cursorsRequested())
+                .as("one read, from before the first ordinal, and the empty page ends the walk")
+                .containsExactly(0L);
+        assertThat(lookupCount())
+                .as("no row exists to look a card up for")
+                .isZero();
+        verify(this.accounts, never()).findByAccountId(anyLong());
+        assertThat(warningDiagnostics())
+                .as("both diagnostic branches sit inside the loop body the pass never entered")
+                .isEmpty();
+        assertThat(completedEvent())
+                .as("the closing event reports three zeros rather than being withheld")
+                .contains("read=0", "unresolvedCards=0", "unresolvedAccounts=0");
+
+        Optional<BatchRun> recorded = this.stepLedgerRows.findByRunIdAndStepName(
+                RUN_ID, PreflightDailyTransactionsJob.STEP_NAME);
+        assertThat(recorded)
+                .as("an empty night is still a step a redrive must be able to recognise")
+                .isPresent();
+        assertThat(recorded.orElseThrow().getStatus())
+                .isEqualTo(BatchRun.BatchRunStatus.COMPLETED);
+        assertThat(recorded.orElseThrow().getReturnCode())
+                .as("nothing read is a clean pass, not a warning")
+                .isEqualTo(RETURN_CODE_CLEAN);
+        assertThat(rowCountOf("ledger.transactions")).isZero();
+        assertThat(rowCountOf("ledger.transaction_rejects")).isZero();
+        assertThat(rowCountOf("ledger.transaction_category_balances")).isZero();
     }
 
     /**
@@ -1061,6 +1272,15 @@ class PreflightDailyTransactionsJobTest {
     }
 
     /**
+     * The redaction the job writes in place of a transaction identifier, at its declared width.
+     *
+     * <p>Assumptions: the literal is repeated here rather than read from the job, because a test that
+     * imported the production constant would agree with it however it changed -- including a change back
+     * to the identifier itself. Sixteen characters is {@code TRAN-ID}'s declared width.</p>
+     */
+    private static final String TRANSACTION_ID_REDACTION_IN_LOG = "****************";
+
+    /**
      * Reads the transaction identifier the scenario's committed feed image carries.
      *
      * @param scenario the fixture scenario directory name
@@ -1174,6 +1394,107 @@ class PreflightDailyTransactionsJobTest {
     }
 
     /**
+     * Seeds one feed row per requested ordinal, each carrying its own card number and identifier.
+     *
+     * <p>Assumptions: the rows are written in ONE batched transaction rather than one statement per row,
+     * because a hundred and one separately committed statements is a hundred and one round trips against
+     * a container on a shared runner and the arrangement is not what any case here is measuring.</p>
+     *
+     * <p>Assumptions: every row derives from the committed {@code happy_path} image and differs from it
+     * in exactly two fields, the identifier and the card number, both derived from the ordinal. Deriving
+     * rather than inventing keeps every other field -- the amount, the type and category codes, the two
+     * timestamps -- at the values the fixture contract governs, so a row here is a committed row with a
+     * distinct key rather than a synthetic record of this method's own design.</p>
+     *
+     * <p>Assumptions: one cross-reference row is written per card, all naming the SAME account, so the
+     * account master needs one row and the resolved path is reached by every feed row. Giving each its
+     * own account would test the account master's cardinality, which no case here is about.</p>
+     *
+     * @param rows the number of feed rows to seed, which become ordinals 1 through {@code rows}
+     * @return the card numbers seeded, in ascending ordinal order, never {@code null}
+     */
+    private List<String> seedDistinctFeedRows(int rows) {
+        DailyTransaction template = feedRecordOf("happy_path");
+        String cardPrefix = template.getCardNum().substring(0, template.getCardNum().length() - 4);
+
+        List<String> cardNumbers = new ArrayList<>();
+        List<Object[]> feedArguments = new ArrayList<>();
+        List<Object[]> crossReferenceArguments = new ArrayList<>();
+        for (int ordinal = 1; ordinal <= rows; ordinal++) {
+            String cardNumber = cardPrefix + String.format("%04d", ordinal);
+            cardNumbers.add(cardNumber);
+            feedArguments.add(new Object[] {(long) ordinal, String.format("%016d", ordinal),
+                template.getTypeCd(), template.getCategoryCd(), template.getSource(),
+                template.getDescription(), template.getAmount(), template.getMerchantId(),
+                template.getMerchantName(), template.getMerchantCity(), template.getMerchantZip(),
+                cardNumber, template.getOrigTs(), template.getProcTs()});
+            crossReferenceArguments.add(
+                    new Object[] {cardNumber, RESOLVED_CUSTOMER_ID, RESOLVED_ACCOUNT_ID});
+        }
+
+        this.transactionTemplate.executeWithoutResult(status -> {
+            this.jdbc.batchUpdate("INSERT INTO ledger.daily_transactions (ingest_seq,"
+                    + " transaction_id, type_cd, category_cd, source, description, amount,"
+                    + " merchant_id, merchant_name, merchant_city, merchant_zip, card_num,"
+                    + " orig_ts, proc_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    feedArguments);
+            this.jdbc.batchUpdate("INSERT INTO account.card_xref (card_num, customer_id,"
+                    + " account_id) VALUES (?, ?, ?)", crossReferenceArguments);
+        });
+        return cardNumbers;
+    }
+
+    /**
+     * Reports the continuation ordinal the pass requested each page from, in request order.
+     *
+     * <p>Assumptions: the argument is read off the spy's recorded invocations rather than inferred from
+     * the rows returned, because the cursor is what is under assertion and the rows would agree with a
+     * cursor that had been recomputed from scratch. Only the keyset finder is read; the pass makes no
+     * other call on this repository, and naming the method keeps that true if one is ever added.</p>
+     *
+     * @return the continuation ordinals in the order the pass asked for them, never {@code null}
+     */
+    private List<Long> cursorsRequested() {
+        return mockingDetails(this.feed).getInvocations().stream()
+                .filter(invocation -> "findByIngestSeqGreaterThanOrderByIngestSeqAsc"
+                        .equals(invocation.getMethod().getName()))
+                .map(invocation -> (Long) invocation.getArgument(0))
+                .toList();
+    }
+
+    /**
+     * Reports the card numbers the pass looked up, in lookup order.
+     *
+     * <p>Assumptions: the full number is read and compared rather than a masked form, because this is an
+     * arrangement value flowing between two test-owned collections and never a rendering -- the masking
+     * rule governs what a LOG line may carry, which the diagnostic assertions cover separately.</p>
+     *
+     * @return the card numbers in the order the pass resolved them, never {@code null}
+     */
+    private List<String> cardNumbersLookedUp() {
+        return mockingDetails(this.crossReferences).getInvocations().stream()
+                .filter(invocation -> "findByCardNum".equals(invocation.getMethod().getName()))
+                .map(invocation -> (String) invocation.getArgument(0))
+                .toList();
+    }
+
+    /**
+     * Reports the pass's closing event, whose three totals are the whole of its numeric output.
+     *
+     * <p>Assumptions: the formatted message is read rather than the pattern and its arguments, so what
+     * is asserted is the line an operator reads. Reading the pattern would report the placeholders.</p>
+     *
+     * @return the formatted closing event, or an empty string when the pass emitted none
+     */
+    private String completedEvent() {
+        return this.capturedLog.list.stream()
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.startsWith("event=batch.preflight.completed"))
+                .findFirst()
+                .orElse("");
+    }
+
+    /**
      * Counts the cross-reference lookups the pass performed.
      *
      * <p>Assumptions: the count is read from the spy's recorded invocations rather than expressed as a
@@ -1238,8 +1559,17 @@ class PreflightDailyTransactionsJobTest {
     @EnableAutoConfiguration
     @EntityScan("com.carddemo.batch.domain")
     @EnableJpaRepositories("com.carddemo.batch.repository")
+    // WHY : Assumptions: DailyFeedWatermarkService is imported EXPLICITLY, like every other
+    //       collaborator here, rather than reached by a component scan. This configuration names its
+    //       imports one at a time so that the context holds one job definition and not seven, and the
+    //       watermark service is a constructor dependency of the pass under test -- so an omission is
+    //       a context that fails to start rather than a pass that quietly reads no position.
+    // WHY : Assumptions: the REAL service is used, over the real repository the JPA scan above
+    //       registers, against the real table V2__batch_feed_watermark.sql creates in the container.
+    //       A mock would let this class assert the pass ran without asserting that the window it read
+    //       was the window the database holds, which is the only property worth having here.
     @Import({BatchConfig.class, PreflightDailyTransactionsJob.class, BatchStepLedger.class,
-            BatchStepLedgerWriter.class})
+            BatchStepLedgerWriter.class, DailyFeedWatermarkService.class})
     static class PreflightPassTestApplication {
     }
 }

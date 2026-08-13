@@ -8,6 +8,7 @@ import java.time.Clock;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 
 /**
@@ -317,12 +318,50 @@ public record ApiError(
      * contention refusal are both fixed, and a test can assert the pair.</p>
      *
      * <p>Assumptions: 409 rather than 412. Both are defensible for a lost version comparison, and 409 is
-     * chosen because it covers all three contention conditions this migration distinguishes, whereas 412
+     * chosen because it covers every contention condition this migration distinguishes, whereas 412
      * would describe only the one that arrives with a precondition header -- and this migration carries
      * the version in the body, following the baseline's own before-image comparison rather than an HTTP
      * conditional-request idiom the baseline has no counterpart for.</p>
      */
     public static final int CONFLICT_STATUS = 409;
+
+    /**
+     * The media type every response carrying this shape is served as.
+     *
+     * <p>⚠️ Purpose: ONE authority for the value, so that a published contract can be gated against it
+     * instead of restating it. The three components that write this shape before the dispatcher runs --
+     * {@link ApiErrorSecurityHandlers}, {@code common.web.RequestBodySizeFilter} and
+     * {@code common.web.CorrelationIdFilter} -- each declared a private constant of their own, and the
+     * account contract declared {@code application/problem+json} on all seventeen of its failing
+     * responses while every handler emitted {@code application/json}. A client routing on content type
+     * before parsing took the wrong branch on every account failure, and nothing failed on either side
+     * because a media type is not part of the body a wire test inspects.</p>
+     *
+     * <p>Assumptions: {@code application/json} and NOT {@code application/problem+json}, which is the
+     * direction the six sibling contracts already document and the one the runtime actually emits. The
+     * shared advice returns a response entity carrying this record and sets no content type, so the
+     * framework negotiates {@code application/json}; and this shape is not an RFC 9457 problem document
+     * -- it declares {@code code}, {@code secondaryCode}, {@code severity}, {@code subsystem} and the
+     * rest, and none of the {@code type}, {@code title}, {@code detail} and {@code instance} members
+     * that specification requires. Alternatives Considered: restructuring the shape into a real problem
+     * document so the more precise media type became honest. Rejected because the shape is the migrated
+     * form of the reference's own message and abend fields, published to eight services and twenty-one
+     * screens; the members it carries are the contract, and renaming them to satisfy a media type would
+     * change every consumer to describe the same information.</p>
+     */
+    public static final String MEDIA_TYPE = "application/json";
+
+    /**
+     * The subordinate code a refusal that publishes no discriminator carries, being the empty string.
+     *
+     * <p>Assumptions: this names the value the canonical constructor already normalises {@code null} to,
+     * so a caller with nothing to qualify the primary code with passes a constant rather than a bare
+     * literal. It exists because the subordinate code is now an argument of {@link #ofConflict}: a
+     * literal empty string at a call site is indistinguishable from an oversight, whereas this name
+     * states that the omission is the contract. Six of the seven published contracts show exactly this
+     * value in their conflict examples.</p>
+     */
+    public static final String NO_SECONDARY_CODE = "";
 
     /**
      * The shared machine code for a request refused because the environment is not currently accepting
@@ -579,7 +618,16 @@ public record ApiError(
         Objects.requireNonNull(severity, "severity must not be null");
         Objects.requireNonNull(subsystem, "subsystem must not be null");
         correlationId = correlationId == null ? "" : correlationId;
-        path = path == null ? "" : CardNumberMasker.maskEmbeddedCardNumbers(path);
+        // WHY : ⚠️ Refactoring Rationale: the shape's own last-resort narrowing is the IDENTIFIER-aware
+        //       sanitizer, and it used to be the card-only one. This constructor is the single place every
+        //       problem body's path passes through whichever handler built it, so the rule applied here is
+        //       the floor beneath every emitted body -- and that floor recognised a sixteen-digit card
+        //       number and nothing shorter, leaving the nine-digit customer identifier and the
+        //       eleven-digit account identifier to be narrowed only by the handlers that happened to do it
+        //       themselves. The composed rule keeps the card number's published last-four rendering and
+        //       withholds the shorter identifiers whole; it is idempotent, so a path a handler has already
+        //       narrowed passes through unchanged.
+        path = path == null ? "" : CardNumberMasker.maskEmbeddedIdentifiers(path);
         timestamp = timestamp == null ? "" : timestamp;
         fieldErrors = fieldErrors == null ? List.of() : List.copyOf(fieldErrors);
         abend = abend == null ? null : abend.external();
@@ -813,7 +861,7 @@ public record ApiError(
                 //       numeric identity keeps the rejection diagnosable while the accepted set
                 //       remains exactly the four visible characters at CCPAUERY.cpy lines 26 to 29.
                 default -> throw new IllegalArgumentException(
-                        "unknown severity code: U+" + String.format("%04X", (int) code));
+                        "unknown severity code: U+" + String.format(Locale.ROOT, "%04X", (int) code));
             };
         }
     }
@@ -900,7 +948,7 @@ public record ApiError(
                 //       does not widen the accepted domain beyond the six visible characters at
                 //       CCPAUERY.cpy lines 31 to 36.
                 default -> throw new IllegalArgumentException(
-                        "unknown subsystem code: U+" + String.format("%04X", (int) code));
+                        "unknown subsystem code: U+" + String.format(Locale.ROOT, "%04X", (int) code));
             };
         }
     }
@@ -1193,28 +1241,48 @@ public record ApiError(
      * have to be admitted -- and then documented as absent -- on every other. One entry keyed by the
      * version field says the same thing inside the shape every client already parses.
      *
+     * <p>⚠️ Refactoring Rationale: the subordinate code is now an ARGUMENT, where this factory used to
+     * hardcode the empty string and its own contract described that as a fixed property of a contention
+     * refusal. It is not fixed, and the hardcoding made one published contract unsatisfiable: the card
+     * context's conflict response declares three stable subordinate codes -- {@code CARD-DATA-CHANGED},
+     * {@code CARD-LOCK-NOT-ACQUIRED} and {@code CARD-WRITE-NOT-APPLIED} -- and states in prose that the
+     * subordinate code is what distinguishes the three conditions, so every conflict that service emitted
+     * violated the document describing it while still being structurally valid. Accepting the code here
+     * is what lets a context that publishes a discriminator supply one.
+     *
+     * <p>Assumptions: the PRIMARY code and the status remain fixed. A conflict is
+     * {@link #CODE_CONFLICT} with status 409 whatever condition produced it, so those two stay properties
+     * of this factory; the subordinate code qualifies the primary one rather than replacing it, which is
+     * the division the record's own component contract already describes. A caller with no discriminator
+     * to publish passes {@link #NO_SECONDARY_CODE}, which is the value the six contracts whose conflict
+     * examples show an empty subordinate code declare -- so the generic advice's body is unchanged and
+     * only a context that promises a discriminator emits one.
+     *
      * @param message the user-visible contention sentence, carried verbatim from its baseline source
+     * @param secondaryCode the subordinate machine-readable code qualifying {@link #CODE_CONFLICT}, which
+     *     a context publishing a discriminator supplies and every other passes
+     *     {@link #NO_SECONDARY_CODE} for; {@code null} is normalised to the empty string
      * @param subsystem the part of the platform the contention arose in; must not be {@code null}
      * @param correlationId the inherited correlation identity, or {@code null} when absent
      * @param path the failed request path, or {@code null} when absent
      * @param fieldErrors the field entries reporting the contended values, empty when there are none;
      *     must not be {@code null}
      * @param clock the explicit clock from which the timestamp is read; must not be {@code null}
-     * @return a 409 problem shape carrying {@link #CODE_CONFLICT} and the supplied subsystem, never
-     *     {@code null}
+     * @return a 409 problem shape carrying {@link #CODE_CONFLICT}, the supplied subordinate code and the
+     *     supplied subsystem, never {@code null}
      * @throws NullPointerException if {@code subsystem}, {@code fieldErrors}, one of its entries or
      *     {@code clock} is {@code null}
      * @throws IllegalArgumentException if the clock yields a year outside the formatter's supported
      *     four-digit range
      */
-    public static ApiError ofConflict(String message, Subsystem subsystem, String correlationId,
-            String path, List<FieldError> fieldErrors, Clock clock) {
+    public static ApiError ofConflict(String message, String secondaryCode, Subsystem subsystem,
+            String correlationId, String path, List<FieldError> fieldErrors, Clock clock) {
         Objects.requireNonNull(subsystem, "subsystem must not be null");
         Objects.requireNonNull(fieldErrors, "fieldErrors must not be null");
         Objects.requireNonNull(clock, "clock must not be null");
         return new ApiError(
                 CODE_CONFLICT,
-                "",
+                secondaryCode,
                 message,
                 Severity.WARNING,
                 subsystem,
@@ -1337,5 +1405,53 @@ public record ApiError(
             return Severity.WARNING;
         }
         return Severity.INFO;
+    }
+
+    /**
+     * Renders the problem's identity and its message, with the per-field list reduced to its size.
+     *
+     * <p>Purpose. This record is stringified more than any other type in the migration -- it is the body
+     * of every refusal -- and its generated rendering printed the whole per-field error array, which is as
+     * long as the number of components a request got wrong. A body carrying forty field errors produced a
+     * forty-entry line, which is the collection concern
+     * {@code docs/architecture/observability.md} L1093 to L1112 addresses.</p>
+     *
+     * <p>Assumptions: every other component prints in full, and each is safe for a stated reason rather
+     * than by inspection. The two codes and the status are bounded constants; the severity and the
+     * subsystem are closed enumerations; the correlation identifier is the value that exists to appear in
+     * logs; the timestamp is a timestamp; and the message is confined to the reference sentences and their
+     * seventy-five-character width. The path is the one component that could have carried a protected
+     * value, and it cannot: this record's own factories pass it through
+     * {@code CardNumberMasker.maskEmbeddedCardNumbers}, so a card number in a request path is already
+     * masked before it reaches a component.</p>
+     *
+     * <p>Alternatives Considered: rendering the field NAMES from the array while omitting their messages.
+     * Rejected because the names are unbounded in number for the same reason the array is, so the line
+     * would still scale with the request; a count states that the array is populated, and the body itself
+     * -- which the client received -- states which fields.</p>
+     *
+     * <p>Trade-offs: the abend detail is reported as present or absent rather than rendered. It carries a
+     * code, a culprit and a reason, none of them protected, but a nested rendering inside a type this
+     * widely stringified is how a line grows without anyone deciding that it should; presence answers
+     * whether the refusal was an abend, which is the distinction an operator reads it for.</p>
+     *
+     * @return a rendering naming the two codes, the severity, the subsystem, the status, the correlation
+     *     identifier, the masked path, the timestamp, the message, the number of field errors and whether
+     *     an abend detail is present; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "ApiError[code=" + this.code
+                + ", secondaryCode=" + this.secondaryCode
+                + ", severity=" + this.severity
+                + ", subsystem=" + this.subsystem
+                + ", status=" + this.status
+                + ", correlationId=" + this.correlationId
+                + ", path=" + this.path
+                + ", timestamp=" + this.timestamp
+                + ", message=" + this.message
+                + ", fieldErrors=" + (this.fieldErrors == null ? "absent"
+                        : this.fieldErrors.size() + " entries")
+                + ", abend=" + (this.abend == null ? "absent" : "present") + ']';
     }
 }

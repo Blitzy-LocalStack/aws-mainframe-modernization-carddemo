@@ -5,7 +5,7 @@
 # =============================================================================
 #
 # Purpose:
-#   Carries the four cross-cutting configuration values that have to be identical
+#   Carries the six cross-cutting configuration values that have to be identical
 #   in every bounded context, so that they are written once here rather than
 #   copied into eight application.yml files:
 #
@@ -31,6 +31,15 @@
 #        in exactly the same sense as the first four -- eight services must answer
 #        a refused request identically -- and both were reached by review finding
 #        one service answering wrongly rather than by design.
+#     6. spring.datasource.hikari.data-source-properties.logServerErrorDetail --
+#        whether the PostgreSQL driver folds the server's DETAIL and HINT fields,
+#        and the bound parameter values inlined into them, into the exception
+#        message that every log site downstream then renders. Withheld here for
+#        all eight services, for the reason stated at the key itself.
+#
+#   The count in the opening sentence read "four" while the list already carried
+#   five entries; it was corrected to six when the sixth was added, because a
+#   stale count invites a reader to stop at the fourth item.
 #
 # How a service consumes it:
 #   One line in the service's own application.yml:
@@ -215,7 +224,211 @@ logging:
     #       fail there rather than silently restoring the exposure.
     io.awspring.cloud.sqs.listener.sink.AbstractMessageProcessingPipelineSink: "off"
 
+    # WHY : (1) ⚠️ Refactoring Rationale: these three persistence loggers are pinned
+    #       HERE, where exactly one service pinned them for itself and the other
+    #       seven inherited the framework's defaults. The one that did found the
+    #       exposure by MEASUREMENT -- planting a check constraint one insert
+    #       violated and reading the log -- and recorded that
+    #       org.hibernate.orm.jdbc.error emits the driver's whole message at WARN,
+    #       which for a constraint violation IS the failing row: on that line the
+    #       account identifier, the primary account number, the amount, the
+    #       merchant identifier and the merchant name all appeared in clear. The
+    #       same driver, the same logger and the same rows are reachable from every
+    #       service that writes, so a pin in one base document closed one eighth of
+    #       the exposure. The same run of this repository's own build reproduced it
+    #       on auth-service, whose log carried
+    #       `Failing row contains (ADMIN001, Given, Family, X, 227ce75a-...)`.
+    #       (2) Assumptions: ERROR rather than OFF for the error category. That
+    #       logger's value-bearing output is emitted at WARN, so ERROR is the lowest
+    #       level that suppresses it, and choosing ERROR over OFF leaves anything
+    #       Hibernate raises at ERROR on the same category still visible. OFF would
+    #       also silence a future diagnostic that carries no row at all.
+    #       (3) Assumptions: the two SQL categories are pinned at WARN rather than
+    #       left to inherit, because at DEBUG and TRACE respectively they write the
+    #       statement and every bound parameter -- and the parameters on these paths
+    #       are primary account numbers, national identifiers and amounts. Pinning
+    #       means no profile can turn them up by raising a broader level, which is
+    #       the failure mode a root-level change would otherwise produce silently.
+    #       (4) Assumptions: nothing diagnostic is lost that this repository does not
+    #       replace. The queue side already logs the database condition and its
+    #       five-character SQL state through
+    #       com.carddemo.common.observability.FailureSummary.databaseConditionOf,
+    #       which masks a card number and replaces every run of three or more digits
+    #       with hashes, and the servlet side renders failures through
+    #       com.carddemo.common.observability.ThrowableDigest. So an operator still
+    #       learns which constraint was violated and with which state code, and
+    #       learns nothing about the customer.
+    #       (5) Trade-offs: an operator who needs the literal failing row must
+    #       reproduce it against a non-production dataset with the category raised
+    #       for that one package -- a scoped and auditable act. The alternative is
+    #       that every constraint violation in any of eight services writes a
+    #       cardholder record into a log store retained far more widely than the
+    #       database it came from. Alternatives Considered: leaving each service to
+    #       pin its own, which is what produced the seven-service gap; and a Logback
+    #       filter, which this repository deliberately cannot use because it ships no
+    #       logback-spring.xml. A service that genuinely needs a different level can
+    #       still override any of the three in its own document, because a
+    #       config-data import is lower precedence than the importing file.
+    org.hibernate.orm.jdbc.error: ERROR
+    org.hibernate.orm.jdbc.bind: WARN
+    org.hibernate.SQL: WARN
+
 spring:
+  datasource:
+    hikari:
+      # WHY : (1) Refactoring Rationale: the PostgreSQL driver is told to WITHHOLD
+      #       server error detail, and it was not. `logServerErrorDetail` defaults
+      #       to true in pgjdbc, which folds the server's DETAIL and HINT fields --
+      #       and the bound parameter values the server inlines into them -- into
+      #       the message carried by the SQLException. Every log site that renders a
+      #       failure message then republishes those values. On this schema the
+      #       values in question are the ones the migration exists to protect: a
+      #       unique violation on a customer row answers `Detail: Key (...)=(...)
+      #       already exists.` naming the colliding value, and a check or
+      #       not-null violation names the offending row's contents. Cardholder
+      #       names, addresses and merchant free text are all reachable this way, so
+      #       the driver default turns an ordinary constraint violation into a
+      #       cardholder-data disclosure in the log sink.
+      #       (2) Assumptions: this is one of TWO independent controls, and both are
+      #       wanted. This key stops the detail entering the exception at the driver;
+      #       FailureSummary.databaseConditionOf refuses to render free text even if
+      #       it is present. Either alone leaves a gap -- this key governs only
+      #       PostgreSQL connections and nothing else in the failure path, while the
+      #       renderer governs every throwable but cannot help a log site that calls
+      #       getMessage() directly, and there is no way to prove none ever will.
+      #       Defence in depth is the point, not redundancy.
+      #       (3) Alternatives Considered: writing the key into each of the eight
+      #       services' own `data-source-properties` blocks, beside sslmode and
+      #       sslrootcert. Rejected for the reason this whole file exists -- eight
+      #       copies of one decision, and a ninth service added later inheriting the
+      #       driver default silently. `data-source-properties` binds as a map, and
+      #       map keys accumulate across property sources rather than replacing one
+      #       another, so a service's own block keeps its TLS keys and gains this one
+      #       without either file mentioning the other. Also considered: leaving the
+      #       detail on and stripping it downstream in the renderer alone. Rejected
+      #       because the sensitive text would still exist in every stack trace, in
+      #       any framework-authored log line, and in the outbox column that stores a
+      #       last-error string -- places the renderer never sees.
+      #       (4) Trade-offs: an operator loses the DETAIL line, which is genuinely
+      #       useful when diagnosing which row collided. What survives is the
+      #       SQLSTATE and the constraint name, which identify WHICH rule was broken
+      #       and on which relation -- the diagnostic half -- while the cardholder
+      #       value, the identifying half, is the part withheld. Recovering a
+      #       specific row is a governed database query, not a log read.
+      data-source-properties:
+        logServerErrorDetail: false
+  jackson:
+    deserialization:
+      # WHY : (1) ⚠️ Refactoring Rationale: the refusal of an UNDECLARED member is
+      #       stated here because four services set it and three did not, while all
+      #       seven publish `additionalProperties: false` on every request body they
+      #       declare. Thirteen body operations therefore accepted and silently
+      #       DISCARDED a member their own contract refuses. The measured shape of
+      #       that defect on the service that found it: a listing request carrying
+      #       `Direction` with a capital D was answered 200 with the FORWARD page
+      #       while the caller had asked to move backward, because the misspelled
+      #       member was dropped and the direction it carried went with it -- an
+      #       answer a caller cannot detect as wrong, since the page it receives is
+      #       well formed and simply the opposite one.
+      #       (2) Assumptions: the framework leaves this OFF, so this key is a change
+      #       and not a pin. The trailing-token refusal is deliberately NOT restated
+      #       beside it: the pinned Jackson generation already enables
+      #       FAIL_ON_TRAILING_TOKENS, so a second JSON value after the body is
+      #       already refused, and writing the key here would read as though the
+      #       refusal depended on it.
+      #       (3) ⚠️ Assumptions: this is safe for the four cross-context READS in
+      #       this system only because each declares every member of the upstream
+      #       schema it reads, and each of those schemas is itself closed. Any member
+      #       added upstream must therefore be declared on the reading side in the
+      #       same change that starts sending it -- transaction-service learned this
+      #       the expensive way, where a narrower subset turned every successful
+      #       lookup into a 500. The cross-context wire records are gated by contract
+      #       tests in their own modules for exactly this reason.
+      #       (4) Trade-offs: strictness over forward compatibility. Adding a member
+      #       to a request body becomes a deliberate contract change made in the
+      #       document and the DTO together, rather than something a client can start
+      #       sending unilaterally. Accepted because these bodies are closed field
+      #       sets taken from the reference maps, which have no representation for a
+      #       field they do not define.
+      fail-on-unknown-properties: true
+
+    read:
+      # WHY : (1) ⚠️ Refactoring Rationale: duplicate-member refusal is stated here
+      #       because one service set it and six did not, and the streaming default
+      #       resolves the ambiguity silently by keeping the LAST occurrence. A body
+      #       naming `accountId` twice was answered 200 for the second account, so a
+      #       caller reading its own request back saw the account it asked about
+      #       while the answer described a different one. The same shape reaches a
+      #       selector, an optimistic-concurrency version and a credential field on
+      #       the six services that had no such refusal, which is a parser
+      #       differential rather than a formatting preference: an intermediary and
+      #       the service can resolve one document differently.
+      #       (2) Trade-offs: the cost is one extra name-set per nesting level while
+      #       parsing, which is immaterial for bodies of at most a few dozen members.
+      #       Refusing the body says the two occurrences disagree instead of picking
+      #       one for the caller.
+      strict-duplicate-detection: true
+
+    # WHY : (1) ⚠️ Refactoring Rationale: always-inclusion is PINNED here because all seven
+    #       API documents already assert it as settled fact -- each ApiError block
+    #       explains that `message` and `abend` are `required` and nullable rather than
+    #       optional, and closes the argument with "the services set
+    #       default-property-inclusion: always". Only ONE service actually set it. The
+    #       other six were relying on the serialiser's own default to make a published
+    #       contractual claim, which held only for as long as nobody set the key to
+    #       something else in one service's profile. Pinning it centrally makes the
+    #       claim true for every service at once, in one place all eight import.
+    #       (2) Assumptions: this is a PIN and not a behaviour change. The serialiser
+    #       already includes null-valued members by default, so no response body moves;
+    #       what changes is that the behaviour is now declared rather than inherited.
+    #       Verified by the wire-shape assertions, which emit `"message":null` and
+    #       `"abend":null` and would fail on either NON_NULL or NON_EMPTY.
+    #       (3) ⚠️ Assumptions: the money contract depends on this, which is why the pin
+    #       belongs with the other contract-preserving defaults rather than in a service.
+    #       Money is carried as a JSON STRING so no client parses it into a binary
+    #       float, and a money member with no value must therefore be present and null
+    #       rather than absent -- an absent key reads as "this account has no balance"
+    #       where null reads as "no amount applies", and a reference screen renders the
+    #       two differently.
+    #       (4) ⚠️ Assumptions: the drift was MEASURED rather than inferred -- a probe
+    #       that imports this file and reads the resolved environment reported the key
+    #       as null before this block existed and `always` after it. The framework's
+    #       own default is what MASKED the drift and is why no test caught it: the six
+    #       services emitted exactly the wire shape their contracts promised while
+    #       promising it on a false basis, so the failure mode was latent. Any future
+    #       service-local `non_null` or `non_empty`, or a changed framework default,
+    #       would have falsified six published contracts at once with nothing to fail.
+    #       (5) ⚠️ Assumptions: `always` is what the REFERENCE behaviour requires and not
+    #       merely what happens to be in force. A BMS map writes every field position on
+    #       every screen turn whether the position holds a value or a blank -- the fixed
+    #       24x80 geometry has no way to omit a field -- so the migrated response shape
+    #       is CONSTANT by contract. Omitting a null would oblige the browser client to
+    #       distinguish a field that was not supplied from a field that is empty, a
+    #       distinction the 3270 contract never made and for which the single-page
+    #       application therefore has no rule.
+    #       (6) Alternatives Considered: rewriting the seven rationales to say the
+    #       default is merely inherited, which would also have made them accurate.
+    #       Rejected because a required-and-nullable member is a promise to every
+    #       generated client, and resting it on an unstated default leaves it removable
+    #       by a one-line profile override in any service, with the breakage appearing
+    #       as a client-side missing-key fault far from the change. Also considered:
+    #       annotating each response type with an inclusion annotation, which is the
+    #       more commonly written form and which one type in this reactor already
+    #       carries. Rejected as the GENERAL mechanism for the reason every other value
+    #       in this file is here -- it restates one fleet-wide decision once per type, a
+    #       type added later inherits whatever the framework default happens to be, and
+    #       the seven contracts cite a SETTING rather than an annotation, so an
+    #       annotation-only fix would leave all seven claims still false. The one
+    #       existing annotation is left in place: it is narrower than this default,
+    #       agrees with it, and documents the intent at the type it guards.
+    #       (7) Trade-offs: an imported value sits BENEATH the importing file in
+    #       precedence, so a service retains the ability to override this and falsify
+    #       its own contract. Accepted, because forcing the value from a post-processor
+    #       a service cannot override would hide a fleet-wide serialisation decision
+    #       behind a class, and because an override is visible in the overriding
+    #       service's own file, where a reviewer reads it beside the contract it breaks.
+    default-property-inclusion: always
+
   security:
     filter:
       # WHY : (1) ⚠️ Refactoring Rationale: the security filter chain is taken OFF

@@ -224,7 +224,7 @@ locals {
 # -----------------------------------------------------------------------------
 # Per-service database role credentials
 #
-# One credential per element of var.service_credential_names -- the fifteen
+# One credential per element of var.service_credential_names -- the sixteen
 # LOGIN roles data-migration/sql/V0__schemas_and_roles.sql creates, in two
 # tiers. Eight are RUNTIME roles, one per connecting workload: the seven bounded
 # contexts (carddemo_auth, carddemo_account, carddemo_card, carddemo_ledger,
@@ -260,7 +260,7 @@ locals {
 #       separated per bounded context, so a shared secret would hand back at the
 #       credential layer exactly the separation the database layer was built to
 #       enforce. One secret per role is what keeps a grant expressible.
-# WHY : Trade-offs: one secret per role costs fifteen resources and is what lets
+# WHY : Trade-offs: one secret per role costs sixteen resources and is what lets
 #       each ECS execution role receive exactly the resources its workload
 #       needs -- its runtime credential and, separately, its migration
 #       credential -- rather than a document containing every bounded context's

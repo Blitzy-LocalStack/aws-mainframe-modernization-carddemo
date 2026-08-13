@@ -711,13 +711,48 @@ and it is that file — not a summary of it — that this section reports. Three
 things differ from the coarse description, all in the narrower direction.
 
 **Every schema is owned by a role that cannot log in.** The script creates
-**three tiers** of role, not one:
+**four tiers** of role, not one:
 
 | Tier | Count | `LOGIN` | Holds |
 |---|---|---|---|
 | `carddemo_<context>_owner` | 8 | **no** | owns the schema and every object a migration creates in it, so it alone may `ALTER` or `DROP` them |
 | `carddemo_<context>_migrator` | 7 | yes | member of its owner `WITH INHERIT FALSE`; holds nothing until it issues `SET ROLE`, which each service's `spring.flyway.init-sqls` does |
 | `carddemo_<context>` | 8 | yes | `USAGE` on its schema, `SELECT`/`INSERT`/`UPDATE` on its tables, `USAGE`/`SELECT` on its sequences, `CREATE` explicitly **revoked** |
+| `carddemo_verifier` | 1 | yes | `USAGE` and `SELECT` on the five **loaded** schemas — `auth`, `account`, `card`, `ledger`, `reference` — and nothing else: no write privilege of any kind, no `CREATE`, no sequence privilege, no ownership, and `default_transaction_read_only = on` set on the role |
+
+> Assumptions: **the fourth tier exists because a post-load verification must not be able
+> to alter what it certifies.** The three per-dataset passes
+> ([`row_counts`](../../data-migration/src/carddemo_migration/verify/row_counts.py),
+> [`checksum`](../../data-migration/src/carddemo_migration/verify/checksum.py) and
+> [`money_parity`](../../data-migration/src/carddemo_migration/verify/money_parity.py))
+> each read loaded rows back and compare them against the extract they came from, and each
+> used to obtain that read by connecting as the bounded context's own runtime role — the
+> same credential the load step immediately before them writes with, holding `SELECT`,
+> `INSERT` and `UPDATE` on exactly the rows being certified. A verifier able to write what
+> it verifies certifies nothing, because a defect in it could repair the evidence a reader
+> is relying on it to judge; the authority is real whether or not it is used
+> ([CWE-250](https://cwe.mitre.org/data/definitions/250.html)).
+>
+> Alternatives Considered: **reusing `carddemo_reporting`, which is already read-only.**
+> Rejected on a property of the passes rather than on preference. Reporting holds `SELECT`
+> on **masked aggregate views only** — the row immediately below this table records that its
+> base-table access is explicitly revoked — so a primary account number reads back as its
+> last four digits. The checksum pass compares a source record against the row it became
+> field by field, so a masked read would differ from the extract on every card and
+> cross-reference row and report a correct load as a defect. Widening reporting to the base
+> tables was the other way to close that, and it would undo the masking boundary for every
+> reporting query — a far larger exposure than one dedicated read-only identity.
+>
+> Trade-offs: **a sixteenth credential, and an identity that can read every migrated record
+> in the clear.** That is the price of being able to prove a field was loaded correctly, and
+> it is bounded rather than unbounded: the role cannot write, cannot create, cannot advance
+> a sequence and owns nothing; the session it runs in is read-only and
+> [`verify/session.py`](../../data-migration/src/carddemo_migration/verify/session.py) reads
+> `transaction_read_only` back **from the server** before any pass runs rather than assuming
+> the role default took effect; and no pass renders a field value into its report, so a value
+> read under this authority does not reach a log. The role reaches only the five schemas the
+> ETL loads: `batch` and `authorization` hold nothing it loads, and `reporting` publishes a
+> presentation of records rather than records.
 
 > Refactoring Rationale: **only `reporting` used to have a `NOLOGIN` owner, and the
 > other seven schemas were owned by the very role their service connected as.** That
@@ -748,18 +783,19 @@ things differ from the coarse description, all in the narrower direction.
 > `carddemo_batch_owner`, after which the runtime role could `SELECT`, `INSERT` and
 > `UPDATE` but was refused `DELETE`, `TRUNCATE`, `ALTER`, `DROP` and `SET ROLE`.
 >
-> Trade-offs: **fifteen credentials instead of eight**, one per login role, and a
+> Trade-offs: **sixteen credentials instead of eight**, one per login role, and a
 > service that forgets its migration credential fails at startup on an unresolved
 > placeholder. Both are accepted: the extra entries are what let one
 > `GetSecretValue` grant per identity stay expressible, and a startup failure naming
 > the missing variable is a better outcome than migrating as the wrong identity and
-> succeeding.
+> succeeding. The sixteenth is `carddemo_verifier`, the read-only identity a post-load
+> verification authenticates as; it is described with the verification tier below.
 
 **Two tiers write outside their own schema, and each surface is one named table rather
 than a schema.** `batch-service` and `transaction-service` are the two deliberate
 departures from database-per-service ownership: nightly posting commits three writes as
 a single unit of work across two schemas, and the bill-payment screen commits two.
-[`service-catalog.md`](service-catalog.md#the-exception-cross-schema-write-grants) holds
+[`service-catalog.md`](service-catalog.md#the-exception-batch-service-cross-schema-write-grants) holds
 both decisions and their rejected saga alternative, and
 [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) holds the
 tables. What belongs here is the **actual privilege**, which in both cases is narrower
@@ -866,7 +902,7 @@ One further hardening statement applies to the cluster rather than to a role:
 ability of any connected role to create objects in the public schema.
 
 **How a role acquires the credential it authenticates with.** The script creates every
-one of the fifteen login roles with `LOGIN` and **no password clause**, so nothing it
+one of the sixteen login roles with `LOGIN` and **no password clause**, so nothing it
 leaves behind can authenticate — that absence is what lets the file carry no credential
 material at all. The eight owner roles get no password clause either, and for them the
 absence is permanent rather than transitional: they are `NOLOGIN`, so
@@ -912,14 +948,15 @@ authority because
 exactly one secret entry that can open the cluster rather than two plausible ones of
 which only the RDS-managed entry works.
 
-The fifteen ordinary service login roles are different: RDS does not manage their
+The sixteen ordinary service login roles are different: RDS does not manage their
 credentials. [`infra/modules/secrets/main.tf`](../../infra/modules/secrets/main.tf)
-authors one generated secret per login role — eight runtime and seven migration —
+authors one generated secret per login role — eight runtime, seven migration and one
+read-only verification —
 while [`V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql)
 creates those roles without a password because the roles must exist before a
 credential can be applied. The required order is therefore explicit:
 
-1. create the cluster and the fifteen per-role secret entries;
+1. create the cluster and the sixteen per-role secret entries;
 2. publish each stored credential to the bootstrap session as a **bound-parameter**
    session setting named `carddemo.credential.<role>`;
 3. run V0, whose final section applies each one with `ALTER ROLE` inside a `DO`
@@ -935,7 +972,7 @@ and the failing verifier so an operator is not left with a report-only query or 
 manual `ALTER ROLE` instruction.
 
 > **Measured delivery status.** All four steps are now composed by each environment
-> root. `module.secrets` creates the fifteen entries first; the `database_admin` Lambda
+> root. `module.secrets` creates the sixteen entries first; the `database_admin` Lambda
 > ([`infra/lambda/database_admin.py`](../../infra/lambda/database_admin.py)) is packaged
 > with `V0__schemas_and_roles.sql` and receives the role-to-secret-name mapping
 > projected from that module's output as `DB_CREDENTIAL_SECRETS`;
@@ -953,7 +990,7 @@ manual `ALTER ROLE` instruction.
 > derives each SCRAM-SHA-256 verifier client-side and calls `verify_role_credentials`,
 > which raises if any role still has no stored credential. It is what
 > [`docs/runbooks/deploy.md`](../runbooks/deploy.md) invokes to re-apply a replaced
-> credential, and it works from the same fifteen-role inventory.
+> credential, and it works from the same sixteen-role inventory.
 >
 > Refactoring Rationale: two successive statements here were wrong, and both are
 > withdrawn. The first rested the ordering guarantee on a
@@ -976,26 +1013,43 @@ manual `ALTER ROLE` instruction.
 > because `aws_lambda_invocation` stores the response in Terraform state.
 >
 > Trade-offs: the bootstrap function holds `secretsmanager:GetSecretValue` on all
-> fifteen entries at once, which is more than any service task holds. That concentration
+> sixteen entries at once, which is more than any service task holds. That concentration
 > is inherent to a step whose job is applying every credential, and it is bounded: the
 > grant is enumerated from `module.secrets`' output rather than written as a prefix
 > wildcard — which would additionally have reached the Cognito seed-user entries under
 > the same prefix — the function holds no other permission, and it is invoked only by
 > Terraform.
 
-### The batch orchestration's execution role for the state machine
+### The batch orchestration's execution roles, one per state machine
 
-The state machine holds an execution role scoped to **the specific task definitions
-it launches**, together with the permissions it needs to observe a task to completion
-and to pass the task and execution roles to the tasks it starts. It must not receive
-a wildcard over task definitions. That role is authored:
+Each state machine holds **its own** execution role, scoped to the specific task
+definitions **that machine** launches, together with the permissions it needs to
+observe a task to completion and to pass the task and execution roles to the tasks it
+starts. No role receives a wildcard over task definitions. Those roles are authored:
 [`infra/modules/step-functions-batch/main.tf`](../../infra/modules/step-functions-batch/main.tf)
-declares `aws_iam_role.this` alongside two state machines — `aws_sfn_state_machine.daily`
-for the nightly chain and `aws_sfn_state_machine.adhoc` for on-demand reports — and their
-two encrypted log groups, `aws_cloudwatch_log_group.daily` and
-`aws_cloudwatch_log_group.adhoc`; each environment root passes the individual
-`ecs_service` task-definition ARNs in rather than a wildcard. The state-by-state contract
-belongs to
+declares `aws_iam_role.this` for_each over `local.machines` alongside four state
+machines — `aws_sfn_state_machine.daily` for the nightly chain, `.adhoc` for on-demand
+reports, `.dataset_roundtrip` for the operator-invoked export/import pair and
+`.authorization_extract` for the segment extracts — and their four encrypted log
+groups; each environment root passes the individual `ecs_service` task-definition ARNs
+in rather than a wildcard, and passes `pass_role_arns` keyed by machine.
+
+Refactoring Rationale: this was ONE role shared by all four machines, and the sharing
+was the finding. The union grant let a machine that runs one task definition start all
+four, pass all eight task and execution roles and invoke the three operational Lambda
+functions — so the operator-invoked report and extract machines carried the privileges
+needed to reopen the online-write bracket or run a posting container, neither of which
+appears anywhere in their own definitions. Only the daily role now carries
+`lambda:InvokeFunction`, and only it carries `ecs:ListTasks`. Each trust document names
+one exact state-machine ARN under `aws:SourceArn` where a same-prefix wildcard stood
+before, so a machine cannot assume a sibling's role.
+
+Assumptions: `ecs:StopTask` is scoped by RESOURCE to `task/<cluster>/*` while
+`ecs:DescribeTasks` keeps its `ecs:cluster` condition, and the two are separate
+statements for that reason. AWS's service authorization reference lists the task
+resource type for both, and a task ARN embeds the cluster name, so scoping the stop by
+resource expresses the same restriction where the service enforces it rather than
+relying on a condition key shared with a read. The state-by-state contract belongs to
 [`batch-orchestration.md`](batch-orchestration.md).
 
 ### Deployment identity

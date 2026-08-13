@@ -313,6 +313,10 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
         '500':
@@ -371,6 +375,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -411,9 +417,12 @@ paths:
         it, and the instant is evidence of when the response was produced.
 
 
-        The body is the PendingAuthScreen schema: twenty-seven members, thirteen
-        of them always present and fourteen nullable, with no undeclared member
-        admitted. It was previously published as an unconstrained object, which
+        The body is the PendingAuthScreen schema: twenty-seven members, every one
+        of them written on every response and fourteen of them nullable, with no
+        undeclared member admitted. Presence and nullability are separate facts
+        here -- the pinned inclusion policy writes every record component, so a
+        member that may hold no value is required AND nullable rather than
+        optional. It was previously published as an unconstrained object, which
         described nothing a client could generate a type from or validate
         against.
       x-required-authority: carddemo-user
@@ -442,6 +451,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -500,12 +511,37 @@ paths:
                 type: object
                 additionalProperties: false
                 properties:
+                  # WHY : Refactoring Rationale: this member was published as an
+                  #       allOf over the detail schema and was NOT in the required
+                  #       list, which says "may be omitted, and may never be null".
+                  #       The server says the opposite on the exhausted move: the
+                  #       response is the NextAuthorization record and the shared
+                  #       Jackson default pins property inclusion to ALWAYS at
+                  #       carddemo-common-defaults.yml, so every move serialises
+                  #       this key and the exhausted one serialises it as null. A
+                  #       conforming client validating responses therefore rejected
+                  #       the documented end-of-data body -- the same class of defect
+                  #       the message member below was corrected for, arriving through
+                  #       the required list rather than through the type.
+                  # WHY : Alternatives Considered: omitting the key on exhaustion
+                  #       instead, which would make the published shape true without
+                  #       touching this document. Rejected because the inclusion
+                  #       policy is a SHARED default all eight contexts read, and
+                  #       overriding it for one response would make this operation the
+                  #       only one in the estate whose absent members are absent rather
+                  #       than null -- a client written against any sibling response
+                  #       would then have to special-case this one.
+                  # WHY : Assumptions: the union is expressed as oneOf with an explicit
+                  #       null branch, because a $ref carries no sibling keywords a
+                  #       reader is obliged to honour and 3.1 removed the nullable
+                  #       keyword that would otherwise sit beside it.
                   authorization:
-                    allOf:
+                    oneOf:
                       - $ref: '#/components/schemas/PendingAuthDetail'
+                      - type: 'null'
                     description: >-
-                      The following authorization, absent when the one named is
-                      the oldest.
+                      The following authorization, and null when the one named is
+                      the oldest. The key is always present.
                   endOfData:
                     type: boolean
                     description: >-
@@ -532,8 +568,16 @@ paths:
                       restated here rather than referenced, because a $ref cannot
                       be combined with the type union above without an allOf that
                       would then have to repeat the union anyway.
+                # WHY : Refactoring Rationale: all three members are required, where
+                #       only the flag was. The response is one record serialised under
+                #       an inclusion policy of ALWAYS, so all three keys are present on
+                #       both moves; publishing two of them as optional described a body
+                #       this service cannot produce and let a client treat a missing key
+                #       as an admissible answer it will never receive.
                 required:
+                  - authorization
                   - endOfData
+                  - message
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -544,6 +588,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -675,8 +721,12 @@ paths:
           $ref: '#/components/responses/NotFound'
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
         '500':
@@ -797,8 +847,18 @@ components:
         identity is echoed and logged. The refusal carries the shared problem body
         and the response correlation header, the same as any other 400, and it names
         the rule it applied without ever repeating the value it refused.
+      # WHY : Measured: the shared CorrelationId schema admits the EMPTY string, because
+      #       ApiError normalises an absent identity to "" at L619 and every problem
+      #       document carries the member, so the schema a BODY member names has to admit
+      #       it. A REQUEST header must not: conformsWithin in CorrelationIdFilter
+      #       declines an empty value and the filter then answers 400. This parameter
+      #       therefore narrows the shared schema by one facet instead of restating its
+      #       alphabet and width, which would be a second statement of both. Omitting the
+      #       header entirely stays valid -- that is governed by required above.
       schema:
-        $ref: '#/components/schemas/CorrelationId'
+        allOf:
+          - $ref: '#/components/schemas/CorrelationId'
+          - minLength: 1
 
   # Assumptions: it is declared once here rather than spelled out at each
   #   response, because a header re-typed at every response is a header one of
@@ -948,10 +1008,31 @@ components:
         X-Correlation-Id:
           $ref: '#/components/headers/XCorrelationId'
         Allow:
-          required: true
+          # WHY : Refactoring Rationale: declared required: true, which promised a
+          #   header the shared advice does not always send. The renderer composes
+          #   the value from the methods the dispatcher reported and OMITS the
+          #   header when it reported none, rather than sending it empty -- an
+          #   empty Allow is a valid construction meaning the resource supports no
+          #   method at all, which is a stronger and different claim than the
+          #   renderer is in a position to make. That omission is specified
+          #   behaviour, asserted in the shared kernel's own suite, so a contract
+          #   promising the header unconditionally described a response the service
+          #   can decline to send. The requiredness is corrected and the condition
+          #   is published in its place, which is the same form the sibling card
+          #   contract already uses for this header.
+          # WHY : Alternatives Considered: changing the renderer instead, so the
+          #   header is always emitted. Rejected because the only value available
+          #   when no set was reported is the empty one, and sending it would
+          #   publish the false claim above; there is no third option, because the
+          #   renderer cannot see the mapping for a path the dispatcher would not
+          #   describe to it.
+          required: false
           description: >-
             The comma-separated methods the addressed path serves, composed from
-            this service's own handler mappings.
+            this service's own handler mappings. Present whenever the dispatcher
+            reported a supported set for the path; omitted rather than sent empty
+            when it reported none, because an empty Allow asserts that the
+            resource supports no method at all.
           schema:
             type: string
           example: 'GET, HEAD'
@@ -992,10 +1073,21 @@ components:
         X-Correlation-Id:
           $ref: '#/components/headers/XCorrelationId'
         Accept:
-          required: true
+          # WHY : Refactoring Rationale: declared required: true for the same reason
+          #   the Allow header above was, and corrected on the same ground. The
+          #   renderer composes the value from the media types the framework
+          #   reported it can read and omits the header when that set is empty,
+          #   because an empty Accept asserts that nothing is acceptable -- both
+          #   untrue and unactionable. That branch is asserted in the shared
+          #   kernel's own suite, so the unconditional promise was one the service
+          #   does not keep.
+          required: false
           description: >-
             The comma-separated media types the operation accepts, composed from
-            this service's own handler mappings.
+            this service's own handler mappings. Present whenever the framework
+            reported at least one readable type; omitted rather than sent empty
+            when it reported none, because an empty Accept asserts that nothing is
+            acceptable.
           schema:
             type: string
           example: application/json
@@ -1010,6 +1102,73 @@ components:
             severity: WARNING
             subsystem: APPLICATION
             status: 415
+            correlationId: 4F1C0E423A554D219B7E6C0F
+            path: /api/v1/authorizations/search
+            timestamp: '2026-08-06 09:15:02.117640'
+            fieldErrors: []
+            abend: null
+
+    # WHY : Refactoring Rationale: this response was absent while its two siblings
+    #   above were present, and the omission is what makes it worth stating. All
+    #   three refusals are raised by the framework before any handler in this
+    #   service runs and all three are rendered by the same shared advice, so
+    #   publishing two of the three left every operation of this contract able to
+    #   answer with a status and a body no generated client has a branch for. A
+    #   caller sending an Accept header this service cannot satisfy -- a browser
+    #   asking for text/html against an API route is the ordinary way to reach it
+    #   -- received 406 carrying this exact shape, undocumented.
+    # WHY : Assumptions: this is attached to EVERY operation, unlike the 415 above,
+    #   which is attached only to the two that consume a body. The distinction is
+    #   which direction the negotiation runs in: a 415 refuses the type of a body
+    #   the caller SENT, so an operation with no request body cannot produce one,
+    #   while a 406 refuses the type of the representation the caller asked to
+    #   RECEIVE, and every operation of this contract produces a representation.
+    # WHY : Assumptions: the body of this response is itself application/json,
+    #   which is a type the caller has just said it will not accept. That is
+    #   deliberate, and the handler sets the content type explicitly to bring it
+    #   about. The alternative is an empty 406, which carries neither the machine
+    #   code nor the correlation identity a support enquiry needs and tells the
+    #   caller nothing about which header to change; and a body left to
+    #   negotiation would be negotiated against the same Accept header that
+    #   already matched nothing, at which point the request is forwarded to the
+    #   container error path this service publishes no route for.
+    # WHY : Assumptions: this response declares no recovery header. The acceptable
+    #   type is stated in the sentence rather than in an Accept header, because
+    #   that header on a response means the types the server accepts in a REQUEST
+    #   body, and reusing it to advertise producible representations would say
+    #   something the specification gives it no meaning for.
+    NotAcceptable:
+      description: >-
+        The request's Accept header names no media type this route can produce.
+        Every operation of this contract produces application/json and nothing
+        else. The body carries code CARDDEMO-0406 and the sentence "This service
+        can answer only with JSON", and is itself sent as application/json
+        whatever the request asked for.
+
+
+        Assumptions: sending the body as application/json when the caller has just
+        said it will not accept that type is deliberate. The alternative is an empty
+        406, which carries neither the machine code nor the correlation identifier a
+        support enquiry needs and tells the caller nothing about which header to
+        change. The content type is set explicitly by the shared advice for a second
+        reason recorded there: a body left to content negotiation would be negotiated
+        against the same Accept header that already matched nothing, and the request
+        would then be forwarded to the container error path, which this service
+        publishes no route for.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: CARDDEMO-0406
+            secondaryCode: ''
+            message: This service can answer only with JSON
+            severity: WARNING
+            subsystem: APPLICATION
+            status: 406
             correlationId: 4F1C0E423A554D219B7E6C0F
             path: /api/v1/authorizations/search
             timestamp: '2026-08-06 09:15:02.117640'
@@ -1239,6 +1398,58 @@ components:
             $ref: '#/components/schemas/ApiError'
 
 
+    # WHY : Refactoring Rationale: the transport refusals below were UNDECLARED while the shared
+    #       advice in services/common-lib produces every one of them, so each was reachable on
+    #       every operation of this contract with no published shape. A client had no branch for
+    #       them: ui/src/api/client.ts could only treat each as an unrecognised body. Declaring
+    #       them here and handling them there are two halves of one correction, and declaring one
+    #       half alone would have documented a response no caller could recognise.
+    # WHY : Assumptions: each carries the same ApiError shape as every other refusal of this
+    #       contract, with its own machine code -- CARDDEMO-0405, CARDDEMO-0406 and
+    #       CARDDEMO-0415. A distinct code per condition is what lets a client branch without
+    #       reading the sentence, which is the same reason the 400 and the 401 do not share one.
+    # WHY : Assumptions: the body is declared application/json because that is what the shared
+    #       advice writes -- it returns a plain ApiError record and this build registers no
+    #       problem+json converter -- and because the 406 arm pins MediaType.APPLICATION_JSON
+    #       explicitly, which is the single call that lets a body be produced at all for a caller
+    #       whose Accept header matched nothing.
+    PayloadTooLarge:
+      description: >-
+        The request body exceeds the byte ceiling this service accepts, and
+        carries the machine code CARDDEMO-0413. The ceiling is 65536 bytes unless
+        the deployment names another under carddemo.web.max-request-body-bytes,
+        and it is enforced by a servlet filter ordered ahead of the security
+        chain rather than by a handler -- which is why it applies to every
+        operation that accepts a body and why the refusal reaches a caller that
+        presented no token at all.
+
+
+        Assumptions: the body of this response carries no fieldErrors entry and
+        cannot. The refusal is raised before any member is parsed, so there is no
+        bound object to have fields; the message names the ceiling and the size
+        the request declared, which is what distinguishes a misconfigured client
+        from a deliberate flood.
+
+
+        Assumptions: a body that declares no length is not refused for that alone.
+        It is read up to the ceiling and refused only if it exceeds it, and the
+        bytes already read are forwarded to the handler when it does not, so a
+        chunked request within the bound is served normally. For that case the
+        message states that the body declares no length and exceeds the bound,
+        because the exact size is the one thing that was never learned.
+
+
+        Assumptions: this response carries the correlation identifier like every
+        other, and that is a property of filter ORDER rather than of this filter.
+        The correlation filter is registered one position ahead of it and has
+        already put the identifier on the response before the body is written.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
   # Assumptions: every schema below is reachable by reference from this one
   #   file and no reference leaves it. A split document would let one
   #   fragment be updated while a sibling still described the old shape, and
@@ -1250,6 +1461,7 @@ components:
   #   consumer of the queue needs the same field-by-field contract an HTTP
   #   caller gets; withholding them because no path references them would
   #   leave the messaging contract described nowhere.
+
   schemas:
     PendingAuthPageQuery:
       type: object
@@ -1489,6 +1701,7 @@ components:
     #   own; they do not govern a member the whole migration shares.
     SharedErrorMessage:
       type: string
+      minLength: 1
       maxLength: 75
       description: >-
         The aggregate sentence of the shared error shape, at most seventy-five
@@ -1736,11 +1949,43 @@ components:
         Four further members carry the CUSTOMER display values the same screen
         renders beside those amounts. They are not columns of this segment: they
         are composed by cbl/COPAUS0C.cbl L757 to L779 out of nine customer fields
-        read from the context that owns the customer master, so they are published
-        as optional and nullable while every segment column is required.
+        read from the context that owns the customer master, so they are nullable
+        where every amount and counter column is not -- a summary whose
+        neighbouring customer record is gone carries all four as null, which is
+        what distinguishes "not resolved" from "resolved and empty".
+
+
+        Refactoring Rationale: that last sentence said the four were published "as
+        optional and nullable while every segment column is required", and neither
+        half held: six segment columns were not required either, and a null display
+        value arrives as a null rather than as a missing key. Every member of this
+        schema is now required and the nullable ones say so in their type.
+      # ⚠️ Refactoring Rationale: this list held ten of the twenty members and now holds all
+      #   twenty. The ten that were missing are the nullable ones -- authStatus, the five
+      #   account-status slots and the four customer display values -- and their absence conflated a
+      #   null VALUE with an absent MEMBER. PendingAuthSummaryView is a record and nothing in this
+      #   module narrows Jackson's inclusion, so all twenty keys are serialised on every response and
+      #   an unpopulated one arrives as an explicit null; the service has no path that omits a key.
+      #   The pin is declared once for the fleet in
+      #   services/common-lib/src/main/resources/carddemo-common-defaults.yml, and the same
+      #   correction was applied to the detail operation's members for the same reason.
+      # Assumptions: required and nullable are INDEPENDENT, which is what makes this correction safe
+      #   rather than a narrowing. Required says the key is always present; the [string, 'null'] union
+      #   on each nullable member says its value may be null. A client still handles every null it
+      #   handled before -- what it no longer provides for is a member that never fails to arrive.
+      # Trade-offs: the four display members are the ones this change is most visible on, because they
+      #   are read from the account context rather than stored on this segment. Publishing them
+      #   required does NOT claim the customer record exists: it claims the key is sent, and the union
+      #   says the value is null when the neighbouring context holds nothing.
       required:
         - accountId
         - customerId
+        - authStatus
+        - accountStatus1
+        - accountStatus2
+        - accountStatus3
+        - accountStatus4
+        - accountStatus5
         - creditLimit
         - cashLimit
         - creditBalance
@@ -1749,6 +1994,10 @@ components:
         - declinedAuthCnt
         - approvedAuthAmt
         - declinedAuthAmt
+        - customerName
+        - addressLine1
+        - addressLine2
+        - phoneNumber1
       additionalProperties: false
       properties:
         accountId:
@@ -2242,9 +2491,16 @@ components:
         The body of the list operation: the account-level summary block and one
         page of that account's pending-authorization rows. The two are returned
         together because the reference screen shows them together.
+      # WHY : Refactoring Rationale: every property below is REQUIRED, including the nullable
+      #       ones, and that is a correction rather than a tightening. carddemo-common-defaults.yml
+      #       pins default-property-inclusion to always, so every record component is written on
+      #       every response and a nullable member arrives as null, NEVER absent. Publishing such
+      #       a member as optional described an omission this service cannot produce, and generated
+      #       a type that was optional AND nullable -- two states for one fact.
       required:
         - summary
         - page
+        - screenMessage
       additionalProperties: false
       properties:
         summary:
@@ -2343,8 +2599,10 @@ components:
     #   because a map declares a label and an attribute position for every value it
     #   shows; this schema publishes the VALUES the response carries, not the cells
     #   the terminal drew them in.
-    # WHY : Assumptions: thirteen members are REQUIRED and fourteen are nullable,
-    #   and the split is derived from the columns rather than chosen. The six chrome
+    # WHY : Assumptions: all twenty-seven members are REQUIRED, because every record
+    #   component is written on every response, and fourteen of them are NULLABLE,
+    #   with that second split derived from the columns rather than chosen. Only the
+    #   nullability split is a design choice here; presence is not one. The six chrome
     #   members are produced by this service from constants and its own clock. The
     #   masked card number, the transaction identifier and the match status come
     #   from columns the migration declares NOT NULL. The approval character is
@@ -2382,6 +2640,20 @@ components:
         screen the response reproduces, so a caller able to set them could label a
         response as having come from a screen that never produced it, and the instant is
         evidence of when the response was produced.
+      # ⚠️ Refactoring Rationale: this list held thirteen of the twenty-seven members and now holds
+      #   all twenty-seven. The fourteen that were missing are the composed and passed-through values
+      #   that can be NULL -- the rendered originating date and time, the processing code, the entry
+      #   mode, the message source, the category code, the card expiry, the authorization type, the
+      #   five merchant components and the message line. Their absence from this list conflated a null
+      #   VALUE with an absent MEMBER, which are different things on the wire: PendingAuthDetailResponse
+      #   is a record and nothing in this module narrows Jackson's inclusion, so all twenty-seven keys
+      #   are serialised on every response and an unpopulated one arrives as an explicit null.
+      # Assumptions: the message line is required for exactly that reason, and its previous exclusion
+      #   was justified as "the message line is null on this route, so it must not be required". Null is
+      #   why it carries a type union; it is not a reason for the key to be missing. A client generated
+      #   from the previous list had to provide for both states of every one of the fourteen.
+      # Trade-offs: nothing about nullability changes here, so no client loses a null check -- each of
+      #   the fourteen keeps the ['string', 'null'] union or the oneOf form it already declared.
       required:
         - transactionName
         - title01
@@ -2390,12 +2662,26 @@ components:
         - title02
         - currentTime
         - cardNumber
+        - authDate
+        - authTime
         - authResponse
         - authResponseReason
+        - processingCode
         - approvedAmount
+        - posEntryMode
+        - messageSource
+        - merchantCategoryCode
+        - cardExpiry
+        - authType
         - transactionId
         - matchStatus
         - fraudMark
+        - merchantName
+        - merchantId
+        - merchantCity
+        - merchantState
+        - merchantZip
+        - message
       properties:
         transactionName:
           type: string
@@ -2437,7 +2723,7 @@ components:
             - $ref: '#/components/schemas/MaskedCardNumber'
           description: >-
             The primary account number rendered to its last four digits. The column is
-            NOT NULL, so this member is always present, and no operation in this
+            NOT NULL, so this member never carries null, and no operation in this
             document returns the value unmasked.
         authDate:
           type:
@@ -2497,8 +2783,8 @@ components:
             - $ref: '#/components/schemas/DetailAmount'
           description: >-
             The amount approved, at DETAIL precision of ten integer digits. An absent
-            stored amount becomes an explicit zero rather than null, so this member is
-            always present -- a screen showing a blank amount where the reference showed
+            stored amount becomes an explicit zero rather than null, so this member never
+            carries null -- a screen showing a blank amount where the reference showed
             0.00 would be a different screen.
         posEntryMode:
           type:
@@ -2547,15 +2833,15 @@ components:
           maxLength: 15
           description: >-
             The fifteen-character transaction identifier the requester sent. The column is
-            NOT NULL, so this member is always present.
+            NOT NULL, so this member never carries null.
         matchStatus:
           type: string
           maxLength: 1
           pattern: '^[PDEM]$'
           description: >-
             The single-character match status. The column is NOT NULL and constrained to
-            the same four characters, so this member is always present and within the
-            domain.
+            the same four characters, so this member never carries null and always falls
+            within the domain.
         fraudMark:
           type: string
           maxLength: 10
@@ -2620,16 +2906,49 @@ components:
         accountId, authDate and authTime -- are the three columns forming the
         row's primary key, and the selector on the list row is the sealed form of
         exactly that triple.
+      # ⚠️ Refactoring Rationale: this list held nine of the twenty-nine members and now holds all
+      #   twenty-nine. The twenty that were missing are the segment's nullable columns, and their
+      #   absence from this list published them as members that MIGHT NOT ARRIVE -- which is not
+      #   what the service sends. PendingAuthDetailView is a record and nothing in this module
+      #   narrows Jackson's inclusion, so every component is serialised on every response and an
+      #   unpopulated authorizer field arrives as an explicit null. A client generated from the
+      #   previous list had to treat every one of those twenty as possibly-absent as well as
+      #   possibly-null, which is two states to handle where the wire has one.
+      # Assumptions: this brings the document into line with the other six contracts in this
+      #   repository, which mark always-emitted nullable members required -- forty-eight of them do
+      #   -- so this schema was the outlier rather than the pattern.
+      # Trade-offs: the twenty are still declared with a ['string', 'null'] union or its oneOf
+      #   equivalent, so nothing about their nullability changes and no client loses a null check.
       required:
         - key
         - accountId
         - authDate
         - authTime
+        - authOrigDate
+        - authOrigTime
         - cardNum
+        - authType
+        - cardExpiryDate
+        - messageType
+        - messageSource
+        - authIdCode
+        - authRespCode
+        - authRespReason
+        - processingCode
         - transactionAmt
         - approvedAmt
+        - merchantCategoryCode
+        - acqrCountryCode
+        - posEntryMode
+        - merchantId
+        - merchantName
+        - merchantCity
+        - merchantState
+        - merchantZip
         - transactionId
         - matchStatus
+        - authFraud
+        - fraudRptDate
       additionalProperties: false
       properties:
         key:
@@ -3127,8 +3446,18 @@ components:
         sentence the reference program reports for it. Which of the two write
         paths ran is carried by the status code, 201 for an insert and 200 for an
         update, rather than by a member.
+      # ⚠️ Refactoring Rationale: message was optional and is now required, because both published
+      #   factories set it: FraudMarkResponse.added() carries 'ADD SUCCESS' and .updated() carries
+      #   'UPDT SUCCESS', and those two are the only ways a 2xx body of this shape is constructed.
+      #   Publishing it as optional described a success body that might carry no sentence, which no
+      #   code path produces -- and a client generated from that document had to handle an absent
+      #   member and a null value for something that is always a fifty-character-bounded string.
+      # Assumptions: it stays NON-nullable for the same reason, so the type union the other nullable
+      #   members here carry is deliberately absent from it. A failed write is answered with a non-2xx
+      #   ApiError rather than with this body, so there is no success outcome that needs no sentence.
       required:
         - updateStatus
+        - message
       additionalProperties: false
       properties:
         # Assumptions: the flag's declared domain is the condition names on
@@ -3167,12 +3496,21 @@ components:
             - $ref: '#/components/schemas/FraudOutcomeMessage'
           description: >-
             The sentence the reference program reports for this outcome, carried
-            character for character, or absent when the outcome needs none. On a
-            success it is 'ADD SUCCESS' when the fraud row was inserted and
+            character for character. It is always present on this body and admits
+            no null branch: it is 'ADD SUCCESS' when the fraud row was inserted and
             'UPDT SUCCESS' when an existing row was updated, from
-            cbl/COPAUS2C.cbl L201 and L232. It is the fifty-character regime and
-            neither the seventy-eight-character screen regime of this context's two
-            maps nor the house seventy-five-character regime governs it.
+            cbl/COPAUS2C.cbl L201 and L232, and those are the only two 2xx
+            outcomes -- both factories of dto/FraudMarkResponse pass one of the two
+            constants. It is the fifty-character regime and neither the
+            seventy-eight-character screen regime of this context's two maps nor
+            the house seventy-five-character regime governs it.
+
+
+            Refactoring Rationale: this said "or absent when the outcome needs
+            none", which described a third outcome the service does not have. Both
+            factories that build this body word their outcome, and a failed write
+            is answered with a non-2xx ApiError rather than with a sentence-less
+            success, so the member is now published as required and non-nullable.
 
 
     # Assumptions: the fifty-character bound is the reference declaration and
@@ -3740,8 +4078,23 @@ components:
       # WHY : Alternatives Considered: suppressing the two keys when null, with an inclusion setting, so
       #       the omission became true. Rejected because the aggregate sentence is the reference's own
       #       75-character message field and a client renders the band from it unconditionally, so a
-      #       key that comes and goes moves that decision into every client; and because the services
-      #       set `default-property-inclusion: always`, which the money contract depends on.
+      #       key that comes and goes moves that decision into every client; and because
+      #       always-inclusion is PINNED for every service in
+      #       services/common-lib/src/main/resources/carddemo-common-defaults.yml, which the
+      #       money contract SEPARATELY depends on -- a money member with no value must be
+      #       present and null rather than absent, because absent reads as "no balance" where
+      #       null reads as "no amount applies". That is a second consumer of the same pin and
+      #       NOT the reason these two keys are required here: the reason is the record shape
+      #       above, and this schema carries no monetary member at all. An earlier revision ran
+      #       the two together, which read as though a problem document's nullability followed
+      #       from a money rule.
+      # WHY : ⚠️ Refactoring Rationale: that last clause used to read "the services set
+      #       default-property-inclusion: always" and it named no place, which is how it came
+      #       to be inaccurate -- exactly one of the seven services actually set the key, and
+      #       the other six, this one included, rested a published contractual promise on the
+      #       serialiser's own default. The key is now set once in the shared defaults every
+      #       service imports, so the claim is true for all of them and is verifiable by
+      #       reading one file. The reasoning is unchanged; only its subject is now real.
       required:
         - code
         - secondaryCode
@@ -3781,9 +4134,18 @@ components:
         #   kernel normalises an absent value to the empty string at
         #   ApiError.java L457 rather than to null, so the empty string is a
         #   reachable value and the bound is an upper bound only.
+          # WHY : ⚠️ Refactoring Rationale: the bound is 22 and was 13. Thirteen is the width of
+          #       `code` above -- `CARDDEMO-` and four digits -- and this member is NOT drawn from that
+          #       vocabulary: it carries a subordinate condition name, and the widest the shared writer
+          #       can emit is 22, measured on CARD-LOCK-NOT-ACQUIRED and CARD-WRITE-NOT-APPLIED in
+          #       services/card-service/src/main/java/com/carddemo/card/api/CardController.java. This
+          #       service emits only the empty string today, so 13 was not violated here -- but one
+          #       generated client type reads a problem document from any of the seven services, and a
+          #       bound that differs between them is a type that differs between them. Bounding it at
+          #       the writer's own maximum is what makes the seven agree.
         secondaryCode:
           type: string
-          maxLength: 13
+          maxLength: 22
           description: >-
             A subordinate identifier qualifying code, or the empty string when the
             failure has no second identifier. It is what discriminates conditions
@@ -3832,8 +4194,15 @@ components:
             value for its own validation, the relational value at the database and
             the queue value on the message-driven path; a response naming any of the
             other three would misattribute the failure.
+          # WHY : Assumptions: the range is 400 to 599 because the shared writer never leaves it: every
+          #       factory of com.carddemo.common.error.ApiError is called with a client-error or
+          #       server-error status, and a 2xx or 3xx in this member would describe a response that is
+          #       not a problem document at all. Declared rather than left open so a generated client
+          #       reading this document gets the same type it gets from the six sibling contracts.
         status:
           type: integer
+          minimum: 400
+          maximum: 599
           format: int32
           description: >-
             The HTTP status this response carries, restated inside the body so that
@@ -3866,8 +4235,14 @@ components:
           #   example naming a path no operation serves reads as though the route
           #   exists, which is the same mistake the two 400 examples above carried.
           example: /api/v1/authorizations/search
+          # WHY : Assumptions: 26 characters and the pattern together, not either alone. The width is the
+          #       reference declaration -- TRNX-ORIG-TS and TRNX-PROC-TS are PIC X(26) -- and the pattern
+          #       is what makes the six microsecond digits a contract rather than a suggestion. A width
+          #       with no pattern admits 26 characters of anything; a pattern with no width leaves a
+          #       client sizing a column from prose.
         timestamp:
           type: string
+          pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}$'
           maxLength: 26
           description: >-
             When the failure occurred, in the migration's twenty-six-character form
@@ -3914,8 +4289,12 @@ components:
         - message
       additionalProperties: false
       properties:
+          # WHY : Assumptions: a field name is never the empty string. The shared writer names the member
+          #       it refused, so an entry with no name would describe a refusal a client cannot place
+          #       against a control, which is the one thing this array exists to enable.
         field:
           type: string
+          minLength: 1
           description: >-
             The request member the entry is about, named as this document names it
             rather than as a screen field. The only value this service's own

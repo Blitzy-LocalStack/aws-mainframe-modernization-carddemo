@@ -210,6 +210,12 @@ class BatchServicesTest {
          * 12.00 percent gives 12000.0000 divided by 1200, which is exactly 10.00; dividing first gives
          * 0.01 at scale two, which multiplied back gives 10.00 as well -- so a coarser datum is used
          * below where the orders separate.</p>
+         *
+         * <p>Assumptions: the expected value reduces with {@code HALF_UP}, the one mode the shared
+         * money type declares and the mode transformation rule T3 states for the money path. The
+         * reference would discard the surplus digits instead, which on this datum is 5.59 against 5.60;
+         * that difference is registered as divergence {@code C-ROUNDING} and is asserted where the
+         * accrual's own contract is asserted rather than here.</p>
          */
         @Test
         @DisplayName("accrue the reference formula, multiplying before dividing")
@@ -222,7 +228,7 @@ class BatchServicesTest {
             assertThat(service.monthlyInterest(Money.of("507.03"), lookup).amount())
                     .isEqualByComparingTo(new BigDecimal("507.03")
                             .multiply(new BigDecimal("13.25"))
-                            .divide(new BigDecimal("1200"), 2, java.math.RoundingMode.DOWN));
+                            .divide(new BigDecimal("1200"), 2, java.math.RoundingMode.HALF_UP));
         }
 
         /**
@@ -234,10 +240,10 @@ class BatchServicesTest {
          * asserts the two are the same value, which is what lets the constant stay where a reader of
          * this service looks for the reference's mode.</p>
          *
-         * <p>Assumptions: the shared constant compared against is {@code BASELINE_INTEREST_ROUNDING},
-         * the accrual's own mode, and not {@code GENERAL_ROUNDING}. Comparing against the general
-         * mode is what let this service name half up while its own summary said the constant records
-         * the reference's mode, which truncates.</p>
+         * <p>Assumptions: the shared constant compared against is {@code GENERAL_ROUNDING}, which is
+         * the one mode the money type declares -- the accrual reduces under it like every other
+         * monetary operation. The service's constant is DERIVED from it rather than restated as a
+         * literal, so this case fails only if the shared type stops applying the mode it publishes.</p>
          */
         @Test
         @DisplayName("the named accrual mode is the mode the shared arithmetic applies")
@@ -245,7 +251,7 @@ class BatchServicesTest {
             assertThat(InterestCalculationService.ACCRUAL_ROUNDING)
                     .as("a mode named here but not applied by the shared helper would mislead every"
                             + " reader of this service")
-                    .isEqualTo(Money.BASELINE_INTEREST_ROUNDING);
+                    .isEqualTo(Money.GENERAL_ROUNDING);
         }
 
         /** A genuine zero rate accrues nothing, and is not the same outcome as an absent group. */

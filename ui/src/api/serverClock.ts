@@ -118,6 +118,8 @@ export function serverInstant(): Date | undefined {
  * Assumptions: this exists for tests. The anchor is module-level, so without it one case's
  * observation would leak into the next and a case asserting the unanchored fallback would pass or
  * fail depending on which case ran before it.
+ * @returns {void} Nothing; the anchor is discarded, after which `serverInstant` reports the
+ *   unanchored state again until the next response is observed.
  */
 export function resetServerClock(): void {
   anchor = undefined;

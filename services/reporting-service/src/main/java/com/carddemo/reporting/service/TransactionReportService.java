@@ -227,6 +227,25 @@ public class TransactionReportService {
     private static final int HEADING_BAND_COUNT = 4;
 
     /**
+     * The integer digit positions a report band figure may occupy.
+     *
+     * <p>Assumptions: nine is declared by the reference in four independent places, which is why it is a
+     * named constant rather than an inline number. The accumulators are
+     * {@code PIC S9(09)V99} at L134 to L136 of {@code app/cbl/CBTRN03C.cbl}, and each of the three total
+     * masks provides exactly nine integer positions -- the page mask at L54, the card-break mask at L60
+     * and the grand mask at L66 of {@code app/cpy/CVTRA07Y.cpy}. A tenth digit is therefore not a value
+     * this report can print, in any band.</p>
+     *
+     * <p>Assumptions: the same nine is declared independently inside
+     * {@code com.carddemo.reporting.mapper.CobolEditMask} for the encoder's own use, and the two are NOT
+     * shared. That is deliberate: the encoder's bound is a property of the mask it prints through, this
+     * one is a property of the value this service returns, and a single constant would make one of the
+     * two statements disappear. The pair agrees because both are read from the same reference lines, and a
+     * disagreement would surface as a figure this class accepted and the encoder refused.</p>
+     */
+    private static final int REPORT_TOTAL_INTEGER_DIGITS = 9;
+
+    /**
      * Diagnostic channel for this class.
      *
      * <p>Assumptions: the reference leaves four diagnostic {@code DISPLAY} statements on the report
@@ -405,7 +424,35 @@ public class TransactionReportService {
         public ReportGenerationSummary {
             Objects.requireNonNull(grandTotal, "grandTotal must not be null");
         }
-    }
+    
+        /**
+         * Renders the four counters WITHOUT the grand total.
+         *
+         * <p>Purpose. The grand total is a monetary value, withheld by
+         * {@code docs/architecture/observability.md} L1093 to L1112, and it is the one figure a report is
+         * ultimately read for -- so the generated rendering put a portfolio-wide sum into the ordinary
+         * completion log of every report run.</p>
+         *
+         * <p>Assumptions: the four counters are kept and are not amounts. A record count, a line count and
+         * two band counts describe the SHAPE of what was written rather than its value, and they are what a
+         * generation fault presents as: a report whose detail lines and written records disagree, or whose
+         * band counts are zero, is diagnosable from these four numbers alone.</p>
+         *
+         * <p>Trade-offs: a run cannot be reconciled against its total from the log and must be reconciled
+         * against the artifact, which is the authoritative output and is where a reconciliation belongs
+         * anyway.</p>
+         *
+         * @return a rendering naming the records written, the detail-line count and the two band counts,
+         *     with the grand total omitted; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "ReportGenerationSummary[recordsWritten=" + this.recordsWritten
+                    + ", detailLines=" + this.detailLines
+                    + ", pageTotalBands=" + this.pageTotalBands
+                    + ", accountTotalBands=" + this.accountTotalBands + ']';
+        }
+}
 
     /**
      * The working storage of one report run, alive only for the duration of that run.
@@ -944,7 +991,7 @@ public class TransactionReportService {
      *     total mask at L54 of {@code app/cpy/CVTRA07Y.cpy} provides
      */
     private void writePageTotals(ReportAccumulators acc, ReportRecordSink sink) {
-        Money closing = acc.pageTotal;
+        Money closing = requireBandMagnitude(acc.pageTotal, "page");
 
         if (sink != null) {
             writeReportRecord(TransactionReportMapper.encodePageTotal(closing), sink, acc);
@@ -991,7 +1038,7 @@ public class TransactionReportService {
      *     the total mask at L60 of {@code app/cpy/CVTRA07Y.cpy} provides
      */
     private void writeAccountTotals(ReportAccumulators acc, ReportRecordSink sink) {
-        Money closing = acc.accountTotal;
+        Money closing = requireBandMagnitude(acc.accountTotal, "card-break");
 
         if (sink != null) {
             writeReportRecord(TransactionReportMapper.encodeAccountTotal(closing), sink, acc);
@@ -1032,8 +1079,54 @@ public class TransactionReportService {
      *     total mask at L66 of {@code app/cpy/CVTRA07Y.cpy} provides
      */
     private void writeGrandTotals(ReportAccumulators acc, ReportRecordSink sink) {
+        Money closing = requireBandMagnitude(acc.grandTotal, "grand");
+
         if (sink != null) {
-            writeReportRecord(TransactionReportMapper.encodeGrandTotal(acc.grandTotal), sink, acc);
+            writeReportRecord(TransactionReportMapper.encodeGrandTotal(closing), sink, acc);
+        }
+    }
+
+    /**
+     * Refuses a band figure whose magnitude the reference's own total mask cannot print.
+     *
+     * <p>⚠️ Refactoring Rationale: this exists because the nine-digit bound was enforced only by the
+     * ENCODER, and the encoder runs only when a sink is present. The value-composing surface --
+     * {@link #composeTotals(LocalDate, LocalDate)} -- deliberately passes no sink, so on that path all
+     * three band figures were accumulated, captured and returned with no magnitude check at all: a range
+     * whose totals need ten integer digits produced a body that no report of the same range could be
+     * written from, and the published amount schema then had to be widened to admit it. Checking here, on
+     * the value rather than on its encoding, makes the two paths refuse exactly the same figure.
+     *
+     * <p>Assumptions: nine is read from {@link #REPORT_TOTAL_INTEGER_DIGITS} rather than written here, and
+     * the refusal is {@link Money#ofPicture(java.math.BigDecimal, int)} rather than a comparison against a
+     * limit. That factory is the shared kernel's own statement of what a declared picture admits, so a
+     * change to how a picture bound is enforced reaches this path with it; a local comparison would be a
+     * second, drifting statement of the same rule.
+     *
+     * <p>Trade-offs: the sink path is now checked twice -- here and again inside the encoder that has its
+     * own mask width to honour. That duplication is deliberate rather than redundant: the encoder must
+     * refuse a figure its mask cannot hold whoever hands it one, and this method must refuse a figure this
+     * service will RETURN whether or not anything encodes it. Removing either leaves one path unchecked.
+     *
+     * @param figure the band figure just closed; must not be {@code null}
+     * @param band the band's name, used only in the refusal message so a reader learns which of the three
+     *     overflowed
+     * @return {@code figure} unchanged, so the call reads as a pass-through at its use sites
+     * @throws ArithmeticException if the magnitude needs more than {@link #REPORT_TOTAL_INTEGER_DIGITS}
+     *     integer positions, which the total masks at L54, L60 and L66 of
+     *     {@code app/cpy/CVTRA07Y.cpy} cannot print
+     */
+    private static Money requireBandMagnitude(Money figure, String band) {
+        try {
+            return Money.ofPicture(figure.amount(), REPORT_TOTAL_INTEGER_DIGITS);
+        } catch (ArithmeticException overflow) {
+            // WHY : Assumptions: the message names the BAND and not the amount. The figure is a sum of
+            //       cardholder transaction amounts, so quoting it in a message that reaches a log would
+            //       disclose one; the band tells a reader which of the three arithmetic paths overflowed,
+            //       which is the part that cannot be worked out afterwards.
+            throw new ArithmeticException("the " + band + " total needs more than "
+                    + REPORT_TOTAL_INTEGER_DIGITS + " integer digits, which the report total mask of"
+                    + " app/cpy/CVTRA07Y.cpy cannot print");
         }
     }
 

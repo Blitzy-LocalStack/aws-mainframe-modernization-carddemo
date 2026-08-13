@@ -219,4 +219,42 @@ public record DisclosureGroupRateResponse(
         String tranCatCd,
         Money interestRate,
         boolean defaultGroupApplied) {
+
+    /**
+     * Renders every component INCLUDING the rate, which is reference data and not a party's money.
+     *
+     * <p>Purpose. This renderer exists because the rate is typed as {@code Money}, and the diagnostic
+     * rule at {@code docs/architecture/observability.md} L1093 to L1112 withholds monetary values. Writing
+     * the renderer is how the decision NOT to withhold this one is recorded at the site rather than left
+     * for each reader to infer -- which is the failure that rule was added to stop.</p>
+     *
+     * <p>Assumptions: an interest rate is none of the three things that clause prohibits. It is not a
+     * monetary amount, not a credit limit and not a balance: it is a percentage held in a seeded reference
+     * row keyed by group, type and category, published in full on this very operation to any entitled
+     * caller, and belonging to no account and no cardholder. Withholding it would make this context's own
+     * diagnostics useless for the one question they are read for -- which rate was resolved -- in exchange
+     * for concealing a value the response already carries.</p>
+     *
+     * <p>Assumptions: the type is {@code Money} because the rate is {@code PIC S9(04)V99} and this
+     * migration holds every fixed-point decimal in that type; the type is therefore evidence about
+     * PRECISION and not about sensitivity, and the two must not be conflated. The rendering says so
+     * explicitly so that a later reader does not "correct" this by redacting a public rate.</p>
+     *
+     * <p>Trade-offs: the four key components print in full as well, which is what makes the rate line
+     * legible -- a rate with no key beside it cannot be checked against the seeded row it came from -- and
+     * the fallback flag prints because whether the requested group or the default one supplied the rate is
+     * the single most common question asked of this operation.</p>
+     *
+     * @return a rendering naming both group identifiers, the type and category codes, the resolved rate
+     *     and the fallback flag; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "DisclosureGroupRateResponse[requestedAcctGroupId=" + this.requestedAcctGroupId
+                + ", appliedAcctGroupId=" + this.appliedAcctGroupId
+                + ", tranTypeCd=" + this.tranTypeCd
+                + ", tranCatCd=" + this.tranCatCd
+                + ", interestRate=" + this.interestRate
+                + ", defaultGroupApplied=" + this.defaultGroupApplied + ']';
+    }
 }

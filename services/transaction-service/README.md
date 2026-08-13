@@ -196,9 +196,24 @@ offset 304 is exactly `TRAN-PROC-TS`.
 
 | Access path | Object | Replaces |
 |---|---|---|
-| by transaction identifier | `pk_transactions PRIMARY KEY (transaction_id)` on `CHAR(16)` | the KSDS primary key |
+| by transaction identifier | `pk_transactions PRIMARY KEY (transaction_id)` on `CHAR(16) COLLATE "C"` | the KSDS primary key |
 | by card number | `idx_transactions_card_num` | the online list path of `COTRN00C` and the bill-pay browse of `COBIL00C` |
 | by processing timestamp | `idx_transactions_proc_ts`, **non-unique** | the batch alternate index `TRANSACT.VSAM.AIX` |
+
+`transaction_id` is declared `COLLATE "C"`, so every comparison and every
+`ORDER BY` over it -- and the primary-key index built on it -- sorts by byte
+value rather than by whatever collation the cluster was initialised with. That
+matters because the ordered reads over this column, here and in `batch-service`
+and `reporting-service`, are derived or JPQL queries that name no `COLLATE`
+clause, and because the column stores identifiers that are not all digits: the
+interest accrual mints keys of the form `2022-07-18000001`, which a collation
+giving punctuation no primary weight orders after every all-digit key where a
+byte comparison orders it before. The reference sorts the field `CH`, byte-wise,
+at `app/jcl/COMBTRAN.jcl` line 28. The full reasoning, the alternatives weighed
+and the two sibling columns deliberately left unpinned are recorded in the
+collation note at the foot of `db/migration/V1__ledger.sql`, and
+`TransactionRepositoryIT` asserts both the declared collation and the resulting
+order.
 
 `idx_transactions_proc_ts` is created with a plain `CREATE INDEX`, which is
 non-unique in PostgreSQL, matching the `NONUNIQUEKEY` the baseline declares. A
@@ -648,8 +663,8 @@ weaken the documentation gate.
 
 ### 9.3 Test topology
 
-<!-- test-inventory: 26 tests + 7 integration tests -->
-**33** test classes across nine subpackages: **26** matching `*Test`, run by
+<!-- test-inventory: 27 tests + 7 integration tests -->
+**34** test classes across nine subpackages: **27** matching `*Test`, run by
 Surefire, and **7** matching `*IT`, run by Failsafe. The `*RepositoryIT` naming
 already matches Failsafe's default include pattern, so neither plugin needs an
 include list. That census is machine-checked — `ServiceReadmeInventoryTest` in
@@ -666,7 +681,7 @@ a reader.
 | `domain` | `MoneyColumnInvariantTest`, `FixedWidthMappingTest`, `FeedRowIdentityTest`, `OccurrenceIdentityTest` |
 | `architecture` | `TransactionLayeringRulesTest`, `MoneyPathGateProofTest`, `KeysetPaginationGateProofTest` |
 | `dto` | `TransactionApiContractTest`, `TransactionAddRequestTest` |
-| `config` | `SecurityConfigTest`, `OpenApiConfigTest` |
+| `config` | `SecurityConfigTest`, `SecurityChainDispatchTest`, `OpenApiConfigTest` |
 | `fixtures` | `TransactionFixtureContractTest` |
 
 What the tiers assert:
@@ -685,6 +700,12 @@ What the tiers assert:
 - **`*RepositoryIT`** run under Testcontainers, whose BOM comes from the parent at
   `testcontainers.version` 2.0.5, and exercise all **three** query paths of 4.3
   including the processing-timestamp index.
+- **`SecurityChainDispatchTest`** stands the deployed filter chain up in a web slice and
+  asserts what it does with the container's own ERROR dispatch. That rule matches a
+  dispatcher type rather than a path or an authority, so nothing addressable from the rule
+  table can witness it; the case that matters most is the one issuing a MUTATING method on
+  an error dispatch, because this chain authorises every business route through one
+  catch-all and a forward keeps the original method.
 - **Money tests** assert scale-2 `BigDecimal` and JSON-**string** serialisation, and
   the two architecture proof tests assert that the money-path and keyset gates
   actually fire by presenting them with a deliberate violation.
@@ -963,8 +984,14 @@ on **every local build**, not only in the pipeline — and `validate` precedes
 The consequences a contributor meets in practice:
 
 - **`package-info.java` is required in every package.** Both `JavadocPackage` and
-  `MissingJavadocPackage` are active, which is why every one of this module's
-  seventeen source and test packages carries one.
+  `MissingJavadocPackage` are active, and `includeTestSourceDirectory` is `true`, so
+  the requirement reaches every package under `src/main/java` **and** every package
+  under `src/test/java`. No total is quoted here on purpose: a hand-kept count is a
+  second source of truth that drifts the first time a package is added — this
+  sentence read "seventeen" while the tree held eighteen — and the count carries no
+  information the gate does not already guarantee. `mvn -f services/pom.xml -pl
+  transaction-service validate` is what answers the question, and it answers it for
+  the tree as it stands rather than as it stood when this line was written.
 - **Every DTO `record` component needs an `@param`.** `JavadocType` runs with
   `allowMissingParamTags="false"`, and a record's components are its type
   parameters for this purpose.
@@ -1130,4 +1157,3 @@ module. See [`MIGRATION_README.md`](../../MIGRATION_README.md) for the migration
 whole, [`docs/architecture/service-catalog.md`](../../docs/architecture/service-catalog.md)
 for this module's place in it, and the root [`README.md`](../../README.md) for the
 mainframe application overview.</sub>
-

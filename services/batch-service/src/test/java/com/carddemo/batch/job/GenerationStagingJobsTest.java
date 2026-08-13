@@ -18,6 +18,7 @@ import com.carddemo.batch.dto.BatchReturnCode;
 import com.carddemo.batch.dto.BusinessDate;
 import com.carddemo.batch.dto.DatasetGeneration;
 import com.carddemo.batch.dto.DatasetGeneration.DatasetFamily;
+import com.carddemo.batch.repository.TransactionCategoryBalanceRepository;
 import com.carddemo.batch.repository.TransactionRepository;
 import com.carddemo.batch.service.BatchStepLedger;
 import com.carddemo.batch.service.DatasetGenerationService;
@@ -25,6 +26,7 @@ import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -97,6 +99,9 @@ class GenerationStagingJobsTest {
     /** The transaction master both jobs stream. */
     private TransactionRepository ledger;
 
+    /** The category-balance repository the backup's third family copies from. */
+    private TransactionCategoryBalanceRepository categoryBalances;
+
     /** The generation resolver whose lifecycle these jobs are asserted to drive. */
     private DatasetGenerationService generations;
 
@@ -118,6 +123,7 @@ class GenerationStagingJobsTest {
     @BeforeEach
     void buildCollaborators() {
         this.ledger = mock(TransactionRepository.class);
+        this.categoryBalances = mock(TransactionCategoryBalanceRepository.class);
         this.generations = mock(DatasetGenerationService.class);
         this.ledgerOfSteps = mock(BatchStepLedger.class);
         this.jobRepository = new ResourcelessJobRepository();
@@ -133,6 +139,15 @@ class GenerationStagingJobsTest {
         //       to the aged-out generations, and an empty master keeps those cases free of record
         //       construction that none of their assertions read.
         when(this.ledger.findAllByOrderByTransactionIdAsc()).thenReturn(Stream.empty());
+
+        // WHY : Assumptions: the backup's other two families read empty too, for the same reason and by
+        //       the same argument as the line above. A Mockito default would answer null here and the
+        //       job would fail on a null stream in every case in this class -- including the cases about
+        //       allocation order, which read no record at all.
+        when(this.ledger.streamProcessedInWindowOrderedByCard(any(LocalDateTime.class),
+                any(LocalDateTime.class))).thenReturn(Stream.empty());
+        when(this.categoryBalances.findAllByOrderByIdAccountIdAscIdTypeCdAscIdCategoryCdAsc())
+                .thenReturn(Stream.empty());
 
         when(this.generations.allocateNewGeneration(any(DatasetFamily.class), any(BusinessDate.class),
                 anyString())).thenAnswer(call -> generation(call.getArgument(0), 1));
@@ -230,13 +245,21 @@ class GenerationStagingJobsTest {
 
         AtomicLong stagedBytes = new AtomicLong(-1L);
         AtomicBoolean presentWhileStaging = new AtomicBoolean(false);
-        Path[] stagedPath = new Path[1];
+        List<Path> stagedPaths = new ArrayList<>();
+        // WHY : Refactoring Rationale: the size is captured for the FULL COPY specifically and used to
+        //       be captured for whichever family staged last. The step now stages three families in one
+        //       pass, and the other two read empty in this class, so a last-wins capture measured a
+        //       zero-byte image and the assertion below became vacuously wrong rather than failing on
+        //       something meaningful. Every temporary path is still collected, because the removal
+        //       ruling applies to all three.
         when(this.generations.stageDataset(any(DatasetGeneration.class), anyString(), any(Path.class)))
                 .thenAnswer(call -> {
                     Path body = call.getArgument(2);
-                    stagedPath[0] = body;
-                    presentWhileStaging.set(Files.exists(body));
-                    stagedBytes.set(Files.size(body));
+                    stagedPaths.add(body);
+                    if (BackupTransactionsJob.DATASET_OBJECT_NAME.equals(call.getArgument(1))) {
+                        presentWhileStaging.set(Files.exists(body));
+                        stagedBytes.set(Files.size(body));
+                    }
                     return "a/staged/key";
                 });
 
@@ -245,9 +268,12 @@ class GenerationStagingJobsTest {
         assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
         assertThat(presentWhileStaging).isTrue();
         assertThat(stagedBytes).hasValue(TRANSACTION_RECORD_LENGTH);
-        assertThat(Files.exists(stagedPath[0]))
-                .withFailMessage("the temporary copy outlived the step at %s", stagedPath[0])
-                .isFalse();
+        assertThat(stagedPaths).hasSize(BackupTransactionsJob.stagedFamilies().size());
+        for (Path staged : stagedPaths) {
+            assertThat(Files.exists(staged))
+                    .withFailMessage("a temporary copy outlived the step at %s", staged)
+                    .isFalse();
+        }
         // WHY : Assumptions: the master stream is asserted CLOSED rather than merely consumed. The
         //       repository returns a cursor-backed stream, so a job that read it without closing it would
         //       leak a database cursor per run -- a leak no output difference reveals.
@@ -316,7 +342,8 @@ class GenerationStagingJobsTest {
      */
     private JobExecution runBackup() throws Exception {
         BackupTransactionsJob configuration =
-                new BackupTransactionsJob(this.ledger, this.generations, this.ledgerOfSteps);
+                new BackupTransactionsJob(this.ledger, this.categoryBalances, this.generations,
+                        this.ledgerOfSteps);
         Job job = configuration.backupTransactions(
                 this.jobRepository, new ResourcelessTransactionManager(), this.validator);
         return execute(job, BackupTransactionsJob.JOB_NAME);

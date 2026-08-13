@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import com.carddemo.common.observability.ThrowableDigest;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -306,6 +309,56 @@ class OnlineWriteGateTest {
                         .as("%s must refuse the write", failure.getClass().getSimpleName())
                         .isInstanceOf(OnlineWritesDisabledException.class);
             }
+        }
+
+        /**
+         * The refusal record names the failure's type chain and none of its message text.
+         *
+         * <p>⚠️ Purpose: an unreadable flag is logged, and the record is retained for the whole
+         * retention period, so what the line may contain is a disclosure question rather than a
+         * formatting one. The failures reaching this arm are composed by the SDK: a parameter-store
+         * denial names the parameter and the calling identity, a credential-resolution failure quotes
+         * the provider chain it walked, and a transport failure composes endpoint material into its
+         * text. Handing the throwable to the facade renders every one of those messages.</p>
+         *
+         * <p>Assumptions: the assertion is made on BOTH halves and neither alone would hold the
+         * property. The absence of a throwable proxy proves the throwable was not passed as the
+         * trailing argument, which is the mechanism that renders the chain's messages; the absence of
+         * the message text proves it was not formatted into the line by hand instead. A digest of the
+         * type chain is asserted present so the line remains diagnostic rather than merely quiet.</p>
+         *
+         * <p>This test takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("the refusal record carries the failure's type chain and no message text")
+        void refusalRecordCarriesNoFailureMessage() {
+            String sensitive = "parameter /carddemo/dev/online-writes-enabled denied for"
+                    + " arn:aws:sts::123456789012:assumed-role/carddemo-task/4111111111111111";
+            RuntimeException failure = SsmException.builder().message(sensitive).build();
+            ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger)
+                    org.slf4j.LoggerFactory.getLogger(OnlineWriteGate.class);
+            ListAppender<ILoggingEvent> captured = new ListAppender<>();
+            captured.start();
+            logger.addAppender(captured);
+            try {
+                assertThat(gateThrowing(failure).gate().writesEnabled()).isFalse();
+            } finally {
+                logger.detachAppender(captured);
+                captured.stop();
+            }
+
+            assertThat(captured.list).hasSize(1);
+            ILoggingEvent record = captured.list.get(0);
+            assertThat(record.getFormattedMessage())
+                    .as("the SDK's own message is the disclosure channel and must not be rendered")
+                    .doesNotContain(sensitive)
+                    .doesNotContain("4111111111111111")
+                    .contains(PARAMETER)
+                    .contains(ThrowableDigest.of(failure));
+            assertThat(record.getThrowableProxy())
+                    .as("a trailing throwable is exactly what makes the facade render the chain's"
+                            + " messages, so the record must carry no throwable at all")
+                    .isNull();
         }
 
         /** The gate reads exactly the parameter it was constructed with. */

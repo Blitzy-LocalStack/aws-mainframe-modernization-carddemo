@@ -13,9 +13,11 @@ import com.carddemo.reference.service.TransactionCategoryService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
+import java.net.URI;
 import java.security.Principal;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -26,6 +28,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.util.UriComponentsBuilder;
 
 /**
  * The five transaction-category operations the contract publishes.
@@ -150,14 +153,43 @@ public class TransactionCategoryController {
     /**
      * Adds a category.
      *
+     * <p>Refactoring Rationale: this returns a response entity rather than the body alone, and the reason is
+     * a member of the published contract that no body can carry. The 201 of
+     * {@code src/main/resources/openapi/reference-api.yaml} declares a {@code Location} header with
+     * {@code required: true}, and the handler previously set only the status -- so every successful creation
+     * answered without a header the document promises, and a client following the document to find the
+     * created row read nothing. A required response header cannot be produced by a return value, so the
+     * signature changes with it. The status moves onto the entity and the method-level
+     * {@code @ResponseStatus} is withdrawn: with both present a reader cannot tell which one decides, and
+     * only one of them can also carry the header.
+     *
+     * <p>Assumptions: the address is built from {@link #BASE_PATH} and {@link #ITEM_PATH} -- the same
+     * template the read handler mounts -- rather than from a second spelling of the path. That is what makes
+     * the returned address resolvable by construction: if the item route ever moves, the header moves with
+     * it. Alternatives Considered: {@code ServletUriComponentsBuilder.fromCurrentRequest}, which is the
+     * usual idiom. Rejected because it composes an ABSOLUTE url from the inbound request, and this service
+     * is reached through an API gateway and an internal load balancer, so the host it would name is the
+     * internal one rather than the one the caller used -- while the contract publishes a path, and its
+     * example is a path.
+     *
+     * <p>Assumptions: the two key halves are taken from the STORED representation rather than from the
+     * submitted body, so the address names the row as it was written. Reading them from the request would
+     * publish a location derived from input that the write path is entitled to normalise.
+     *
      * @param request the create body carrying both key halves and the description
-     * @return the stored category as the contract publishes it
+     * @return HTTP 201 carrying the stored category and the path of the created row; never {@code null}
      */
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
-    @ResponseStatus(HttpStatus.CREATED)
-    public TransactionCategoryResponse createTransactionCategory(
+    public ResponseEntity<TransactionCategoryResponse> createTransactionCategory(
             @Valid @RequestBody TransactionCategoryCreateRequest request) {
-        return this.service.create(request);
+
+        TransactionCategoryResponse stored = this.service.create(request);
+        // WHY : Assumptions: the variadic build expands the two template variables in the order they appear
+        //       in the template and answers the address itself, so no separate conversion step is needed and
+        //       no second spelling of the path exists for one to drift from the other.
+        URI location = UriComponentsBuilder.fromPath(BASE_PATH + ITEM_PATH)
+                .build(stored.typeCd(), stored.catCd());
+        return ResponseEntity.created(location).body(stored);
     }
 
     /**

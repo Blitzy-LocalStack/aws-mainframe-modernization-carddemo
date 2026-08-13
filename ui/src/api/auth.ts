@@ -17,12 +17,25 @@
  * This mirrors the baseline, whose sign-on program was the one program that ran before any identity
  * existed: it detected that first turn by an empty communication area, `IF EIBCALEN = 0` at
  * `app/cbl/COSGN00C.cbl` L80, and every other program in the region was reached only after it.
- * The consequence of the unauthenticated case is already carried by `applyRequestHeaders` in
- * `ui/src/api/client.ts`, which attaches NO `Authorization` header when no token is held rather than
- * one reading `Bearer undefined`: a service handed a malformed credential answers 401, which would
- * report a refused token to an operator who has not yet presented one. Nothing here may add a header,
- * and nothing here may send a credential on the five administration calls beyond the bearer token the
- * shared interceptor attaches.
+ * The consequence of the unauthenticated case is carried in two places, and both are needed. When no
+ * token is held, `applyRequestHeaders` in `ui/src/api/client.ts` attaches NO `Authorization` header
+ * rather than one reading `Bearer undefined`: a service handed a malformed credential answers 401,
+ * which would report a refused token to an operator who has not yet presented one. And when a token IS
+ * held, each of the three exchanges below is dispatched with `WITHOUT_STORED_SESSION`, so the header is
+ * removed for exactly the operations their contract declares `security: []`.
+ *
+ * Refactoring Rationale: that second half was missing, and its absence was not visible at a call site.
+ * All three exchanges share the one axios instance, whose interceptor attaches the stored bearer to
+ * every request, so a token that had expired or been revoked travelled on the sign-on, the refresh and
+ * the challenge answer alike. The resource-server filter validates a presented credential BEFORE the
+ * permit-all rule for these paths is reached, so a stale token could refuse the exchange whose whole
+ * purpose is to replace it — and the failure is worst exactly when it matters most, at the moment an
+ * operator returns to a tab whose session has lapsed. Suppressing per request rather than per instance
+ * keeps the correlation identifier, the clamped timeout and the failure normalisation identical for
+ * these three operations; the reasoning against a second instance is recorded on the flag itself.
+ *
+ * Nothing here may add a header, and nothing here may send a credential on the five administration
+ * calls beyond the bearer token the shared interceptor attaches.
  *
  * Assumptions: every credential this module transmits -- a password, a new password, a refresh token,
  * a challenge session -- travels in a request BODY, and never in a path or a query string. That is not
@@ -53,7 +66,7 @@
  * set and the caller passes it to `setAccessToken`, so there is one writer.
  */
 
-import { getApiClient, requestPath } from './client';
+import { WITHOUT_STORED_SESSION, getApiClient, keysetPagingMembers, requestPath } from './client';
 import type {
   ContractOperation,
   CreateUserRequest,
@@ -234,7 +247,15 @@ export const PASSWORD_MAX_LENGTH = 256;
  */
 export async function signOn(userId: string, password: string): Promise<SignOnResult> {
   const request: SignOnRequest = { userId, password };
-  const response = await getApiClient().post<SignOnResult>(requestPath(SIGN_ON), request);
+  // Assumptions: dispatched WITHOUT the stored session, because this operation is declared
+  //   `security: []` and a bearer left over from a lapsed session would be validated by the
+  //   resource-server filter before the permit-all rule for this path is reached -- refusing the
+  //   credential the operator is in the middle of replacing.
+  const response = await getApiClient().post<SignOnResult>(
+    requestPath(SIGN_ON),
+    request,
+    WITHOUT_STORED_SESSION,
+  );
 
   return response.data;
 }
@@ -250,7 +271,16 @@ export async function signOn(userId: string, password: string): Promise<SignOnRe
  */
 export async function refreshTokens(userId: string, refreshToken: string): Promise<SignOnTokens> {
   const request: TokenRefreshRequest = { userId, refreshToken };
-  const response = await getApiClient().post<SignOnTokens>(requestPath(REFRESH_TOKENS), request);
+  // Assumptions: the stored session is suppressed here for a sharper reason than on sign-on. This
+  //   exchange runs precisely when the access token is about to stop being accepted, so the token most
+  //   likely to be attached is the one whose expiry triggered the call; presenting it could refuse the
+  //   refresh and sign the operator out for the sole reason that the refresh happened a moment late.
+  //   The credential this operation actually presents is the refresh token, in the body.
+  const response = await getApiClient().post<SignOnTokens>(
+    requestPath(REFRESH_TOKENS),
+    request,
+    WITHOUT_STORED_SESSION,
+  );
   return response.data;
 }
 
@@ -270,9 +300,14 @@ export async function answerSignOnChallenge(
   newPassword: string,
 ): Promise<SignOnTokens> {
   const request: SignOnChallengeRequest = { userId, session, newPassword };
+  // Assumptions: suppressed for the same reason as the two exchanges above. A caller answering a
+  //   challenge holds no accepted token by definition -- the provider has not finished authenticating
+  //   it -- so any bearer this tab still holds belongs to an earlier session and can only be refused.
+  //   The credential here is the continuation handle and the replacement password, both in the body.
   const response = await getApiClient().post<SignOnTokens>(
     requestPath(ANSWER_SIGN_ON_CHALLENGE),
     request,
+    WITHOUT_STORED_SESSION,
   );
   return response.data;
 }
@@ -310,8 +345,9 @@ export async function answerSignOnChallenge(
  * Assumptions: a cursor is an opaque sealed token minted by the service and is echoed back EXACTLY as
  * received -- never parsed, compared, incremented or constructed. A caller copies the `lastKey` of
  * the page it holds to advance or the `firstKey` to retreat, and states the matching direction; the
- * contract refuses a direction whose cursor is absent with a 400, which is why both are sent together
- * or not at all.
+ * contract refuses a direction whose cursor is absent with a 400, which is why
+ * {@link keysetPagingMembers} refuses that combination here rather than sending it, and why a cursor
+ * supplied without a direction is read forward rather than being refused.
  *
  * Assumptions: the page size is set by the service at ten rows and is never supplied by the caller,
  * proven twice in the baseline -- `02 USER-REC OCCURS 10 TIMES.` at `app/cbl/COUSR00C.cbl` L57, and
@@ -324,15 +360,29 @@ export async function answerSignOnChallenge(
  *   it entirely for the first page.
  * @returns {Promise<PageResponse<UserSummary>>} One bounded page of user rows, with the `firstKey`
  *   and `lastKey` a caller pages from and the `hasNext` that says whether a forward move exists.
- * @throws {Error} The normalised `ApiRequestError`: 400 for a cursor sealed for the other direction
- *   or supplied without one, 401 for an absent or expired token, and 403 for an authenticated caller
- *   outside the administrative group -- which is distinct from 401 and must not sign the caller out.
+ * @throws {RangeError} If a direction is supplied without a usable cursor, which names no page to step
+ *   from and which the contract refuses; the refusal is raised here rather than sent, so the caller
+ *   learns which two inputs disagreed instead of receiving the opening page as though the step had
+ *   happened.
+ * @throws {Error} The normalised `ApiRequestError`: 400 for a cursor sealed for the other direction,
+ *   401 for an absent or expired token, and 403 for an authenticated caller outside the
+ *   administrative group -- which is distinct from 401 and must not sign the caller out.
  */
 export async function listUsers(query: UserListQuery = {}): Promise<PageResponse<UserSummary>> {
+  // Assumptions: the pair is checked before assembly rather than after, so a direction with no cursor
+  //   is refused instead of being dropped. Dropping it was the previous behaviour and it contradicted
+  //   the paragraph above, which states that the contract refuses that pair with a 400 -- a caller
+  //   reading that sentence would expect a refusal and silently receive the opening page instead.
   const params: Record<string, string> = {};
-  if (query.cursor !== undefined) {
-    params.cursor = query.cursor;
-    params.direction = query.direction ?? 'next';
+  // Refactoring Rationale: the pair is established by the shared guard rather than assembled here,
+  //   because this module used to drop a supplied direction whenever no cursor accompanied it and
+  //   answer the caller with the opening page -- the one combination the contract refuses with a 400
+  //   keyed on the direction. Centralising it also puts the forward default in one place for all seven
+  //   clients, which is what stops the seven from coming to disagree about it.
+  const paging = keysetPagingMembers(query.cursor, query.direction);
+  if (paging !== undefined) {
+    params.cursor = paging.cursor;
+    params.direction = paging.direction;
   }
 
   const response = await getApiClient().get<PageResponse<UserSummary>>(requestPath(LIST_USERS), {

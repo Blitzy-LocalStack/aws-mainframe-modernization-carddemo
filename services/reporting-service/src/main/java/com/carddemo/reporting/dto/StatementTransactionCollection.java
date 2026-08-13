@@ -109,4 +109,33 @@ public record StatementTransactionCollection(
             int transactionCount) {
         return new StatementTransactionCollection(items, transactionCount, false);
     }
+
+    /**
+     * Renders the collection as its two counts and its truncation flag, never as its items.
+     *
+     * <p>Purpose. Each item carries an amount and a merchant, so the compiler-generated rendering scaled
+     * one statement's whole transaction detail into a single line. The collection concern in
+     * {@code docs/architecture/observability.md} L1093 to L1112 is exactly this: a rendering whose length
+     * and content are functions of the data rather than of the type.</p>
+     *
+     * <p>Assumptions: BOTH counts are rendered, and the pair is deliberate rather than redundant. The
+     * carried size and the reported transaction count differ precisely when truncation has occurred, and
+     * that difference is the reference statement generator's own bounded-table behaviour surfacing here;
+     * rendering one of them would hide the discrepancy the truncation flag exists to announce.</p>
+     *
+     * <p>Trade-offs: no item is rendered even in the truncated case, where an operator might most want to
+     * see the boundary. The item at the boundary is reachable from the generated artifact, and printing
+     * one row here would make the rendering's content depend on a branch -- a shape that differs between
+     * two runs is harder to read than one that never does.</p>
+     *
+     * @return a rendering naming the carried item count, the reported transaction count and the truncation
+     *     flag, with the items themselves omitted; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "StatementTransactionCollection[items=" + (this.items == null ? "absent"
+                : this.items.size() + " entries")
+                + ", transactionCount=" + this.transactionCount
+                + ", truncated=" + this.truncated + ']';
+    }
 }

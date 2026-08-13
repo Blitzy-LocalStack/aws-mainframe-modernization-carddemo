@@ -44,20 +44,25 @@ import org.mockito.InOrder;
  * <p>The subject is {@link InterestCalculationService}. The behaviour under assertion is the set of
  * rulings a careful transcription gets wrong by doing the obvious thing, and each case below is
  * anchored to committed evidence rather than to a restatement of the production code: the accrual
- * TRUNCATES because the reference statement at {@code app/cbl/CBACT04C.cbl:464-465} carries no
- * {@code ROUNDED} phrase and no statement in that program's 652 lines carries one; the truncation
- * happens PER CATEGORY ROW because {@code :467} accumulates a value the preceding statement has
- * already stored into {@code PIC S9(09)V99}; and one transaction is emitted PER CATEGORY ROW because
- * {@code :468} sits inside {@code 1300-COMPUTE-INTEREST} rather than at the account level.</p>
+ * ROUNDS HALF UP because transformation rule T3 states that mode for the money path and states no
+ * exception for the accrual, while the reference statement at {@code app/cbl/CBACT04C.cbl:464-465}
+ * carries no {@code ROUNDED} phrase and no statement in that program's 652 lines carries one, so the
+ * reference discards its surplus digits and the difference is registered as divergence
+ * {@code C-ROUNDING}; the reduction happens PER CATEGORY ROW because {@code :467} accumulates a value
+ * the preceding statement has already stored into {@code PIC S9(09)V99}; and one transaction is emitted
+ * PER CATEGORY ROW because {@code :468} sits inside {@code 1300-COMPUTE-INTEREST} rather than at the
+ * account level.</p>
  *
- * <p>Assumptions: the two cases that separate {@code RoundingMode.DOWN} from its neighbours are the
+ * <p>Assumptions: the cases that separate {@code RoundingMode.HALF_UP} from its neighbours are the
  * load-bearing ones and are the reason this class exists rather than one more grouping in the
  * aggregate. The shipped happy-path fixture accrues 12.50 on a balance of 1000.00 at 15.00 per cent,
- * and that datum yields an EXACT two-place quotient -- so it passes under half-up rounding just as it
- * does under truncation and cannot detect a wrong mode on its own. A balance of 1000.80 at 2.50 per
- * cent yields 2.085 exactly, which is 2.08 truncated and 2.09 rounded half up, and its negative
- * counterpart is 2.08 truncated toward zero and 2.09 floored. Without both, the mode is asserted only
- * by the constant that names it.</p>
+ * and that datum yields an EXACT two-place quotient -- so it passes under truncation just as it does
+ * under half up and cannot detect a wrong mode on its own. A balance of 1000.80 at 2.50 per cent
+ * yields 2.085 exactly, which is 2.09 rounded half up and 2.08 discarded. On the negative side TWO
+ * vectors are needed, because no single negative input separates all three candidate modes: at
+ * -1000.80 and 2.50 half up and flooring both give -2.09 while the discard gives -2.08, and at
+ * -1000.00 and 2.50 half up and the discard both give -2.08 while flooring gives -2.09. Without all of
+ * them, the mode is asserted only by the constant that names it.</p>
  *
  * <h2>Four constructed vectors, and why no shipped fixture could replace them</h2>
  *
@@ -69,7 +74,7 @@ import org.mockito.InOrder;
  * <ul>
  *   <li>The ROUNDING MODE. Every interest fixture drives 1000.00 at 15.00 per cent, whose quotient is
  *       exactly 12.5000, so truncation and half-up rounding agree and the goldens are satisfied by
- *       either. Closed by {@code aHalfCentQuotientTruncatesDown} and its second vector.</li>
+ *       either. Closed by {@code aHalfCentQuotientRoundsUp} and its second vector.</li>
  *   <li>The ZERO-RATE branch. The fixture named {@code zero_balance} is a zero-BALANCE scenario: its
  *       rate is 15.00 and its golden {@code transact.expected} is 702 bytes, being two 350-byte rows
  *       plus newlines, so two transactions ARE written there. Genuine zero-rate rows exist in
@@ -80,10 +85,10 @@ import org.mockito.InOrder;
  *       {@code tests/golden/interest/default_fallback/acctdat.expected} shows them zero on output, so
  *       dropping the two assignments would change nothing observable. Closed by
  *       {@code allThreeStateChangesHappen}.</li>
- *   <li>PER-ROW truncation and PER-ROW emission. Every fixture gives each account exactly one
+ *   <li>PER-ROW reduction and PER-ROW emission. Every fixture gives each account exactly one
  *       category-balance row, so one account contributes one term and one row and the per-row and
  *       per-account readings coincide. Closed by
- *       {@code threeCategoryRowsEmitThreeRowsAndIncrementBySixtyCents}.</li>
+ *       {@code threeCategoryRowsEmitThreeRowsAndIncrementBySixtyThreeCents}.</li>
  * </ul>
  *
  * <p>Trade-offs: a constructed vector is not traceable to a committed byte image, which is the
@@ -93,25 +98,25 @@ import org.mockito.InOrder;
  * an absent case because it occupies the place a real check would go. Each constructed vector states
  * its own arithmetic in full so a reader can verify it without running anything.</p>
  *
- * <p>Trade-offs: the correction identified C-ROUNDING is acknowledged here rather than left for a
- * reader to rediscover, because the surrounding prose disagrees with this class on its face.
- * {@code services/common-lib/README.md} and
- * {@code docs/architecture/data-model-and-schema-mapping.md} both state scale 2 with half-up rounding
- * UNCONDITIONALLY, and for the accrual path that is not the mode: the shared kernel therefore carries
- * two named modes, a general half-up one and a distinct truncating one, and the accrual reaches the
- * truncating one through a dedicated helper that exposes no way to select the other. The
- * distinction is deliberate and asserted by {@code theNamedModeIsTheAppliedMode}, so a future reader
- * must not "reconcile" the kernel back to a single mode. Note also that no test vector had to change
- * when the disposition was settled, precisely because 12.50 is exact under both -- which is the same
- * fact that makes the constructed rounding vector necessary.</p>
+ * <p>Trade-offs: divergence {@code C-ROUNDING} is acknowledged here rather than left for a reader to
+ * rediscover, because it is what makes the vectors below read as inversions of the reference. The
+ * shared kernel declares ONE mode, half up, which {@code services/common-lib/README.md} and
+ * {@code docs/architecture/data-model-and-schema-mapping.md} both state unconditionally and which
+ * transformation rule T3 requires; the reference accrual discards its surplus digits instead, so on a
+ * quotient landing exactly on a half cent this service credits one cent more. The register entry in
+ * {@code docs/architecture/cobol-to-service-traceability.md} carries the reasoning and the parity
+ * evidence, and {@code theNamedModeIsTheAppliedMode} holds the kernel and this service to the same
+ * mode so the two cannot drift apart.</p>
  *
- * <p>Refactoring Rationale: C-ROUNDING was formerly a registered behavioural divergence, on the
- * reading that the accrual rounded half up and differed from the baseline by a cent. That
- * disposition is withdrawn and the identifier survives only as a withdrawal record in
- * {@code docs/architecture/cobol-to-service-traceability.md}. The reason it could not stand is that
- * the cent did not stay local: {@code :467} adds each reduced term into the account total and
- * {@code :352} adds that total to the balance, which subsequent inclusive over-limit comparisons are
- * made against.</p>
+ * <p>Refactoring Rationale: an earlier disposition reduced the accrual with a second, truncating
+ * kernel constant so that no cent of difference arose, and recorded C-ROUNDING as withdrawn. That is
+ * reversed: preferring the truncating constant read a parity argument as licence to depart from a
+ * frozen transformation rule, whereas the plan admits a documented behavioural difference and admits a
+ * departure from a transformation rule only where it states an exception. The vectors below therefore
+ * assert the half-up value AND assert that it differs from the reference's, so neither a silent revert
+ * to truncation nor a silent disappearance of the divergence can pass. No fixture-driven expectation
+ * moved with the change, because 12.50 is exact under both modes -- the same fact that makes the
+ * constructed rounding vectors necessary.</p>
  *
  * <p>Trade-offs: every case here builds its subject with a constructor call and supplies each
  * repository as a mock, so no application context starts, no database container is requested and no
@@ -253,9 +258,10 @@ class InterestCalculationServiceTest {
          *
          * <p>Assumptions: this datum alone CANNOT detect a wrong rounding mode, and saying so here is
          * what stops it being mistaken for the mode's proof. The quotient of 15000.0000 by 1200 is
-         * exactly 12.5000, so truncation, half-up rounding and flooring all yield 12.50. The mode is
-         * settled by {@link #aHalfCentQuotientTruncatesDown} and
-         * {@link #aNegativeQuotientTruncatesTowardZero} instead.</p>
+         * exactly 12.5000, so truncation, half-up rounding and flooring all yield 12.50 -- which is
+         * also why divergence {@code C-ROUNDING} is unreachable on the shipped interest corpus. The
+         * mode is settled by {@link #aHalfCentQuotientRoundsUp} and
+         * {@link #aNegativeQuotientRoundsHalfUpOnMagnitude} instead.</p>
          */
         @Test
         @DisplayName("accrue 12.50 on 1000.00 at 15.00 per cent, as the golden records")
@@ -275,62 +281,69 @@ class InterestCalculationServiceTest {
         }
 
         /**
-         * A quotient of exactly half a cent truncates down rather than rounding up.
+         * A quotient of exactly half a cent rounds up rather than being discarded.
          *
          * <p>Assumptions: this is the case that separates the two modes, and it is the reason the
          * class documentation calls the happy-path datum insufficient. A balance of 1000.80 at 2.50
-         * per cent gives a raw product of 2502.0000 and a quotient of exactly 2.085; truncation
-         * toward zero yields 2.08 and rounding half up would yield 2.09. The mode is truncation
-         * because the statement at {@code app/cbl/CBACT04C.cbl:464-465} carries no {@code ROUNDED}
-         * phrase, and neither does any other statement in that program's 652 lines -- a count, not an
-         * impression -- so it discards the surplus digits of its result into
-         * {@code WS-MONTHLY-INT PIC S9(09)V99} at {@code :168}.</p>
+         * per cent gives a raw product of 2502.0000 and a quotient of exactly 2.085; half up yields
+         * 2.09 where the reference's discard yields 2.08. The mode is half up because transformation
+         * rule T3 states it for the money path with no exception for the accrual; the reference
+         * statement at {@code app/cbl/CBACT04C.cbl:464-465} carries no {@code ROUNDED} phrase, and
+         * neither does any other statement in that program's 652 lines -- a count, not an impression --
+         * so it discards the surplus digits of its result into
+         * {@code WS-MONTHLY-INT PIC S9(09)V99} at {@code :168}, and that difference is registered as
+         * divergence {@code C-ROUNDING}.</p>
+         *
+         * <p>Refactoring Rationale: this case required 2.08 while the accrual reduced with a truncating
+         * constant. It is inverted rather than deleted, and it keeps an assertion that the two modes
+         * differ, because that assertion is the executable form of the registered divergence: a revert
+         * to truncation and a quiet disappearance of the difference both fail here.</p>
          */
         @Test
-        @DisplayName("truncate a half-cent quotient down, where half up would round it up")
-        void aHalfCentQuotientTruncatesDown() {
+        @DisplayName("round a half-cent quotient up, where the reference discards it")
+        void aHalfCentQuotientRoundsUp() {
             Money accrued = accrue("1000.80", "2.50");
 
             assertThat(accrued.amount())
-                    .as("the reference statement at app/cbl/CBACT04C.cbl:464-465 carries no ROUNDED"
-                            + " phrase, so it discards the surplus digits of its result")
-                    .isEqualByComparingTo("2.08");
+                    .as("transformation rule T3 states half up for the money path and states no"
+                            + " exception for the accrual")
+                    .isEqualByComparingTo("2.09");
             assertThat(accrued.amount())
-                    .as("2.09 is the half-up answer and would mean the mode had been inherited from"
-                            + " the shared general contract instead of the reference statement")
-                    .isNotEqualByComparingTo("2.09");
+                    .as("2.08 is what the reference statement stores, and the one-cent difference is"
+                            + " registered as divergence C-ROUNDING rather than removed")
+                    .isNotEqualByComparingTo("2.08");
 
-            // WHY : Assumptions: the scale is asserted here in particular because truncation is the
-            //       SUBJECT of this case, and a truncating reduction that returned three places would
-            //       have discarded nothing at all -- 2.085 compares unequal to both 2.08 and 2.09, so
-            //       the two assertions above would pass while no reduction had happened.
+            // WHY : Assumptions: the scale is asserted here in particular because the reduction is the
+            //       SUBJECT of this case, and a reduction that returned three places would have reduced
+            //       nothing at all -- 2.085 compares unequal to both 2.08 and 2.09, so the two
+            //       assertions above would pass while no reduction had happened.
             assertThat(accrued.amount().scale()).isEqualTo(Money.SCALE);
         }
 
         /**
-         * A second, independent half-cent vector truncates down, so the first is not a coincidence.
+         * A second, independent half-cent vector rounds up, so the first is not a coincidence.
          *
          * <p>Alternatives Considered: relying on the single 1000.80-at-2.50 vector to settle the
          * mode. A lone datum leaves open the reading that the reduction happens to land correctly for
          * one pair of operands, so a second pair with different digits is used. A balance of 100.40
-         * at 15.00 per cent forms the scale-4 product 1506.0000 and the quotient 1.2550, which
-         * truncates to 1.25 and would round half up to 1.26.</p>
+         * at 15.00 per cent forms the scale-4 product 1506.0000 and the quotient 1.2550, which rounds
+         * half up to 1.26 where the reference would store 1.25.</p>
          *
          * <p>Assumptions: this vector is CONSTRUCTED and closes coverage gap G-2, which no shipped
          * fixture can close. Every interest fixture drives 1000.00 at 15.00 per cent -- the single
          * row of {@code tests/fixtures/interest/happy_path/discgrp.txt} carries that rate -- and that
          * quotient is exact, so {@code tests/golden/interest/happy_path/transact.expected} is
-         * satisfied by either mode and the truncation is unobservable through it.</p>
+         * satisfied by either mode and the rounding is unobservable through it.</p>
          */
         @Test
-        @DisplayName("truncate a second half-cent quotient down, on different digits")
-        void aSecondHalfCentQuotientAlsoTruncatesDown() {
+        @DisplayName("round a second half-cent quotient up, on different digits")
+        void aSecondHalfCentQuotientAlsoRoundsUp() {
             Money accrued = accrue("100.40", "15.00");
 
-            assertThat(accrued.amount()).isEqualByComparingTo("1.25");
+            assertThat(accrued.amount()).isEqualByComparingTo("1.26");
             assertThat(accrued.amount())
-                    .as("1.26 is the half-up answer on this vector")
-                    .isNotEqualByComparingTo("1.26");
+                    .as("1.25 is what the reference stores on this vector")
+                    .isNotEqualByComparingTo("1.25");
             assertThat(accrued.amount().scale()).isEqualTo(Money.SCALE);
         }
 
@@ -340,7 +353,7 @@ class InterestCalculationServiceTest {
          * <p>Assumptions: two places is the declared scale of {@code WS-MONTHLY-INT PIC S9(09)V99} at
          * {@code app/cbl/CBACT04C.cbl:168}, and a COBOL arithmetic statement stores into its receiving
          * field's scale whatever the intermediate carried. The cases collected here span an exact
-         * quotient, a truncating one, a negative one, a zero and a non-terminating expansion, because
+         * quotient, a half-cent one, a negative one, a zero and a non-terminating expansion, because
          * the last is where a reduction that forgot its scale would instead raise rather than answer
          * the wrong number.</p>
          *
@@ -370,24 +383,39 @@ class InterestCalculationServiceTest {
         }
 
         /**
-         * A negative balance truncates toward zero, which is where flooring diverges.
+         * A negative balance rounds half up on magnitude, which two vectors together establish.
          *
          * <p>Assumptions: negatives are reachable because the receiving field is declared SIGNED --
          * {@code WS-MONTHLY-INT PIC S9(09)V99} at {@code app/cbl/CBACT04C.cbl:168} -- and the
-         * accrual base {@code TRAN-CAT-BAL} is signed too at {@code app/cpy/CVTRA01Y.cpy:9}. On a
-         * quotient of -2.085, truncation toward zero gives -2.08 while flooring gives -2.09, so this
-         * is the case that rules out substituting the floor mode for the truncating one.</p>
+         * accrual base {@code TRAN-CAT-BAL} is signed too at {@code app/cpy/CVTRA01Y.cpy:9}.
+         *
+         * <p>Assumptions: TWO negative vectors are asserted because on a negative quotient the three
+         * candidate modes fall into two pairings and no single input separates all three. At a quotient
+         * of -2.085 half up and flooring both give -2.09 while the reference's discard gives -2.08, so
+         * that vector rules out truncation. At a quotient of -2.08333... half up and the discard both
+         * give -2.08 while flooring gives -2.09, so that vector rules out flooring. Only half up
+         * satisfies both.
+         *
+         * <p>Refactoring Rationale: the second vector is ADDED rather than the first merely being
+         * inverted, because inverting the first alone would leave the case satisfied by flooring as well
+         * as by half up -- the two agree at that input -- and the sign case exists precisely to
+         * distinguish rounding on magnitude from rounding toward negative infinity.</p>
          */
         @Test
-        @DisplayName("truncate a negative quotient toward zero, where flooring would go past it")
-        void aNegativeQuotientTruncatesTowardZero() {
+        @DisplayName("round a negative quotient half up on magnitude, not toward negative infinity")
+        void aNegativeQuotientRoundsHalfUpOnMagnitude() {
             Money accrued = accrue("-1000.80", "2.50");
+            Money separatesFlooring = accrue("-1000.00", "2.50");
 
-            assertThat(accrued.amount()).isEqualByComparingTo("-2.08");
+            assertThat(accrued.amount()).isEqualByComparingTo("-2.09");
             assertThat(accrued.amount())
-                    .as("-2.09 is the floored answer, and flooring differs from truncation on"
-                            + " exactly the negative side")
-                    .isNotEqualByComparingTo("-2.09");
+                    .as("-2.08 is what the reference stores, which is divergence C-ROUNDING seen from"
+                            + " the negative side")
+                    .isNotEqualByComparingTo("-2.08");
+            assertThat(separatesFlooring.amount())
+                    .as("flooring would give -2.09 on this second vector, so it is what rules out"
+                            + " substituting the floor mode for half up")
+                    .isEqualByComparingTo("-2.08");
             assertThat(accrued.amount().scale()).isEqualTo(Money.SCALE);
             assertThat(accrued.amount())
                     .as("the sign survives the reduction, which is what makes the signed picture at"
@@ -403,12 +431,12 @@ class InterestCalculationServiceTest {
          * two-place rate is a FOUR-place product -- the rate is itself scale 2, being
          * {@code DIS-INT-RATE PIC S9(04)V99} at {@code app/cpy/CVTRA02Y.cpy:9} -- and reducing that
          * product to cents before the division discards two digits the division would have consumed,
-         * which on this datum is the difference between 2.08 and 2.07.</p>
+         * which on this datum is the difference between 2.09 and 2.08.</p>
          *
          * <p>Trade-offs: the two orders are computed in the test body and compared, rather than the
-         * expected 2.08 simply being asserted. The cost is arithmetic in a test, which normally risks
+         * expected 2.09 simply being asserted. The cost is arithmetic in a test, which normally risks
          * re-implementing the subject; it is accepted here because the value of this case is entirely
-         * in showing that the orders DISAGREE on the vector chosen. Asserting 2.08 alone would leave a
+         * in showing that the orders DISAGREE on the vector chosen. Asserting 2.09 alone would leave a
          * reader unable to tell whether the order mattered on this datum at all, and a later
          * maintainer could substitute a vector on which it did not while the case stayed green. The
          * subject is still driven for the answer -- only the two candidate answers are computed
@@ -421,9 +449,9 @@ class InterestCalculationServiceTest {
             BigDecimal rate = new BigDecimal("2.50");
 
             BigDecimal multiplyFirst = balance.multiply(rate)
-                    .divide(new BigDecimal("1200"), 2, RoundingMode.DOWN);
-            BigDecimal divideFirst = balance.divide(new BigDecimal("1200"), 2, RoundingMode.DOWN)
-                    .multiply(rate).setScale(2, RoundingMode.DOWN);
+                    .divide(new BigDecimal("1200"), 2, RoundingMode.HALF_UP);
+            BigDecimal divideFirst = balance.divide(new BigDecimal("1200"), 2, RoundingMode.HALF_UP)
+                    .multiply(rate).setScale(2, RoundingMode.HALF_UP);
 
             assertThat(multiplyFirst)
                     .as("the two orders must be shown to disagree, or this case proves nothing")
@@ -437,30 +465,31 @@ class InterestCalculationServiceTest {
          * <p>Assumptions: {@code ACCRUAL_ROUNDING} is documentation rather than a parameter -- the
          * accrual reduces through {@code Money.monthlyInterest}, which binds the mode -- so the
          * constant could drift from the behaviour it describes without any other case failing. The
-         * shared constant compared against is the ACCRUAL mode and deliberately not the general
-         * one.</p>
+         * shared constant compared against is {@code GENERAL_ROUNDING}, the one mode the kernel
+         * declares, and the service's own constant is derived from it rather than restated as a
+         * literal.</p>
          *
-         * <p>Assumptions: the mode it must equal is truncation toward zero, because the accrual
-         * statement at {@code app/cbl/CBACT04C.cbl:464-465} carries no {@code ROUNDED} phrase. This
-         * case is the reason the constant cannot silently disagree with
-         * {@code Money.monthlyInterest}, and it is also where correction C-ROUNDING is held in place:
-         * an edit reconciling the kernel back to one half-up mode fails here.</p>
+         * <p>Assumptions: the mode it must equal is half up, because transformation rule T3 states that
+         * mode for the money path and states no exception for the accrual. This case is the reason the
+         * constant cannot silently disagree with {@code Money.monthlyInterest}, and it is where the
+         * single-mode kernel is held in place: an edit reintroducing a second, truncating accrual mode
+         * fails here.</p>
          */
         @Test
         @DisplayName("name the same rounding mode the shared arithmetic applies")
         void theNamedModeIsTheAppliedMode() {
             assertThat(InterestCalculationService.ACCRUAL_ROUNDING)
-                    .isEqualTo(Money.BASELINE_INTEREST_ROUNDING)
-                    .isEqualTo(RoundingMode.DOWN);
+                    .isEqualTo(Money.GENERAL_ROUNDING)
+                    .isEqualTo(RoundingMode.HALF_UP);
         }
 
         /**
-         * Each row truncates on its own, so the account increment is a sum of truncated terms.
+         * Each row reduces on its own, so the account increment is a sum of reduced terms.
          *
          * <p>Assumptions: {@code :467} performs {@code ADD WS-MONTHLY-INT TO WS-TOTAL-INT} with an
          * addend the preceding statement has already stored into {@code PIC S9(09)V99} at
-         * {@code :168}, so the account increment is the SUM OF THE TRUNCATED terms and never the
-         * truncation of their unreduced sum. The shared money type deliberately offers no
+         * {@code :168}, so the account increment is the SUM OF THE REDUCED terms and never the
+         * reduction of their unreduced sum. The shared money type deliberately offers no
          * sum-then-reduce helper, so there is nothing to reach for by mistake.</p>
          *
          * <p>Assumptions: this vector is CONSTRUCTED and closes coverage gap G-5, which no shipped
@@ -472,38 +501,38 @@ class InterestCalculationServiceTest {
          *
          * <p>Alternatives Considered: a two-row vector. Rejected because the smallest pair whose
          * strategies disagree still leaves the difference at one cent, where a reader may take it for
-         * an artefact of one addition; three rows of 99.60 at 2.50 per cent make it two cents and
-         * make the accumulation visibly repeated. Each row's quotient is exactly 0.2075, truncating
-         * to 0.20 for a sum of 0.60, whereas the unreduced products total 747.0000 and truncate to
+         * an artefact of one addition; three rows of 99.60 at 2.50 per cent make the accumulation
+         * visibly repeated. Each row's quotient is exactly 0.2075, rounding half up to 0.21 for a sum
+         * of 0.63, whereas the unreduced products total 747.0000 whose quotient 0.6225 reduces to
          * 0.62.</p>
          */
         @Test
-        @DisplayName("truncate each of three rows on its own, giving 0.60 and not 0.62")
-        void truncationHappensPerRowAndNotOnTheSum() {
+        @DisplayName("reduce each of three rows on its own, giving 0.63 and not 0.62")
+        void reductionHappensPerRowAndNotOnTheSum() {
             List<Money> perRow = List.of(
                     accrue("99.60", "2.50"), accrue("99.60", "2.50"), accrue("99.60", "2.50"));
 
             assertThat(perRow)
-                    .as("each row's quotient is exactly 0.2075 and truncates to 0.20")
-                    .allSatisfy(row -> assertThat(row.amount()).isEqualByComparingTo("0.20"));
+                    .as("each row's quotient is exactly 0.2075 and rounds half up to 0.21")
+                    .allSatisfy(row -> assertThat(row.amount()).isEqualByComparingTo("0.21"));
 
-            Money sumOfTruncated = Money.total(perRow.toArray(new Money[0]));
-            BigDecimal truncationOfSum = new BigDecimal("99.60").multiply(new BigDecimal("2.50"))
+            Money sumOfReduced = Money.total(perRow.toArray(new Money[0]));
+            BigDecimal reductionOfSum = new BigDecimal("99.60").multiply(new BigDecimal("2.50"))
                     .multiply(new BigDecimal("3"))
-                    .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, RoundingMode.DOWN);
+                    .divide(Money.MONTHLY_RATE_DIVISOR, Money.SCALE, RoundingMode.HALF_UP);
 
-            assertThat(sumOfTruncated.amount()).isEqualByComparingTo("0.60");
-            assertThat(truncationOfSum).isEqualByComparingTo("0.62");
+            assertThat(sumOfReduced.amount()).isEqualByComparingTo("0.63");
+            assertThat(reductionOfSum).isEqualByComparingTo("0.62");
 
             // WHY : Assumptions: the two strategies are asserted to DISAGREE rather than merely
             //       asserting the expected total, because a vector on which they happened to agree
             //       would make this case pass without discriminating anything -- which is exactly the
             //       defect that leaves the shipped one-row-per-account fixtures unable to close G-5.
-            assertThat(sumOfTruncated.amount())
-                    .as("the sum of truncated terms must differ from the truncation of the raw sum,"
+            assertThat(sumOfReduced.amount())
+                    .as("the sum of reduced terms must differ from the reduction of the raw sum,"
                             + " or this case discriminates nothing")
-                    .isNotEqualByComparingTo(truncationOfSum);
-            assertThat(sumOfTruncated.amount().scale()).isEqualTo(Money.SCALE);
+                    .isNotEqualByComparingTo(reductionOfSum);
+            assertThat(sumOfReduced.amount().scale()).isEqualTo(Money.SCALE);
         }
 
         /**
@@ -1007,11 +1036,11 @@ class InterestCalculationServiceTest {
         }
 
         /**
-         * Three category rows of one account yield three rows and a sum-of-truncated increment.
+         * Three category rows of one account yield three rows and a sum-of-reduced increment.
          *
          * <p>This is the whole of coverage gap G-5 driven end to end at this tier: the emission at
          * {@code :468} runs once per category row, the accumulate at {@code :467} adds each
-         * already-truncated term, and {@code :352} then adds the accumulated total to the balance. The
+         * already-reduced term, and {@code :352} then adds the accumulated total to the balance. The
          * two rulings are asserted together because they share one cause -- the emit and the
          * accumulate are consecutive statements inside {@code 1300-COMPUTE-INTEREST} -- so a
          * transcription that hoisted either to the account level would break both.</p>
@@ -1029,12 +1058,12 @@ class InterestCalculationServiceTest {
          *
          * <p>Assumptions: the balance reaches the account through the accumulated total and never
          * through any per-row write, because {@code 1300-B-WRITE-TX} writes only to the transaction
-         * file. The increment is therefore 0.60 and not 0.62, and the difference is the two cents the
-         * three truncations discard.</p>
+         * file. The increment is therefore 0.63 and not 0.62, and the difference is the cent the three
+         * per-row reductions gain over one reduction of the raw sum.</p>
          */
         @Test
-        @DisplayName("emit three rows for three category balances and increment the balance by 0.60")
-        void threeCategoryRowsEmitThreeRowsAndIncrementBySixtyCents() {
+        @DisplayName("emit three rows for three category balances and increment the balance by 0.63")
+        void threeCategoryRowsEmitThreeRowsAndIncrementBySixtyThreeCents() {
             List<TransactionCategoryBalance> categoryRows = threeCategoryRowsOf(ACCOUNT_ID);
             InterestRateLookup lookup = InterestRateLookup.ofDirectHit(
                     key(OWN_GROUP), new BigDecimal("2.50"));
@@ -1049,7 +1078,7 @@ class InterestCalculationServiceTest {
                 Money accrued = InterestCalculationServiceTest.this.service
                         .monthlyInterest(Money.of(categoryRow.getBalance()), lookup);
 
-                // WHY : Assumptions: the accumulate happens per row with the ALREADY-truncated term,
+                // WHY : Assumptions: the accumulate happens per row with the ALREADY-REDUCED term,
                 //       which is what :467 adds. Accumulating the raw quotients and reducing once at the
                 //       end would reach 0.62 here, and that is the defect this vector exists to catch.
                 accumulated = accumulated.plus(accrued);
@@ -1067,15 +1096,15 @@ class InterestCalculationServiceTest {
                     .extracting(Transaction::getTransactionId)
                     .containsExactly("2024-01-15000001", "2024-01-15000002", "2024-01-15000003");
             assertThat(emitted.getAllValues())
-                    .as("each row carries its own truncated term, all 0.20 on this vector")
-                    .allSatisfy(row -> assertThat(row.getAmount()).isEqualByComparingTo("0.20"));
+                    .as("each row carries its own reduced term, all 0.21 on this vector")
+                    .allSatisfy(row -> assertThat(row.getAmount()).isEqualByComparingTo("0.21"));
 
             assertThat(accumulated.amount())
-                    .as("the sum of three truncated terms is 0.60; truncating their raw sum gives 0.62")
-                    .isEqualByComparingTo("0.60");
+                    .as("the sum of three reduced terms is 0.63; reducing their raw sum gives 0.62")
+                    .isEqualByComparingTo("0.63");
             assertThat(account.getCurrBal())
-                    .as("194.00 plus the sum-of-truncated 0.60; a reduce-once total would give 194.62")
-                    .isEqualByComparingTo("194.60");
+                    .as("194.00 plus the sum-of-reduced 0.63; a reduce-once total would give 194.62")
+                    .isEqualByComparingTo("194.63");
             assertThat(account.getCurrBal())
                     .as("194.62 is the reduce-once answer and must not be reachable")
                     .isNotEqualByComparingTo("194.62");
@@ -1084,13 +1113,13 @@ class InterestCalculationServiceTest {
         }
 
         /**
-         * Builds three distinct category-balance rows of one account, each accruing to 0.20.
+         * Builds three distinct category-balance rows of one account, each accruing to 0.21.
          *
          * <p>Assumptions: the balance 99.60 at a rate of 2.50 per cent forms the scale-4 product
-         * 249.0000 and the quotient 0.2075 exactly, which truncates to 0.20. Three such rows sum to
-         * 0.60 once each is truncated, whereas their unreduced products total 747.0000 and truncate to
-         * 0.62 -- so the vector separates the two accumulation strategies by two cents, which is what
-         * makes it worth constructing.</p>
+         * 249.0000 and the quotient 0.2075 exactly, which rounds half up to 0.21. Three such rows sum
+         * to 0.63 once each is reduced, whereas their unreduced products total 747.0000 whose quotient
+         * 0.6225 reduces to 0.62 -- so the vector separates the two accumulation strategies, which is
+         * what makes it worth constructing.</p>
          *
          * <p>Assumptions: the three rows share the account and the transaction type and differ in
          * CATEGORY, because that is how one account comes to hold several rows in the reference feed:

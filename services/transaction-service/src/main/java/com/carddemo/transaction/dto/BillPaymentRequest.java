@@ -107,4 +107,31 @@ public record BillPaymentRequest(
     //   COBIL00C.cbl's short-circuit order intact.
     @Size(max = 1)
     String confirmation) {
+
+    /**
+     * Renders this request WITHOUT the account it names.
+     *
+     * <p>Purpose. The account identifier is prohibited from a diagnostic rendering by name at
+     * {@code docs/architecture/observability.md} L1093 to L1112, and it is the component most likely to
+     * be rendered: a request record reaches a diagnostic BECAUSE validation refused it, and the refusal
+     * this record most often carries is the one that says the identifier was not eleven digits.</p>
+     *
+     * <p>Alternatives Considered: masking the identifier the way a card number is masked. Rejected
+     * because that rule's second clause sanctions exactly one abbreviation, the primary account number
+     * through {@code com.carddemo.common.security.CardNumberMasker}, and applying that function to an
+     * account identifier would both disclose four digits of a value the rule omits and reuse a card
+     * rule on a non-card value -- the precise misuse the finding this renderer answers names.</p>
+     *
+     * <p>Trade-offs: the confirmation flag is kept, and it is the whole diagnostic value of this
+     * rendering: the branch a bill-payment turn takes is decided by whether that one character was
+     * supplied and which letter it was, so a line showing it distinguishes a prompt from a submission
+     * without naming the account either concerned.</p>
+     *
+     * @return a rendering carrying the confirmation character alone, with the account identifier
+     *     omitted entirely; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "BillPaymentRequest[confirmation=" + this.confirmation + ']';
+    }
 }

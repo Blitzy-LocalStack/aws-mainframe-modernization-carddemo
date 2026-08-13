@@ -4,20 +4,44 @@
  *
  * <h2>The directory, measured rather than remembered</h2>
  *
- * <p>Four compilation units sit in this directory: this charter and the three services
- * {@code ReportExecutionService}, {@code StatementService} and {@code TransactionReportService}. Every
- * inventory, file name, class name and count here is a measurement of that directory, and the marker
- * line is re-measured on every build by
+ * <p>Nine compilation units sit in this directory: this charter, the four services and the four
+ * supporting types the report and statement lifecycles needed once a caller was given a way to reach
+ * what a run produced.</p>
+ *
+ * <ul>
+ *   <li>{@code CategoryBalanceReportService} accumulates and renders the category-balance report
+ *       bands.</li>
+ *   <li>{@code ReportExecutionService} starts a report run and reports what became of one.</li>
+ *   <li>{@code StatementService} composes a statement run and resolves the artifacts it left.</li>
+ *   <li>{@code TransactionReportService} accumulates and renders the 133-column report bands.</li>
+ *   <li>{@code ArtifactStore} is the object-store port: describe, open and range-read, and nothing
+ *       else. Refactoring Rationale: it was named {@code StatementArtifactStore} while only the
+ *       statement path used it; nothing about it was statement-specific, and the report lifecycle needs
+ *       the same two questions answered about its own artifact.</li>
+ *   <li>{@code ReportArtifactLocator} owns the report artifact's key convention and its published
+ *       path pieces. Assumptions: the convention lives HERE rather than in the {@code task} package
+ *       that writes it, because the read side is in this package and this package cannot import
+ *       {@code task} -- {@code task} already depends on it. The writer delegates to it instead.</li>
+ *   <li>{@code StatementIndexEntry} is one fixed-width row of the statement run index: a card
+ *       fingerprint and the record range that card's statement occupies.</li>
+ *   <li>{@code StatementRunOutcome} is what one statement run produced -- a count and the index --
+ *       cross-checked so a count that disagrees with the index it came with is refused.</li>
+ * </ul>
+ *
+ * <p>Every inventory, file name, class name and count here is a measurement of that directory, and the
+ * marker line is re-measured on every build by
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
- * so a fourth service arriving without an entry here fails the build:</p>
+ * which additionally requires that each type named above be a file in this directory -- so a type
+ * arriving without an entry here, and an entry naming a type that has moved, both fail the build:</p>
  *
  * <pre>
- * this directory: 4 java files = 3 classes + 1 charter
+ * this directory: 9 java files = 8 classes + 1 charter
  * </pre>
  *
  * <p>Assumptions: the two controllers in {@code com.carddemo.reporting.api} are the only callers of
- * these three services over HTTP, and the published contract at
- * {@code src/main/resources/openapi/reporting-api.yaml} settles the four operations they expose. The
+ * these services over HTTP -- three of the four; the fourth, {@code CategoryBalanceReportService}, is
+ * reached only from the nightly task -- and the published contract at
+ * {@code src/main/resources/openapi/reporting-api.yaml} settles the eight operations they expose. The
  * business rules stay here and none of them moves into a controller: the report-type PRECEDENCE, the
  * per-type date-range derivation, the confirmation vocabulary, the integrity reconciliation, the
  * subtotal accumulation and the statement selector rules are all owned by these classes, and a
@@ -80,7 +104,7 @@
  * under {@code app/} is read as the reference and is never edited: this
  * migration adds a path, it does not remove one.
  *
- * <p>Three services live here, and only three.
+ * <p>Four services live here, and only four.
  *
  * <ul>
  *   <li>{@code TransactionReportService} produces the transaction detail report
@@ -103,9 +127,24 @@
  *       from the paragraph at L462 of {@code app/cbl/CORPT00C.cbl}. Here it
  *       becomes a {@code states:StartExecution} call on a second, smaller state
  *       machine.</li>
+ *   <li>{@code CategoryBalanceReportService} produces the category-balance report
+ *       of {@code app/jcl/PRTCATBL.jcl} (66 lines). That job has no COBOL program
+ *       at all -- the whole report is a DFSORT step, so its {@code SORT FIELDS}
+ *       list on L52 and its {@code OUTREC} operand list on L53 to L56 are the
+ *       entire specification, and {@code CategoryBalanceLineLayout} in the mapper
+ *       package holds the line shape. This service owns only the pass: one line
+ *       per balance in the reference's key order, and an exact running total that
+ *       it returns and never prints. The one-byte disagreement between that
+ *       operand list and the {@code LRECL=40} declared on L61 is registered as
+ *       divergence {@code D-PRTCATBL-LRECL}.
+ *       <p>Refactoring Rationale: this service exists because the family had no
+ *       writer. The nightly report state's own rationale claimed it replaced both
+ *       {@code TRANREPT.jcl} and {@code PRTCATBL.jcl} while only the first was
+ *       built, so the second report was documented as delivered and was not
+ *       produced at all.</p></li>
  * </ul>
  *
- * <p>All three are built by constructor injection. They hold no static state
+ * <p>All four are built by constructor injection. They hold no static state
  * and no shared mutable working storage; repositories and mappers arrive as
  * injected collaborators. Assumptions: a COBOL program's WORKING-STORAGE is
  * process-wide and single-threaded, so a table such as WS-TRNX-TABLE at L225 of

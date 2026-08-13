@@ -36,8 +36,17 @@ class CardDetailRenderingTest {
     /** The masked rendering the mapper admits into this shape, twelve masks and four digits. */
     private static final String MASKED_NUMBER = "************0011";
 
-    /** A synthetic eleven-digit account identifier of the declared form. */
-    private static final String ACCOUNT_ID = "00000000011";
+    /**
+     * A synthetic eleven-digit account identifier of the declared form.
+     *
+     * <p>Refactoring Rationale: the last four digits are deliberately DIFFERENT from the four the masked
+     * card number discloses, and they were identical before. Two protected values sharing a fragment make
+     * a fragment assertion undecidable -- a search for the account's tail matches the card's tail, so it
+     * either fails on a correct rendering or passes on a leaking one depending on which value is present.
+     * Distinct tails are what let the case below assert that no abbreviation of the account identifier
+     * reaches the rendering while the masked number is rendered in full beside it.</p>
+     */
+    private static final String ACCOUNT_ID = "00000000253";
 
     /** A synthetic cardholder name of the declared character set. */
     private static final String EMBOSSED_NAME = "JOHN Q PUBLIC";
@@ -74,6 +83,13 @@ class CardDetailRenderingTest {
      * assertion, so a failure names which one leaked. The account identifier is also asserted absent in its
      * unpadded form, because a rendering that trimmed leading zeros would defeat a search for the padded
      * one while disclosing the same account.</p>
+     *
+     * <p>Refactoring Rationale: the account identifier's last four digits are now asserted absent as well,
+     * and that assertion is what this case previously lacked. Every assertion here was a whole-value
+     * search, so the masked rendering that stood in this shape for one revision -- eleven characters of
+     * which the last four were the account's own -- satisfied all of them while disclosing part of the
+     * value they existed to withhold. A whole-value search cannot detect an abbreviation; a fragment
+     * search can, and it is the only assertion here that discriminates the two.</p>
      */
     @Test
     @DisplayName("the rendering carries neither the name, the account identifier nor the expiry")
@@ -85,6 +101,10 @@ class CardDetailRenderingTest {
         assertThat(rendered).doesNotContain(ACCOUNT_ID);
         assertThat(rendered).doesNotContain("11\"");
         assertThat(rendered).doesNotContain(EXPIRATION_DATE);
+        assertThat(rendered)
+                .as("an abbreviation of the identifier is a disclosure of it, so the last four digits"
+                        + " must be absent and not merely the whole value")
+                .doesNotContain(ACCOUNT_ID.substring(ACCOUNT_ID.length() - 4));
     }
 
     /**
@@ -94,22 +114,25 @@ class CardDetailRenderingTest {
      * to think some other type produced the line. All seven components are named in contract order, two
      * carrying a placeholder, one a masked rendering and four their value.</p>
      *
-     * <p>Refactoring Rationale: the expected line names the SELECTOR and a MASKED account identifier,
-     * where an earlier revision of this case expected neither -- it omitted the selector entirely and
-     * expected the account fully redacted. Both changes follow from considering the two card shapes
-     * together, which {@link CardSummary} records in full: the selector discloses nothing without the
-     * deployment key and is the only value left that correlates the line with a request, so omitting it
-     * cost the rendering its usefulness for nothing; and the account identifier is an identifier rather
-     * than a secret, so masking it leaves enough to correlate two lines about one account while
-     * disclosing no complete locator -- and it keeps one policy across both shapes instead of full
-     * redaction on this one beside full disclosure on its sibling.</p>
+     * <p>Refactoring Rationale: the expected line names the SELECTOR and a REDACTED account identifier.
+     * Two revisions preceded it and the second was wrong. The first omitted the selector and redacted the
+     * account; the second kept the selector -- correctly, because it discloses nothing without the
+     * deployment key and is the only value left that correlates the line with a request -- and changed the
+     * account to a MASK, on the argument that an identifier "is not a secret". This revision keeps the
+     * selector and restores the redaction, because {@code docs/architecture/observability.md} L1093 to
+     * L1112 names the account identifier among the values a rendering must OMIT and confines the masker to
+     * a primary account number. The mask preserved input width and kept the last four characters, so the
+     * expected line this case asserted -- {@code accountId=*******0011} -- was itself the disclosure: a
+     * test can encode a defect as confidently as it encodes a rule, which is why the assertion below is
+     * now paired with a fragment assertion in {@code CardDtoContractTest} that no exact-line expectation
+     * can satisfy vacuously.</p>
      */
     @Test
     @DisplayName("the rendering names all seven components in contract order")
     void theRenderingNamesAllSixComponentsInOrder() {
         assertThat(DETAIL.toString()).isEqualTo("CardDetail[key=" + SEALED_KEY
                 + ", displayCardNumber=" + MASKED_NUMBER
-                + ", accountId=*******0011"
+                + ", accountId=REDACTED"
                 + ", embossedName=REDACTED"
                 + ", expirationDate=REDACTED"
                 + ", activeStatus=Y"
@@ -251,17 +274,21 @@ class CardDetailRenderingTest {
         assertThat(summaryComponents)
                 .as("a personal component added here would need the same redaction the detail shape has")
                 .containsExactly("key", "displayCardNumber", "accountId", "activeStatus");
-        // WHY : Refactoring Rationale: the summary's rendering is asserted to carry a MASKED account
-        //       identifier, where an earlier revision of this case asserted it carried the identifier in
-        //       full on the ground that a row with no personal component needs no redaction. The ground
-        //       holds for the JOIN and not for the value: nothing here is joined to a cardholder's name,
-        //       which is why this shape withholds nothing outright, but an eleven-digit account number is
-        //       still a complete locator and this rendering reaches the same logs the detail's does. The
-        //       reasoning is recorded in full on CardSummary.toString, which also records why one policy
-        //       across both card shapes was preferred to two.
+        // WHY : Refactoring Rationale: the summary's rendering is asserted to WITHHOLD the account
+        //       identifier. Two earlier revisions of this case asserted otherwise -- the first that it
+        //       carried the identifier in full, on the ground that a row with no personal component needs
+        //       no redaction, and the second that it carried a MASK of it. Neither survives
+        //       docs/architecture/observability.md L1093 to L1112, which names the account identifier
+        //       among the values a rendering must omit and requires omission rather than abbreviation.
+        //       The reasoning is recorded in full on CardSummary.toString.
+        // WHY : Assumptions: the tail assertion is the one that discriminates. A whole-value search passes
+        //       against a masked rendering, which is how the middle revision of this case went green while
+        //       disclosing four digits of the identifier; searching for the tail cannot, and it is
+        //       decidable here only because the fixture's two tails differ.
         assertThat(new CardSummary(SEALED_KEY, MASKED_NUMBER, ACCOUNT_ID, "Y").toString())
                 .contains(MASKED_NUMBER)
-                .contains("*******0011")
-                .doesNotContain(ACCOUNT_ID);
+                .contains("accountId=REDACTED")
+                .doesNotContain(ACCOUNT_ID)
+                .doesNotContain(ACCOUNT_ID.substring(ACCOUNT_ID.length() - 4));
     }
 }

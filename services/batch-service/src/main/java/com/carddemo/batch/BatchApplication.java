@@ -669,15 +669,22 @@ public class BatchApplication {
         } catch (Exception failure) {
             // WHY : Assumptions: an Exception means the job logic or the night's data was wrong, so
             //       the code reported is the job-failed code and the operator's next step is to read
-            //       the cause. The throwable is passed to the logger as the LAST argument rather than
-            //       being formatted into the message, which is what makes the pipeline render the
-            //       stack as part of the same structured record instead of as unattributed lines on a
-            //       separate stream.
-            // WHY : Assumptions: the trace is emitted by this class because nothing else will. The
-            //       framework reports a STARTUP failure through its own analysers, but a throwable
-            //       raised after the context is running is reported by no framework path, so a
-            //       hard-failure tier without a trace would leave the failure-notification state with
-            //       nothing to route on.
+            //       the cause. The digest is BOUND TO A NAMED PLACEHOLDER rather than appended as the
+            //       facade's trailing throwable, which is what keeps the type chain and the frames
+            //       inside the same structured record as the job name and the business date instead of
+            //       arriving as a separate rendered stack the pipeline attributes to nothing.
+            // WHY : ⚠️ Refactoring Rationale: this paragraph said the throwable itself "is passed to
+            //       the logger as the LAST argument", and it was -- bound to the failureDigest={}
+            //       placeholder, where the facade renders it with String.valueOf and therefore with
+            //       Throwable.toString(): the type AND THE MESSAGE. So the very disclosure the
+            //       paragraph below argues against was being made under a parameter name that claimed
+            //       the opposite, and both statements stood in the same comment. The call now passes
+            //       ThrowableDigest.of(failure) and the claim is true.
+            // WHY : Assumptions: the type chain and the frames are emitted by this class because
+            //       nothing else will. The framework reports a STARTUP failure through its own
+            //       analysers, but a throwable raised after the context is running is reported by no
+            //       framework path, so a hard-failure tier with no fault information at all would
+            //       leave the failure-notification state with nothing to route on.
             // WHY : Refactoring Rationale: the throwable is NOT passed as a trailing argument. The
             //       facade renders a trailing throwable with its own message, every cause's message and
             //       the frames, and this is the generic boundary that fires for failures nobody
@@ -693,7 +700,7 @@ public class BatchApplication {
             //       failing library chose to quote.
             LOG.error("event=batch.job.failed code={} job={} businessDate={} fault={} failureDigest={}",
                     ERROR_CODE_JOB_FAILED, jobName, businessDate, failure.getClass().getName(),
-                    failure);
+                    ThrowableDigest.of(failure));
             // WHY : Assumptions: this path publishes with the no-step stand-in because it is reached
             //       when the job could not be STARTED -- an instance already running, parameters the
             //       job refuses, an instance that is not restartable -- or when a throwable escaped
@@ -720,8 +727,21 @@ public class BatchApplication {
             //       on this path -- see the guard below. After an Error the runtime may be unable to
             //       complete a normal shutdown, and an exit helper that itself fails would replace a
             //       reported hard failure with an unreported one.
-            LOG.error("event=batch.job.fatal code={} job={} businessDate={} fault={}",
-                    ERROR_CODE_FATAL, jobName, businessDate, fatal.getClass().getName(), fatal);
+            // WHY : ⚠️ Refactoring Rationale: the Error was passed as a FIFTH argument to a message
+            //       carrying four placeholders, so the facade treated it as the trailing throwable and
+            //       rendered its message, every cause's message and the frames. An Error's message is
+            //       composed by the runtime or by whatever library raised it -- a linkage fault names
+            //       the symbol it could not resolve, and an assertion carries whatever value the
+            //       failing code chose to quote -- so the channel is unbounded here for exactly the
+            //       reason it is unbounded in the arm above. The digest is bound to a named placeholder
+            //       instead, which keeps the type chain and the frames and drops the messages.
+            // WHY : Assumptions: the same digest treatment is applied on BOTH arms although only one of
+            //       them handles application faults. An Error reaching here has already crossed every
+            //       job, step, reader and writer in the run, so any of them may be in its cause chain
+            //       and the two arms cannot be assumed to differ in what their messages could contain.
+            LOG.error("event=batch.job.fatal code={} job={} businessDate={} fault={} failureDigest={}",
+                    ERROR_CODE_FATAL, jobName, businessDate, fatal.getClass().getName(),
+                    ThrowableDigest.of(fatal));
             // WHY : Assumptions: NO failure notification is published on this path, and the omission is
             //       deliberate rather than an oversight in the branch above. An Error means the RUNTIME
             //       failed -- exhausted memory, a linkage fault, a stack overflow -- so the same

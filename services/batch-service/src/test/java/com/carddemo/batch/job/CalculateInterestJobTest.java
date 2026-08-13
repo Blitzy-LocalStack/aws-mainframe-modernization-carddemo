@@ -44,6 +44,7 @@ import com.carddemo.common.codec.CopybookLayout;
 import com.carddemo.common.codec.ZonedDecimalCodec;
 import com.carddemo.common.money.Money;
 import java.io.IOException;
+import java.io.InputStream;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -229,6 +230,32 @@ class CalculateInterestJobTest {
     /** The domain directory the interest fixtures and expectations both live under. */
     private static final String INTEREST_DOMAIN = "interest";
 
+    /**
+     * The classpath prefix of this module's own committed interest fixture images.
+     *
+     * <p>Refactoring Rationale: the driving inputs were read from the parity oracle's
+     * {@code tests/fixtures/interest} tree and are now read from this module's own, which the build
+     * packages onto the test classpath. Two things were wrong with reaching outside. The module tree
+     * was committed and documented and READ BY NOTHING, so its scenarios were carried in the build as
+     * dead weight and a corruption in one of them would have reached a release unremarked. And a case
+     * whose inputs live outside its own module passes in a checkout where the module's inputs are
+     * missing, which is the opposite of what a module's test tree is for. The expectation files stay
+     * where they are, because those describe the REFERENCE and belong to the oracle; only the inputs
+     * moved. {@link #everyDrivingFixtureMatchesItsOracleDerivation} is what keeps the two trees
+     * agreeing now that only one of them is read.</p>
+     */
+    private static final String FIXTURE_INTEREST_ROOT = "fixtures/" + INTEREST_DOMAIN + "/";
+
+    /**
+     * The four driving inputs every interest scenario commits.
+     *
+     * <p>Assumptions: the list is declared once and used by both the parity case's reads and the
+     * provenance case's comparison, so a file added to the tree and consumed by the run cannot escape
+     * the drift check, and one named here and absent from the tree fails both.</p>
+     */
+    private static final List<String> DRIVING_FIXTURES =
+            List.of("acctdata.txt", "cardxref.txt", "discgrp.txt", "tcatbal.txt");
+
     /** The byte a fixed-width record file terminates each stored record with. */
     private static final byte LINE_FEED = 0x0A;
 
@@ -275,6 +302,16 @@ class CalculateInterestJobTest {
 
     /** The closing banner text, verbatim from {@code app/cbl/CBACT04C.cbl:230}. */
     private static final String END_BANNER_TEXT = "END OF EXECUTION OF PROGRAM CBACT04C";
+
+    /**
+     * The event name of the per-row observation that stands in for {@code CBACT04C.cbl:193}.
+     *
+     * <p>Assumptions: the event NAME is matched rather than the whole rendered line, because the line's
+     * remaining content -- ordinal, type code, category code -- is what the case then asserts field by
+     * field. Matching the full line would restate the assertion inside the filter and would fail for a
+     * reason the report could not distinguish from a missing row.</p>
+     */
+    private static final String ROW_READ_EVENT = "event=batch.interest.row-read";
 
     /** The low-value byte the reference leaves in the two pad regions of a generated record. */
     private static final byte LOW_VALUE = 0x00;
@@ -1028,20 +1065,30 @@ class CalculateInterestJobTest {
         }
 
         /**
-         * The finishing event counts every input row the walk read, and announces no other total.
+         * One observation is emitted per input row, in read order, and the closing event totals them.
          *
          * <p>Pins {@code app/cbl/CBACT04C.cbl:193}, whose {@code DISPLAY TRAN-CAT-BAL-RECORD} sits
          * inside the read loop immediately after {@code :192} increments the record count, so the
-         * reference emits exactly one observation per input category-balance row. Three rows are
-         * staged here and the finishing event reports three.</p>
+         * reference emits exactly one observation per input category-balance row, in the key order the
+         * indexed read returns. Three rows are staged here: three per-row events are asserted, in
+         * order, and the closing event is asserted to total three.</p>
          *
-         * <p>Assumptions: the migrated job reports that figure as ONE counted total rather than as one
-         * emitted line per row, and the difference is deliberate rather than an omission. The
-         * reference's per-row display exists because a fifty-byte record image dumped to SYSOUT was
-         * how a batch operator inspected a tape; a migrated task that emitted one log event per
-         * category-balance row would bill and page one line per row for a figure the single closing
-         * event already carries exactly. The COUNT is the parity-bearing part of {@code :193} and it
-         * is what is asserted.</p>
+         * <p>Refactoring Rationale: this case previously accepted the closing total ALONE and argued
+         * that the count was the parity-bearing part of {@code :193}. The count is not the whole of it:
+         * a total says how many rows were read and not which, and it cannot show that the walk visited
+         * them in key order or that it visited each exactly once -- which is what a reader following the
+         * reference's own trace uses the per-row lines for. The job now emits one event per row and this
+         * case asserts the cardinality and the ORDER, keeping the closing total as the separate claim it
+         * always was.</p>
+         *
+         * <p>Assumptions: the record's fifty BYTES are asserted ABSENT rather than present, and the
+         * absence is a governing rule rather than a gap this case tolerates.
+         * {@code TRAN-CAT-BAL-RECORD} carries {@code TRANCAT-ACCT-ID} and {@code TRAN-CAT-BAL}, and
+         * {@code docs/architecture/observability.md} requires a prohibited value to be OMITTED rather
+         * than abbreviated, naming the account identifier and every monetary amount among them. So the
+         * two protected values are asserted to appear in no emitted line, and the row's disclosable
+         * identity -- ordinal, type code, category code -- is asserted to appear in each. The divergence
+         * is registered as {@code D-INTEREST-ROW-DISPLAY-WITHHELD}.</p>
          *
          * <p>Assumptions: no processed-and-rejected counter pair is asserted, and its ABSENCE is
          * asserted instead. {@code CBACT04C} declares no reject stream and displays no counter pair
@@ -1052,7 +1099,7 @@ class CalculateInterestJobTest {
          * @throws Exception if the framework's own execution path raises, which no case here provokes
          */
         @Test
-        @DisplayName("the finishing event counts every input row and announces no counter pair")
+        @DisplayName("emit one observation per input row in read order, and total them at the close")
         void theFinishingEventCountsEveryRowItWalked() throws Exception {
             CalculateInterestJobTest.this.stageRows(
                     balanceRow(READABLE_ACCOUNT, TYPE_CODE, CATEGORY_CODE, CATEGORY_BALANCE),
@@ -1064,8 +1111,37 @@ class CalculateInterestJobTest {
             List<String> emitted = emittedWhile(
                     () -> CalculateInterestJobTest.this.run(BUSINESS_DATE));
 
+            List<String> perRow = emitted.stream()
+                    .filter(line -> line.contains(ROW_READ_EVENT))
+                    .toList();
+
+            // WHY : Assumptions: the per-row lines are filtered and then compared as an ORDERED list,
+            //       because both properties of :193 are at stake and each fails differently. A wrong
+            //       count means a row was skipped or visited twice; a wrong order means the walk did not
+            //       read in key order, which is what makes the control break correct. Asserting the
+            //       count alone would pass a walk that emitted the same three lines in any sequence.
+            assertThat(perRow)
+                    .as("one observation per input row the reference displays at :193")
+                    .hasSize(3);
+            assertThat(perRow.get(0)).contains("rowOrdinal=1", "typeCd=" + TYPE_CODE,
+                    "categoryCd=" + CATEGORY_CODE);
+            assertThat(perRow.get(1)).contains("rowOrdinal=2", "categoryCd=0002");
+            assertThat(perRow.get(2)).contains("rowOrdinal=3", "categoryCd=" + CATEGORY_CODE);
+
+            // WHY : Assumptions: the two protected values are asserted absent from EVERY emitted line
+            //       and not only from the per-row ones, because the disclosure rule is about the line a
+            //       group retains rather than about which statement wrote it. The account identifier is
+            //       searched for at its full declared width, which is the form the record carries it in.
+            String accountDigits = String.format("%011d", READABLE_ACCOUNT);
             assertThat(emitted)
-                    .as("one counted row per input row the reference would have displayed at :193")
+                    .as("the account identifier is omitted rather than abbreviated")
+                    .noneSatisfy(line -> assertThat(line).contains(accountDigits));
+            assertThat(emitted)
+                    .as("the balance the record carries is omitted from every line")
+                    .noneSatisfy(line -> assertThat(line).contains(CATEGORY_BALANCE));
+
+            assertThat(emitted)
+                    .as("the closing event totals the rows the walk read")
                     .anySatisfy(line -> assertThat(line).contains(END_BANNER_TEXT)
                             .contains("rows=3"));
 
@@ -1366,19 +1442,25 @@ class CalculateInterestJobTest {
      * than from offsets spelled here, so selecting the wrong layout would be a failure and not a
      * silent mismatch.</p>
      *
-     * <p>Assumptions: the interest layout also differs from the posting one in a padding rule, and it
-     * is the reason the comparison canonicalises the low-value byte on BOTH sides. Section 6.3 of that
-     * same contract measures that the interest program builds its description with {@code STRING} at
-     * {@code app/cbl/CBACT04C.cbl:485-489}, which writes only the characters it was given and leaves
-     * the remainder of the receiving field as the low values the record area held, whereas the posting
-     * program uses {@code MOVE} and space-pads; and section 6.1 measures the trailing pad of every
-     * committed transaction expectation as low values for the same reason, no statement in either
-     * program touching it. The shared fixed-width encoder rebuilds a dropped pad as blanks, which is
-     * correct for a codec with no record-specific padding knowledge, so the two images agree on every
-     * field and differ on ninety-six pad bytes. Mapping the low value to the blank on both sides is
-     * what closes that gap -- and the guard below asserts that every low value in the expectation
-     * lies inside one of those two pad regions, so the canonicalisation cannot mask a difference in a
-     * field that carries data.</p>
+     * <p>Refactoring Rationale: the comparison used to map every low-value byte to a blank on BOTH
+     * sides before comparing, and it no longer does -- the two pad regions are now reproduced instead of
+     * normalised away. Section 6.3 of that same contract measures that this program builds its
+     * description with {@code STRING} at {@code app/cbl/CBACT04C.cbl:485-489}, which writes only the
+     * characters it was given and leaves the remainder of the receiving field as the low values the
+     * record area held, whereas the posting program uses {@code MOVE} and space-pads; and section 6.1
+     * measures the trailing pad of every committed transaction expectation as low values for the same
+     * reason, no statement in either program touching it. The record mapper now writes both of those
+     * bytes, taking the description's from the layout the caller names, so the staged generation is
+     * compared BYTE FOR BYTE with only the two run-generated timestamp spans masked. The canonicalisation
+     * was a normalisation a reader had to trust; ninety-six bytes of every generated record are now
+     * asserted rather than mapped, and a downstream consumer reading the generation positionally sees
+     * the bytes this case compares.</p>
+     *
+     * <p>Assumptions: the guard that every low value in the expectation lies inside one of the two pad
+     * regions is KEPT even though nothing is canonicalised any more, because it pins a different
+     * property: that the two regions really are the only places the reference leaves a low value, which
+     * is what makes the mapper's two pad declarations complete rather than merely sufficient for these
+     * three scenarios.</p>
      */
     @Nested
     @DisplayName("the committed interest expectations")
@@ -1441,6 +1523,46 @@ class CalculateInterestJobTest {
         }
 
         /**
+         * Every input this module drives the accrual with is byte-identical to its oracle derivation.
+         *
+         * <p>This case exists because the case above stopped reading the oracle's fixture tree. The
+         * inputs are now this module's own copies on the test classpath, for the reasons recorded on
+         * {@link #FIXTURE_INTEREST_ROOT} -- and two byte-identical trees where only one is read is
+         * precisely the arrangement in which the unread one drifts. Section 2 of
+         * {@code services/batch-service/src/test/resources/fixtures/README.md} declares the module tree
+         * a derivation of the oracle's rather than an independent authoring, so the identity is a
+         * stated contract and this is where it is checked.</p>
+         *
+         * <p>Assumptions: the comparison is over RAW BYTES including the trailing newline, and nothing
+         * is normalised on either side. A derivation that agreed after normalisation would not be a
+         * derivation: the sign overpunches of section 3.3, the line-ending rule of section 3.8 and the
+         * trailing-newline rule of section 3.9 are all byte-level contracts, so any transformation
+         * applied before comparing would hide a drift in one of the three.</p>
+         *
+         * <p>Assumptions: the oracle file's existence is asserted rather than skipped over when
+         * absent. {@code tests/fixtures} is a committed, reference-only part of this repository, so its
+         * absence means an incomplete checkout, and a skip would report a green drift check that
+         * compared nothing.</p>
+         *
+         * @throws IOException if an oracle fixture cannot be read from the repository tree
+         */
+        @Test
+        @DisplayName("drive from inputs byte-identical to their reference-only derivation")
+        void everyDrivingFixtureMatchesItsOracleDerivation() throws IOException {
+            for (String scenario : SCENARIOS) {
+                for (String file : DRIVING_FIXTURES) {
+                    byte[] driven = moduleFixtureBytes(scenario, file);
+                    byte[] derivedFrom = Files.readAllBytes(oracleFile("fixtures", scenario, file));
+
+                    assertThat(driven)
+                            .as("this module's %s/%s against tests/fixtures/%s/%s/%s, byte for byte",
+                                    scenario, file, INTEREST_DOMAIN, scenario, file)
+                            .isEqualTo(derivedFrom);
+                }
+            }
+        }
+
+        /**
          * Compares the staged generation against the committed transaction expectation, record by
          * record.
          *
@@ -1470,9 +1592,9 @@ class CalculateInterestJobTest {
 
             for (int index = 0; index < expected.size(); index++) {
                 assertLowValuesOnlyInPadRegions(expected.get(index));
-                assertThat(canonicalisedForComparison(staged.get(index)))
+                assertThat(withRunGeneratedStampsMasked(staged.get(index)))
                         .as("record %d of the %s expectation", index, scenario)
-                        .isEqualTo(canonicalisedForComparison(expected.get(index)));
+                        .isEqualTo(withRunGeneratedStampsMasked(expected.get(index)));
             }
         }
 
@@ -1937,19 +2059,64 @@ class CalculateInterestJobTest {
     }
 
     /**
-     * Reads one committed fixture as fixed-width records under a named layout.
+     * Reads one of this module's own committed fixtures as fixed-width records under a named layout.
+     *
+     * <p>Assumptions: the resource is read from the CLASSPATH rather than from a repository-relative
+     * path, which is what makes it this module's own copy and not the oracle's. The reason the two are
+     * not interchangeable is recorded on {@link #FIXTURE_INTEREST_ROOT}.</p>
+     *
+     * <p>Assumptions: the bytes are decoded with {@code ISO_8859_1} and then measured against the
+     * layout's declared record length, exactly as the expectation reader beside this one does. A
+     * single-byte encoding is required rather than convenient -- section 3.3 of
+     * {@code services/batch-service/src/test/resources/fixtures/README.md} makes the low-order byte of
+     * every money field a sign overpunch, and a multi-byte decode would fold those bytes into
+     * replacement characters and shift every offset after them.</p>
      *
      * @param scenario the committed scenario directory the fixture belongs to
      * @param file the fixture file name inside that directory
      * @param layoutName the registry name whose declared record length every line must match
      * @return the records, one per line, each exactly the declared length; never {@code null}
-     * @throws IOException if the fixture cannot be read from the repository tree
      */
-    private static List<String> fixtureRecords(String scenario, String file, String layoutName)
-            throws IOException {
+    private static List<String> fixtureRecords(String scenario, String file, String layoutName) {
+        int reclen = CopybookLayout.layout(layoutName).reclen();
+        String resource = FIXTURE_INTEREST_ROOT + scenario + "/" + file;
+        List<String> records = new ArrayList<>();
+        for (String line : new String(moduleFixtureBytes(scenario, file), StandardCharsets.ISO_8859_1)
+                .split("\n", -1)) {
+            String record = line.endsWith("\r") ? line.substring(0, line.length() - 1) : line;
+            if (record.isEmpty()) {
+                continue;
+            }
+            assertThat(record)
+                    .as("record geometry of the committed fixture %s", resource)
+                    .hasSize(reclen);
+            records.add(record);
+        }
+        return records;
+    }
 
-        return fixedWidthRecords(oracleFile("fixtures", scenario, file),
-                CopybookLayout.layout(layoutName).reclen());
+    /**
+     * Reads one of this module's own committed fixture images from the test classpath.
+     *
+     * @param scenario the committed scenario directory the fixture belongs to
+     * @param file the fixture file name inside that directory
+     * @return the resource's bytes exactly as committed, never {@code null}
+     * @throws IllegalStateException if the resource is absent from the classpath, which means this
+     *     module's fixture tree and this class disagree about what is committed
+     */
+    private static byte[] moduleFixtureBytes(String scenario, String file) {
+        String resource = FIXTURE_INTEREST_ROOT + scenario + "/" + file;
+        try (InputStream stream =
+                CalculateInterestJobTest.class.getClassLoader().getResourceAsStream(resource)) {
+            if (stream == null) {
+                throw new IllegalStateException("the committed fixture " + resource
+                        + " is not on the test classpath, so this case has no input to drive");
+            }
+            return stream.readAllBytes();
+        } catch (IOException unreadable) {
+            throw new IllegalStateException(
+                    "the committed fixture " + resource + " could not be read as bytes", unreadable);
+        }
     }
 
     /**
@@ -2124,41 +2291,49 @@ class CalculateInterestJobTest {
     }
 
     /**
-     * Canonicalises one generated record so that only value-carrying bytes remain comparable.
+     * Masks the run-generated timestamp spans of one record so the rest can be compared byte for byte.
      *
-     * <p>Assumptions: two transformations are applied and no others. The spans of every field the
-     * chosen layout flags as a normalisable timestamp are blanked, which for the interest layout is
-     * BOTH twenty-six-character stamps; and the low value is mapped to the blank throughout, which
-     * reconciles the two pad regions the reference leaves as low values against the blank a
-     * fixed-width encode rebuilds a dropped pad with. Both transformations are applied to BOTH images,
-     * so neither side is favoured.</p>
+     * <p>Assumptions: ONE transformation is applied and no other. The spans of every field the chosen
+     * layout flags as a normalisable timestamp are blanked, which for the interest layout is BOTH
+     * twenty-six-character stamps, because {@code app/cbl/CBACT04C.cbl:496} reads the clock once and
+     * {@code :497-498} move that one value into both. Every other byte of the record -- including the
+     * seventy-six low values behind the description and the twenty in the trailing pad -- is compared as
+     * it stands.</p>
+     *
+     * <p>Refactoring Rationale: this method also mapped every low-value byte to a blank, which closed a
+     * gap between the reference's padding and a fixed-width encode that rebuilt a dropped pad as blanks.
+     * The gap is closed in the encoder instead, so the mapping is gone: a comparison that normalises a
+     * byte cannot tell a reader what a consumer of the generation will actually read at that offset,
+     * and ninety-six bytes of every record were inside the normalised set.</p>
      *
      * @param image one fixed-width record image, which is copied rather than modified in place
-     * @return the canonicalised copy, never {@code null}
+     * @return the copy with only the run-generated stamps blanked, never {@code null}
      */
-    private static byte[] canonicalisedForComparison(byte[] image) {
-        byte[] canonical = image.clone();
-        for (int index = 0; index < canonical.length; index++) {
-            if (canonical[index] == LOW_VALUE) {
-                canonical[index] = BLANK;
-            }
-        }
+    private static byte[] withRunGeneratedStampsMasked(byte[] image) {
+        byte[] masked = image.clone();
         for (CopybookLayout.FieldSpec field : CopybookLayout.layout(INTEREST_LAYOUT).fields()) {
             if (field.normalizeTs()) {
-                Arrays.fill(canonical, field.start(), field.end(), BLANK);
+                Arrays.fill(masked, field.start(), field.end(), BLANK);
             }
         }
-        return canonical;
+        return masked;
     }
 
     /**
      * Asserts that the committed record carries low values only where the reference leaves them.
      *
-     * <p>Assumptions: this guard is what keeps the canonicalisation above honest. Mapping the low
-     * value to the blank would mask a real difference if a low value ever appeared in a field that
-     * carries data, so the two regions where the reference leaves one are named and every other
-     * position is required to be free of it: the description, whose tail {@code STRING} never writes,
-     * and the trailing pad, which no statement in the program touches.</p>
+     * <p>Assumptions: this guard is what makes the encoder's two pad declarations COMPLETE rather than
+     * merely sufficient. The mapper writes a low value in exactly two regions -- the description's tail,
+     * which {@code STRING} never writes, and the trailing pad, which no statement in the program
+     * touches -- so every low value the reference actually emits must lie inside one of them. A
+     * committed record carrying one anywhere else would mean a third region exists that the encoder
+     * blank-fills, which is a difference the byte-for-byte comparison would report without saying
+     * why.</p>
+     *
+     * <p>Refactoring Rationale: the guard previously existed to keep a canonicalisation honest, by
+     * proving that mapping the low value to the blank could not mask a difference in a field carrying
+     * data. Nothing is canonicalised any more, so the reason is restated rather than the guard being
+     * removed with the mapping: the property it pins outlives the mapping it was written for.</p>
      *
      * @param image one committed record image, read and never modified
      */
@@ -2176,8 +2351,8 @@ class CalculateInterestJobTest {
             boolean insidePad = index >= trailingPad.start() && index < trailingPad.end();
             assertThat(insideDescription || insidePad)
                     .as("byte %d of the committed record is a low value outside the description and"
-                            + " the trailing pad, so canonicalising it would mask a data difference",
-                            index)
+                            + " the trailing pad, so a third pad region exists that the encoder"
+                            + " blank-fills", index)
                     .isTrue();
         }
     }

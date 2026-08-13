@@ -507,6 +507,42 @@ public record PageResponse<T>(
     }
 
     /**
+     * Renders this envelope for a diagnostic as its shape, never as its rows.
+     *
+     * <p>⚠️ Purpose: the generated rendering of a record calls {@code toString} on every component, and
+     * one component of this one is a LIST OF ROWS. So a page of card summaries, account rows or
+     * authorization details rendered itself in full the moment anything interpolated it -- a log
+     * statement, an assertion message, a debugger's variable pane, a framework diagnostic reporting an
+     * unrelated failure. Every value the response contract masks or withholds is present on those rows
+     * before the writer sees them, so the recursion reached primary account numbers, customer names,
+     * addresses and amounts. This override is what stops that being one interpolation away.</p>
+     *
+     * <p>⚠️ Assumptions: the ROW COUNT is reported and the rows are not, because the count is what a
+     * diagnostic about paging actually needs -- whether the page came back empty, full or short -- and
+     * it is a fact about the query rather than about a cardholder. The two cursor components are
+     * reported only as PRESENT or ABSENT rather than by value: a sealed token discloses nothing by
+     * construction, but it is long, opaque and identifies one row, so a log store holding it for the
+     * retention period gains a row identifier and a reader gains nothing they can act on.</p>
+     *
+     * <p>Alternatives Considered: rendering the rows through a per-row safe renderer instead of omitting
+     * them, which would keep the diagnostic informative. Rejected because this type is generic: it
+     * cannot know that its element type has a safe rendering, and a type that does not would fall back
+     * to the generated one -- so the control would hold for the rows that had been thought about and
+     * fail silently for the next element type added. Omission is the only form of the guarantee that
+     * cannot be undone from outside this file.</p>
+     *
+     * @return a single line naming the row count, whether each boundary is present, and whether a
+     *     further page follows; never {@code null} and never any part of a row
+     */
+    @Override
+    public String toString() {
+        return "PageResponse[rows=" + this.items.size()
+                + ", firstKey=" + (this.firstKey == null ? "absent" : "present")
+                + ", lastKey=" + (this.lastKey == null ? "absent" : "present")
+                + ", hasNext=" + this.hasNext + "]";
+    }
+
+    /**
      * Collapses every spelling of an absent cursor token onto {@code null}, leaving a present token
      * untouched.
      *

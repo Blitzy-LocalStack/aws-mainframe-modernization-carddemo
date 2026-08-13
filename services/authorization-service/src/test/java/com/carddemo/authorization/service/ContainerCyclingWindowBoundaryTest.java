@@ -7,6 +7,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -34,8 +35,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.TreeSet;
+import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -45,8 +48,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.health.contributor.Status;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.test.util.ReflectionTestUtils;
 
 /**
  * Asserts the reopen contract of the PRODUCTION window boundary, including under concurrent deliveries.
@@ -146,23 +151,41 @@ class ContainerCyclingWindowBoundaryTest {
     private ContainerCyclingWindowBoundary boundary;
 
     /**
+     * Whether the substituted container currently reports itself running.
+     *
+     * <p>Assumptions: held as an atomic because the boundary reads it from its own cycling thread while a
+     * case may be arranging it from the test thread.</p>
+     */
+    private AtomicBoolean running;
+
+    /**
      * Builds a boundary over a mocked registry whose container records its stop and start.
      */
     @BeforeEach
     void setUp() {
         this.steps = Collections.synchronizedList(new ArrayList<>());
+        this.running = new AtomicBoolean();
         this.registry = mock(MessageListenerContainerRegistry.class);
         this.container = mock(MessageListenerContainer.class);
         when(this.registry.getContainerById(ContainerCyclingWindowBoundary.REQUEST_CONTAINER_ID))
                 .thenAnswer(invocation -> this.container);
         doAnswer(invocation -> {
-            this.steps.add("stop");
-            return null;
-        }).when(this.container).stop();
-        doAnswer(invocation -> {
             this.steps.add("start");
+            this.running.set(true);
             return null;
         }).when(this.container).start();
+        // WHY : ⚠️ Assumptions: the substitute REPORTS ITS OWN RUNNING STATE, and it has to, because the
+        //   boundary now confirms the restart through `isRunning()` rather than inferring it from `start()`
+        //   returning. A substitute left with the default answer reports not running forever, so every case
+        //   here would exercise the exhausted-restart path -- which is the opposite of what most of them
+        //   are about. Tying the flag to the stubbed calls keeps one arrangement honest for both outcomes:
+        //   a case that makes `start()` throw leaves the flag false without saying so separately.
+        when(this.container.isRunning()).thenAnswer(invocation -> this.running.get());
+        doAnswer(invocation -> {
+            this.steps.add("stop");
+            this.running.set(false);
+            return null;
+        }).when(this.container).stop();
         this.boundary = new ContainerCyclingWindowBoundary(this.registry);
     }
 
@@ -226,12 +249,17 @@ class ContainerCyclingWindowBoundaryTest {
     }
 
     /**
-     * A stop that throws still reopens, because nothing was closed and intake is open in fact.
+     * A stop that throws still reopens, because the start still leaves the listener running.
      *
      * <p>Assumptions: this is the case the interface's own contract names — an implementation that cannot
      * close the window must leave intake OPEN and report the failure. Leaving the accounting closed instead
      * would charge every later admission as overspill of a window that had ended, and the bound would never
      * be re-armed.</p>
+     *
+     * <p>Assumptions: the reopen survives here for a REASON that outlives the failure, not by a guard. A
+     * refused stop leaves the container running, the start that follows it is a no-op on a running
+     * container, and the confirmation therefore succeeds -- so the restart is confirmed and the reopen
+     * follows from the ordinary success path rather than from a rule about failures.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      *
@@ -240,67 +268,164 @@ class ContainerCyclingWindowBoundaryTest {
     @Test
     @DisplayName("a stop that throws still reopens intake, and still attempts the start")
     void aFailedStopStillReopens() throws InterruptedException {
+        // Assumptions: the container is arranged as ALREADY RUNNING, which is the state a refused stop
+        //   leaves it in. Arranging it stopped would be describing a different failure.
+        this.running.set(true);
         doThrow(new IllegalStateException("stop refused")).when(this.container).stop();
         CountDownLatch reopened = new CountDownLatch(1);
 
         this.boundary.onWindowComplete(0L, WINDOW_ADMISSIONS, reopened::countDown);
-        assertThat(reopened.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+        assertThat(reopened.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
         this.boundary.destroy();
 
         verify(this.container).start();
+        assertThat(this.boundary.health().getStatus())
+                .as("a cycle whose listener is running must not report the service down")
+                .isEqualTo(Status.UP);
     }
 
     /**
-     * A start that throws still reopens, so the accounting is not left waiting on a container that is down.
+     * A start that never leaves the listener running reports the service DOWN and does not reopen.
      *
-     * <p>Assumptions: a container that failed to start accepts no requests, so nothing will be admitted
-     * either way. The reopen still matters, because a later manual or automatic recovery must find the
-     * accounting armed rather than stuck reporting overspill of a window that closed long before.</p>
+     * <p>⚠️ Refactoring Rationale: this case asserted the opposite -- that a failed start STILL reopened
+     * intake -- and the reasoning it carried was that a container which cannot start accepts no requests,
+     * so nothing would be admitted either way and an armed accounting would help a later recovery. The
+     * first half is true and the conclusion does not follow from it. Reopening produced a task that was
+     * completely inert and completely healthy: the listener consumed nothing, the accounting reported an
+     * open window over it, the readiness probe passed, and one log line was the only evidence anywhere.
+     * There was no later recovery to find the accounting armed, because nothing retried and nothing
+     * reported. The contract is now that an unconfirmed restart leaves admission closed and the health
+     * contribution down, so the orchestrator replaces the task.</p>
+     *
+     * <p>Assumptions: the restart is attempted the bounded number of times before the verdict, so the
+     * assertion on the attempt count is part of the same property -- a single attempt would report down on
+     * a transient failure that the second attempt would have cleared.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      *
      * @throws InterruptedException if the wait for the cycle is interrupted
      */
     @Test
-    @DisplayName("a start that throws still reopens intake")
-    void aFailedStartStillReopens() throws InterruptedException {
+    @DisplayName("a start that never runs reports health down and leaves admission closed")
+    void aFailedStartReportsDownAndDoesNotReopen() throws InterruptedException {
         doThrow(new IllegalStateException("start refused")).when(this.container).start();
         CountDownLatch reopened = new CountDownLatch(1);
 
         this.boundary.onWindowComplete(0L, WINDOW_ADMISSIONS, reopened::countDown);
+        this.boundary.destroy();
 
-        assertThat(reopened.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+        assertThat(reopened.getCount())
+                .as("admission must stay closed while the listener is not running")
+                .isEqualTo(1L);
+        verify(this.container, times(ContainerCyclingWindowBoundary.START_ATTEMPTS)).start();
+        assertThat(this.boundary.health().getStatus())
+                .as("a stopped listener that cannot be restarted is a broken task, not a healthy one")
+                .isEqualTo(Status.DOWN);
     }
 
     /**
-     * An unregistered container still reopens, rather than leaving the accounting closed forever.
+     * A restart that succeeds on a later attempt reopens intake and leaves the service healthy.
      *
-     * <p>Assumptions: this path RETURNS early, which is exactly why the reopen is guaranteed by a
-     * {@code finally} guard rather than by a statement on the normal path. A return that skipped the reopen
-     * would be the one failure mode with no recovery: nothing would ever reopen the window, because nothing
-     * else calls the callback.</p>
+     * <p>Assumptions: this is the case the bound exists for, and it is asserted beside the exhaustion case
+     * because the two together are what make the bound meaningful. Without this one, an implementation that
+     * gave up after the first attempt would satisfy every other assertion here.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      *
      * @throws InterruptedException if the wait for the cycle is interrupted
      */
     @Test
-    @DisplayName("an unregistered container still reopens intake")
-    void anUnregisteredContainerStillReopens() throws InterruptedException {
+    @DisplayName("a restart that succeeds on the second attempt reopens intake")
+    void aRetriedStartReopens() throws InterruptedException {
+        AtomicInteger attempts = new AtomicInteger();
+        doAnswer(invocation -> {
+            this.steps.add("start");
+            if (attempts.incrementAndGet() >= 2) {
+                this.running.set(true);
+            }
+            return null;
+        }).when(this.container).start();
+        CountDownLatch reopened = new CountDownLatch(1);
+
+        this.boundary.onWindowComplete(0L, WINDOW_ADMISSIONS, reopened::countDown);
+
+        assertThat(reopened.await(WAIT_SECONDS, TimeUnit.SECONDS))
+                .as("a listener running again must reopen the window it closed")
+                .isTrue();
+        this.boundary.destroy();
+        assertThat(attempts.get()).isEqualTo(2);
+        assertThat(this.boundary.health().getStatus()).isEqualTo(Status.UP);
+    }
+
+    /**
+     * A window that recovers clears a health-down left by the window before it.
+     *
+     * <p>Assumptions: asserted because a latching flag would be the easy implementation and the wrong one.
+     * A task reporting down beside a listener that is demonstrably consuming sends an operator looking for
+     * a fault that has already cleared, and it would be replaced on the next health check for no reason.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     *
+     * @throws InterruptedException if the wait for either cycle is interrupted
+     */
+    @Test
+    @DisplayName("a later successful cycle clears the health-down an earlier failure set")
+    void aRecoveredCycleClearsTheHealthDown() throws InterruptedException {
+        doThrow(new IllegalStateException("start refused")).when(this.container).start();
+        this.boundary.onWindowComplete(0L, WINDOW_ADMISSIONS, () -> { });
+        // Assumptions: the cycler is drained by waiting for a second submitted task to run, because the
+        //   verdict is written on that thread and reading health before it lands would race.
+        awaitCycler();
+        assertThat(this.boundary.health().getStatus()).isEqualTo(Status.DOWN);
+
+        doAnswer(invocation -> {
+            this.steps.add("start");
+            this.running.set(true);
+            return null;
+        }).when(this.container).start();
+        CountDownLatch reopened = new CountDownLatch(1);
+        this.boundary.onWindowComplete(1L, WINDOW_ADMISSIONS, reopened::countDown);
+
+        assertThat(reopened.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
+        assertThat(this.boundary.health().getStatus()).isEqualTo(Status.UP);
+    }
+
+    /**
+     * An unregistered container reports the service DOWN rather than reopening a window over nothing.
+     *
+     * <p>⚠️ Refactoring Rationale: this case asserted that an unregistered container STILL reopened intake,
+     * on the reasoning that a window nothing can reopen halts every authorization in the system. The
+     * premise was right and the remedy addressed the wrong half: reopening the window does not give the
+     * task a listener, so what it produced was a task with no listener at all, an armed accounting, and a
+     * passing readiness probe. A container missing from the registry is a wiring fault, and the only useful
+     * outcome is for the task to be replaced -- which is what the down contribution now causes. The halt
+     * this case was written to prevent is real, and it is now signalled instead of hidden.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     *
+     * @throws InterruptedException if the wait for the cycle is interrupted
+     */
+    @Test
+    @DisplayName("an unregistered container reports health down and reopens nothing")
+    void anUnregisteredContainerReportsDown() throws InterruptedException {
         when(this.registry.getContainerById(ContainerCyclingWindowBoundary.REQUEST_CONTAINER_ID))
                 .thenReturn(null);
         CountDownLatch reopened = new CountDownLatch(1);
 
         List<String> lines = capturingBoundaryLog(() -> {
             this.boundary.onWindowComplete(0L, WINDOW_ADMISSIONS, reopened::countDown);
-            assertThat(reopened.await(WAIT_SECONDS, TimeUnit.SECONDS))
-                    .as("a window nothing can reopen halts every authorization in the system")
-                    .isTrue();
-            // WHY : Assumptions: the executor is DRAINED before the captured lines are read. The latch
-            //       above is released from the reopen callback, which the implementation runs in a
-            //       finally block AFTER the skip line is written, so the drain is belt and braces here
-            //       rather than load-bearing -- but the start-failure case below genuinely needs it, so
-            //       both cases read the log the same way.
+            awaitCycler();
+            assertThat(reopened.getCount())
+                    .as("a window with no listener behind it must not be reported as open")
+                    .isEqualTo(1L);
+            assertThat(this.boundary.health().getStatus())
+                    .as("a task that cannot resolve its own listener is broken")
+                    .isEqualTo(Status.DOWN);
+            // WHY : Assumptions: the executor is DRAINED before the captured lines are read, and the
+            //       drain is now load-bearing rather than belt and braces. This path reopens NOTHING, so
+            //       there is no callback to wait on and no latch that could stand in for the cycle having
+            //       finished -- the skip line and the health verdict are both written on the cycler
+            //       thread, so reading either before the drain would race with the thread writing it.
             this.boundary.destroy();
         });
 
@@ -588,14 +713,21 @@ class ContainerCyclingWindowBoundaryTest {
         List<String> order = new CopyOnWriteArrayList<>();
         List<String> threads = new CopyOnWriteArrayList<>();
         CountDownLatch bothStarted = new CountDownLatch(2);
+        // WHY : Assumptions: these substitutes maintain the SAME running flag the shared arrangement does,
+        //   because the boundary confirms each restart through `isRunning()`. A local stub that left the
+        //   flag alone would report the container stopped after every start, so the boundary would retry
+        //   within its bound and the recorded order would be the retries rather than the two windows this
+        //   case is about.
         doAnswer(call -> {
             threads.add(Thread.currentThread().getName());
             order.add("stop");
+            this.running.set(false);
             return null;
         }).when(this.container).stop();
         doAnswer(call -> {
             threads.add(Thread.currentThread().getName());
             order.add("start");
+            this.running.set(true);
             bothStarted.countDown();
             return null;
         }).when(this.container).start();
@@ -632,10 +764,15 @@ class ContainerCyclingWindowBoundaryTest {
         doAnswer(call -> {
             reachedStop.countDown();
             releaseStop.await(WAIT_SECONDS, TimeUnit.SECONDS);
+            this.running.set(false);
             return null;
         }).when(this.container).stop();
+        // Assumptions: the start marks the container running for the reason recorded on the serial-cycle
+        //   case -- the boundary confirms the restart, so a substitute that never reports running would
+        //   turn this case's single start into three.
         doAnswer(call -> {
             reopened.set(true);
+            this.running.set(true);
             return null;
         }).when(this.container).start();
 
@@ -649,6 +786,31 @@ class ContainerCyclingWindowBoundaryTest {
                 .as("a disposal that did not wait could leave the container stopped between the pair")
                 .isTrue();
         verify(this.container).start();
+    }
+
+    /**
+     * Waits for the boundary's single cycling thread to reach the end of the work already submitted.
+     *
+     * <p>Purpose: the cases that assert on a path which reopens NOTHING have no callback to wait on, so
+     * they need a way to know the cycle has finished. Submitting a task of our own to the same
+     * single-threaded executor and waiting for it is that way: it cannot run until everything queued
+     * before it has.</p>
+     *
+     * <p>⚠️ Assumptions: reached by reflection over the boundary's private executor rather than by adding
+     * an accessor for tests. The alternative was polling the health contribution until it changed, which
+     * asserts nothing about the cycle having FINISHED -- the verdict is written before the method returns,
+     * so a poll that saw it could still race the log line these cases read. An accessor widening
+     * production API for a test's benefit was the other option and is the one this codebase declines.</p>
+     *
+     * @throws InterruptedException if the wait is interrupted
+     */
+    private void awaitCycler() throws InterruptedException {
+        ExecutorService cycler = (ExecutorService) ReflectionTestUtils.getField(this.boundary, "cycler");
+        CountDownLatch drained = new CountDownLatch(1);
+        Objects.requireNonNull(cycler, "the boundary holds a cycling executor").execute(drained::countDown);
+        assertThat(drained.await(WAIT_SECONDS, TimeUnit.SECONDS))
+                .as("the boundary's cycling thread did not reach the end of its queued work")
+                .isTrue();
     }
 
     /**

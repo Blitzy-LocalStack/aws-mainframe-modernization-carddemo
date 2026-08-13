@@ -29,6 +29,7 @@ import java.lang.reflect.Modifier;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.stream.Stream;
@@ -1649,6 +1650,77 @@ class TransactionAddServiceTest {
         assertThat(answer.transactionId().length())
                 .as("the key column is sixteen characters, per line 5 of the record contract")
                 .isEqualTo(TransactionAddService.TRANSACTION_ID_WIDTH);
+    }
+
+    /**
+     * The identifier is ASCII digits even when the JVM's default locale numbers differently.
+     *
+     * <p>Purpose: {@code String.format} without a locale renders integral decimal conversions with the
+     * DEFAULT locale, and a locale whose numbering system is not Latin substitutes its own digits. The
+     * identifier this service allocates is stored in {@code TRAN-ID}, declared {@code PIC X(16)} at
+     * line 5 of {@code app/cpy/CVTRA05Y.cpy} and carried as a {@code CHAR(16)} key, so a localised
+     * rendering produces a key that no equality comparison can match, no fixed-width codec can decode
+     * and no sibling context can resolve -- while nothing raises.</p>
+     *
+     * <p>Assumptions: the case is parameterised over TWO numbering systems rather than one, because the
+     * two substitute different characters from different Unicode blocks and a fix that happened to
+     * normalise one would not necessarily normalise the other. Devanagari and Arabic-Indic digits were
+     * both confirmed to be substituted by this toolchain before the case was written.</p>
+     *
+     * <p>Assumptions: the assertion is on the ASCII digit range CHARACTER BY CHARACTER as well as on
+     * equality with the expected identifier. Equality alone would be enough today, and the range check
+     * is what makes the failure message name the defect -- a reader seeing sixteen unfamiliar
+     * characters in an equality diff has to recognise the script before they can act on it.</p>
+     *
+     * <p>Trade-offs: the case mutates the JVM-wide default locale, which is global state, and restores
+     * it in a {@code finally} block. That is accepted because the defect is a property OF the default
+     * locale and cannot be exercised without setting one; the alternative -- injecting a locale into the
+     * service -- would test a seam that only exists for the test and would leave the real call site,
+     * which takes no locale from anywhere, unasserted.</p>
+     *
+     * <p>Assumptions: the cross-reference read is stubbed PERMISSIVELY here rather than through
+     * {@code accountResolvesTo}, and the reason is measured rather than stylistic. The ACCOUNT KEY is
+     * rendered by the same method as the identifier, so under a non-Latin default locale it reaches the
+     * lookup localised and a stub keyed on the ASCII value matches nothing -- which made the case fail
+     * as a Mockito stubbing mismatch, evidence of the defect but not a message anybody could act on.
+     * Stubbing the read for any key lets the localised value travel far enough for the failure to name
+     * itself.</p>
+     *
+     * <p>Assumptions: this case has been RUN against the defect, not merely written for it. With the
+     * locale argument removed from {@code zeroPadded}, it fails with
+     * {@code IllegalArgumentException: transactionId must hold digits only, because the reference field
+     * is tested numeric before it is used as a key} -- raised by the response type's own construction
+     * guard, before the assertions below are reached. So the defect is caught twice over: by that guard
+     * for the identifier, and by the assertions here for anything the guard would let past.</p>
+     */
+    @Test
+    @DisplayName("the allocated identifier is ASCII digits under a non-Latin default locale")
+    void theAllocatedIdentifierIsAsciiUnderANonLatinDefaultLocale() {
+        Locale original = Locale.getDefault();
+        try {
+            for (String tag : List.of("hi-IN-u-nu-deva", "ar-SA-u-nu-arab")) {
+                Locale.setDefault(Locale.forLanguageTag(tag));
+                when(this.accounts.findCardXrefByAccountId(any()))
+                        .thenReturn(Optional.of(
+                                new AccountContextClient.CardXref(ACCOUNT_ID, RESOLVED_CARD_NUMBER)));
+                theAllocatorAnswersWith(ALLOCATED_FIRST);
+                theAppendEchoesTheRow();
+                writeSpanRunsInline();
+
+                TransactionAddResponse answer =
+                        appended(this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")));
+
+                assertThat(answer.transactionId().chars().allMatch(c -> c >= '0' && c <= '9'))
+                        .as("under default locale %s the identifier must be ASCII digits, but was %s",
+                                tag, answer.transactionId())
+                        .isTrue();
+                assertThat(answer.transactionId())
+                        .as("under default locale %s the identifier must be unchanged", tag)
+                        .isEqualTo(FIRST_IDENTIFIER);
+            }
+        } finally {
+            Locale.setDefault(original);
+        }
     }
 
     /**

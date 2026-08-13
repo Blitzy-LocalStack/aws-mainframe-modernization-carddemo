@@ -84,7 +84,7 @@ import org.springframework.transaction.PlatformTransactionManager;
  * only behaviour that satisfies both committed forms, which is why the raw accessor is used and the
  * normalising one is deliberately not.</p>
  *
- * <h2>The accrual arithmetic multiplies first and then truncates</h2>
+ * <h2>The accrual arithmetic multiplies first and then reduces once</h2>
  *
  * <p>Assumptions: {@code app/cbl/CBACT04C.cbl:464-465} is
  * {@code COMPUTE WS-MONTHLY-INT = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200}, and the parenthesised product
@@ -93,14 +93,15 @@ import org.springframework.transaction.PlatformTransactionManager;
  * re-expressed here. Dividing first would reduce the intermediate to two decimals and then scale it up
  * again, which yields a different number of cents on many inputs.</p>
  *
- * <p>Trade-offs: the division TRUNCATES rather than rounding half up, which is the one place this module
- * departs from its own shared default. A search for {@code ROUNDED} across all 652 lines of the
- * reference returns nothing, and COBOL truncates an untagged {@code COMPUTE}, so
- * {@code Money.BASELINE_INTEREST_ROUNDING} is {@link java.math.RoundingMode#DOWN} where
- * {@code Money.GENERAL_ROUNDING} is {@link java.math.RoundingMode#HALF_UP}. The compromise accepted is
- * that this one formula reads inconsistently with every other money operation in the module; the
- * alternative -- rounding half up for consistency -- would credit an extra cent on any balance and rate
- * whose exact quotient carries a third decimal, and the committed goldens would show it.</p>
+ * <p>Trade-offs: the division reduces half up under {@code Money.GENERAL_ROUNDING}, the one mode the
+ * shared money type declares, and the reference would reduce it differently. A search for
+ * {@code ROUNDED} across all 652 lines of the reference returns nothing and an untagged COBOL
+ * {@code COMPUTE} discards its surplus digits, so on a quotient landing exactly on a half cent the
+ * reference credits one cent less than this job does. The cost is accepted because transformation rule
+ * T3 names half up for the money path and states no exception for the accrual, and it is recorded as
+ * divergence {@code C-ROUNDING} in {@code docs/architecture/cobol-to-service-traceability.md} rather
+ * than absorbed. What that buys is one money contract across the module: a reader does not have to
+ * establish which of two modes governs the formula in front of them.</p>
  *
  * <h2>Where the generated transactions go, and the three datasets not to confuse</h2>
  *
@@ -415,6 +416,32 @@ public class CalculateInterestJob {
         accrual.rowsRead++;
         Long accountId = row.getId().getAccountId();
 
+        // WHY : Assumptions: ONE event is emitted per input row, immediately after the row is counted,
+        //       because app/cbl/CBACT04C.cbl:193 places DISPLAY TRAN-CAT-BAL-RECORD inside the read loop
+        //       directly after :192 increments the record count -- so the reference emits one observation
+        //       per category balance, in key order, and that cardinality and that ordering are the
+        //       parity-bearing properties of the statement. A run's closing total alone cannot carry
+        //       them: it says how many rows were read and not which, and an operator following the
+        //       reference's own trace has one line per row to follow.
+        // WHY : Trade-offs: the record's fifty BYTES are NOT emitted, and the omission is a governing
+        //       rule of this migration rather than a choice made here. TRAN-CAT-BAL-RECORD carries
+        //       TRANCAT-ACCT-ID and TRAN-CAT-BAL, and docs/architecture/observability.md requires that a
+        //       prohibited value be OMITTED rather than abbreviated, naming the account identifier and
+        //       every monetary amount among them; a digest is refused there on the same page, because
+        //       eleven digits is a space an adversary can enumerate. What is emitted is the row's
+        //       disclosable identity -- its transaction type code, its category code and its ordinal in
+        //       this pass's ordered read -- which locates the row for a reader holding the input without
+        //       disclosing whose it is. The divergence is registered as
+        //       D-INTEREST-ROW-DISPLAY-WITHHELD in
+        //       docs/architecture/cobol-to-service-traceability.md section 7.4.
+        // WHY : Alternatives Considered: emitting the fifty bytes at a lower log level, which is the
+        //       obvious way to have both. Rejected because the disclosure rule is about what a retained
+        //       line HOLDS and not about which level wrote it -- every level lands in the same group with
+        //       the same retention -- so a debug-level dump would be the same disclosure with a smaller
+        //       audience.
+        LOG.info("event=batch.interest.row-read rowOrdinal={} typeCd={} categoryCd={}",
+                accrual.rowsRead, row.getId().getTypeCd(), row.getId().getCategoryCd());
+
         if (!accountId.equals(accrual.openAccountId)) {
             flushOpenAccount(accrual);
             accrual.openTo(accountId, this.interest.loadAccount(accountId));
@@ -509,17 +536,16 @@ public class CalculateInterestJob {
         //       The delegate multiplies at full precision and only then divides with an explicit scale
         //       and rounding mode; dividing first would round the intermediate to two decimals and then
         //       scale it back up, which lands on a different cent for many balance-and-rate pairs.
-        // WHY : Trade-offs: the delegate truncates rather than rounding half up, which contradicts the
-        //       shared money type's own general default and is correct here. The reference carries no
-        //       ROUNDED phrase anywhere in its 652 lines, and an untagged COBOL COMPUTE truncates, so
-        //       the accrual path uses the DOWN mode the shared type publishes for exactly this baseline
-        //       while every other money operation in the module keeps HALF_UP. The inconsistency is
-        //       accepted deliberately: a reader who knows the general default will otherwise read this
-        //       as a bug, and rounding half up "for consistency" would credit an extra cent whenever the
-        //       exact quotient carries a third decimal.
-        // WHY : Assumptions: the per-row value is accumulated ALREADY TRUNCATED, because :467 adds
+        // WHY : Trade-offs: the delegate reduces half up, under the one mode the shared money type
+        //       declares, and the reference would reduce this quotient by discarding its surplus digits
+        //       -- it carries no ROUNDED phrase anywhere in its 652 lines. On a quotient landing exactly
+        //       on a half cent the reference therefore credits a cent less. That difference is accepted
+        //       because transformation rule T3 states half up for the money path without exception, and
+        //       it is registered as divergence C-ROUNDING with the accrual's parity evidence rather than
+        //       removed by applying a second mode here.
+        // WHY : Assumptions: the per-row value is accumulated ALREADY REDUCED, because :467 adds
         //       WS-MONTHLY-INT after the preceding statement has stored it into PIC S9(09)V99. The
-        //       account increment is therefore the sum of the truncated terms and not the truncation of
+        //       account increment is therefore the sum of the reduced terms and not the reduction of
         //       their sum, and the two differ by cents on a multi-category account.
         Money accrued = this.interest.monthlyInterest(Money.of(row.getBalance()), lookup);
         accrual.total = accrual.total.plus(accrued);

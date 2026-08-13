@@ -81,6 +81,7 @@
 
 import { useCallback, useEffect, useReducer, useRef } from 'react';
 
+import { isApiError, isApiRequestError } from '../api/client';
 import type { ApiError, PageDirection, PageResponse } from '../api/types';
 
 /**
@@ -109,19 +110,33 @@ export interface PagedQueryRequest {
    *
    * Assumptions: opaque. It is replayed to the service byte for byte and is never parsed, split,
    * compared with another cursor or rebuilt from a row. What a cursor seals differs per browse and is
-   * none of this module's business, and the reference shows exactly how easy it would be to get wrong
-   * -- its card browse position is a composite twenty-seven characters wide, a sixteen-character card
-   * number followed by an eleven-digit account identifier in physical key order at
-   * `app/cbl/COCRDLIC.cbl` L230 to L232, while the row that same screen DISPLAYS is a twenty-eight
-   * character group in the opposite order at L258 to L260: account number, then card number, then a
-   * card status in its twenty-eighth character, which belongs to no key at all. Reading one as the
-   * other would page in the wrong sequence. The remaining browses seal scalars of three further
-   * widths -- sixteen characters at `app/cbl/COTRN00C.cbl` L63 to L64, eight at
-   * `app/cbl/COUSR00C.cbl` L68 to L69 and two at
-   * `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` L399 and L401 -- so one text member serves all
-   * four shapes and no key type parameter is introduced for any of them. `ui/src/api/types.ts`
-   * records that the service seals the DIRECTION into the token as well, so a token replayed the
-   * other way is refused with HTTP 400 rather than answered with the wrong page.
+   * none of this module's business.
+   *
+   * Refactoring Rationale: what the card browse's cursor seals is the SINGLE sixteen-character card
+   * number, and the twenty-seven-character composite cited here before is the reference's own
+   * COMMAREA record identifier rather than the target's position -- the two are recorded apart because
+   * conflating them is what a reader would otherwise carry away.
+   * `services/card-service/src/main/java/com/carddemo/card/service/CardListService.java` states at L425
+   * to L437 that the keyset predicate is that one card number in both directions and never a composite
+   * of it with the account identifier, and it gives the evidence from three independent places: all six
+   * record identifiers of the reference browse pass the length of the `X(16)` member alone rather than
+   * the enclosing group, every statement that would have added the account identifier is commented out,
+   * and the cluster definition agrees from outside the program with `KEYS(16 0)` at
+   * `app/jcl/CARDFILE.jcl` L54. The account narrowing a filtered browse carries is not lost by that: it
+   * goes into the cursor's authenticated BINDING scope, at that class's `listCursorBinding`, so a token
+   * is honoured only under the same narrowing that produced it while the position it names stays a
+   * single key. The composite still exists in the reference and is still worth citing -- the twenty-
+   * seven-character group at `app/cbl/COCRDLIC.cbl` L230 to L232, card number then account identifier
+   * -- as is the twenty-eight-character DISPLAY row at L258 to L260, which runs in the opposite order
+   * and ends with a status character belonging to no key at all. Their value is as a warning about
+   * composing a position from what a screen shows, which is why this member is opaque.
+   *
+   * Assumptions: the remaining browses seal scalars of three further widths -- sixteen characters at
+   * `app/cbl/COTRN00C.cbl` L63 to L64, eight at `app/cbl/COUSR00C.cbl` L68 to L69 and two at
+   * `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` L399 and L401 -- so one text member serves every
+   * shape and no key type parameter is introduced for any of them. `ui/src/api/types.ts` records that
+   * the service seals the DIRECTION into the token as well, so a token replayed the other way is
+   * refused with HTTP 400 rather than answered with the wrong page.
    */
   readonly cursor: string | null;
   /** Direction the cursor is replayed in, forward for a next page and backward for a previous one. */
@@ -146,8 +161,9 @@ export interface UsePagedQueryOptions<T> {
    * Assumptions: this value never reaches the service. It is not sent as a request member, it is not
    * turned into one, and {@link PagedQueryRequest} has nowhere to put it; the service establishes
    * page availability from a read of one row beyond the page it returns, which is how the reference
-   * establishes it too. Its uses here are local: it is validated as a row count, and it is published
-   * back on the result so the screen renders that many row positions from one declaration.
+   * establishes it too. Its three uses here are all local: it is validated as a row count, it is the
+   * bound a delivered page is checked against before being published, and it is published back on the
+   * result so the screen renders that many row positions from one declaration.
    */
   readonly pageSize: number;
   /**
@@ -172,6 +188,13 @@ export interface UsePagedQueryOptions<T> {
    * optional entry field beside its list and, at L206 to L207, positions from the start of the set
    * when that field is blank -- so this is the switch that lets a screen defer its opening read
    * instead of issuing one whose answer it would discard.
+   *
+   * Assumptions: lowered, it holds back EVERY read and not merely the opening one. The restart, forward
+   * and backward steps each become documented no-ops, an outstanding read is superseded so it cannot
+   * settle into the browse afterwards, and the browse returns to the state it would have had if the
+   * screen had mounted with the switch already down: no rows, no cursors, the opening ordinal, nothing
+   * outstanding and no failure. Raising it again opens the browse at the first page of whatever criteria
+   * now hold, rather than resuming a position whose criteria the operator can no longer see.
    */
   readonly enabled?: boolean;
   /**
@@ -268,30 +291,42 @@ export interface UsePagedQueryResult<T> {
   /**
    * Whether the most recent read ended in refusal or failure.
    *
-   * Assumptions: this is separate from `error` because a failure does not always arrive as a problem
-   * document. A gateway answering with its own HTML page, or a request that never reached one, gives
-   * a screen nothing to read a code or a correlation identifier out of -- and a browse that quietly
-   * kept displaying its previous rows in that case would be the silent broken view this flag exists
-   * to prevent. So this answers whether the read failed and `error` answers what the service said
-   * about it.
+   * Assumptions: this is separate from `error` because two failures carry no document at all, and a
+   * browse that quietly kept displaying its previous rows in either case would be the silent broken
+   * view this flag exists to prevent. The first is a reader that rejected with something other than the
+   * shared client's normalised failure -- a plain `Error` from a screen's own reader. The second is
+   * this module's own refusal of a page carrying more rows than the screen declared room for, which no
+   * service reported and for which nothing may be invented. So this answers whether the read failed and
+   * `error` answers what the service said about it.
    */
   readonly isFailed: boolean;
   /**
    * Problem document from the most recent failure, or `null`.
    *
-   * Assumptions: `null` means either that nothing failed or that what failed carried no problem
-   * document, which is why `isFailed` above is the flag to branch on. No stand-in is invented for the
-   * second case: a fabricated code, severity or correlation identifier would be indistinguishable
-   * from one a service actually sent, and a screen quoting a made-up correlation identifier to
-   * support is worse off than one quoting none.
+   * Refactoring Rationale: this is populated for every failure the shared client raises, which is every
+   * failure a browse reading through `ui/src/api` can have. That client classifies each one and carries
+   * a complete document on it -- the service's own body verbatim for a classified problem response, and
+   * a document it synthesises with an empty field-error array for a timeout, a network fault or an
+   * unusable body -- so the code, the sentence, the per-field entries and above all the correlation
+   * identifier an operator quotes to support all reach a screen. An earlier revision of this module
+   * looked for that document in the raw axios shape, which the client's interceptor has already replaced
+   * by the time a read rejects, so `error` was null on every single failure while `isFailed` was true.
+   *
+   * Assumptions: `null` therefore now means one of three things -- nothing has failed, a reader rejected
+   * with something that is neither the shared failure nor a document, or this module refused an
+   * over-long page. `isFailed` remains the flag to branch on. No stand-in is invented for those cases: a
+   * fabricated code, severity or correlation identifier would be indistinguishable from one a service
+   * actually sent, and a screen quoting a made-up correlation identifier to support is worse off than
+   * one quoting none.
    */
   readonly error: ApiError | null;
   /**
    * Reads the page after the one on display, which is the forward paging key's action.
    *
-   * Assumptions: a call made while `hasNext` is false, or with no trailing cursor to read from, is a
-   * documented no-op -- no request is issued, the rows, cursors and ordinal are left untouched, and
-   * nothing is thrown. That mirrors the reference, which gates its forward arm on the same indicator
+   * Assumptions: a call made while `hasNext` is false, with no trailing cursor to read from, or while
+   * {@link UsePagedQueryOptions.enabled} is lowered, is a documented no-op -- no request is issued, the
+   * rows, cursors and ordinal are left untouched, and nothing is thrown. That mirrors the reference,
+   * which gates its forward arm on the same indicator
    * at `app/cbl/COCRDLIC.cbl` L486 to L487 and at
    * `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` L766 to L767 and answers the refused step by
    * re-sending the screen with a sentence attached.
@@ -301,8 +336,9 @@ export interface UsePagedQueryResult<T> {
   /**
    * Reads the page before the one on display, which is the backward paging key's action.
    *
-   * Assumptions: a call made on the opening page, or with no leading cursor to read from, is a
-   * documented no-op on the same terms as `nextPage`. The reference gates its backward arm the same
+   * Assumptions: a call made on the opening page, with no leading cursor to read from, or while
+   * {@link UsePagedQueryOptions.enabled} is lowered, is a documented no-op on the same terms as
+   * `nextPage`. The reference gates its backward arm the same
    * way, on its ordinal rather than on anything read from the file --
    * `app/cbl/COCRDLIC.cbl` L501 to L502 and
    * `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` L780 to L781.
@@ -316,6 +352,11 @@ export interface UsePagedQueryResult<T> {
    * cleared first. Clearing them would blank the table for the duration of a request that may well
    * return the same rows, and the reference has no equivalent moment: it composes the whole screen
    * once the read has finished.
+   *
+   * Assumptions: a call made while {@link UsePagedQueryOptions.enabled} is lowered is a documented
+   * no-op, as the two paging steps are. This step has no guard of its own -- an opening read is always
+   * expressible -- so the switch is the only thing that refuses it, and it does so at the one point all
+   * three steps pass through.
    * @returns {void} Nothing; the outcome is observed through this result on a later render.
    */
   readonly reset: () => void;
@@ -337,9 +378,28 @@ export interface UsePagedQueryResult<T> {
 interface PagedQueryState<T> {
   /** Rows of the page on display, ascending, exactly as the envelope delivered them. */
   readonly items: readonly T[];
-  /** Sealed cursor naming this page's leading boundary, or `null` when it carried no rows. */
+  /**
+   * Sealed cursor naming this page's leading boundary, or `null` when the envelope carried none.
+   *
+   * Refactoring Rationale: nullability is stated against the ENVELOPE and not against the row count,
+   * because the two come apart and this pair is what the backward guard is decided from. An earlier
+   * revision described this as null "when the page carried no rows", which reads as though an empty
+   * page always has null boundaries -- and one kind of empty page does not.
+   * `PageResponse.ofFilteredEmpty` in common-lib exists for exactly that case: a read whose every row
+   * failed a filter applied after the rows were fetched returns no rows while rows remain on both sides
+   * of it, so its two boundaries carry the keys at which scanning stopped in each direction rather than
+   * the identities of returned rows. That page is still pageable in both directions, which is the
+   * baseline's own behaviour -- `app/cbl/COCRDLIC.cbl` applies `9500-FILTER-RECORDS.` at L1382 only
+   * after reading a screen's worth. The correct reading is therefore the simple one: this is whatever
+   * the envelope published, empty rows or not, and `null` means the envelope published none.
+   */
   readonly firstKey: string | null;
-  /** Sealed cursor naming this page's trailing boundary, or `null` when it carried no rows. */
+  /**
+   * Sealed cursor naming this page's trailing boundary, or `null` when the envelope carried none.
+   *
+   * Assumptions: the same reading as the leading boundary above, and for the same reason -- taken
+   * verbatim from the envelope, never inferred from how many rows arrived.
+   */
   readonly lastKey: string | null;
   /** Whether the envelope reported a further page beyond this one. */
   readonly hasNext: boolean;
@@ -363,11 +423,14 @@ interface PagedQueryState<T> {
 }
 
 /**
- * The three transitions a browse can make.
+ * The four transitions a browse can make.
  *
  * Assumptions: every transition carries the sequence number of the read it belongs to, including the
  * one that starts a read, because that is what lets the reducer tell a settlement of the current read
- * from a settlement of an abandoned one without consulting anything outside its two arguments.
+ * from a settlement of an abandoned one without consulting anything outside its two arguments. The
+ * idling transition belongs to no read and carries a freshly allocated number for the same mechanism
+ * read the other way round: adopting a number no outstanding read holds is what supersedes every read
+ * started before it.
  *
  * Assumptions: a settlement also carries the cursor and direction of the read that produced it, and
  * carries them for one purpose -- they are the only two things the ordinal can be worked out from, and
@@ -378,6 +441,7 @@ interface PagedQueryState<T> {
  */
 type PagedQueryAction<T> =
   | { readonly kind: 'browse-started'; readonly sequence: number }
+  | { readonly kind: 'query-restarted'; readonly sequence: number }
   | {
       readonly kind: 'page-settled';
       readonly sequence: number;
@@ -385,7 +449,8 @@ type PagedQueryAction<T> =
       readonly direction: PageDirection;
       readonly page: PageResponse<T>;
     }
-  | { readonly kind: 'browse-failed'; readonly sequence: number; readonly error: ApiError | null };
+  | { readonly kind: 'browse-failed'; readonly sequence: number; readonly error: ApiError | null }
+  | { readonly kind: 'browse-idled'; readonly sequence: number };
 
 /**
  * Works out which page a delivered page is, from the request that produced it.
@@ -421,54 +486,57 @@ function ordinalAfter(current: number, cursor: string | null, direction: PageDir
 }
 
 /**
- * Narrows a value to a problem document when it carries the members a screen acts on.
- *
- * Assumptions: three members are probed rather than all eleven -- the status, the correlation
- * identifier an operator quotes to support, and the field-error array a form binds to -- which is the
- * same probe `isApiError` in `ui/src/api/client.ts` makes. The question being decided is whether the
- * body is USABLE, not whether it is exhaustive, so a body from a service that published a further
- * member still passes.
- *
- * Alternatives Considered: importing that function instead of restating its probe. Rejected because
- * `ui/src/api/client.ts` is a transport module -- it builds an axios instance and installs
- * interceptors on it -- so importing it would pull a transport into a module that issues no request,
- * and every assertion about the paging invariants would then load one.
- * @param {unknown} value - A value of unknown shape, typically a response body.
- * @returns {ApiError | null} The value as a problem document, or `null` when it is not one.
- */
-function asProblemDocument(value: unknown): ApiError | null {
-  if (typeof value !== 'object' || value === null) {
-    return null;
-  }
-  const candidate = value as Partial<ApiError>;
-  const usable =
-    typeof candidate.status === 'number' &&
-    typeof candidate.correlationId === 'string' &&
-    Array.isArray(candidate.fieldErrors);
-  return usable ? (value as ApiError) : null;
-}
-
-/**
  * Finds the problem document a rejected read carried, if it carried one.
  *
- * Assumptions: two shapes are examined, because a rejection reaches here by two routes. A caller may
- * reject with the document itself, and the already-authored clients reject with the transport's own
- * failure, which nests the response body one level down -- `ui/src/api/client.ts` re-throws whatever
- * axios rejected with, unchanged, so the body arrives as that value's `response.data`. Examining only
- * the outer value would report every service refusal as carrying no document at all, which would
- * throw away the code and correlation identifier the service did in fact send.
+ * Refactoring Rationale: this reads the NORMALISED failure the shared client raises, where an earlier
+ * revision reached for `reason.response.data` -- the raw axios shape -- as its PRIMARY route. That
+ * shape never arrives from a shipped client. `ui/src/api/client.ts` installs a response interceptor
+ * whose rejection handler converts every axios failure into an `ApiRequestError` and throws THAT, so a
+ * rejected read carries no `response` member at all and the raw-shape branch could not match. The
+ * consequence was total rather than partial: every service refusal reported `isFailed` true with
+ * `error` null, so a screen lost the code, the sentence, the per-field entries and the correlation
+ * identifier the service had in fact sent, on every failure of every browse.
  *
- * Assumptions: anything else yields `null` rather than a stand-in. A failure with no document is a
- * real outcome -- an unreachable edge, or a gateway answering with its own page -- and
- * {@link UsePagedQueryResult.isFailed} is what reports it, so nothing has to be invented here.
+ * Refactoring Rationale: the earlier rationale for restating the document probe LOCALLY -- that
+ * importing from the client module would pull a transport into a module that issues no request -- is
+ * withdrawn, and with it a weaker local probe of three members. That module constructs its axios
+ * instance lazily inside `getApiClient`, so importing two predicates from it starts nothing, and the
+ * assertions below exercise this hook with an injected reader exactly as before. What the local probe
+ * bought was a weaker check on a value the transport had usually already gated; what it cost was two
+ * implementations of one rule, which is the condition under which they come to disagree.
+ *
+ * Assumptions: the nested `response.data` route is KEPT as a documented FALLBACK, even though no
+ * shipped client takes it. The reader is injected, so a caller is free to reject with a raw transport
+ * failure of its own -- a screen composing its own reader, or an assertion building one -- and reading
+ * a document out of one costs nothing. It is validated through the same exported `isApiError` as every
+ * other route, so the fallback admits nothing the primary routes would refuse.
+ *
+ * Assumptions: two routes are recognised and they are not equivalent. The first is the shared
+ * failure, whose `problem` member is already a complete document -- verbatim from the service for a
+ * classified problem response, and synthesised by that module with an empty field-error array for a
+ * timeout, a network fault or an unusable body. Reading it needs no validation here, because the
+ * producer built it. The second is a reader that rejects with a bare document, which the injected-reader
+ * contract permits and which a screen composing its own reader may do; that route IS validated, through
+ * the same exported `isApiError` the client uses, so exactly one implementation of that check exists.
+ *
+ * Assumptions: anything else yields `null` rather than a stand-in -- a reader that threw a plain
+ * `Error`, or rejected with a string. {@link UsePagedQueryResult.isFailed} is what reports the failure
+ * in that case, so nothing is invented here.
  * @param {unknown} reason - Whatever the read rejected with; not necessarily an `Error`.
  * @returns {ApiError | null} The problem document, or `null` when the rejection carried none.
  */
 function problemDocumentOf(reason: unknown): ApiError | null {
-  const direct = asProblemDocument(reason);
-  if (direct !== null) {
-    return direct;
+  if (isApiRequestError(reason)) {
+    return reason.problem;
   }
+  if (isApiError(reason)) {
+    return reason;
+  }
+  // Assumptions: the fallback below is reached only by a reader that rejects with a raw transport
+  //   failure, which no shipped client does. Each step is checked rather than asserted -- a non-object
+  //   rejection, a rejection with no `response`, and a response with no `data` all settle to `null` --
+  //   and the payload is put through the SAME `isApiError` the two routes above use, so there is
+  //   exactly one implementation of what a problem document is.
   if (typeof reason !== 'object' || reason === null || !('response' in reason)) {
     return null;
   }
@@ -476,7 +544,8 @@ function problemDocumentOf(reason: unknown): ApiError | null {
   if (typeof response !== 'object' || response === null || !('data' in response)) {
     return null;
   }
-  return asProblemDocument(response.data);
+  const payload: unknown = response.data;
+  return isApiError(payload) ? payload : null;
 }
 
 /**
@@ -531,7 +600,9 @@ function pagedQueryReducer<T>(
       // Assumptions: the previous outcome is cleared as the new read starts, so a screen never shows
       //   a refusal from the read before beside a spinner for the read now outstanding. The rows and
       //   both cursors are deliberately kept, because the page on display stays legible and, if this
-      //   read fails, remains the page the ordinal describes.
+      //   read fails, remains the page the ordinal describes. That retention is correct ONLY while the
+      //   rows belong to the query still being read; when the query itself changes, the sibling
+      //   transition below is the one that runs.
       return {
         ...state,
         isLoading: true,
@@ -539,6 +610,20 @@ function pagedQueryReducer<T>(
         error: null,
         startedSequence: action.sequence,
       };
+    case 'query-restarted':
+      // Refactoring Rationale: a change of query used to dispatch `browse-started`, which keeps the
+      //   rows, both cursors and the ordinal. The consequence was not a stale frame but a WRONG one
+      //   that persisted: a screen whose criteria changed kept the previous query's rows on display
+      //   under the new criteria, and if the opening read of the new query then FAILED, the failure
+      //   transition kept them too -- so the operator was left looking at rows belonging to a query
+      //   they had already left, with no indication that the set on screen answered a different
+      //   question. Clearing here is what makes the retention above safe to keep: retention is now
+      //   scoped to reads OF THE SAME query, which is where its argument -- the page stays legible and
+      //   the same step can be taken again -- actually holds.
+      // Assumptions: the ordinal returns to the opening page as well as the rows being dropped,
+      //   because it is the value `prevPage` refuses on and leaving it raised would offer a backward
+      //   step from the first page of the new set.
+      return { ...openingState<T>(true), startedSequence: action.sequence };
     case 'page-settled':
       if (action.sequence !== state.startedSequence) {
         return state;
@@ -574,6 +659,23 @@ function pagedQueryReducer<T>(
       //   were, so the operator keeps the page in front of them and can take the same step again.
       //   The reference does the same, re-sending the screen it already composed.
       return { ...state, isLoading: false, isFailed: true, error: action.error };
+    case 'browse-idled':
+      // Assumptions: this returns the browse to the state it would have had if the screen had mounted
+      //   with its switch down, and it is applied UNCONDITIONALLY rather than under the sequence guard
+      //   the two settlements carry. The guard's question is "does this settlement belong to the
+      //   current read", and this transition belongs to no read: it is the browse being told there is
+      //   nothing to read at all, so there is nothing for it to be stale against.
+      // Assumptions: the rows and both cursors are DISCARDED here, where a failure keeps them. The
+      //   switch is lowered when the screen's criteria stop being meaningful -- an entry field cleared
+      //   -- so the rows on display answer a question that is no longer being asked, and a page read
+      //   under criteria that no longer hold is worse than an empty table because nothing about it
+      //   says which criteria produced it. Discarding them also makes re-enabling deterministic: the
+      //   browse opens at the first page of the new criteria rather than resuming a position whose
+      //   criteria the operator can no longer see.
+      // Assumptions: the freshly allocated number is adopted as the started sequence, which is what
+      //   makes an outstanding read's settlement arrive stale and be dropped by the two guards above
+      //   rather than repopulating a browse that has been idled.
+      return { ...openingState<T>(false), startedSequence: action.sequence };
   }
 }
 
@@ -629,7 +731,9 @@ function pagedQueryReducer<T>(
  *   change restarts the browse.
  * @returns {UsePagedQueryResult<T>} The page on display with its two boundary states, the ordinal,
  *   the outstanding-read and failure flags, any problem document, and the forward, backward and
- *   restart steps.
+ *   restart steps. A delivered page carrying more rows than the declared arity is refused rather than
+ *   published, and reported through the failure flag with no document beside it; a browse held back by
+ *   its switch reports the opening state with nothing outstanding.
  * @throws {RangeError} If the row arity is not a whole number of at least one, which is a wiring
  *   mistake in the calling screen rather than anything a user can cause.
  * @template T The row type of one page.
@@ -665,6 +769,18 @@ export function usePagedQuery<T>(options: UsePagedQueryOptions<T>): UsePagedQuer
   //   on one of them would re-run continuously, and the opening read would re-issue on every render.
   const fetchPageRef = useRef(fetchPage);
 
+  // Assumptions: the switch is held here as well as read directly, because the paging steps have to
+  //   consult the CURRENT value from inside a callback that names no dependency. Naming it in those
+  //   dependencies instead would rebuild every step, and therefore the restart step the opening effect
+  //   is keyed on, whenever a screen raised or lowered it -- which is exactly the moment the browse
+  //   must not re-issue an opening read for a second reason.
+  const enabledRef = useRef(enabled);
+
+  // Assumptions: the arity is held the same way and for the same reason: the delivered page is checked
+  //   against it inside that same dependency-free callback. It is validated as a whole number at the
+  //   top of this hook, so what the ref holds is always a usable count.
+  const pageSizeRef = useRef(pageSize);
+
   useEffect(
     /**
      * Tracks whether this browse is still mounted, so no settlement is applied after it is gone.
@@ -692,29 +808,62 @@ export function usePagedQuery<T>(options: UsePagedQueryOptions<T>): UsePagedQuer
 
   useEffect(
     /**
-     * Keeps the held reader current, so the next step uses the one this render was given.
+     * Keeps the three held values current, so the next step uses what this render was given.
      *
      * Assumptions: no dependency list, deliberately. The reader is whatever the most recent render
      * supplied, so this has to run after every render rather than after some of them; a list would
-     * decide when to refresh it, and every possible list is wrong for a reader composed inline.
-     * @returns {void} Nothing; the held reader is replaced in place.
+     * decide when to refresh it, and every possible list is wrong for a reader composed inline. The
+     * switch and the arity ride along in the same effect because they have the same lifetime and the
+     * same reason to be held -- a callback with no dependencies reads them -- so justifying them apart
+     * would say the same thing three times.
+     *
+     * Assumptions: this effect being declared BEFORE the opening effect is what makes the ordering
+     * correct rather than incidental. React runs a component's effects in declaration order, so on the
+     * render that raises the switch, the ref carries the raised value before the opening effect calls
+     * the restart step -- whose gate consults exactly that ref. Moving this below the opening effect
+     * would make the first read after enabling take the previous, lowered value and do nothing.
+     * @returns {void} Nothing; the three held values are replaced in place.
      */
     () => {
       fetchPageRef.current = fetchPage;
+      enabledRef.current = enabled;
+      pageSizeRef.current = pageSize;
     },
   );
 
   const runRequest = useCallback(
     /**
-     * Issues one read and settles it, unless a later read has started or this browse has gone.
+     * Issues one read and settles it, unless the browse is held back, a later read has started, or
+     * this browse has gone.
+     *
+     * Assumptions: the switch is consulted HERE rather than at each of the three call sites, because
+     * this is the single point every read passes through. An earlier revision gated only the opening
+     * effect, which left the restart, forward and backward steps able to read while the browse was held
+     * back -- so a screen that lowered the switch on a cleared entry field still answered its paging
+     * keys, and the read that resulted settled into a browse the screen was no longer showing rows for.
+     * Gating one function closes all three at once and cannot be forgotten at a fourth call site.
+     *
+     * Assumptions: the refusal happens BEFORE a sequence number is allocated and before the started
+     * transition is dispatched, so a held-back browse does not briefly report a read outstanding for a
+     * read that was never issued.
+     *
+     * Assumptions: which opening transition to dispatch is a PARAMETER rather than a decision made
+     * here, because this function cannot tell the two cases apart -- a change of query and a caller
+     * asking to return to the start of the set both issue an opening read with no cursor. The caller
+     * knows which it is, so the caller says, and the two entry points below are the two answers.
      * @param {string | null} cursor - Position to read from, or `null` for an opening read.
      * @param {PageDirection} direction - Direction to replay the cursor in.
+     * @param {boolean} clearing - Whether this read belongs to a DIFFERENT query, in which case the
+     *   rows, both cursors and the ordinal of the previous one are dropped before it is issued.
      * @returns {void} Nothing; both outcomes are applied through the two handlers.
      */
-    (cursor: string | null, direction: PageDirection): void => {
+    (cursor: string | null, direction: PageDirection, clearing = false): void => {
+      if (!enabledRef.current) {
+        return;
+      }
       const sequence = sequenceRef.current + 1;
       sequenceRef.current = sequence;
-      dispatch({ kind: 'browse-started', sequence });
+      dispatch({ kind: clearing ? 'query-restarted' : 'browse-started', sequence });
 
       // Alternatives Considered: two other ways to stop an earlier read overwriting a later one. An
       //   AbortController cancelling the outstanding request was rejected because the reader is
@@ -738,9 +887,34 @@ export function usePagedQuery<T>(options: UsePagedQueryOptions<T>): UsePagedQuer
           //   answered after the screen has gone, and it is the delivery that would touch a state
           //   container nobody is reading any more. The sequence this closure captured is the one
           //   allocated for this read, so a later read's settlement cannot be mistaken for this one.
-          if (mountedRef.current) {
-            dispatch({ kind: 'page-settled', sequence, cursor, direction, page });
+          if (!mountedRef.current) {
+            return;
           }
+
+          // Assumptions: the delivered row count is checked against the arity the screen declared, and
+          //   an over-long page is refused rather than published. The arity is the number of row
+          //   positions the screen's mapset paints -- seven, ten, ten, seven and five across the five
+          //   browses -- so a page carrying more rows than that has rows the screen cannot show, and
+          //   publishing it would silently drop the surplus. What makes that a correctness matter
+          //   rather than a cosmetic one is which rows go missing: the service establishes the further
+          //   page from a probe read one row beyond the page, so a surplus row reaching the array means
+          //   the probe row was published, and the row a screen dropped is the row the next forward
+          //   step would have read from. The operator would then step past a row that was never shown.
+          // Alternatives Considered: truncating the array to the arity and publishing the rest.
+          //   Rejected because it makes this module a participant in paging arithmetic it does not own
+          //   -- the cursors delivered alongside would name rows outside the page as published, so the
+          //   next step would read from a position inconsistent with what is on screen. Refusing keeps
+          //   the browse on the page the operator can see and reports that something is wrong.
+          // Assumptions: the refusal carries NO problem document. No service sent one, and
+          //   `UsePagedQueryResult.error` may not hold a document this module invented -- a fabricated
+          //   code or correlation identifier would be indistinguishable from one a service produced.
+          //   The sentence a screen shows comes from `ui/src/messages/messages.ts` under rule T8, which
+          //   is why none is composed here either.
+          if (page.items.length > pageSizeRef.current) {
+            dispatch({ kind: 'browse-failed', sequence, error: null });
+            return;
+          }
+          dispatch({ kind: 'page-settled', sequence, cursor, direction, page });
         },
         /**
          * Records a refusal or failure, keeping the page on display.
@@ -763,7 +937,12 @@ export function usePagedQuery<T>(options: UsePagedQueryOptions<T>): UsePagedQuer
 
   const reset = useCallback(
     /**
-     * Reads the opening page again, returning the browse to the start of the set.
+     * Reads the opening page again, returning the browse to the start of the SAME set.
+     *
+     * Assumptions: the rows on display are RETAINED while this read is outstanding, because this is a
+     * refresh of the query already being browsed -- a caller reaches for it after a mutation, and the
+     * page it is refreshing is still an answer to the same question. A change of QUERY is the other
+     * case and does not come through here; the effect below dispatches the clearing transition for it.
      * @returns {void} Nothing; the new page arrives through this hook's result.
      */
     (): void => {
@@ -776,22 +955,63 @@ export function usePagedQuery<T>(options: UsePagedQueryOptions<T>): UsePagedQuer
     [runRequest],
   );
 
+  const restartQuery = useCallback(
+    /**
+     * Drops the previous query's page and reads the opening page of the new one.
+     *
+     * Assumptions: this is the ONLY entry point that clears, and it is reached only from the effect
+     * that watches the restart value. Exposing it to callers would let a screen clear the rows of the
+     * query it is still browsing, which is the failure the clearing transition exists to prevent
+     * rather than to enable.
+     * @returns {void} Nothing; the new page arrives through this hook's result.
+     */
+    (): void => {
+      runRequest(null, 'next', true);
+    },
+    [runRequest],
+  );
+
   useEffect(
     /**
-     * Opens the browse, and reopens it whenever the screen's criteria change.
+     * Opens the browse, reopens it whenever the screen's criteria change, and idles it when the screen
+     * holds it back.
      *
      * Assumptions: the restart value is named in the dependency list and read nowhere in the body,
      * which is the whole of its purpose -- it exists so a screen can say that its criteria have
      * changed without this module knowing what any of them are. It is compared for equality by React,
      * so a screen that composes it from its criteria gets one restart per genuine change.
-     * @returns {void} Nothing; the page arrives through this hook's result.
+     *
+     * Refactoring Rationale: the lowered case now has a body, where an earlier revision simply did
+     * nothing. Doing nothing left a browse that had been reading before the switch went down still
+     * reporting a read outstanding, with the previous criteria's rows and cursors on display, and left
+     * that read able to settle into it afterwards -- so a screen whose entry field was cleared went on
+     * showing rows for the cleared criterion, and a page in flight would arrive and repopulate it.
+     * Idling here is the state half of the same decision `runRequest` implements for new reads: the
+     * gate stops reads starting while the switch is down, and this stops the ones already outstanding
+     * from landing.
+     *
+     * Assumptions: the raised case uses the CLEARING entry point, and the public {@link reset} does
+     * not. Every run of this effect is a read of a query this hook was not previously reading -- the
+     * first one because there was no previous query, and each later one because the restart value
+     * compared unequal -- so there are never rows here that answer the query about to be read. Clearing
+     * on the first run is therefore a no-op over already-empty state, which is why one entry point
+     * serves both runs rather than the effect having to tell them apart.
+     * @returns {void} Nothing; the page arrives through this hook's result, or the browse settles idle.
      */
     () => {
       if (enabled) {
-        reset();
+        restartQuery();
+        return;
       }
+      // Assumptions: the sequence is advanced here, in the effect, rather than inside the reducer.
+      //   The allocator is a ref precisely so that a number can be claimed at the moment an event
+      //   happens rather than a render later, and claiming one for the idling is what makes every read
+      //   started before it stale. A reducer cannot claim one, because it may be invoked more than once
+      //   for a single dispatch and would then allocate twice.
+      sequenceRef.current += 1;
+      dispatch({ kind: 'browse-idled', sequence: sequenceRef.current });
     },
-    [enabled, resetKey, reset],
+    [enabled, resetKey, restartQuery],
   );
 
   const nextPage = useCallback(
@@ -800,8 +1020,9 @@ export function usePagedQuery<T>(options: UsePagedQueryOptions<T>): UsePagedQuer
      *
      * Assumptions: refused when the envelope reported no further page, and refused when there is no
      * trailing cursor to read from, and a refusal here does nothing at all -- no read is issued and
-     * no member of the browse moves. Telling the operator why is the screen's part, and it chooses
-     * its sentence from `hasNext`.
+     * no member of the browse moves. A browse held back by its switch is refused too, one level down in
+     * `runRequest`, which is where that gate belongs because all three steps pass through it. Telling
+     * the operator why is the screen's part, and it chooses its sentence from `hasNext`.
      * @returns {void} Nothing; the page arrives through this hook's result.
      */
     (): void => {

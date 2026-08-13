@@ -1,17 +1,23 @@
 package com.carddemo.reporting.api;
 
 import com.carddemo.common.control.OnlineWriteGateExempt;
+import com.carddemo.common.security.OpaqueIdentifier;
 import com.carddemo.reporting.dto.StatementDocument;
 import com.carddemo.reporting.dto.StatementRequest;
 import com.carddemo.reporting.dto.StatementResponse;
 import com.carddemo.reporting.dto.StatementTransactionCollection;
+import com.carddemo.reporting.service.ArtifactStore;
 import com.carddemo.reporting.service.StatementService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Pattern;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import org.springframework.core.io.InputStreamResource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -20,18 +26,20 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * HTTP boundary of the statement surface, replacing a pair of batch statement programs.
  *
- * <p>This controller carries the two operations that surface {@code app/cbl/CBSTM03A.CBL} at 924
+ * <p>This controller carries the three operations that surface {@code app/cbl/CBSTM03A.CBL} at 924
  * lines and {@code app/cbl/CBSTM03B.CBL} at 230 lines. The upper-case extension on each is
  * load-bearing: a lower-case citation of either one is a dead reference. The baseline is reference
  * material, read as the specification and never modified.
  *
- * <p>Two operations are exposed and they differ in what part of one statement they return.
- * {@link #generateStatement(StatementRequest)} returns the heading figures, the assembled total and
- * the two artifact locations; {@link #listStatementTransactions(StatementRequest)} returns the
- * transactions those artifacts were built from, and nothing else. A caller rendering the lines takes
- * the second; a caller that only needs to know where the artifacts are, or what the statement
- * totals, takes the first and does not pay to transport the row window it would discard, which
- * {@link StatementService#MAX_RESPONSE_TRANSACTIONS} caps at 1,000.
+ * <p>Three operations are exposed and they differ in what part of one statement they return.
+ * {@link #generateStatement(StatementRequest)} returns the heading figures, the assembled total and,
+ * where the store holds them, the location of each rendered artifact;
+ * {@link #listStatementTransactions(StatementRequest)} returns the transactions those artifacts were
+ * built from, and nothing else; {@link #collectArtifact(String)} returns one rendered artifact's
+ * bytes. A caller rendering the lines takes the second; a caller that only needs to know whether the
+ * artifacts exist, or what the statement totals, takes the first and does not pay to transport the row
+ * window it would discard, which {@link StatementService#MAX_RESPONSE_TRANSACTIONS} caps at 1,000; a
+ * caller collecting the rendered document takes the third with the selector the first returned.
  *
  * <p>Refactoring Rationale: both method names are the published operation identifiers verbatim --
  * an earlier revision named them {@code describeStatement} and {@code getStatementDocument}. The
@@ -56,12 +64,17 @@ import org.springframework.web.bind.annotation.RestController;
  * selector would have to be minted from the very number the caller already holds, which is a round
  * trip that buys nothing over placing the number in a body directly.
  *
- * <p>Alternatives Considered: an operation returning a rendered statement artifact itself, plain-text
- * or markup. Rejected because this module is granted no object-store client: the two artifacts are
- * written by the batch task and delivered from object storage through the content distribution, and a
- * fetch-and-relay operation here would put this service on the delivery path for a document it does
- * not own. What the description returns instead is the two locations, so the caller reaches the
- * artifact through the path that owns it.
+ * <p>⚠️ Refactoring Rationale: this controller DOES now serve the rendered artifact, and the paragraph
+ * this replaces argued the opposite on two premises that were both untrue. It said this module is
+ * granted no object-store client, while {@code ObjectStoreConfig} contributes one unconditionally and
+ * three classes in this module already use it. And it said the caller reaches the artifact "through the
+ * path that owns it", while no such path exists: nothing serves the dataset bucket to a caller, and the
+ * bucket policy refuses access from outside the VPC endpoint, so the locations the description returned
+ * were unreachable by every caller of this surface. A review found the consequence rather than the
+ * argument. The delivery path is now {@link #collectArtifact(String)}, and what makes that acceptable
+ * where a fetch-and-relay was not is that the artifact is served as an opaque attachment under this
+ * surface's own authorization -- see the rationale on that operation, which records why a pre-signed
+ * URL and a widened bucket policy were both rejected in its place.
  *
  * <p>Assumptions: no exception handler and no authority annotation is declared here, for the reasons
  * recorded on {@link ReportController} and in the package charter. A card with no cross-reference,
@@ -71,9 +84,10 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping(path = StatementController.BASE_PATH, produces = MediaType.APPLICATION_JSON_VALUE)
 @OnlineWriteGateExempt(reason =
-        "Both operations render an existing statement and persist nothing. They are POSTs because"
-        + " the account and card identifiers they select on must travel in a request body rather"
-        + " than in a request line the load balancer records. A rendered statement is a read of"
+        "All three operations read an existing statement and persist nothing. The two describing"
+        + " operations are POSTs because the account and card identifiers they select on must travel"
+        + " in a request body rather than in a request line the load balancer records; the third is a"
+        + " GET because an opaque selector discloses neither. A rendered statement is a read of"
         + " already-posted data, so it stays available while the window is closed.")
 public class StatementController {
 
@@ -90,12 +104,53 @@ public class StatementController {
      * {@code /api/v1/reports} -- so a second root would not have been routable at all. A statement is
      * a report of this context, so the nesting is also what the surface means.
      */
-    public static final String BASE_PATH = "/api/v1/reports/statements";
+    public static final String BASE_PATH = StatementService.STATEMENTS_BASE_PATH;
 
     /**
      * Sub-path of the whole-document operation.
      */
     public static final String TRANSACTIONS_PATH = "/transactions";
+
+    /**
+     * Name of the path variable carrying the opaque artifact selector.
+     */
+    public static final String SELECTOR_VARIABLE = "selector";
+
+    /**
+     * Sub-path of the artifact collection operation, relative to {@value #BASE_PATH}.
+     *
+     * <p>Assumptions: this is DERIVED from {@link StatementService#ARTIFACT_LOCATION_PREFIX} rather
+     * than typed independently, so the route that serves an artifact and the location a statement
+     * response publishes for it cannot drift apart. The service composes the location and this
+     * controller serves it, and a review found exactly what happens when the two are written
+     * separately: the published location named an object nothing writes.
+     */
+    public static final String ARTIFACTS_PATH =
+            StatementService.ARTIFACTS_SEGMENT + "{" + SELECTOR_VARIABLE + "}";
+
+    /**
+     * Shape a selector must have before the store is consulted.
+     *
+     * <p>Assumptions: the pattern is DERIVED from the tokeniser rather than written out, so a change
+     * of token width cannot leave the guard admitting a width the tokeniser no longer emits. The
+     * alphabet is the unpadded URL-safe base64 set {@code OpaqueIdentifier} encodes into, and the
+     * length is {@code OpaqueIdentifier.TOKEN_LENGTH}; the expression stays a compile-time constant,
+     * which is what lets it sit in the constraint annotation below.
+     *
+     * <p>Measured: removing this constraint from the parameter below fails exactly
+     * {@code StatementControllerTest.aMalformedSelectorIsRefusedBeforeTheStore} with
+     * {@code Status expected:<400> but was:<500>} -- the malformed value reaches the store, which is
+     * both the wrong status and one call further than it needed to go.
+     *
+     * <p>Trade-offs: a selector of the wrong SHAPE is refused with 400 while a well-formed selector
+     * that names nothing is answered with 404, and the asymmetry is deliberate. The shape is published
+     * in this service's own contract, so refusing a malformed value discloses nothing a caller could
+     * not already read -- and it saves a call to the object store for a value that cannot name an
+     * artifact. Which well-formed selectors are real is NOT published, so those are all answered
+     * alike.
+     */
+    public static final String SELECTOR_PATTERN =
+            "^[A-Za-z0-9_-]{" + OpaqueIdentifier.TOKEN_LENGTH + "}$";
 
     /**
      * Value of the content-type options header set on every response from this controller.
@@ -160,7 +215,8 @@ public class StatementController {
     }
 
     /**
-     * Describes one card's statement: its heading figures, its total and its two artifact locations.
+     * Describes one card's statement: its heading figures, its total, and the location of each
+     * rendered artifact the store actually holds.
      *
      * @param request the card whose statement is wanted, and optionally the account it is expected to
      *     belong to; validated declaratively before this method is entered
@@ -178,9 +234,9 @@ public class StatementController {
      *
      * <p>Refactoring Rationale: the body carries the TRANSACTIONS alone, where an earlier revision
      * returned the whole document -- the heading summary and the transactions together. The published
-     * contract declares two operations here, one for the summary and one for the rows, and the reason
+     * contract declares the summary and the rows as separate operations, and the reason
      * is size rather than taste: a statement carries as many rows as the card has activity, a count no
-     * contract fixes, and a caller that wants only the heading figures and the two artifact locations
+     * contract fixes, and a caller that wants only the heading figures and the artifact locations
      * should not have to receive them. The summary operation above answers that caller.
      *
      * <p>Assumptions: the body returned here is a BOUNDED window, and the two bounds in play belong to
@@ -233,6 +289,60 @@ public class StatementController {
     }
 
     /**
+     * Streams one stored statement artifact to an authenticated caller.
+     *
+     * <p>⚠️ Refactoring Rationale: this operation exists because the two operations above published
+     * artifact locations that nothing served. The dataset bucket refuses access outside the VPC
+     * endpoint, so a caller holding a location had no way to collect the artifact it named, and the
+     * only alternatives were to widen the bucket policy or to hand out pre-signed URLs. Both were
+     * rejected: widening the policy makes every artifact of every run reachable from the internet on
+     * the strength of a key name, and a pre-signed URL is a bearer credential in a query string that
+     * outlives the session, appears in browser history and in any intermediary's access log, and
+     * carries none of this surface's authorization rules. Streaming through this operation keeps
+     * collection inside the same token, the same rules and the same audit trail as every other read.
+     *
+     * <p>Assumptions: BOTH artifacts are served as a binary attachment rather than with their own
+     * media types. The markup artifact is HTML built from cardholder data, and returning it as
+     * {@code text/html} invites a browser to render it in this origin -- which is the case the
+     * content-security policy and the attachment disposition on this controller exist to prevent, and
+     * declaring it renderable would undo them for the one response that actually carries the markup.
+     * Trade-offs: a caller that wants to display the markup must save it and open it itself, which is
+     * the cost of not making a statement a page this service hosts.
+     *
+     * <p>Measured: adding {@code text/html} to the producible types of this operation fails exactly
+     * {@code StatementControllerTest.anArtifactCannotBeNegotiatedAsMarkup}, which stops reporting 406
+     * and instead reaches the handler -- {@code Cannot invoke "OpenArtifact.sizeBytes()" because
+     * "artifact" is null}, the collaborator never having been stubbed for a request that should not
+     * have arrived. So the single producible type is what refuses the negotiation, not an accident of
+     * the harness.
+     *
+     * <p>Assumptions: the response declares its length from the store's own count and the body is
+     * streamed rather than buffered, so a run covering a large customer base does not become a
+     * function of this service's heap. The stream is closed by the message converter after the body is
+     * written.
+     *
+     * <p>Assumptions: a selector of the wrong shape is refused before the store is consulted, by the
+     * declarative constraint below, and the shared advice renders that as 400 with this contract's own
+     * error shape. A well-formed selector that names nothing is answered with 404, indistinguishably
+     * from an artifact the store does not hold -- the reasoning for the asymmetry is on
+     * {@link #SELECTOR_PATTERN}.
+     *
+     * @param selector the opaque selector taken from a statement response
+     * @return the artifact bytes, carrying the protective response headers
+     * @throws NoSuchElementException if the selector names no artifact, or names one the store does not
+     *     hold -- rendered as 404 by the shared handler
+     */
+    @GetMapping(path = ARTIFACTS_PATH, produces = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+    public ResponseEntity<InputStreamResource> collectArtifact(
+            @PathVariable(SELECTOR_VARIABLE) @Pattern(regexp = SELECTOR_PATTERN) String selector) {
+        ArtifactStore.OpenArtifact artifact = statements.collectArtifact(selector);
+        return protectiveBuilder()
+                .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                .contentLength(artifact.sizeBytes())
+                .body(new InputStreamResource(artifact.content()));
+    }
+
+    /**
      * Wraps a payload with the three protective headers every statement response carries.
      *
      * <p>Assumptions: the three are set together in one helper rather than being repeated per
@@ -245,10 +355,24 @@ public class StatementController {
      * @return the payload with the protective headers applied
      */
     private static <T> ResponseEntity<T> protectively(T payload) {
+        return protectiveBuilder().body(payload);
+    }
+
+    /**
+     * Starts a response carrying the three protective headers, for a body that needs more of the
+     * builder than {@link #protectively(Object)} exposes.
+     *
+     * <p>Assumptions: the three headers are set in ONE place and both response paths pass through it,
+     * because the artifact response is the one that most needs them -- it is the only response whose
+     * body is markup a browser could render -- and a second, hand-assembled builder is exactly how one
+     * of the three would eventually be left off.
+     *
+     * @return a builder with the three protective headers already applied, never {@code null}
+     */
+    private static ResponseEntity.BodyBuilder protectiveBuilder() {
         return ResponseEntity.ok()
                 .header(CONTENT_TYPE_OPTIONS_HEADER, NOSNIFF)
                 .header(CONTENT_SECURITY_POLICY_HEADER, STATEMENT_POLICY)
-                .header(HttpHeaders.CONTENT_DISPOSITION, ATTACHMENT_DISPOSITION)
-                .body(payload);
+                .header(HttpHeaders.CONTENT_DISPOSITION, ATTACHMENT_DISPOSITION);
     }
 }

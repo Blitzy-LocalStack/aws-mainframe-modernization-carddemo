@@ -2,14 +2,21 @@
 # infra/modules/s3-datasets/outputs.tf
 # -----------------------------------------------------------------------------
 # Purpose:
-#   The entire public return surface of the `s3-datasets` module -- TEN
-#   outputs and nothing else. Between them they answer the only three questions
+#   The entire public return surface of the `s3-datasets` module -- TWELVE
+#   outputs and nothing else. Between them they answer the only four questions
 #   a caller has about this bucket: what it is called, what it is called to IAM,
-#   and where inside it each baseline dataset lives.
+#   where inside it each baseline dataset lives, and where its audit trail goes.
 #   Assumptions: the count above is maintained against the `output` blocks in
 #   this file. A return-surface count is the one figure a caller reads before
 #   wiring a module, so an under-count reads as "there is nothing else to wire"
 #   and hides the outputs a root actually needs.
+#   Refactoring Rationale: this count read TEN and the enumeration below listed
+#   SEVEN, while the file declared twelve. Both are restated from a measurement
+#   of the `output` blocks. The gap was not one omission but three: the audit
+#   trio was never added to the list, and the two source-extract values landed
+#   with the dataset refresh. An under-count here is the failure mode the
+#   Assumptions paragraph above already names -- a caller reads it as the whole
+#   surface and concludes a published value is not published.
 #
 #   AAP section 0.5.3.5 states the contract these outputs exist to satisfy:
 #   "Terraform module outputs are the only source of runtime endpoints and
@@ -20,7 +27,7 @@
 #   main.tf. Not one is a literal, so no ARN, no account identifier, no region
 #   and no bucket name is written down anywhere in this file.
 #
-#   ONE-WAY CONTRACT. These seven output NAMES are read by four components:
+#   ONE-WAY CONTRACT. These twelve output NAMES are read by four components:
 #
 #     infra/envs/dev/main.tf ............. writes them into Parameter Store
 #     infra/envs/prod/main.tf ............ the same, per environment
@@ -50,14 +57,15 @@
 #   `variable` block. Every module input lives in variables.tf and is
 #   documented on the `variable` block itself, which is also where tflint's
 #   terraform_standard_module_structure requires it -- a `variable` declared
-#   here would be reported as being in the wrong file. Two inputs are
+#   here would be reported as being in the wrong file. FOUR inputs are
 #   nevertheless READ below: `var.dataset_families` and
 #   `var.non_generation_prefixes` indirectly, through the locals main.tf
-#   derives from them, and `var.noncurrent_version_retention` directly. Each is
-#   documented at the output that reads it.
+#   derives from them, and `var.noncurrent_version_retention` and
+#   `var.source_extract_prefix` directly. Each is documented at the output that
+#   reads it.
 #
 # Return values:
-#   Seven, in declaration order. An `output` block IS a return value, so the
+#   Twelve, in declaration order. An `output` block IS a return value, so the
 #   `description` on each one below is this file's direct discharge of the
 #   documentation standard's "Return values" element rather than an analogue of
 #   it, and tflint's terraform_documented_outputs rule is what makes a missing
@@ -67,9 +75,14 @@
 #     bucket_arn ................... string       IAM resource, bucket form
 #     dataset_prefixes ............. map(string)  TEN generation families
 #     dataset_uris ................. map(string)  the same TEN as s3:// URIs
-#     non_generation_prefixes ...... map(string)  TWO statement artifacts
-#     non_generation_uris .......... map(string)  the same TWO as s3:// URIs
+#     non_generation_prefixes ...... map(string)  THREE reporting artifacts
+#     non_generation_uris .......... map(string)  the same THREE as s3:// URIs
+#     source_extract_prefix ........ string       where the refresh READS inputs
+#     source_extract_uri ........... string       the same prefix as an s3:// URI
 #     noncurrent_version_retention . number       the LIMIT(5) count
+#     audit_bucket_name ............ string       the object-access log bucket
+#     audit_bucket_arn ............. string       IAM resource, audit bucket form
+#     object_access_trail_arn ...... string       the CloudTrail data-event trail
 #
 #   NOTHING HERE IS `sensitive`, and that is a decision rather than an
 #   oversight. A bucket name, a bucket ARN, a set of key prefixes and a
@@ -85,18 +98,29 @@
 #
 # Errors:
 #   Two, neither of them a fault in the module:
-#     1. Every value except `noncurrent_version_retention` derives from a
-#        resource attribute, so those six are UNKNOWN UNTIL APPLY. `terraform
-#        output` run against a root that has only planned returns nothing at
-#        all, and a plan renders them as "(known after apply)". Only the
-#        retention count is known at plan time, because it is an input rather
-#        than an attribute.
+#     1. EIGHT of the twelve reference a resource attribute and are therefore
+#        UNKNOWN UNTIL APPLY: both bucket names, both bucket ARNs, the trail
+#        ARN, and the three URI-shaped values, each of which interpolates
+#        `aws_s3_bucket.datasets.bucket`. `terraform output` run against a root
+#        that has only planned returns nothing at all for those, and a plan
+#        renders them as "(known after apply)". The remaining FOUR are known at
+#        plan time because every term in them is an input: `dataset_prefixes`
+#        and `non_generation_prefixes`, which are locals composed from their
+#        respective maps, plus `source_extract_prefix` and
+#        `noncurrent_version_retention` read straight through.
+#        Refactoring Rationale: this said "every value except
+#        `noncurrent_version_retention` ... so those six are unknown", which was
+#        wrong in both directions -- it named six of what was then ten, and it
+#        put the two prefix MAPS on the apply side when neither touches a
+#        resource. The split is now stated as the property that decides it,
+#        whether the value reads a resource attribute, so a reader can re-derive
+#        it from the file rather than trusting a tally.
 #     2. A rename is caught by no gate in this module; see the one-way contract
 #        above.
 #
 # WHY (non-obvious design decisions):
 #   - Trade-offs: the ten generation prefixes are published as ONE map rather
-#     than as ten separately named scalar outputs, and the two statement
+#     than as ten separately named scalar outputs, and the three reporting-artifact
 #     prefixes as a SECOND map rather than being merged into the first. Both
 #     shapes are argued at the outputs themselves; the shared reason is that
 #     the count TEN is the most error-prone fact in this module, and each of the
@@ -107,13 +131,18 @@
 #     the prefix, while a Step Functions container override carries a URI.
 #     Argued in full on `dataset_uris`.
 #   - Alternatives Considered: publishing `local.all_dataset_prefixes`, the
-#     merged twelve-entry map every lifecycle filter in main.tf reads, as an
-#     eighth output. Rejected: the whole content of that map is already
-#     published here as its two component maps, so a consumer that genuinely
-#     wants the union can `merge()` the two outputs, whereas a single
-#     twelve-entry output would erase the generation / non-generation
-#     distinction the separation exists to keep visible -- and erasing it is
-#     the specific way the family count stops being ten.
+#     merged thirteen-entry map the per-family and per-artifact lifecycle
+#     filters in main.tf read, as a further output. Rejected: the whole content
+#     of that map is already published here as its two component maps, so a
+#     consumer that genuinely wants the union can `merge()` the two outputs,
+#     whereas a single thirteen-entry output would erase the generation /
+#     non-generation distinction the separation exists to keep visible -- and
+#     erasing it is the specific way the family count stops being ten.
+#     Assumptions: that merged map is thirteen entries and the bucket carries
+#     FOURTEEN prefixed lifecycle rules; the fourteenth is
+#     `src-source-extracts`, which filters on `var.source_extract_prefix`
+#     directly rather than through the map, because that prefix is an input the
+#     module reads rather than a dataset it owns.
 # =============================================================================
 
 # Assumptions: the `bucket` attribute is published, not `id`. For
@@ -235,33 +264,47 @@ output "dataset_uris" {
   }
 }
 
-# Assumptions: THESE TWO ARE NOT GENERATION FAMILIES and must never be counted
-# as an eleventh and a twelfth. They are the two statement artifacts
-# app/jcl/CREASTMT.JCL writes -- STATEMNT.PS, deleted by the IEFBR14 step at
-# L75 and rewritten at L91 with DCB=(LRECL=80,BLKSIZE=8000,RECFM=FB) declared at
-# L89, and STATEMNT.HTML, deleted at L71 and rewritten at L96 with
-# DCB=(LRECL=100,BLKSIZE=800,RECFM=FB) declared at L94 -- and NEITHER HAS A
-# `DEFINE GENERATIONDATAGROUP` BASE ANYWHERE IN THE BASELINE. That is measured
-# rather than assumed: an exhaustive search for the keyword matches four files
-# only, app/jcl/DEFGDGB.jcl, app/jcl/DEFGDGD.jcl, app/jcl/DALYREJS.jcl and
-# app/jcl/REPTFILE.jcl, and not one of them defines a statement base. Both are
-# plain sequential datasets the job deletes and rewrites each run.
+# Assumptions: THESE THREE ARE NOT GENERATION FAMILIES and must never be counted
+# as an eleventh, a twelfth and a thirteenth. They are the two statement
+# artifacts app/jcl/CREASTMT.JCL writes -- STATEMNT.PS, deleted by the IEFBR14
+# step at L75 and rewritten at L91 with DCB=(LRECL=80,BLKSIZE=8000,RECFM=FB)
+# declared at L89, and STATEMNT.HTML, deleted at L71 and rewritten at L96 with
+# DCB=(LRECL=100,BLKSIZE=800,RECFM=FB) declared at L94, both under ONE prefix and
+# distinguished by object name -- plus the request-scoped transaction detail
+# report and the category-balance report TCATBALF.REPT, which
+# app/jcl/PRTCATBL.jcl deletes at L21-L25 and rewrites at L59-L63 with
+# DCB=(LRECL=40,RECFM=FB). NOT ONE OF THEM HAS A `DEFINE GENERATIONDATAGROUP`
+# BASE ANYWHERE IN THE BASELINE. That is measured rather than assumed: an
+# exhaustive search for the keyword matches four files only,
+# app/jcl/DEFGDGB.jcl, app/jcl/DEFGDGD.jcl, app/jcl/DALYREJS.jcl and
+# app/jcl/REPTFILE.jcl, and not one of them defines a base for any of these.
+# All three are plain sequential datasets the job deletes and rewrites each run.
 # They are published under their own output name for exactly one reason: a
 # consumer counting generation families reads `dataset_prefixes` and gets TEN.
-# Folding these two in would make that number twelve and put the module out of
-# step with variables.tf's `length == 10` assertion, with
+# Folding these three in would make that number thirteen and put the module out
+# of step with variables.tf's `length == 10` assertion, with
 # docs/architecture/batch-orchestration.md and with data-migration/README.md,
 # all three of which publish the same ten independently.
 #
+# Assumptions: the transaction detail report appears HERE as well as among the
+# generation families, and that is not a double count. The reference writes that
+# output to a numbered base -- TRANREPT(+1) at app/jcl/TRANREPT.jcl:L80 -- and
+# the target publishes the same bytes to two keys: the generation coordinate
+# under `dataset_prefixes["tranrept"]`, which carries the LIMIT(5) analogue, and
+# the request-scoped key here, which is what a range-addressed request and the
+# runbooks resolve. Two keys for one artifact is argued at
+# ReportArtifactPublisher.publishDaily; what matters here is that the family
+# count reads ten either way.
+#
 # Assumptions: they need prefixes all the same, because the GenerateStatements
-# batch state -- state 8 of the eleven in AAP section 0.4.1.7 -- writes both the
-# plain-text and the HTML statement to S3 and has to write them somewhere. The
-# noncurrent-version rule main.tf gives them is ordinary version hygiene and NOT
-# the LIMIT(5) SCRATCH analogue, which is why main.tf identifies their lifecycle
-# rules `seq-` and the ten generation rules `gdg-`: the retention numbers
-# coincide, the contracts behind them do not.
+# and GenerateReports batch states -- states 8 and 9 of the eleven in AAP
+# section 0.4.1.7 -- write all three artifacts to S3 and have to write them
+# somewhere. The noncurrent-version rule main.tf gives them is ordinary version
+# hygiene and NOT the LIMIT(5) SCRATCH analogue, which is why main.tf identifies
+# their lifecycle rules `seq-` and the ten generation rules `gdg-`: the retention
+# numbers coincide, the contracts behind them do not.
 output "non_generation_prefixes" {
-  description = "Key prefix per non-generation dataset -- the two sequential statement artifacts, plain text and HTML -- keyed exactly as var.non_generation_prefixes is keyed. Read by the GenerateStatements batch state, which writes both statements to S3. Deliberately separate from dataset_prefixes: neither artifact has a generation-data-group base in the baseline, so counting them among the generation families would report twelve where variables.tf, docs/architecture/batch-orchestration.md and data-migration/README.md all publish ten."
+  description = "Key prefix per non-generation reporting artifact -- the shared statements prefix carrying the plain-text and HTML statements, the request-scoped transaction detail report and the category-balance report -- keyed exactly as var.non_generation_prefixes is keyed and valued as the literal prefix the reporting service writes under. Read by the GenerateStatements and GenerateReports batch states and by the IAM policies that scope the reporting task role. Deliberately separate from dataset_prefixes: not one artifact has a generation-data-group base in the baseline, so counting them among the generation families would report thirteen where variables.tf, docs/architecture/batch-orchestration.md and data-migration/README.md all publish ten."
   value       = local.non_generation_dataset_prefixes
 }
 
@@ -269,18 +312,46 @@ output "non_generation_prefixes" {
 # output than the minimum. The GenerateStatements state consumes a container
 # override in exactly the way the generation-writing states do, so an
 # asymmetric return surface -- prefixes and URIs for the ten, prefixes only for
-# the two -- would leave that one state as the sole consumer obliged to compose
-# its own `s3://` string from a bucket name and a prefix. A caller made to
+# the three -- would leave those states as the sole consumers obliged to compose
+# their own `s3://` string from a bucket name and a prefix. A caller made to
 # compose one location is a caller that eventually hard-codes one, which is the
 # outcome AAP section 0.5.3.5 exists to prevent. The cost is one extra output
 # and one extra row in the generated Outputs table; the cost of the asymmetry
 # would be one bespoke path in the statements state.
 output "non_generation_uris" {
-  description = "Fully-qualified s3:// URI per non-generation dataset: the same two keys as non_generation_prefixes, each resolved against the created bucket, so the GenerateStatements batch state receives its plain-text and HTML output locations as container overrides in the same form the generation-writing states receive theirs."
+  description = "Fully-qualified s3:// URI per non-generation reporting artifact: the same three keys as non_generation_prefixes, each resolved against the created bucket, so the GenerateStatements and GenerateReports batch states receive their output locations as container overrides in the same form the generation-writing states receive theirs."
   value = {
-    for statement_key, statement_prefix in local.non_generation_dataset_prefixes :
-    statement_key => "s3://${aws_s3_bucket.datasets.bucket}/${statement_prefix}"
+    for artifact_key, artifact_prefix in local.non_generation_dataset_prefixes :
+    artifact_key => "s3://${aws_s3_bucket.datasets.bucket}/${artifact_prefix}"
   }
+}
+
+# Assumptions: this is the only prefix this module publishes that a consumer READS
+# rather than writes, and it is published so that the batch chain's seed-refresh
+# state receives it instead of composing it. The step-functions-batch module passes
+# it to the data-migration container as --extract-prefix, and the container joins
+# each dataset's registered source file name to it; if the two ever composed the
+# prefix independently they could disagree, and the failure mode is a refresh that
+# reads a prefix nothing was synced to and reports an absent object per dataset.
+# Assumptions: it is deliberately NOT folded into dataset_prefixes or
+# non_generation_prefixes. Both of those inventories are closed by validation --
+# ten generation families and three reporting artifacts -- and this prefix belongs to
+# neither: it carries no generation convention, no dt=/gen= structure and no
+# LIMIT(5) analogue, so counting it in either would make the ten-family count that
+# variables.tf asserts and two sibling documents publish stop being true.
+output "source_extract_prefix" {
+  description = "Key prefix inside the dataset bucket that the exported baseline extracts are read FROM. Passed to the batch chain's seed-refresh state, which gives it to the data-migration container as --extract-prefix. Populating it is an operator action documented in docs/runbooks/data-migration.md. Not one of the ten generation families and not one of the three reporting-artifact prefixes: it is an input, so it has no generation convention and no LIMIT(5) analogue."
+  value       = var.source_extract_prefix
+}
+
+# Trade-offs: published for symmetry with dataset_uris and non_generation_uris, so
+# that an operator following the runbook copies one value rather than composing a
+# URI from a bucket name and a prefix. A caller made to compose a location is a
+# caller that eventually hard-codes one, which is what AAP section 0.5.3.5 exists to
+# prevent.
+output "source_extract_uri" {
+  description = "Fully-qualified s3:// URI of the source-extract prefix, for the operator sync documented in docs/runbooks/data-migration.md."
+  value       = "s3://${aws_s3_bucket.datasets.bucket}/${var.source_extract_prefix}"
 }
 
 # Assumptions: the effective retention is echoed back so that the LIMIT(5)

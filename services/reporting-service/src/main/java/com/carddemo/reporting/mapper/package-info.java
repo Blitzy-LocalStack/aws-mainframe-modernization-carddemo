@@ -4,9 +4,10 @@
  *
  * <h2>What this package contains</h2>
  *
- * <p>Eight compilation units sit in this directory: this charter and the seven types it governs --
- * {@code CobolEditMask}, {@code ReportBandLayouts}, {@code ReportingDtoMapper},
- * {@code StatementBandLayouts}, {@code StatementHtmlMapper}, {@code StatementTextMapper} and
+ * <p>Nine compilation units sit in this directory: this charter and the eight types it governs --
+ * {@code CategoryBalanceLineLayout}, {@code CobolEditMask}, {@code ReportBandLayouts},
+ * {@code ReportingDtoMapper}, {@code StatementBandLayouts}, {@code StatementHtmlMapper},
+ * {@code StatementTextMapper} and
  * {@code TransactionReportMapper}. Every type name, band inventory and count below is a measurement
  * of that directory and of those files, so the seam described here is an observation of compiled
  * code and not only a contract to be honoured. The shared-kernel types named further down are
@@ -39,7 +40,7 @@
  * reachable from code that has no business knowing a declared width, and the boundary would
  * become a naming convention instead of a constraint.</p>
  *
- * <h2>The eight files, and what each one owns</h2>
+ * <h2>The nine files, and what each one owns</h2>
  *
  * <ul>
  *   <li><b>{@code package-info}</b> -- this charter, and the package's documentation
@@ -61,6 +62,13 @@
  *       statement, including its fragment table and emission sequence.</li>
  *   <li><b>{@code ReportingDtoMapper}</b> -- the JSON API representations, and the sole home
  *       of data-exposure narrowing.</li>
+ *   <li><b>{@code CategoryBalanceLineLayout}</b> -- the 40-byte category-balance line of
+ *       {@code app/jcl/PRTCATBL.jcl}, whose {@code OUTREC} operand list at L53-L56 composes 41
+ *       bytes against the {@code LRECL=40} its {@code SORTOUT} declares at L61. It is the only
+ *       artifact in this package with no COBOL program behind it, so the two JCL statements are the
+ *       whole specification and there is no third to break the tie; the resolution is registered as
+ *       divergence {@code D-PRTCATBL-LRECL}. It composes rather than emits bands, which is why it is
+ *       named a layout and not a mapper.</li>
  * </ul>
  *
  * <p>Alternatives Considered: fewer files, by folding the masks into the mappers that use them
@@ -78,13 +86,17 @@
  * {@code app/cbl/CBSTM03A.CBL} and {@code HTML-L30-42} at line 176 -- and they are named that
  * way precisely because one fragment is emitted at several positions, so the table and the
  * sequence are two halves of one fact and separating them would hide it. The accepted cost is
- * seven files where three would compile.</p>
+ * eight files where three would compile.</p>
  *
- * <h2>Three declared record lengths, none of them a sum of field widths</h2>
+ * <h2>Four declared record lengths, none of them a sum of field widths</h2>
  *
- * <p>Assumptions: this package emits three artifacts, and each has a <b>declared record
+ * <p>Assumptions: this package emits four artifacts, and each has a <b>declared record
  * length</b> that is a property of the file it is written to rather than an arithmetic result.
- * Each is anchored to more than one source so the number is checkable:</p>
+ * Each is anchored to more than one source so the number is checkable. The fourth --
+ * {@code LRECL=40} at {@code app/jcl/PRTCATBL.jcl:61} -- is the one case where the corroborating
+ * source DISAGREES rather than agreeing, and the declared length is taken; that is the whole of
+ * divergence {@code D-PRTCATBL-LRECL} and it is what this section's own heading warns about, since
+ * the sum of the operand widths there is 41:</p>
  *
  * <pre>
  * artifact           declared   declared at                          corroborated by

@@ -222,14 +222,18 @@ class InternalServiceTokenTest {
      * <p>Assumptions: the transaction context is the subject asserted against, because it is the one with a
      * genuinely narrower entitlement: it calls ONE operation family on the account context, the card
      * cross-reference lookup, so both the account and the customer scopes are withheld from it. Asserting the
-     * one permitted scope as well as the two refused ones is what stops the case passing on a table that
+     * permitted scopes as well as the two refused ones is what stops the case passing on a table that
      * permitted nothing at all.</p>
      *
-     * <p>Refactoring Rationale: this case asserted two permitted scopes until the transaction context stopped
-     * reading the account master over HTTP -- its bill payment reads and reduces the balance locally now,
-     * under a named cross-schema grant, so nothing in it mints the account scope. The refused half of the case
-     * gained an entry rather than losing one, which is the direction that matters: the account scope is now
-     * asserted to be refused, so a table that quietly restored it fails here.</p>
+     * <p>Refactoring Rationale: the permitted half of this case has been rewritten twice, each time because
+     * the table changed rather than because the assertion was wrong. It named two scopes until the
+     * transaction context stopped reading the account master over HTTP -- its bill payment reads and reduces
+     * the balance locally now, under a named cross-schema grant, so nothing in it mints the account scope,
+     * and the refused half gained that entry, which is the direction that matters. It names two again now
+     * for an unrelated reason: the cross-reference family itself was split, because ONE of its three
+     * addresses answers with an unmasked primary account number, and the scope covering that address is
+     * granted to this caller and withheld from the other. The two changes must not be read as one -- the
+     * first removed a reach nothing used, the second bounded a disclosure that is required for parity.</p>
      */
     @Test
     @DisplayName("a caller cannot mint a scope outside its own permitted set")
@@ -238,9 +242,25 @@ class InternalServiceTokenTest {
                 InternalServiceToken.SUBJECT_TRANSACTION_SERVICE,
                 Clock.fixed(NOW, ZoneOffset.UTC), Duration.ofMinutes(1));
 
+        // WHY : Refactoring Rationale: the transaction row carries TWO cross-reference scopes where it
+        //       carried one, and the second is asserted here rather than only where it is used. The
+        //       account-keyed lookup answers with an unmasked primary account number and the other two
+        //       cross-reference addresses answer with none, so the disclosure was split onto its own
+        //       scope and granted to this caller alone -- it keys its ledger row on that value. Both are
+        //       named because the ordering of the returned set is alphabetical and asserting one would
+        //       pass against a table that had lost the other.
         assertThat(InternalServiceToken.permittedScopes(
                 InternalServiceToken.SUBJECT_TRANSACTION_SERVICE))
-                .containsExactly(InternalServiceToken.SCOPE_CARD_XREF_READ);
+                .containsExactly(InternalServiceToken.SCOPE_CARD_XREF_READ,
+                        InternalServiceToken.SCOPE_CARD_XREF_RESOLVE_CARD_NUMBER);
+        // WHY : Assumptions: the OTHER caller's refusal of that same scope is asserted here, in the case
+        //       that owns the table, because the narrowing is a property of the table rather than of
+        //       either service. The authorization context calls the card-keyed lookup only, so a
+        //       credential it mints must not resolve an account to a clear card number; without this
+        //       assertion a table that granted the scope to both callers would leave every other case in
+        //       this class passing.
+        assertThat(InternalServiceToken.permits(InternalServiceToken.SUBJECT_AUTHORIZATION_SERVICE,
+                InternalServiceToken.SCOPE_CARD_XREF_RESOLVE_CARD_NUMBER)).isFalse();
         assertThatThrownBy(() -> transactionMinter.mint(
                 InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
                 InternalServiceToken.SCOPE_CUSTOMER_READ))

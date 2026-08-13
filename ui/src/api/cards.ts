@@ -71,7 +71,7 @@
  * prevents.
  */
 
-import { getApiClient, requestPath } from './client';
+import { getApiClient, keysetPagingMembers, requestPath } from './client';
 import type {
   AdminCardDetail,
   CardDetail,
@@ -186,6 +186,37 @@ export const CARD_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
   GET_ADMIN_CARD_DETAIL,
 ];
 
+/*
+ * WHY : Refactoring Rationale: the rendering guard below matches the masked form POSITIVELY, and the
+ *       revision it replaces refused only the sixteen-digit form -- `isCardNumber(displayCardNumber)`
+ *       -- which is a strictly narrower test than the contract states. `card-api.yaml` declares
+ *       `pattern: '^\*{12}[0-9]{4}$'` on this member in BOTH shapes that carry it, at L1988 for the
+ *       list row and L2161 for the detail, so anything else in it is a contract breach the client is
+ *       positioned to catch. The negative form admitted every unmasked rendering that was not exactly
+ *       sixteen bare digits: a separator-formatted number such as `4111-1111-1111-1111`, a
+ *       space-grouped one, a fifteen-digit or seventeen-digit value, a partially masked `****1111`,
+ *       and the empty string. The first two of those are whole primary account numbers -- the very
+ *       disclosure this guard exists to stop -- and they reached a table, a log line and a bug report
+ *       unremarked, because a test asking "is this sixteen digits" answers no to a value carrying
+ *       nineteen characters of which sixteen are digits.
+ * WHY : Alternatives Considered: (1) extending `isCardNumber` in `../routes/cards` to strip separators
+ *       before counting digits. Rejected because it fixes the narrower test rather than replacing it,
+ *       and it would still admit a partial mask; the guard's obligation is the contract's pattern, not
+ *       a family of near-misses enumerated one at a time. (2) importing a shared masked-rendering
+ *       predicate. Rejected for now because the four sibling clients that already check this member --
+ *       `./accounts` L161, `./authorization` L234, `./reporting` L144 and `./transactions` L237 --
+ *       each declare this exact literal locally, so a fifth local declaration keeps this module
+ *       consistent with the folder, whereas hoisting it would be a five-module change outside the
+ *       findings this pass resolves.
+ * WHY : Trade-offs: the positive form refuses a response the previous one accepted, so a service that
+ *       renders the mask differently -- a different mask character, or eleven of them -- now fails the
+ *       browse rather than painting a row. That is the intended exchange: the contract's pattern is the
+ *       agreement, and a rendering that does not satisfy it is either a service fault or a disclosure,
+ *       and neither should be resolved by rendering it.
+ */
+/** Matches the masked rendering every card row and card detail must carry. */
+const MASKED_CARD_NUMBER = /^[*]{12}[0-9]{4}$/u;
+
 // WHY : Alternatives Considered: the two operations below are the collection-level pair, serving the
 //       browse screen's two entry fields between them -- one page of rows optionally narrowed by
 //       account, and one row resolved from a card number a user typed -- and the page is positioned by
@@ -253,7 +284,8 @@ export const CARD_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
  * @returns {Promise<PageResponse<CardSummary>>} One bounded page whose rows each render the card
  *   number's last four digits beside the selector that addresses it, together with the two sealed
  *   positions and the forward-availability flag the following request is built from.
- * @throws {RangeError} If any row renders a whole card number or carries no well-formed selector.
+ * @throws {RangeError} If a direction is supplied without a usable cursor, if any row's rendering is not
+ *   the masked form the contract declares, or if the row carries no well-formed selector.
  * @throws {Error} If the request fails, as the normalised failure `./client` raises, carrying the
  *   service's problem document: HTTP 400 for a malformed account filter or a cursor that cannot be
  *   opened, 401 when no session is held, 403 for a caller outside the required group, and 500 or 503
@@ -265,17 +297,23 @@ export async function listCards(query: CardListQuery = {}): Promise<PageResponse
   //   absent rather than null, so the service sees exactly the criteria that were supplied — because
   //   the contract still declares every member optional and still treats an absent body as the
   //   opening page of the unfiltered set.
+  // Assumptions: the pair is checked before the body is assembled, so a direction that arrives with
+  //   no cursor is refused rather than dropped. The membership rules above say an omitted member is
+  //   absent rather than null, which is a statement about what the CALLER omitted; silently omitting
+  //   something the caller did supply is a different thing and is what `keysetPagingMembers` stops.
   const body: Record<string, string> = {};
 
   if (query.accountId !== undefined) {
     body.accountId = query.accountId;
   }
-  if (query.cursor !== undefined) {
-    body.cursor = query.cursor;
-    // Assumptions: the direction accompanies the cursor and is omitted without one, because the
-    //   contract declares it meaningful only alongside a cursor and defaults it to next. Sending a
-    //   direction alone would describe a position relative to nothing.
-    body.direction = query.direction ?? 'next';
+  // Refactoring Rationale: ⚠️ the pair is established by `keysetPagingMembers`, which refuses a
+  //   direction supplied without a cursor. This block used to DROP it, so a caller asking to step
+  //   backward from no position received the opening page of the unfiltered set and could not tell the
+  //   two apart -- while the contract answers that same combination with a 400 keyed on the direction.
+  const paging = keysetPagingMembers(query.cursor, query.direction);
+  if (paging !== undefined) {
+    body.cursor = paging.cursor;
+    body.direction = paging.direction;
   }
 
   const response = await getApiClient().post<PageResponse<CardSummary>>(
@@ -366,9 +404,9 @@ export async function getCard(cardKey: string): Promise<CardDetail> {
  * @param {string} cardKey - The card's sealed selector.
  * @returns {Promise<AdminCardDetail>} The card detail, additionally carrying the whole sixteen-digit
  *   card number as a string.
- * @throws {RangeError} If the value is not the published selector shape, if the four-digit rendering
- *   carries a whole card number, if the version is invalid, or if the whole number is not sixteen
- *   digits.
+ * @throws {RangeError} If the value is not the published selector shape, if the masked rendering is
+ *   not exactly twelve mask characters followed by four digits, if the version is invalid, or if the
+ *   whole number is not sixteen digits.
  * @throws {Error} If the request fails, as the normalised failure `./client` raises, carrying the
  *   service's problem document: HTTP 400 for a selector that cannot be opened, 401 when no session is
  *   held, 403 for a caller outside the administrative group, 404 when the selector addresses no row,
@@ -460,11 +498,13 @@ export async function updateCard(cardKey: string, request: CardUpdateRequest): P
 /**
  * Validates the two security-sensitive fields a card row carries.
  *
- * Assumptions: what is checked of the rendering is that it shows only the last four digits. The
- * contract publishes a sixteen-character value in this member and the service replaces every position
- * but the last four, so a value that is sixteen DIGITS was never rendered at all. Refusing it at the
- * boundary is what turns a server-side rendering failure into a named client error rather than a whole
- * card number reaching a table, a log line and a bug report.
+ * Assumptions: what is checked of the rendering is that it IS the masked form the contract declares --
+ * exactly twelve mask characters followed by exactly four digits -- and not merely that it is something
+ * other than sixteen bare digits. The service replaces every position but the last four, so the masked
+ * form is the only rendering this member is ever permitted to hold, and requiring it is what turns a
+ * server-side rendering failure into a named client error rather than a whole card number reaching a
+ * table, a log line and a bug report. The `MASKED_CARD_NUMBER` declaration above records why the
+ * narrower negative test this replaced was insufficient.
  *
  * Assumptions: what is checked of the selector is its SHAPE, because a row whose selector is malformed
  * would otherwise become a link that fails only when it is followed — naming `cardDetailPath` at the
@@ -472,14 +512,22 @@ export async function updateCard(cardKey: string, request: CardUpdateRequest): P
  * importantly, a value that is a card number rather than a selector would put the number back into a
  * URL. Its validity is the service's to decide, since only the service holds the sealing key.
  * @param {CardSummary} card - Typed response row supplied by Axios.
- * @returns {CardSummary} The row, unchanged, once its rendering shows four digits and its selector is
+ * @returns {CardSummary} The row, unchanged, once its rendering is the masked form and its selector is
  *   well-formed.
- * @throws {RangeError} If the rendering carries a whole card number or the selector is malformed.
+ * @throws {RangeError} If the rendering is not exactly twelve mask characters followed by four digits,
+ *   or the selector is malformed.
  */
 function validateCardSummary(card: CardSummary): CardSummary {
-  if (isCardNumber(card.displayCardNumber)) {
+  if (!MASKED_CARD_NUMBER.test(card.displayCardNumber)) {
+    /*
+     * WHY : Assumptions: the rejected value is DESCRIBED and never reproduced, and the four sibling
+     *       guards state the same reason. The values this branch exists to catch include whole primary
+     *       account numbers, so quoting the offending value in the message would carry the number into
+     *       whatever renders or logs the failure -- which is the disclosure the guard is here to
+     *       prevent, arriving by a different route.
+     */
     throw new RangeError(
-      'displayCardNumber must render only the last four digits; a sixteen-digit value renders them all.',
+      'displayCardNumber must be exactly twelve mask characters followed by the last four digits.',
     );
   }
   if (!isCardSelector(card.key)) {
@@ -501,7 +549,7 @@ function validateCardSummary(card: CardSummary): CardSummary {
  * Validates a card detail and its optimistic-lock version.
  * @param {CardDetail} card - Typed detail supplied by Axios.
  * @returns {CardDetail} A normalized detail safe for rendering and update submission.
- * @throws {RangeError} If its rendering carries a whole card number, its selector is malformed, or its
+ * @throws {RangeError} If its rendering is not the masked form, its selector is malformed, or its
  *   version is invalid.
  */
 function validateCardDetail(card: CardDetail): CardDetail {

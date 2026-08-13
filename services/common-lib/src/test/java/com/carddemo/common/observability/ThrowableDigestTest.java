@@ -39,14 +39,27 @@ import org.junit.jupiter.api.Test;
 class ThrowableDigestTest {
 
     /**
-     * A sentinel shaped like an unmasked primary account number.
+     * A sentinel shaped like an unmasked primary account number, drawn from the reserved test range.
+     *
+     * <p>Assumptions: this is the card scheme's own published test number, reserved for exactly this
+     * use and issued to nobody, which is why it is safe to write into a source file that is read and
+     * searched. It is stated here rather than left to be recognised, because a sixteen-digit string
+     * that satisfies the industry check digit is indistinguishable from a live account number to a
+     * reader who does not already know the range.</p>
      */
     private static final String PAN_SENTINEL = "4111111111111111";
 
     /**
-     * A sentinel shaped like a national identifier.
+     * A sentinel shaped like a national identifier that no allocation rule could ever have issued.
+     *
+     * <p>Assumptions: the digits are chosen so the value cannot belong to a person rather than merely
+     * being unlikely to. The issuing authority has never assigned an area number of 000, never a group
+     * number of 00 and never a serial number of 0000, so this string fails three independent allocation
+     * rules at once. It replaces 123-45-6789, which is shaped exactly like an ISSUABLE identifier and
+     * therefore reads as a real one to anyone who meets it out of context -- an outcome this file exists
+     * to prevent for values in a log line.</p>
      */
-    private static final String SSN_SENTINEL = "123-45-6789";
+    private static final String SSN_SENTINEL = "000-00-0000";
 
     /**
      * A sentinel shaped like a fixed-width record image fragment.

@@ -378,10 +378,16 @@
           family at 12.4.0; the migration targets 42.7.13 and 13.0.0. Advancing
           past the versions the Boot release was tested against is accepted
           knowingly, in exchange for the driver and migration behaviour the
-          Aurora PostgreSQL target requires. This is the ONLY place this build
-          departs from the parent's tested dependency set, and it is why the
+          Aurora PostgreSQL target requires. This is the only FUNCTIONAL
+          departure from the parent's tested dependency set — the only one
+          taken to obtain behaviour this migration needs — and it is why the
           departure is written as a property override rather than buried in a
-          coordinate.
+          coordinate. It is not the only departure of any kind: the security
+          floors grouped further down this block (netty, the two Jackson BOMs
+          and httpcore5) also advance past the versions Boot 4.1.0 manages, and
+          they are stated separately because their justification is an advisory
+          rather than a required behaviour and therefore expires. A reader
+          auditing what this build overrides has to read both groups.
         Assumptions: the override MUST be expressed as these properties and not
           only as dependencyManagement entries. Boot manages roughly two dozen
           Flyway artifacts through the single flyway.version property. Pinning
@@ -462,7 +468,7 @@
 
     <!--
       WHY :
-        Assumptions: these three properties exist ONLY to clear published
+        Assumptions: these four properties exist ONLY to clear published
           security advisories in transitive dependencies, and each is pinned to
           the lowest version that does so. They are grouped and labelled here,
           apart from the functional pins above, because their justification
@@ -472,17 +478,23 @@
           this migration. Nothing in CardDemo depends on a feature of any of
           these versions.
         Assumptions: the overrides MUST be expressed as these exact property
-          names, because Boot imports each family as a BOM whose version is
-          the property: io.netty:netty-bom through netty.version,
-          com.fasterxml.jackson:jackson-bom through jackson-2-bom.version and
-          tools.jackson:jackson-bom through jackson-bom.version. Pinning
-          individual artifacts in dependencyManagement instead was rejected for
-          the reason recorded against the Flyway override above: Netty resolves
-          as fourteen separate artifacts here and Jackson as six across two
-          group lines, so an artifact-by-artifact pin leaves every module nobody
-          listed at the advisory version while the build reports success. It
-          also silently breaks whenever a new transitive artifact from the same
-          family reaches the classpath.
+          names, because Boot resolves each family through the property rather
+          than through the coordinate: io.netty:netty-bom through
+          netty.version, com.fasterxml.jackson:jackson-bom through
+          jackson-2-bom.version, tools.jackson:jackson-bom through
+          jackson-bom.version, and the three
+          org.apache.httpcomponents.core5 artifacts Boot manages directly,
+          namely httpcore5, httpcore5-h2 and httpcore5-reactive, through
+          httpcore5.version. Pinning individual artifacts in
+          dependencyManagement instead was rejected for the reason recorded
+          against the Flyway override above: Netty resolves as fourteen separate
+          artifacts here and Jackson as six across two group lines, so an
+          artifact-by-artifact pin leaves every module nobody listed at the
+          advisory version while the build reports success. It also silently
+          breaks whenever a new transitive artifact from the same family reaches
+          the classpath — which for HttpCore is the concrete risk, because the
+          advisory below is in the shared core and httpcore5-h2 carries the
+          HTTP/2 framing that reads the very header stream it concerns.
         Trade-offs: the two Jackson floors deliberately stay on the patch line
           Boot selected, 2.21.x and 3.1.x, rather than advancing to the newest
           2.22.x and 3.2.x available. Advancing the minor line would pull
@@ -501,6 +513,41 @@
     <netty.version>4.2.16.Final</netty.version>
     <jackson-2-bom.version>2.21.5</jackson-2-bom.version>
     <jackson-bom.version>3.1.5</jackson-bom.version>
+
+    <!--
+      WHY :
+        Assumptions: Boot 4.1.0 manages httpcore5 at 5.4.2, and that release is
+          affected by GHSA-hf6x-8p5f-cgmf / CVE-2026-54399: an unauthenticated
+          caller can drive memory exhaustion through the header stream, and the
+          fix is 5.4.3. 5.4.3 is therefore the lowest version that clears the
+          advisory and is exactly what is pinned — no newer line is taken,
+          because nothing here depends on a 5.4.3 feature and a larger step
+          would trade a reviewed floor for untested behaviour.
+        Assumptions: httpcore5 is not a dependency this migration declares. It
+          arrives transitively under the Apache HttpComponents client that the
+          AWS SDK's apache-client and Spring's client abstractions resolve, so
+          it is on the runtime classpath of every service in this reactor and
+          not only of the ones that speak HTTP outbound. That is why the floor
+          belongs in the aggregator's properties rather than in any single
+          module: a per-module pin would leave every module nobody amended at
+          5.4.2 while the build reported success.
+        Assumptions: the exposure is denial of service and not disclosure, which
+          is why it is a floor rather than a code change. The header-parsing
+          path is inside the library; there is no CardDemo call site to harden
+          and no configuration that mitigates it, so advancing the managed
+          version is the whole of the fix.
+        Alternatives Considered: excluding the artifact, as the Netty note above
+          considers and rejects for its own family. Rejected here for the same
+          reason and more strongly — httpcore5 is the transport core beneath
+          the SDK's synchronous client, so excluding it removes the ability to
+          call SQS, S3, Step Functions, Secrets Manager and KMS rather than
+          patching it. Also considered: waiting for a Boot patch release that
+          manages 5.4.3. Rejected because the advisory is live now and the
+          override is a single reviewed line that a later Boot release turns
+          into a restatement, at which point the group comment above says to
+          delete it.
+    -->
+    <httpcore5.version>5.4.3</httpcore5.version>
 
   </properties>
 

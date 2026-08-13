@@ -106,7 +106,10 @@
  * boundary most easily mistaken for an omission. The administrative authority required on the fraud route
  * is declared once, against path prefixes, in {@code com.carddemo.authorization.config.SecurityConfig},
  * and it is asserted against the installed decision object in
- * {@code com.carddemo.authorization.config.SecurityConfigTest}. The reason it cannot be asserted here is
+ * {@code com.carddemo.authorization.config.SecurityConfigTest}, with the chain's handling of the
+ * container's ERROR dispatch asserted through a dispatch in
+ * {@code com.carddemo.authorization.config.SecurityChainDispatchTest}. The reason it cannot be asserted
+ * here is
  * mechanical rather than stylistic: the server these tests build is assembled standalone and installs no
  * filter chain at all, so the principal is supplied on the request builder. An assertion here that a route
  * was reachable would therefore say nothing whatever about whether it is reachable WITHOUT the right
@@ -140,10 +143,16 @@
  *   <li>The sliced web-layer test annotation is not used anywhere in this module. Both classes here
  *       assemble a standalone server, and the reason is specific to this context rather than a
  *       preference: this module's {@code SecurityConfig} builds its decoder from an issuer location, which
- *       resolves that issuer's discovery document EAGERLY at bean construction, so any context including
- *       that configuration reaches the network from a unit test -- against a host the test profile points
- *       somewhere unresolvable on purpose. A standalone server exercises routing, binding, validation,
- *       delegation and status selection with none of that.</li>
+ *       resolves that issuer's discovery document EAGERLY at bean construction, so any context REGISTERING
+ *       that configuration as a configuration class reaches the network from a unit test -- against a host
+ *       the test profile points somewhere unresolvable on purpose. A standalone server exercises routing,
+ *       binding, validation, delegation and status selection with none of that. Refactoring Rationale:
+ *       this entry read "any context including that configuration", which overstated the obstacle.
+ *       {@code com.carddemo.authorization.config.SecurityChainDispatchTest} does assemble a web context
+ *       holding the deployed chain, by INSTANTIATING the configuration and calling the two bean methods it
+ *       needs while substituting the decoder -- so the eager resolution never happens. It is recorded here
+ *       because a reader of this entry would otherwise conclude that a web context is unreachable in this
+ *       module, and one of its security rules can be asserted no other way.</li>
  *   <li>The recorded byte images this module's other packages read are documented, and the count is not
  *       the one the plan carried. That directory holds thirty-three binary images and five delimited
  *       ones beside a README that describes them, and it is also the one path on the test side that the

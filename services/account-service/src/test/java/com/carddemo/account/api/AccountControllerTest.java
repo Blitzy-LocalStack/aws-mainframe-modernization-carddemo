@@ -1654,10 +1654,15 @@ class AccountControllerTest {
      * @return a request builder ready to be performed, never {@code null}
      */
     private MockHttpServletRequestBuilder readView() {
+        // WHY : Refactoring Rationale: the body is built from ACCOUNT_KEY rather than from ACCOUNT_ID
+        //       because the published schema declares this member as digits-only TEXT at the
+        //       eleven-character width, not as an integer. Passing the number would no longer compile,
+        //       and passing its unpadded rendering would exercise a width the contract admits but this
+        //       class's stubs are not keyed on.
         return post(VIEW_PATH)
                 .contentType(MediaType.APPLICATION_JSON)
                 .accept(MediaType.APPLICATION_JSON)
-                .content(this.jsonMapper.writeValueAsString(new AccountLookupRequest(ACCOUNT_ID)));
+                .content(this.jsonMapper.writeValueAsString(new AccountLookupRequest(ACCOUNT_KEY)));
     }
 
     /**
@@ -1674,7 +1679,7 @@ class AccountControllerTest {
         return post(XREF_PATH)
                 .contentType(MediaType.APPLICATION_JSON)
                 .accept(MediaType.APPLICATION_JSON)
-                .content(this.jsonMapper.writeValueAsString(new AccountLookupRequest(ACCOUNT_ID)));
+                .content(this.jsonMapper.writeValueAsString(new AccountLookupRequest(ACCOUNT_KEY)));
     }
 
     /**

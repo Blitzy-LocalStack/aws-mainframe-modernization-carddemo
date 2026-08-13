@@ -40,8 +40,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * queue acknowledges the request only on that clean return -- so a task killed between the send and the
  * acknowledgement leaves the request visible again and the next delivery would send a SECOND reply bearing
  * the same correlation identifier as the first. {@link InquiryReplyLedger} removes that by recording the
- * answer under the requester's own identity, committing it, and only then sending. This class asserts the
- * three statements that make it work.</p>
+ * answer under the broker's own identifier for the delivery, committing it, and only then sending. This
+ * class asserts the three statements that make it work.</p>
  *
  * <p>Assumptions: this runs against a real PostgreSQL engine rather than a substitute, because every
  * property under test here is the ENGINE's. {@code INSERT ... ON CONFLICT DO NOTHING} reporting zero

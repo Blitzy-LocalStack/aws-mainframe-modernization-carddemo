@@ -51,7 +51,7 @@
  *       first with its own, that a blank attribute stays distinguishable from an unacceptable one,
  *       that an over-width attribute is refused at the boundary, and that a stale revision is
  *       refused even when the submission changes nothing.</li>
- *   <li>{@code CardControllerTest} asks ADMITTANCE and RENDERING across 27 cases, and it is the only
+ *   <li>{@code CardControllerTest} asks ADMITTANCE and RENDERING across 31 cases, and it is the only
  *       class here that refreshes an application context. It installs the chain
  *       {@code com.carddemo.card.config.SecurityConfig} declares and the advice
  *       {@code com.carddemo.common.error.GlobalExceptionHandler} is, then drives all five operations
@@ -60,8 +60,9 @@
  *       token is challenged rather than denied, that a group name in a token becomes an authority
  *       through the deployed converter, that an unpublished address meets the closing deny rule while
  *       the health path does not, that each detail shape publishes its complete member set and
- *       therefore carries no verification value, that the envelope carries all five of its members
- *       and neither cursor on an exhausted page, that the browse narrowing is optional where the
+ *       therefore carries no verification value, that the envelope carries all FOUR of its members
+ *       -- {@code items}, {@code firstKey}, {@code lastKey} and {@code hasNext} -- and neither cursor
+ *       on an exhausted page, that the browse narrowing is optional where the
  *       lookup number is mandatory, that the reference clear-filter sentinel earns a refusal rather
  *       than clearing a narrowing, and that a refusal is rendered as the shared problem document
  *       carrying the reference sentence -- including the three conflict conditions kept apart from one

@@ -68,73 +68,71 @@
  * search of either file for those type names returns nothing, so the two are consistent by
  * construction rather than by coincidence.</p>
  *
- * <h2>Contract two: two rounding modes, one per operation, and why it is not one</h2>
+ * <h2>Contract two: one rounding mode for the whole money path</h2>
  *
- * <p>Every reduction of a monetary result to cents in this package uses scale 2, and which mode
- * performs it is a property of the operation rather than of the caller. Reducing a supplied amount,
- * general multiplication and general division use {@code RoundingMode.HALF_UP}, exposed as
- * {@code Money.GENERAL_ROUNDING}. Interest accrual uses {@code RoundingMode.DOWN}, exposed as
- * {@code Money.BASELINE_INTEREST_ROUNDING}. Neither is reachable from any signature, so a call site
- * cannot select between them and cannot be asked to. The accrual path differs from the others in
- * both the <em>order</em> of its operations, described below, and its rounding.</p>
+ * <p>Every reduction of a monetary result to cents in this package uses scale 2 and
+ * {@code RoundingMode.HALF_UP}, exposed as {@code Money.GENERAL_ROUNDING}: reducing a supplied
+ * amount, general multiplication, general division and interest accrual alike. The mode is reachable
+ * from no signature, so a call site cannot select another and cannot be asked to. The accrual path
+ * still differs from the others, but in the <em>order</em> of its operations rather than in its
+ * rounding.</p>
  *
- * <p>Assumptions: the split follows the reference source, and it is the asymmetry rather than the
- * modes that carries the meaning. The baseline performs exactly one monetary computation, and the
- * accrual quotient is it. Lines 462 to 468 of {@code app/cbl/CBACT04C.cbl} hold the accrual
- * paragraph, whose statement is
- * {@code COMPUTE WS-MONTHLY-INT = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200}. The receiving field is
- * declared at line 168 of the same program as {@code 05 WS-MONTHLY-INT            PIC S9(09)V99.},
- * so the result is stored at exactly two decimal places and surplus precision has to go somewhere;
- * and the statement carries no {@code ROUNDED} phrase, nor does any other statement in the program,
- * because a search for that phrase across all 652 lines returns no match. A store into a
- * fixed-scale field without that phrase discards the surplus digits rather than rounding them, so
- * the baseline behaviour is truncation toward zero, and that is what the accrual mode reproduces.
- * The three general operations have no reference statement at all -- they are target arithmetic with
- * no baseline counterpart -- so nothing constrains their mode and transformation rule T3's half-up
- * applies to them unopposed.</p>
+ * <p>Assumptions: the single mode is transformation rule T3 applied literally. That rule states the
+ * money path as an exact decimal at scale 2 with {@code RoundingMode.HALF_UP} in Java and states no
+ * exception for any operation, and the plan's arithmetic rule T4 constrains the accrual's operand
+ * ORDER while leaving its mode to T3, naming only "an explicit scale and rounding mode". Three of the
+ * four operations governed have no reference statement to be faithful to at all -- general
+ * multiplication, general division and the reduction of a supplied amount are target arithmetic with
+ * no baseline counterpart -- and the fourth is the accrual quotient, where the reference would reduce
+ * differently.</p>
  *
- * <p>Refactoring Rationale: this package applied half-up to the accrual as well, and registered the
- * resulting cent as a documented divergence identified {@code C-ROUNDING}. That disposition is
- * withdrawn and the divergence is closed; the identifier is retained only as a withdrawal record in
- * {@code docs/architecture/cobol-to-service-traceability.md} so that it still resolves for a reader
- * who meets it in an older comment. Reading rule T3's "half up for the whole money path" as covering
- * the accrual put the letter of a transformation rule above the requirement it exists to serve: the
- * plan requires observable behaviour to be unchanged, names the exact interest formula among the
- * rules that must be preserved, and admits a behavioural change only as an explicitly authorised
- * divergence. What T3 actually forbids -- binary floating point in the money path, and a
- * caller-selectable mode -- is still forbidden here and is still asserted mechanically: the mode is
- * fixed at the type, unreachable from every signature, and applied to an exact decimal.</p>
+ * <p>Trade-offs: the reference accrual discards its surplus digits and this package rounds them, so on
+ * a quotient landing exactly on a half cent this package credits one cent more. Lines 462 to 468 of
+ * {@code app/cbl/CBACT04C.cbl} hold the accrual paragraph, whose statement is
+ * {@code COMPUTE WS-MONTHLY-INT = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200}; the receiving field is
+ * declared at line 168 as {@code 05 WS-MONTHLY-INT            PIC S9(09)V99.}, so the result is stored
+ * at exactly two decimal places and surplus precision has to go somewhere, and the statement carries no
+ * {@code ROUNDED} phrase -- nor does any other statement in the program, because a search for that
+ * phrase across all 652 lines returns no match. A store into a fixed-scale field without that phrase
+ * discards the surplus digits rather than rounding them. The cent is accepted rather than avoided, and
+ * it is registered as divergence {@code C-ROUNDING} in
+ * {@code docs/architecture/cobol-to-service-traceability.md}, which carries the accrual's parity
+ * evidence with it.</p>
  *
- * <p>Refactoring Rationale: the cent was not the whole of the cost, and understating it is what made
- * the divergence look acceptable. The accrual is one of the business rules the reference test suite
- * asserts verbatim, so a cent of drift in it is a functional-parity failure in the most heavily
- * asserted computation in the system. It also compounds rather than staying local: line 467 of
- * {@code app/cbl/CBACT04C.cbl} adds each row's reduced result into the account total and line 352
- * adds that total to the account balance once per account, so a cent gained per transaction category
- * reaches the balance the next over-limit comparison is made against, and that comparison is
- * inclusive.</p>
+ * <p>Refactoring Rationale: this package carried a second mode for a time,
+ * {@code BASELINE_INTEREST_ROUNDING}, fixed at {@code RoundingMode.DOWN} and applied to the accrual
+ * quotient alone so that the cent above did not arise. That constant is withdrawn. Preferring it read a
+ * parity argument as licence to depart from a frozen transformation rule, which inverts the order the
+ * plan sets: a behavioural difference from the reference is admitted when it is documented as a
+ * divergence, whereas a departure from a transformation rule is admitted only where the plan states an
+ * exception, and it states none for the accrual. What T3 also forbids -- binary floating point in the
+ * money path, and a caller-selectable mode -- remains forbidden and remains asserted mechanically: the
+ * mode is fixed at the type, unreachable from every signature, and applied to an exact decimal.</p>
  *
- * <p>Trade-offs: two modes cost a reader having to know which operation is governed by which, where
- * one mode cost nothing to explain and a cent in the one computation that matters most. The cost is
- * paid down three ways: exactly one operation sits on the truncating side, each constant is named
- * for the operation it governs rather than for a general policy, and the vector that discriminates
- * the two is asserted rather than described. On the vectors the reference fixtures actually carry
- * the two modes agree, which is why a discriminating test has to be constructed deliberately: the
- * happy-path interest fixture supplies a category balance of {@code 1000.00} and a disclosure-group
- * rate of {@code 15.00}, the formula yields {@code 12.5000} exactly and both modes return
- * {@code 12.50}; at a rate of {@code 2.50} against the same balance the quotient is
- * {@code 2.08333...} and both return {@code 2.08}. They part company on an exact half cent, as with
- * a balance of {@code 1000.80} at a rate of {@code 2.50}: the quotient is {@code 2.0850} exactly,
- * truncation returns {@code 2.08} and half-up returns {@code 2.09}.</p>
+ * <p>Trade-offs: the cent does not stay local, and saying so is what makes the registered divergence
+ * legible rather than nominal. Line 467 of {@code app/cbl/CBACT04C.cbl} adds each row's reduced result
+ * into the account total and line 352 adds that total to the account balance once per account, so a
+ * cent gained on a transaction category reaches the balance the next over-limit comparison is made
+ * against, and that comparison is inclusive. What is bought is one money contract for the whole
+ * migration: one mode for a reader to know, one for a reviewer to check, and no call site left to
+ * establish which of two governs the computation in front of it.</p>
+ *
+ * <p>Assumptions: the divergence is unreachable on the vectors the reference fixtures actually carry,
+ * which is why a discriminating test has to be constructed deliberately. The happy-path interest
+ * fixture supplies a category balance of {@code 1000.00} and a disclosure-group rate of {@code 15.00},
+ * the formula yields {@code 12.5000} exactly and both modes return {@code 12.50}; at a rate of
+ * {@code 2.50} against the same balance the quotient is {@code 2.08333...} and both return
+ * {@code 2.08}. They part company only on an exact half cent, as with a balance of {@code 1000.80} at a
+ * rate of {@code 2.50}: the quotient is {@code 2.0850} exactly, half up returns {@code 2.09} and the
+ * reference's truncation returns {@code 2.08}.</p>
  *
  * <p>Alternatives Considered: exposing the mode as a parameter on the accrual and letting the caller
  * select it. Rejected because the choice would then live at the call site, where the next
  * accrual-adjacent caller would face a decision with no basis for making it, and because two call
  * sites computing the same accrual could disagree by a cent with nothing in either one signalling
  * that they had chosen differently. Also considered: amending the migration plan to admit
- * truncation. Rejected outright -- the plan is frozen and is the agreed contract. Neither is
- * necessary: fixing the mode per operation satisfies the plan's parity requirement and its
- * prohibitions at the same time, without relocating the decision to a caller or to the plan.</p>
+ * truncation. Rejected outright -- the plan is frozen and is the agreed contract, so a difference from
+ * the reference is registered against it rather than written into it.</p>
  *
  * <p>Assumptions: the multiply-before-divide order is part of the same contract and is not an
  * implementation detail, per transformation rule T4. The reference statement multiplies the balance
@@ -244,9 +242,10 @@
  * <p>Refactoring Rationale: every figure above was previously a TARGET rather than a measurement,
  * and the paragraph that said so argued that a target "keeps this paragraph true at every point in
  * that sequence". That reasoning held only while the tree was a subset of the target. It is not: the
- * module now holds forty-two production classes against a target of seventeen, and one whole
- * subpackage -- {@code messaging}, with {@code MessageExpiry}, {@code MessagingCorrelationId} and
- * {@code QueueClientBudget} -- that the target never named at all. A target that the delivery
+ * module now holds forty-four production classes against a target of seventeen, and one whole
+ * subpackage -- {@code messaging}, with {@code MessageExpiry}, {@code MessagingCorrelationId},
+ * {@code QueueClientBudget} and {@code RethrowingDigestErrorHandler} -- that the target never named
+ * at all. A target that the delivery
  * has overshot is not a forgiving description of the delivery; it is a false one, and it fails in
  * the direction that matters, because a reader consults this block to learn whether a type they
  * cannot find is missing or was never admitted, and an under-stated inventory answers "never

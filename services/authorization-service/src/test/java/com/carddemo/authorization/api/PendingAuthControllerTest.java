@@ -633,6 +633,19 @@ class PendingAuthControllerTest {
          * authorization in place rather than refusing the request, and a 404 would be indistinguishable from
          * a selector that named nothing at all.
          *
+         * <p>⚠️ Refactoring Rationale: the exhausted body's authorization member was asserted with
+         * {@code jsonPath("$.authorization").doesNotExist()}, which cannot tell the two shapes apart. That
+         * matcher passes when a definite path yields {@code null}, so it passed for the body this service
+         * actually writes -- the key PRESENT and null -- while reading as a guarantee that the key was
+         * absent. A reader trusting it published {@code authorization} as optional-and-non-nullable in
+         * {@code openapi/authorization-api.yaml}, and a conforming client validating responses then
+         * rejected this very body. The member is now asserted as present AND null, which is the one
+         * assertion the two shapes disagree on.
+         *
+         * <p>Measured: a bare Jackson 3 mapper writes a null-valued member rather than omitting it, and
+         * the shared default at {@code carddemo-common-defaults.yml} pins that inclusion to {@code always}
+         * for every service, so the key is present in a deployment and in this slice for the same reason.
+         *
          * @throws Exception if the request cannot be performed
          */
         @Test
@@ -643,11 +656,20 @@ class PendingAuthControllerTest {
                     new PendingAuthDetailService.NextAuthorization(null, true,
                             PendingAuthDetailService.LAST_AUTHORIZATION_REACHED));
 
-            PendingAuthControllerTest.this.mockMvc.perform(get(NEXT_ROUTE, selector).principal(PRINCIPAL))
+            MvcResult exhausted = PendingAuthControllerTest.this.mockMvc
+                    .perform(get(NEXT_ROUTE, selector).principal(PRINCIPAL))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.endOfData").value(true))
-                    .andExpect(jsonPath("$.authorization").doesNotExist())
-                    .andExpect(jsonPath("$.message").value(S1C_L283_LAST_AUTHORIZATION));
+                    .andExpect(jsonPath("$.message").value(S1C_L283_LAST_AUTHORIZATION))
+                    .andReturn();
+
+            assertThat(topLevelMemberNames(exhausted))
+                    .as("the exhausted body carries all three members the contract requires")
+                    .containsExactlyInAnyOrder("authorization", "endOfData", "message");
+            assertThat(BODY_READER.readTree(exhausted.getResponse().getContentAsString())
+                            .get("authorization").isNull())
+                    .as("the authorization member is present and null, not omitted")
+                    .isTrue();
         }
 
         /**

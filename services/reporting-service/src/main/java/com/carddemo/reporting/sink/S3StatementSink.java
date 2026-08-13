@@ -42,11 +42,22 @@ import java.util.Objects;
  */
 public final class S3StatementSink implements StatementService.StatementSink, AutoCloseable {
 
-    /** Object-key suffix of the plain-text artifact. */
-    public static final String PLAIN_TEXT_OBJECT = "statements.txt";
+    /**
+     * Object name of the plain-text artifact, being {@code statements.txt}.
+     *
+     * <p>⚠️ Refactoring Rationale: this constant used to DECLARE the name and now ALIASES the
+     * declaration on {@link StatementService}, because the read side has to name the same object the
+     * write side writes and a review found the two disagreeing -- the statement response published a
+     * per-card location while this writer wrote a run-wide object, so every published location resolved
+     * to nothing. Aliasing keeps every existing reference to this constant compiling while leaving one
+     * place where the value can be changed. The direction is forced: this class already depends on
+     * {@code StatementService} for the sink seam it implements, so the declaration can only live there
+     * without creating a package cycle.
+     */
+    public static final String PLAIN_TEXT_OBJECT = StatementService.PLAIN_TEXT_OBJECT;
 
-    /** Object-key suffix of the markup artifact. */
-    public static final String HTML_OBJECT = "statements.html";
+    /** Object name of the markup artifact, aliasing the declaration on {@link StatementService}. */
+    public static final String HTML_OBJECT = StatementService.HTML_OBJECT;
 
     /** The writer for the eighty-character plain-text artifact. */
     private final S3ArtifactWriter plainText;

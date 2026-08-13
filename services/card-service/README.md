@@ -164,8 +164,8 @@ services/card-service/
 |   |                                    card_num character-domain check
 |   |-- openapi/card-api.yaml            OpenAPI 3.1 contract of record
 |-- src/test/
-    |-- java/com/carddemo/card/**        22 test classes, package-info per package
-                                         (21 *Test + 1 *IT)
+    |-- java/com/carddemo/card/**        24 test classes, package-info per package
+                                         (23 *Test + 1 *IT)
     |-- resources/application-test.yml
     |-- resources/fixtures/              12 fixture files, 40 CVACT02Y records, 150 bytes each
 ```
@@ -947,19 +947,20 @@ is running in without this module restating it.
 
 ## Tests
 
-<!-- test-inventory: 21 tests + 1 integration tests -->
-**22** test classes: **21** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
+<!-- test-inventory: 23 tests + 1 integration tests -->
+**24** test classes: **23** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
 Failsafe. That census is machine-checked — `ServiceReadmeInventoryTest` in `common-lib` parses the
 comment above and re-measures both figures against this module's test tree, so the count fails the
 build when it drifts rather than ageing quietly in prose.
 
-The five classes below carry the parity assertions that matter most to this module.
+The six classes below carry the parity assertions that matter most to this module.
 They are named individually because each one is the only place a particular
 guarantee is checked.
 
 | Test class | Kind | What it proves |
 |---|---|---|
 | `api/CardControllerTest` | MockMvc over a hand-assembled web context | The administrator and ordinary-caller split on the card-detail route, both directions; that an unauthenticated request is challenged rather than served; that a token carrying no recognised group reaches no card route; that a masked read discloses only the last four digits; that a stale revision is answered with the reference sentence; and that every asserted sentence fits the program-side message width |
+| `config/CardApiContractGateTest` | contract gate over the committed YAML | That every response schema declares exactly the members the record serialising into it carries — resolved through composition and through `@JsonUnwrapped`, so the administrative detail is held to all eight of its members; that every object schema refuses members it does not declare, or is composed only by schemas that do; that the three conflict discriminators the document publishes are exactly the three the handlers emit, and that the member declaring them is wide enough to hold them; and that every published example satisfies the schema it illustrates, including examples nested under a nullable union |
 | `service/CardListServiceTest` | unit | A forward step resumes past the last returned key; a backward step resumes before the first returned key; the row beyond the window discovers a further page; a row arriving between two requests is neither hidden nor repeated; and the browse window is seven rows |
 | `service/CardUpdateServiceTest` | unit | Every transcribed validation gate, including that all four gates run so every fault is reported, that the summary sentence follows the reference gate order, that a refused submission is never written, and that a stale token is refused even when nothing would change |
 | `repository/CardRepositoryIT` | Testcontainers | The account-keyed access path that replaces `CARDAIX`, the keyed read, forward and backward keyset paging, the concurrent-insert boundary, empty results, that both migrations were applied in version order, and that `ck_cards_card_num_digits` refuses a stored key outside the sixteen-digit domain while admitting a conforming one |

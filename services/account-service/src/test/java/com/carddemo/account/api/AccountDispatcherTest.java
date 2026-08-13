@@ -140,7 +140,7 @@ class AccountDispatcherTest {
         //       agreement -- which is exactly how the earlier keyed mounting passed its own census.
         this.mockMvc.perform(post("/api/v1/accounts/lookup")
                         .contentType("application/json")
-                        .content("{\"accountId\":11}"))
+                        .content("{\"accountId\":\"00000000011\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.creditLimit").value("5000.00"))
                 .andExpect(jsonPath("$.cashCreditLimit").value("500.00"))
@@ -160,7 +160,7 @@ class AccountDispatcherTest {
 
         this.mockMvc.perform(post("/api/v1/accounts/lookup")
                         .contentType("application/json")
-                        .content("{\"accountId\":11}"))
+                        .content("{\"accountId\":\"00000000011\"}"))
                 .andExpect(status().isNotFound());
     }
 
@@ -174,7 +174,7 @@ class AccountDispatcherTest {
     void theAccountLookupRefusesAnOutOfRangeBody() throws Exception {
         this.mockMvc.perform(post("/api/v1/accounts/lookup")
                         .contentType("application/json")
-                        .content("{\"accountId\":100000000000}"))
+                        .content("{\"accountId\":\"100000000000\"}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION));
 
@@ -313,7 +313,7 @@ class AccountDispatcherTest {
 
         this.mockMvc.perform(post("/api/v1/accounts/view")
                         .contentType("application/json")
-                        .content("{\"accountId\":0}"))
+                        .content("{\"accountId\":\"00000000000\"}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
                 .andExpect(jsonPath("$.fieldErrors[0].field").value("accountId"));
@@ -341,7 +341,7 @@ class AccountDispatcherTest {
 
         this.mockMvc.perform(post("/api/v1/accounts/view")
                         .contentType("application/json")
-                        .content("{\"accountId\":11}"))
+                        .content("{\"accountId\":\"00000000011\"}"))
                 .andExpect(status().isNotFound());
 
         verify(this.reads).readAccountView(ACCOUNT_ID);

@@ -35,9 +35,49 @@
 #   ECS task definition supplies. The values this service cannot start without,
 #   because their placeholders declare no fallback, are:
 #     - SPRING_DATASOURCE_URL, SPRING_DATASOURCE_USERNAME, SPRING_DATASOURCE_PASSWORD
+#     - SPRING_FLYWAY_USER, SPRING_FLYWAY_PASSWORD -- the migration identity is
+#       SEPARATE from the runtime identity above and is not defaulted to it, so the
+#       schema owner's credential is never the credential the request path holds.
 #     - SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI
 #     - CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID
 #     - CARDDEMO_MESSAGING_PAUTH_REQUEST_QUEUE
+#     - CARDDEMO_MESSAGING_REPLY_QUEUE_ALLOWLIST -- the closed set of reply
+#       destinations this consumer will honour. It is a start-time input and not a
+#       default because an empty or permissive default would let a request name its
+#       own reply queue, which is the confused-deputy shape this allowlist exists to
+#       refuse.
+#     - CARDDEMO_MESSAGING_HMAC_KEY -- the key the request and reply payloads are
+#       authenticated with, replacing the trust the baseline placed in the queue
+#       manager itself.
+#     - CARDDEMO_ACCOUNT_CONTEXT_BASE_URL -- an authorization decision reads account
+#       state this context does not own, so the account context's address is a
+#       start-time input.
+#     - CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY -- the key this context
+#       signs its outbound service-to-service assertions with.
+#   The list above is the COMPLETE set of no-fallback placeholders across
+#   application.yml and application-prod.yml, with ONE deliberate exclusion, and the
+#   completeness is mechanically held rather than asserted: common-lib's
+#   RuntimeConfigurationContractTest re-derives the placeholder set from those two
+#   files and fails the build if any member of it is absent from this file.
+#   The one exclusion is CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD. It has no fallback
+#   either, but it is NOT an operator-supplied value and belongs in a different
+#   category from every name above: config/docker/generate-listener-material.sh --
+#   the entry point named below -- mints the keystore and exports its password itself
+#   for this one task's single use, so a deployment that injected one would be
+#   overriding material the task generates for itself. The name is documented HERE,
+#   as entrypoint-supplied, rather than listed among the values a deployment passes.
+#   One further input is required, is NOT an application.yml placeholder, and is
+#   therefore easy to miss when reading only the list above:
+#     - CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY, the environment form of the property
+#       carddemo.pagination.cursor.signing-key, base64 over at least 32 bytes. The
+#       shared kernel publishes the keyset-cursor signer only when that property is
+#       set -- the bean carries @ConditionalOnProperty on it and the kernel defaults
+#       it nowhere, deliberately, so that no deployment can sign cursors with a key
+#       another deployment also holds. Omitting it does not silently degrade the
+#       pending-authorization summary's paging: it removes the bean,
+#       PendingAuthViewMapper requires one, and the context then fails to start.
+#   Every entry above is a variable NAME. No value, and therefore no credential,
+#   connection string, issuer URI, queue URL or key, appears anywhere in this file.
 #
 # Return values:
 #   0 (integer): the JVM exited after a requested shutdown.

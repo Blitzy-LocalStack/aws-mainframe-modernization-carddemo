@@ -965,8 +965,12 @@ statement grouping token and is granted to the schema owner alone.
 > `V1__account.sql` landed; the `card` and `authorization` rows had fallen out of
 > date while their migrations existed, which is the failure mode a status column
 > invites and the reason this note names it. All seven per-service migrations are
-> authored, and the reporting schema now holds seven views. Each entry below names
+> authored, and the reporting schema now holds eight views. Each entry below names
 > the file that substantiates it, so the claim can be checked rather than trusted.
+> Refactoring Rationale: that figure read seven until the category-balance report
+> arrived. `v_transaction_category_balances` is the eighth, added because
+> `app/jcl/PRTCATBL.jcl` had no target path at all — its generation family and its
+> report prefix were both provisioned and neither was written.
 
 | Schema | Owning context | Target tables or views | Authored migration status |
 |---|---|---|---|
@@ -975,9 +979,9 @@ statement grouping token and is granted to the schema owner alone.
 | `card` | `card-service` | `cards` | `V1__card.sql` authored |
 | `ledger` | `transaction-service` | `transactions`, `daily_transactions`, `transaction_rejects`, `transaction_category_balances` | `V1__ledger.sql` authored |
 | `reference` | `reference-service` | `transaction_types`, `transaction_categories`, `disclosure_groups`, `us_phone_area_codes`, `us_states`, `us_state_zip_prefixes` | `V1__reference.sql` and `V2__seed_reference.sql` authored |
-| `batch` | `batch-service` | `batch_run`, plus the batch framework's own job-repository tables | `V1__batch.sql` authored |
-| `authorization` | `authorization-service` | `pending_auth_summary`, `pending_auth_detail`, `auth_fraud`, `auth_reply_outbox` | `V1__authorization.sql` authored |
-| `reporting` | `reporting-service`, schema owned in the database by `carddemo_reporting_owner` | **no table the service can read** — seven read-only cross-schema views, plus one owner-only key table | `data-migration/sql/V1__reporting_views.sql` authored |
+| `batch` | `batch-service` | `batch_run`, `daily_feed_watermark`, plus the batch framework's own job-repository tables | `V1__batch.sql` and `V2__batch_feed_watermark.sql` authored |
+| `authorization` | `authorization-service` | `pending_auth_summary`, `pending_auth_detail`, `auth_fraud`, `auth_reply_outbox` | `V1__authorization.sql` authored, extended by `V2`, `V3` and `V4` |
+| `reporting` | `reporting-service`, schema owned in the database by `carddemo_reporting_owner` | **no table the service can read** — eight read-only cross-schema views, plus one owner-only key table | `data-migration/sql/V1__reporting_views.sql` authored |
 
 When the bootstrap SQL is applied, `batch-service` receives narrowly-scoped
 cross-schema **write** grants on `ledger.*` and `account.*` only. That is the one
@@ -1037,7 +1041,7 @@ bytes · dataset `USRSEC` → table **`auth.users`**
 
 | COBOL field | `PICTURE` | Bytes | Offset | Column | Type | Java |
 |---|---|---|---|---|---|---|
-| `SEC-USR-ID` (L18) | `X(08)` | 8 | 0 | `user_id` | `CHAR(8)` **PK** | `String` |
+| `SEC-USR-ID` (L18) | `X(08)` | 8 | 0 | `user_id` | `CHAR(8)` **PK**, `CHECK ck_users_user_id_canonical` | `String` |
 | `SEC-USR-FNAME` (L19) | `X(20)` | 20 | 8 | `first_name` | `VARCHAR(20)` | `String` |
 | `SEC-USR-LNAME` (L20) | `X(20)` | 20 | 28 | `last_name` | `VARCHAR(20)` | `String` |
 | `SEC-USR-PWD` (L21) | `X(08)` | 8 | 48 | **not carried forward** | — | — |
@@ -1048,6 +1052,19 @@ bytes · dataset `USRSEC` → table **`auth.users`**
 The identifier is `CHAR(8)` rather than `VARCHAR(8)` because it is a key of declared
 fixed width and rule 2 applies; the two name fields are descriptive, so rule 3 gives
 `VARCHAR`.
+
+⚠️ The identifier additionally carries a **canonical-form guard**,
+`ck_users_user_id_canonical`, added by
+`services/auth-service/src/main/resources/db/migration/V6__auth_canonical_user_id.sql`. It
+holds every stored key to the same expression the service derives — upper-cased,
+blank-trimmed, and drawn only from the 94 printable invariant code points `0x21`–`0x7E` with
+the space excluded — so a writer that does not go through the service cannot store a key no
+request can address. Refactoring Rationale: it replaces `ck_users_user_id_folded` from `V4`,
+whose predicate `user_id = upper(user_id)` enforced only the fold and therefore admitted a
+leading blank, letting one logical identity hold two rows. The narrowing is a divergence from
+the reference, which validates the identifier's characters nowhere; it is registered as
+[`D-USER-ID-CANONICAL-DOMAIN`](cobol-to-service-traceability.md#d-user-id-canonical-domain--the-logon-identifier-is-held-to-a-canonical-form-the-baseline-never-checked)
+and every identifier in the committed extract is admitted unchanged.
 
 > Refactoring Rationale: **the plaintext password field is deliberately not
 > carried forward.** `SEC-USR-PWD PIC X(08)` at
@@ -1187,7 +1204,8 @@ to the messaging contract and is recorded in
 sends its reply and then returns, and the queue acknowledges the request only on that
 return, so a task killed between the two would otherwise let the next delivery send a
 second reply bearing the same correlation identifier as the first. The ledger records
-the answer under the requester's own identity before it is sent.
+the answer under the queue service's own identifier for the delivery — not under either
+identity the producer supplies, neither of which is authenticated — before it is sent.
 
 > Assumptions: the count above is therefore "the three tables **derived from
 > copybooks**" rather than "the three tables in this schema", and the distinction is
@@ -1452,6 +1470,7 @@ recording.
 | Table | Columns | Origin |
 |---|---|---|
 | `batch_run` | `run_id`, `step_name`, `status`, `started_at`, `finished_at`, `return_code` | Net-new |
+| `daily_feed_watermark` | `feed_name`, `last_ingest_seq`, `run_id`, `business_date`, `updated_at` | Net-new |
 | the batch framework's job-repository tables | as the framework defines them | Net-new |
 
 > Assumptions: **this is an addition, not a port, because the baseline has no
@@ -1459,17 +1478,38 @@ recording.
 > the JCL tree — the only one present is commented out — and no checkpoint
 > declaration at all. `batch_run` therefore gives each step a durable idempotency
 > key so that a resumed step which already completed is a no-op, and it is
-> documented here as a **capability the target adds**. Trade-offs: the table is
-> authored and so is the class that would maintain it, but that class has no
-> production caller while `batch-service`'s `Job` beans remain unauthored, so the
-> idempotency this note describes is a **designed capability rather than an operative
-> one**. The guarantee available today is coarser — the business date is an
-> identifying job parameter, so a repeated business date is recognised, while a
-> resumed step within one night is not. Describing it as a migration
+> documented here as a **capability the target adds**. Describing it as a migration
 > of an existing mechanism would misrepresent the baseline, which recovers from a
 > failed step by resubmitting from a step the operator selects. The orchestration
 > that uses this table is in
 > [`batch-orchestration.md`](batch-orchestration.md).
+>
+> Refactoring Rationale: this note said the maintaining class "has no production
+> caller while `batch-service`'s `Job` beans remain unauthored", and offered the
+> business-date job parameter as the coarser guarantee available instead. The jobs
+> are authored and `BatchStepLedger` is called from them, so the withdrawn sentence
+> would now tell a reader to expect no per-step idempotency where there is some.
+>
+> `daily_feed_watermark` is the schema's **second** net-new table and answers a
+> different question. `batch_run` records whether a STEP finished;
+> `daily_feed_watermark` records how much of its INPUT a named consumer read, and a
+> step can fail after consuming. It exists because of a structural difference
+> between the two systems rather than a rule in either: the reference's daily feed
+> is a flat dataset REPLACED between runs, so `CBTRN02C` reading it from the top
+> reads exactly one night, whereas `ledger.daily_transactions` ACCUMULATES — its
+> rows are what the three post-load verification passes compare against — so a
+> target reading from the top would repost every retained night. `feed_name` is the
+> primary key, so the table holds one row per consumer and grows with consumers
+> rather than with runs. Assumptions: `business_date` is `VARCHAR(10)` checked on
+> WIDTH ALONE and deliberately not `DATE`, because the business-date token the
+> reference injects at `app/jcl/INTCALC.jcl:22` is the compact `2022071800` form,
+> which no date type accepts; storing it as text keeps the recorded token byte-equal
+> to the one the run was given. Alternatives Considered and rejected: deleting
+> consumed rows, which would delete what the verification passes need; filtering by
+> business date, which the feed cannot support because its processing stamp is blank
+> on all 300 records of `app/data/ASCII/dailytran.txt`; reusing `batch_run`, which
+> keys by step and not by consumer; and a partition per run, which changes the
+> relation the verification passes read.
 
 
 ### `authorization` — `authorization-service`
@@ -1649,8 +1689,9 @@ the reply belongs to, the moment it was written and the moment it was published.
 never loads into it.
 
 **Measured implementation status:** the authorization module carries
-`V1__authorization.sql`, which creates this table and both indexes below, and its
-main sources implement the `AuthReplyOutbox` entity, `OutboxRepository`, the
+`V1__authorization.sql`, which creates this table and both indexes below,
+`V4__authorization_outbox_send_acceptance.sql`, which adds the accepted-send record
+described next, and its main sources implement the `AuthReplyOutbox` entity, `OutboxRepository`, the
 transactional writer inside `AuthorizationRequestListener`, and `OutboxPublisher`
 with its per-group claim and its retention purge. Refactoring Rationale: this
 paragraph previously reported the module as having no Flyway migration and no
@@ -1660,7 +1701,29 @@ migrations existed" — the same failure mode, in the same document, one section
 apart. A status line is only worth carrying if it is re-measured when it is quoted,
 so it is now stated against the artifacts it names.
 
-Two target indexes, both partial and both on unpublished rows only:
+⚠️ **The row additionally records the broker's ACCEPTANCE of a send**, in four nullable
+columns added by `V4__authorization_outbox_send_acceptance.sql`: `sent_at`, the moment
+the broker took the message; `send_expires_at`, the staleness deadline that message
+actually carried; and `broker_message_id VARCHAR(100)` with
+`broker_sequence_number VARCHAR(64)`, the broker's own identities for it. Three check
+constraints hold the record self-consistent — a sequence number requires an identity, an
+identity requires a send instant, and a send instant requires a deadline — and a partial
+index over accepted-but-unpublished rows serves the reconciling read.
+
+Refactoring Rationale: the columns exist because a send the broker accepted and a send
+never issued were previously indistinguishable on the row. The reply's two
+first-in-first-out identities are frozen by §0.4.1.8 as the card number and the
+transaction identifier, so a retry after an accepted send is answered by the broker with
+the message it already holds and is silently suppressed — meaning the requester kept a
+reply whose deadline had already passed while the row claimed a publication, and outside
+the deduplication window the same schedule enqueued a *second* reply for one decision.
+With the acceptance persisted, a pass meeting such a row reconciles it — marks it
+published, logs `event=auth.reply.publish-reconciled` — and issues no second send. The
+divergence-free reasoning, the rejected alternatives and the one residual window are
+recorded in [`../adr/ADR-004-messaging.md`](../adr/ADR-004-messaging.md) and on
+`OutboxPublisher.recordSendAccepted`.
+
+Two target indexes on unpublished rows only, plus the accepted-send index above:
 
 | Index | Definition | Why |
 |---|---|---|
@@ -1721,7 +1784,7 @@ Two target indexes, both partial and both on unpublished rows only:
 defines `reporting` as the eighth of the eight schemas in
 [`V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql)
 and [`V1__reporting_views.sql`](../../data-migration/sql/V1__reporting_views.sql)
-authors the seven read-only cross-schema views, plus one table the service role
+authors the eight read-only cross-schema views, plus one table the service role
 cannot select from: `reporting.card_grouping_key`. That table holds the secret mixed
 into `v_statement_transactions.card_fingerprint`, the per-card grouping token that
 lets a statement break by card while the card number itself stays masked. It is
@@ -1739,7 +1802,7 @@ Two properties of this schema differ from the other seven, and both are delibera
 
 | Property | The other seven | `reporting` |
 |---|---|---|
-| Contents | tables, indexes and constraints | seven views the service role may read, plus `card_grouping_key`, the one table it may not |
+| Contents | tables, indexes and constraints | eight views the service role may read, plus `card_grouping_key`, the one table it may not |
 | Target creation authority | the owning service's own Flyway migration, applied under `SET ROLE carddemo_<context>_owner` | `data-migration/sql/V1__reporting_views.sql`, applied after the source-table migrations under `SET ROLE carddemo_reporting_owner` |
 
 > Refactoring Rationale: **database ownership used to be the third difference and is
@@ -1767,7 +1830,7 @@ Two properties of this schema differ from the other seven, and both are delibera
 > 1. **`reporting-service` owns no table.** The migrated module carries no
 >    data-definition script, no Flyway artifact and no `db/migration` directory, and the
 >    login role it authenticates as, `carddemo_reporting`, holds `USAGE` on the schema and
->    `SELECT` on the seven views and nothing else whatsoever.
+>    `SELECT` on the eight views and nothing else whatsoever.
 > 2. **The `reporting` schema is not empty of tables.** It holds exactly one,
 >    `card_grouping_key`, created by `V1__reporting_views.sql` and owned by
 >    `carddemo_reporting_owner`.
@@ -2012,42 +2075,38 @@ model:
 > A store into a fixed-scale field without `ROUNDED` **discards** the surplus digits
 > rather than rounding them, so the baseline behaviour is truncation toward zero.
 >
-> The target applies the same truncation, through `Money.BASELINE_INTEREST_ROUNDING`
-> — `RoundingMode.DOWN` — which governs the accrual quotient and nothing else. Every
-> other reduction in the money path uses `Money.GENERAL_ROUNDING`, half up, which is
-> the mode transformation rule T3 states. Neither is reachable from any signature, so
-> no call site selects between them. **There is no divergence here**, and none is
-> registered.
+> The target does **not** apply that truncation. `Money.GENERAL_ROUNDING` —
+> `RoundingMode.HALF_UP` — is the ONE mode the money type declares and it governs the
+> accrual quotient like every other reduction, because transformation rule T3 states
+> that mode for the money path and states no exception for the accrual. It is not
+> reachable from any signature, so no call site selects anything. The resulting
+> difference from the baseline is registered as divergence **C-ROUNDING** in §7.4 of
+> `docs/architecture/cobol-to-service-traceability.md`.
 >
-> Refactoring Rationale: the accrual applied `HALF_UP` and the resulting cent was
-> recorded here as documented divergence **C-ROUNDING**. That is withdrawn; the
-> identifier survives only as a withdrawal record in §7.5 of
-> `docs/architecture/cobol-to-service-traceability.md`. This paragraph previously
-> evaluated **implementing `RoundingMode.DOWN` to match the baseline cent for cent**
-> and rejected it, on the grounds that it would leave the plan and every sibling
-> descriptor stating one mode while the kernel implemented another, and would remove
-> the one money-rounding contract an architecture rule can assert mechanically. Both
-> objections were answerable rather than decisive, and both have been answered: the
-> siblings and the standard now state the split, and what an architecture rule
-> actually asserts is that no binary floating-point type appears in the money path,
-> which is untouched by there being two decimal modes. What the rejection cost was
-> not answerable — the accrual is one of the business rules the reference test suite
-> asserts verbatim, and the cent compounds, because line 467 adds each reduced term
-> into the account total and line 352 adds that total to the account balance, which
-> the next **inclusive** over-limit comparison is made against.
+> Refactoring Rationale: the accrual was moved to `RoundingMode.DOWN` for a time, to
+> match the baseline cent for cent, and C-ROUNDING was recorded as withdrawn. That is
+> reversed. The argument for matching was that the accrual is one of the business rules
+> the reference suite asserts verbatim and that the cent compounds — line 467 adds each
+> reduced term into the account total and line 352 adds that total to the account
+> balance, which the next **inclusive** over-limit comparison is made against. Both
+> observations are true and neither licenses the departure: the plan is frozen, it admits
+> a behavioural difference from the reference when the difference is registered, and it
+> admits a departure from a transformation rule only where it states an exception. So the
+> difference is registered, with those consequences stated in the register entry, and the
+> rule is followed.
 >
-> Trade-offs: **two modes rather than one, and a reader has to know which operation
-> takes which.** On the vectors the reference fixtures actually carry the two modes
-> agree, which is why the split has to be written down and asserted rather than left
-> for a fixture to catch: a balance of `1000.00` at a rate of `15.00` yields
-> `12.5000` exactly and both modes return `12.50`; at a rate of `2.50` against the
-> same balance the quotient is `2.08333…` and both return `2.08`. They part company
-> at `1000.80` and `2.50`, where the quotient is `2.0850` exactly — truncation
-> returns `2.08` and half up would return `2.09` — and on any negative vector, where
-> truncation toward zero and rounding on magnitude differ in direction. The
-> authoritative statement of the contract lives beside the implementation, in
+> Trade-offs: **one mode for the whole money path, at the cost of a cent against the
+> baseline on an exact half.** On the vectors the reference fixtures actually carry the
+> two modes agree, which is why the difference has to be written down and asserted rather
+> than left for a fixture to catch: a balance of `1000.00` at a rate of `15.00` yields
+> `12.5000` exactly and both modes return `12.50`; at a rate of `2.50` against the same
+> balance the quotient is `2.08333…` and both return `2.08`. They part company at
+> `1000.80` and `2.50`, where the quotient is `2.0850` exactly — half up returns `2.09`
+> and the baseline stores `2.08` — and on a negative vector, where rounding on magnitude
+> and truncation toward zero differ in direction. The authoritative statement of the
+> contract lives beside the implementation, in
 > [`../../services/common-lib/src/main/java/com/carddemo/common/money/package-info.java`](../../services/common-lib/src/main/java/com/carddemo/common/money/package-info.java),
-> which carries the same two baseline observations and the same vectors.
+> which carries the same baseline observations and the same vectors.
 
 
 ## Reference seed data
@@ -2124,7 +2183,7 @@ register for all divergences across the migration.
 | 7 | Two-phase commit across the two authorization stores is eliminated, not emulated | Assumptions | [From IMS hierarchy to relational keys](#the-key-changes-shape-account-scoped-hierarchical-to-card-scoped-relational) |
 | 8 | Version columns added on `accounts`, `customers` and `cards` | Refactoring Rationale | [`account`](#account--account-service) |
 | 9 | National identifiers and the card verification value become encrypted `BYTEA` | Trade-offs | [`account`](#account--account-service), [`card`](#card--card-service) |
-| 10 | `batch.batch_run` is an addition; the baseline has no checkpoint contract | Assumptions | [`batch`](#batch--batch-service) |
+| 10 | `batch.batch_run` and `batch.daily_feed_watermark` are additions; the baseline has no checkpoint contract and its feed is replaced rather than accumulated | Assumptions | [`batch`](#batch--batch-service) |
 | 11 | `UPGRADE`, `DEFINE PATH` and `BLDINDEX` are retired with a named replacement | Refactoring Rationale | [Alternate indexes](#alternate-indexes-become-real-secondary-indexes) |
 
 **Three baseline defects are deliberately absent from this list**, because they are

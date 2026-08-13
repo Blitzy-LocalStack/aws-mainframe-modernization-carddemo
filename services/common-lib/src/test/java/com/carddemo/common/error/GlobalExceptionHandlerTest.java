@@ -17,6 +17,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -1038,7 +1040,16 @@ class GlobalExceptionHandlerTest {
     @Test
     @DisplayName("no message from any link of the caught cause chain reaches the log line")
     void noCaughtMessageReachesTheLogLine() {
-        String nationalIdentifier = "123-45-6789";
+        // Assumptions: the national-identifier sentinel is 000-00-0000, and the digits are chosen so
+        //   that the value cannot belong to a person rather than merely being unlikely to. The issuing
+        //   authority has never assigned an area number of 000, has never assigned a group number of
+        //   00, and has never assigned a serial number of 0000, so this string fails three independent
+        //   allocation rules at once. An example shaped like an ISSUABLE identifier -- 123-45-6789, the
+        //   value this line used to carry -- reads as a real one to anyone who finds it by search, and
+        //   this file's whole subject is keeping such values out of a record that outlives the request.
+        //   Alternatives Considered: a random draw per run, rejected because a sentinel has to be
+        //   quotable in the assertion below and reproducible from the source.
+        String nationalIdentifier = "000-00-0000";
         String recordImage = "DOE       JOHN      0000012345";
         Exception deepest = new NumberFormatException("cannot parse '" + recordImage + "'");
         Exception middle = new IllegalArgumentException(
@@ -1576,15 +1587,18 @@ class GlobalExceptionHandlerTest {
     }
 
     /**
-     * Confirms an over-wide member name is bounded to the published rendering width.
+     * Confirms an over-wide member name is refused rather than truncated into the body.
      *
-     * <p>Assumptions: the name is caller-supplied text on its way into a response body, so its width is
-     * bounded rather than trusted. The bound is read from the published constant instead of written as a
-     * figure here, so the two cannot drift.</p>
+     * <p>⚠️ Refactoring Rationale: this case previously asserted that such a name was TRUNCATED to the
+     * published rendering width and rendered. Truncation is what made the width bound useless as a
+     * control — a seventy-five-character prefix of a longer value is still a reflected value — so the
+     * assertion is inverted: a name too wide to be a misspelling of any declared member falls through to
+     * the generic refusal, which says the body could not be read and says nothing the caller did not
+     * already know.</p>
      */
     @Test
-    @DisplayName("an over-wide member name is bounded to the published rendering width")
-    void anOverWideMemberNameIsBoundedToTheRenderingWidth() {
+    @DisplayName("an over-wide member name is refused rather than truncated into the body")
+    void anOverWideMemberNameIsRefusedRatherThanTruncated() {
         String overWide = "m".repeat(ApiError.MESSAGE_RENDERING_WIDTH + 40);
         HttpMessageNotReadableException failure = new HttpMessageNotReadableException(
                 "unreadable", unrecognisedProperty(overWide), null);
@@ -1593,22 +1607,23 @@ class GlobalExceptionHandlerTest {
                 this.handler.onUnreadableBody(failure, requestFor("/api/v1/cards/search"));
 
         assertThat(response.getBody()).isNotNull();
-        assertThat(response.getBody().fieldErrors())
-                .singleElement()
-                .satisfies(entry -> assertThat(entry.field())
-                        .hasSize(ApiError.MESSAGE_RENDERING_WIDTH));
+        assertThat(response.getBody().message())
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_MALFORMED_REQUEST);
+        assertThat(response.getBody().fieldErrors()).isEmpty();
     }
 
     /**
-     * Confirms a member name carrying a control character is sanitised before it is rendered.
+     * Confirms a member name carrying a control character is refused rather than rendered.
      *
-     * <p>Assumptions: a control character in a value of external provenance is what lets a caller forge
-     * a line in a structured record, and a member name is the second such value this advice carries, so
-     * it passes the same narrowing the rest of them do.</p>
+     * <p>⚠️ Refactoring Rationale: this case previously asserted the name was SANITISED to
+     * {@code "page Number"} and rendered. It is now refused outright, which is strictly stronger: the
+     * sanitiser answers the log-forgery question, and a member name that needed sanitising is not a
+     * plausible misspelling of any declared member, so echoing a repaired version of it asserts that a
+     * member by that name exists.</p>
      */
     @Test
-    @DisplayName("a member name carrying a control character is sanitised before rendering")
-    void aMemberNameCarryingAControlCharacterIsSanitised() {
+    @DisplayName("a member name carrying a control character is refused rather than rendered")
+    void aMemberNameCarryingAControlCharacterIsRefused() {
         HttpMessageNotReadableException failure = new HttpMessageNotReadableException(
                 "unreadable", unrecognisedProperty("page\\nNumber"), null);
 
@@ -1616,11 +1631,110 @@ class GlobalExceptionHandlerTest {
                 this.handler.onUnreadableBody(failure, requestFor("/api/v1/cards/search"));
 
         assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().message())
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_MALFORMED_REQUEST);
+        assertThat(response.getBody().fieldErrors()).isEmpty();
+        assertThat(this.json(response.getBody()))
+                .as("no control character reaches the rendered body by any route")
+                .doesNotContain("\\n")
+                .doesNotContain("\n");
+    }
+
+    /**
+     * Confirms a member name that could be a protected identifier is never reflected into the body.
+     *
+     * <p>Purpose: a caller composes both sides of a JSON member, so a KEY is exactly as
+     * caller-controlled as a value. A body sent as {@code {"4859452612877065": 1}} was answered with
+     * that key verbatim in a field entry, and from there into whatever the client logs, stores or
+     * reports to an error tracker — the very disclosure the masking at every other boundary of this
+     * package exists to prevent.</p>
+     *
+     * @param name a member name shaped like a value rather than like a member of a published schema
+     */
+    // WHY : Assumptions: the vectors are the identifier widths this system actually issues plus the two
+    //       ways a caller writes one — bare and separated — and one non-identifier vector, an amount,
+    //       which is refused by the same rule. Asserting the generic refusal rather than a masked
+    //       rendering is deliberate: a masked key is not a key, so a caller could not match it against
+    //       anything in the body it sent, and the entry would cost a field slot while informing nobody.
+    @ParameterizedTest(name = "the member name {0} is not reflected")
+    @ValueSource(strings = {
+        "4859452612877065",
+        "4859-4526-1287-7065",
+        "00000000011",
+        "000000009",
+        "1234.56",
+        "0123456789",
+    })
+    @DisplayName("a member name that could be a protected identifier is not reflected")
+    void aMemberNameThatCouldBeAProtectedIdentifierIsNotReflected(String name) {
+        HttpMessageNotReadableException failure = new HttpMessageNotReadableException(
+                "unreadable", unrecognisedProperty(name), null);
+
+        ResponseEntity<ApiError> response =
+                this.handler.onUnreadableBody(failure, requestFor("/api/v1/cards/search"));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().message())
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_MALFORMED_REQUEST);
+        assertThat(response.getBody().fieldErrors()).isEmpty();
+        assertThat(this.json(response.getBody()))
+                .as("no part of the caller's key reaches the rendered body")
+                .doesNotContain(name);
+    }
+
+    /**
+     * Confirms a member name a caller could plausibly have mistyped is still reflected.
+     *
+     * <p>Purpose: this is the counterweight to the refusals above and it is what keeps the arm useful.
+     * The grammar exists to admit a misspelling of a declared member, so the shapes a misspelling
+     * actually takes — camel case, snake case, kebab case, a nested path and an indexed path — are
+     * asserted to survive it.</p>
+     *
+     * @param name a member name of the shape a mistyped or wrongly-cased member takes
+     */
+    // WHY : Assumptions: `title01` is included because it is a REAL published member name carrying a
+    //       two-digit run, which is exactly the bound the digit-run rule permits. A rule tightened one
+    //       digit further would refuse a member this system declares, and this vector is what would fail
+    //       if that happened.
+    @ParameterizedTest(name = "the member name {0} is reflected")
+    @ValueSource(strings = {
+        "pageNumber",
+        "page_number",
+        "page-number",
+        "_internal",
+        "address.line3",
+        "fieldErrors[0].field",
+        "title01",
+    })
+    @DisplayName("a member name a caller could plausibly have mistyped is still reflected")
+    void aPlausiblyMistypedMemberNameIsStillReflected(String name) {
+        HttpMessageNotReadableException failure = new HttpMessageNotReadableException(
+                "unreadable", unrecognisedProperty(name), null);
+
+        ResponseEntity<ApiError> response =
+                this.handler.onUnreadableBody(failure, requestFor("/api/v1/cards/search"));
+
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().message())
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_UNKNOWN_MEMBER);
         assertThat(response.getBody().fieldErrors())
                 .singleElement()
-                .satisfies(entry -> assertThat(entry.field())
-                        .isEqualTo("page Number")
-                        .doesNotContain("\n"));
+                .satisfies(entry -> assertThat(entry.field()).isEqualTo(name));
+    }
+
+    /**
+     * Renders one problem document as JSON so a case can assert over everything it carries.
+     *
+     * <p>Assumptions: the whole document is serialised rather than one member being inspected, because
+     * the property under test is that a value appears NOWHERE — in the message, in a field entry, in the
+     * path or in the abend block. Naming one member would let the same value pass through another.</p>
+     *
+     * @param problem the document to render; must not be {@code null}
+     * @return the document's JSON rendering, never {@code null}
+     */
+    private String json(ApiError problem) {
+        return JsonMapper.builder().build().writeValueAsString(problem);
     }
 
     /**

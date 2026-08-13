@@ -1,6 +1,10 @@
 package com.carddemo.authorization.service;
 
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.carddemo.authorization.domain.PendingAuthDetail;
 import com.carddemo.authorization.domain.PendingAuthDetailKey;
 import com.carddemo.authorization.domain.PendingAuthSummary;
@@ -28,6 +32,7 @@ import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Limit;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.SimpleTransactionStatus;
@@ -162,6 +167,24 @@ class PurgeJobTest {
 
     /** The negative bound the reversal saturates at, being the negation of {@link #CEILING}. */
     private static final BigDecimal FLOOR = CEILING.negate();
+
+    /**
+     * The greatest value either counter may reach, being {@code PendingAuthSummary.COUNTER_MAX}.
+     *
+     * <p>Assumptions: named here rather than inlined at each verification because the statement takes
+     * the bound as a parameter -- the query language has no way to write the clamp without one -- so
+     * every call site names both bounds and a literal at each of them would drift from the domain.</p>
+     */
+    private static final int COUNT_CEILING = PendingAuthSummary.COUNTER_MAX;
+
+    /**
+     * The least value either counter may reach, being {@code PendingAuthSummary.COUNTER_MIN}.
+     *
+     * <p>Assumptions: the floor is the bound this sweep actually reaches, because a reversal
+     * SUBTRACTS; the ceiling is passed with it so the clamp is symmetric in the statement rather than
+     * one-sided, which is what keeps a future addition on the same path in domain too.</p>
+     */
+    private static final int COUNT_FLOOR = PendingAuthSummary.COUNTER_MIN;
 
     /** Ordinal 24095, the built children's authorization date: day 95 of 2024. */
     private static final int AUTH_DATE = 24_095;
@@ -407,6 +430,33 @@ class PurgeJobTest {
                 Short.valueOf(PackedDecimalCodec.decodeBinary(image, 52, 4, 0, true).shortValueExact()),
                 PackedDecimalCodec.decodePacked(image, 54, 9, 2, true),
                 PackedDecimalCodec.decodePacked(image, 60, 9, 2, true));
+    }
+
+    /**
+     * Composes a parent summary at stated counters and running totals, for the domain-boundary cases.
+     *
+     * <p>Assumptions: this exists beside {@code committedParent} rather than replacing it. The committed
+     * fixture is the parity oracle -- its counters and accumulators are read out of the reference record's
+     * own bytes -- and every ordinary case must keep using it. Only the two boundary cases need values no
+     * committed record carries, and stating them here keeps the fixture-derived cases free of numbers a
+     * reader would have to check against a binary.</p>
+     *
+     * @param accountId the account the summary belongs to; must not be {@code null}
+     * @param approvedCount the approved counter to seed, as an {@code int}
+     * @param declinedCount the declined counter to seed, as an {@code int}
+     * @param approvedAmount the approved running total to seed; must not be {@code null}
+     * @param declinedAmount the declined running total to seed; must not be {@code null}
+     * @return the composed summary, never {@code null}
+     */
+    private static PendingAuthSummary summaryAt(Long accountId, int approvedCount, int declinedCount,
+            BigDecimal approvedAmount, BigDecimal declinedAmount) {
+        BigDecimal ampleLimit = new BigDecimal("999999999.99");
+        BigDecimal zero = new BigDecimal("0.00");
+        return PendingAuthSummary.rehydrated(accountId, Long.valueOf(900_000_001L),
+                null, null, null, null, null, null,
+                ampleLimit, ampleLimit, zero, zero,
+                Short.valueOf((short) approvedCount), Short.valueOf((short) declinedCount),
+                approvedAmount, declinedAmount);
     }
 
     /**
@@ -656,7 +706,8 @@ class PurgeJobTest {
             //       read off the statement because the reversal no longer touches the loaded entity.
             verify(PurgeJobTest.this.summaries, times(1)).reverseExpiredAuthorizations(eq(accountId),
                     eq(2), argThat(amount -> amount.signum() > 0), eq(0),
-                    argThat(amount -> amount.signum() == 0), eq(CEILING), eq(FLOOR));
+                    argThat(amount -> amount.signum() == 0), eq(CEILING), eq(FLOOR), eq(COUNT_CEILING),
+                    eq(COUNT_FLOOR));
         }
     }
 
@@ -768,7 +819,8 @@ class PurgeJobTest {
             assertThat(outcome.detailsDeleted()).isZero();
             verify(PurgeJobTest.this.details, never()).delete(any());
             verify(PurgeJobTest.this.summaries, never())
-                    .reverseExpiredAuthorizations(any(), anyInt(), any(), anyInt(), any(), any(), any());
+                    .reverseExpiredAuthorizations(any(), anyInt(), any(), anyInt(), any(), any(), any(),
+                        anyInt(), anyInt());
             assertThat(outcome.summariesDeleted()).isZero();
         }
     }
@@ -838,7 +890,8 @@ class PurgeJobTest {
             verify(PurgeJobTest.this.summaries, times(1)).reverseExpiredAuthorizations(eq(accountId),
                     eq(1), argThat(amount -> amount.compareTo(new BigDecimal("300.00")) == 0),
                     eq(1), argThat(amount -> amount.compareTo(new BigDecimal("150.00")) == 0),
-                    eq(CEILING), eq(FLOOR));
+                    eq(CEILING), eq(FLOOR), eq(COUNT_CEILING),
+                    eq(COUNT_FLOOR));
             // WHY : Assumptions: the parent SURVIVES, and that is a consequence of the arithmetic rather
             //       than a separate rule. Two minus one leaves one on each side, and one is not at or below
             //       zero, so the guard the group below asserts does not fire. Naming it here is what stops
@@ -882,7 +935,8 @@ class PurgeJobTest {
             verify(PurgeJobTest.this.summaries, times(1)).reverseExpiredAuthorizations(eq(accountId),
                     eq(1), argThat(amount -> amount.compareTo(new BigDecimal("100.00")) == 0),
                     eq(1), argThat(amount -> amount.compareTo(new BigDecimal("50.00")) == 0),
-                    eq(CEILING), eq(FLOOR));
+                    eq(CEILING), eq(FLOOR), eq(COUNT_CEILING),
+                    eq(COUNT_FLOOR));
         }
 
         /**
@@ -918,7 +972,8 @@ class PurgeJobTest {
             ArgumentCaptor<BigDecimal> approved = ArgumentCaptor.forClass(BigDecimal.class);
             ArgumentCaptor<BigDecimal> declined = ArgumentCaptor.forClass(BigDecimal.class);
             verify(PurgeJobTest.this.summaries).reverseExpiredAuthorizations(eq(accountId), eq(1),
-                    approved.capture(), eq(1), declined.capture(), eq(CEILING), eq(FLOOR));
+                    approved.capture(), eq(1), declined.capture(), eq(CEILING), eq(FLOOR), eq(COUNT_CEILING),
+                    eq(COUNT_FLOOR));
             assertThat(approved.getValue().scale()).isEqualTo(Money.SCALE);
             assertThat(declined.getValue().scale()).isEqualTo(Money.SCALE);
         }
@@ -968,8 +1023,120 @@ class PurgeJobTest {
             verify(PurgeJobTest.this.summaries, times(1)).reverseExpiredAuthorizations(eq(accountId),
                     eq(2), argThat(amount -> amount.compareTo(new BigDecimal("300.00")) == 0),
                     eq(2), argThat(amount -> amount.compareTo(new BigDecimal("150.00")) == 0),
-                    eq(CEILING), eq(FLOOR));
+                    eq(CEILING), eq(FLOOR), eq(COUNT_CEILING),
+                    eq(COUNT_FLOOR));
             assertThat(outcome.summariesDeleted()).isEqualTo(1);
+        }
+
+        /**
+         * A counter driven below the four-digit floor is clamped by the statement and reported by the sweep.
+         *
+         * <p>⚠️ Purpose: this is the negative half of the counter domain, and it is reachable on THIS path
+         * only. A root whose counter saturated at the ceiling recorded fewer children than the account
+         * actually accumulated, so reversing every expired child it does hold subtracts more than the
+         * counter carries -- which is why the floor exists and why the reduction is expected here rather
+         * than exceptional. The earlier policy raised at the bound, which abended the sweep mid-table and
+         * left the rows already deleted deleted and the ones behind them not. The divergence is registered
+         * as {@code D-SUMMARY-COUNTER-SATURATION}.</p>
+         *
+         * <p>Assumptions: the FLOOR argument is asserted at the statement and the narrowing is asserted on
+         * the log, because they are two separate halves of one policy and each has failed independently.
+         * The clamp lived only in the aggregate while the statement carried no bound at all, and the report
+         * logged an unconditional positive magnitude while the stored value was negative. A case asserting
+         * one half would pass against the other's defect.</p>
+         *
+         * <p>Assumptions: the parent is composed here rather than read from the committed fixture, whose
+         * counters are two and two. Reaching the floor from a fixture would need ten thousand children.</p>
+         */
+        @Test
+        @DisplayName("a counter driven below the four-digit floor is clamped and the narrowing is reported")
+        void aCounterBelowTheFloorIsClampedAndReported() {
+            Long accountId = committedParentAccountId();
+            givenSummaries(List.of(summaryAt(accountId, PendingAuthSummary.COUNTER_MIN, 0,
+                    new BigDecimal("500.00"), new BigDecimal("500.00"))));
+            givenChildren(List.of(child(AUTH_DATE, 91_500_000, APPROVED, "100.00", "100.00")));
+            Logger purgeLogger = (Logger) LoggerFactory.getLogger(PurgeJob.class);
+            ListAppender<ILoggingEvent> captured = new ListAppender<>();
+            captured.start();
+            purgeLogger.addAppender(captured);
+            Level previousLevel = purgeLogger.getLevel();
+            purgeLogger.setLevel(Level.WARN);
+            try {
+                job().purge(PurgeJob.PurgeParameters.forBusinessDate(AUTHORIZED_ON.plusDays(10)));
+
+                verify(PurgeJobTest.this.summaries, times(1)).reverseExpiredAuthorizations(eq(accountId),
+                        eq(1), argThat(amount -> amount.compareTo(new BigDecimal("100.00")) == 0),
+                        eq(0), argThat(amount -> amount.compareTo(BigDecimal.ZERO) == 0),
+                        eq(CEILING), eq(FLOOR), eq(COUNT_CEILING),
+                        eq(COUNT_FLOOR));
+                assertThat(captured.list.stream().map(ILoggingEvent::getFormattedMessage).toList())
+                        .as("a sweep that silently loses a count leaves nothing to reconcile the deleted "
+                                + "children against")
+                        .anyMatch(line -> line.contains("event=authorization.purge.counter-narrowed")
+                                && line.contains("field=approvedAuthCount")
+                                && line.contains("bound=" + PendingAuthSummary.COUNTER_MIN));
+                assertThat(captured.list.stream().map(ILoggingEvent::getFormattedMessage).toList())
+                        .as("the declined arm reverses nothing here, so reporting it would name a member "
+                                + "the sweep never moved")
+                        .noneMatch(line -> line.contains("event=authorization.purge.counter-narrowed")
+                                && line.contains("field=declinedAuthCount"));
+            } finally {
+                purgeLogger.setLevel(previousLevel);
+                purgeLogger.detachAppender(captured);
+            }
+        }
+
+        /**
+         * A money narrowing on the sweep reports the NEGATIVE bound, which is the value that will be stored.
+         *
+         * <p>⚠️ Purpose: this case exists because the reported bound carried the WRONG SIGN. The reporter
+         * logged {@code PendingAuthSummary.MONEY_MAX_MAGNITUDE}, an unconditionally positive constant,
+         * while every narrowing this method can observe is a SUBTRACTION passing the negative bound -- so
+         * the line said the total had been held at positive 999,999,999.99 when the column had been set to
+         * negative 999,999,999.99. An operator reconciling the summary against the detail table would have
+         * been looking for a value two thousand million away from the one stored. The reporter now logs
+         * {@code narrowedToStoredDomain}, which is the same function the statement's clamp mirrors.</p>
+         *
+         * <p>Assumptions: the sign is asserted by requiring the MINUS to be present in the logged text,
+         * rather than by comparing to a signed constant alone. The defect was a missing negation, and a
+         * comparison written against the same expression the code uses would have agreed with the defect;
+         * requiring the character states the property a reader of the log actually depends on.</p>
+         *
+         * <p>Assumptions: the counters are left in domain so this case reports the money member only, which
+         * keeps the two reporters independently observable -- they share a shape and had different
+         * defects.</p>
+         */
+        @Test
+        @DisplayName("a money narrowing on the sweep reports the negative bound the column will hold")
+        void aMoneyNarrowingOnTheSweepReportsTheNegativeBound() {
+            Long accountId = committedParentAccountId();
+            givenSummaries(List.of(summaryAt(accountId, 5, 5,
+                    new BigDecimal("-999999000.00"), new BigDecimal("0.00"))));
+            givenChildren(List.of(child(AUTH_DATE, 91_500_000, APPROVED, "5000.00", "5000.00")));
+            Logger purgeLogger = (Logger) LoggerFactory.getLogger(PurgeJob.class);
+            ListAppender<ILoggingEvent> captured = new ListAppender<>();
+            captured.start();
+            purgeLogger.addAppender(captured);
+            Level previousLevel = purgeLogger.getLevel();
+            purgeLogger.setLevel(Level.WARN);
+            try {
+                job().purge(PurgeJob.PurgeParameters.forBusinessDate(AUTHORIZED_ON.plusDays(10)));
+
+                List<String> lines =
+                        captured.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
+                assertThat(lines)
+                        .as("the reported bound must be the one the column will hold, sign included")
+                        .anyMatch(line -> line.contains("event=authorization.purge.money-narrowed")
+                                && line.contains("field=approvedAuthAmount")
+                                && line.contains("bound=-999999999.99"));
+                assertThat(lines)
+                        .as("a positive bound on a subtraction is the exact defect this case replaces")
+                        .noneMatch(line -> line.contains("event=authorization.purge.money-narrowed")
+                                && line.contains("bound=999999999.99"));
+            } finally {
+                purgeLogger.setLevel(previousLevel);
+                purgeLogger.detachAppender(captured);
+            }
         }
     }
 
@@ -1051,7 +1218,8 @@ class PurgeJobTest {
             verify(PurgeJobTest.this.summaries, times(1)).reverseExpiredAuthorizations(eq(accountId),
                     eq(1), argThat(amount -> amount.compareTo(new BigDecimal("300.00")) == 0),
                     eq(1), argThat(amount -> amount.compareTo(new BigDecimal("150.00")) == 0),
-                    eq(CEILING), eq(FLOOR));
+                    eq(CEILING), eq(FLOOR), eq(COUNT_CEILING),
+                    eq(COUNT_FLOOR));
             verify(PurgeJobTest.this.summaries, never()).save(any());
             assertThat(parent.getApprovedAuthCount())
                     .as("the instance is untouched; the ROW is what the statement reduces")
@@ -1120,7 +1288,8 @@ class PurgeJobTest {
             givenChildren(List.of(expiring));
             doThrow(new IllegalStateException("reduction failed"))
                     .when(PurgeJobTest.this.summaries)
-                    .reverseExpiredAuthorizations(any(), anyInt(), any(), anyInt(), any(), any(), any());
+                    .reverseExpiredAuthorizations(any(), anyInt(), any(), anyInt(), any(), any(), any(),
+                        anyInt(), anyInt());
 
             PurgeJob job = job();
             PurgeJob.PurgeParameters parameters =
@@ -1201,7 +1370,8 @@ class PurgeJobTest {
             //       to the instance.
             verify(PurgeJobTest.this.summaries, times(1)).reverseExpiredAuthorizations(eq(accountId),
                     eq(2), argThat(amount -> amount.compareTo(new BigDecimal("300.00")) == 0),
-                    eq(0), argThat(amount -> amount.signum() == 0), eq(CEILING), eq(FLOOR));
+                    eq(0), argThat(amount -> amount.signum() == 0), eq(CEILING), eq(FLOOR), eq(COUNT_CEILING),
+                    eq(COUNT_FLOOR));
             assertThat(outcome.summariesDeleted()).isZero();
             verify(PurgeJobTest.this.summaries, never()).delete(any());
         }
@@ -1963,9 +2133,11 @@ class PurgeJobTest {
             verify(PurgeJobTest.this.summaries).findByAccountId(populated);
             verify(PurgeJobTest.this.details).delete(expiring);
             verify(PurgeJobTest.this.summaries, never())
-                    .reverseExpiredAuthorizations(eq(childless), anyInt(), any(), anyInt(), any(), any(), any());
+                    .reverseExpiredAuthorizations(eq(childless), anyInt(), any(), anyInt(), any(), any(),
+                        any(), anyInt(), anyInt());
             verify(PurgeJobTest.this.summaries, times(1))
-                    .reverseExpiredAuthorizations(eq(populated), eq(1), any(), eq(0), any(), any(), any());
+                    .reverseExpiredAuthorizations(eq(populated), eq(1), any(), eq(0), any(), any(), any(),
+                        anyInt(), anyInt());
         }
 
         /**

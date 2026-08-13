@@ -11,7 +11,11 @@
  * {@code dto} package, and the placement is deliberate rather than convenient: the three entities are the
  * types whose confident and wrong disclosure rationales made that class necessary, so a reader arriving
  * from one of them should find the assertions beside it, and one class covering one rule across every
- * type it governs cannot fall out of step with itself the way two classes could.</p>
+ * type it governs cannot fall out of step with itself the way two classes could.
+ * {@code ProtectedValueIsolationTest} holds the copy-in and copy-out property of
+ * {@code Customer.ProtectedValueUpdate}, and it is here for a mechanical reason rather than a thematic one:
+ * that type's ciphertext accessor is package-private, so no assertion outside this package can observe what
+ * an intent is carrying.</p>
  *
  * <p>Trade-offs: these tests construct their subjects directly rather than loading a Spring context or a
  * database. That buys assertions naming the exact value that leaked, at the cost of proving nothing about

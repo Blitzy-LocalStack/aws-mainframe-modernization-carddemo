@@ -334,4 +334,46 @@ class PageResponseTest {
         assertThat(page.firstKey()).doesNotContain(cardNumber).doesNotContain(accountId);
         assertThat(page.lastKey()).doesNotContain(cardNumber).doesNotContain(accountId);
     }
+
+    /**
+     * Confirms the diagnostic rendering reports the page's shape and none of its rows.
+     *
+     * <p>⚠️ Purpose: the generated rendering of a record recurses into every component, and one
+     * component here is the list of ROWS. A page of card summaries or account rows therefore rendered
+     * every protected value it carried the moment anything interpolated it -- a log statement, an
+     * assertion message, a framework diagnostic about an unrelated failure. This case fixes the
+     * override that stops that, and it asserts the ABSENCE of the row content rather than the exact
+     * wording, because the wording may change while the absence must not.</p>
+     *
+     * <p>Assumptions: the row is a string carrying a card-number-shaped value, so a rendering that
+     * recursed would contain it verbatim and this assertion would fail. Using a plain string rather
+     * than a domain type keeps the case in this module, and the recursion it guards against is a
+     * property of the record's generated rendering rather than of any element type.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the diagnostic rendering carries the row count and no row")
+    void diagnosticRenderingCarriesNoRow() {
+        String protectedRow = "4111111111111111|JOHN Q PUBLIC|5000.00";
+        String sealed = cursor("4111111111111111" + "00000000001");
+
+        String rendered = PageResponse.ofRows(List.of(protectedRow, protectedRow), sealed, sealed, true)
+                .toString();
+
+        assertThat(rendered)
+                .as("a rendering that recursed into the rows would publish every protected value on them")
+                .doesNotContain(protectedRow)
+                .doesNotContain("4111111111111111")
+                .doesNotContain(sealed)
+                .contains("rows=2")
+                .contains("firstKey=present")
+                .contains("lastKey=present")
+                .contains("hasNext=true");
+        assertThat(PageResponse.empty().toString())
+                .as("an exhausted page must be distinguishable from a populated one in a diagnostic")
+                .contains("rows=0")
+                .contains("firstKey=absent")
+                .contains("hasNext=false");
+    }
 }

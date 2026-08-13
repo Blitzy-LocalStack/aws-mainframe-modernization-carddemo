@@ -116,15 +116,15 @@
 
 CREATE TABLE ledger.transactions (
 
-    -- Assumptions: CHAR(16) rather than an integer, for a field whose
-    --   characters happen to be digits. app/cpy/CVTRA05Y.cpy L5 declares
-    --   `TRAN-ID PIC X(16)`, an alphanumeric picture, so the fixed width is
-    --   the contract and leading zeros are significant. That is not
-    --   theoretical: in app/data/ASCII/dailytran.txt all 300 identifiers
-    --   occupy the full 16 bytes with no trailing blank, and values such as
-    --   `0000000000683580` carry leading zeros an integer column would
-    --   discard. Bytes 1-16.
-    transaction_id  CHAR(16)      NOT NULL,
+    -- Assumptions: CHAR(16) rather than an integer, for a field whose characters happen to be digits.
+    --   app/cpy/CVTRA05Y.cpy L5 declares `TRAN-ID PIC X(16)`, an alphanumeric picture, so the fixed
+    --   width is the contract and leading zeros are significant. That is not theoretical: in
+    --   app/data/ASCII/dailytran.txt all 300 identifiers occupy the full 16 bytes with no trailing
+    --   blank, and values such as `0000000000683580` carry leading zeros an integer column would discard.
+    --   Bytes 1-16. WHY COLLATE "C": every ordered read of this column must be BYTE ordering, which is
+    --   what the reference sort produced; the alternatives considered, the blast radius and the
+    --   assumptions are recorded in the collation note at the foot of this file.
+    transaction_id  CHAR(16) COLLATE "C" NOT NULL,
 
     -- Assumptions: a two-character code, so CHAR(2) by the fixed-code
     --   rule, and the baseline agrees where it expressed the same field
@@ -404,7 +404,15 @@ CREATE TABLE ledger.daily_transactions (
     --   primary key here and it is NOT unique: it is business data the feed
     --   supplies, for the reason given on ingest_seq above and at the end of this
     --   table.
-    transaction_id  CHAR(16),
+    -- Assumptions: COLLATE "C" for the reason argued in full at
+    --   ledger.transactions.transaction_id -- the reference compares this field
+    --   byte-wise. It is pinned here as well as there rather than only where the
+    --   ordered walk reads, because the pre-posting pass reads this feed and a
+    --   comparison between the two columns must not be the place where two
+    --   different collations meet: PostgreSQL refuses a comparison between two
+    --   differently and explicitly collated columns outright, which would surface
+    --   as a query error rather than as a wrong order.
+    transaction_id  CHAR(16) COLLATE "C",
 
     -- Assumptions: fixed-width code, bytes 17-18; argued at
     --   ledger.transactions.type_cd.
@@ -893,3 +901,84 @@ CREATE TABLE ledger.transaction_category_balances (
 --   the key as the only constraint keeps a uniqueness violation, and
 --   therefore the create-versus -update decision, visible to the service
 --   that has to report it.
+
+-- =============================================================================
+-- Collation note -- ledger.transactions.transaction_id COLLATE "C"
+-- =============================================================================
+-- The identifier column declared above is given the "C" collation, so
+--   every comparison and every ORDER BY over it -- including the index
+--   pk_transactions builds on it -- sorts by byte value rather than by the
+--   collation the database cluster was initialised with.
+--
+-- WHY: the reference sorts this field as bytes. app/jcl/TRANREPT.jcl L41-L42
+--   declares its sort fields positionally over the 350-byte record, and DFSORT
+--   orders a character field by its collating sequence with no locale involved.
+--   app/jcl/COMBTRAN.jcl L28 declares the same field as `TRAN-ID,1,16,CH` and
+--   L30 orders it ascending, `CH` being a byte-wise character comparison.
+--   The migrated ordered reads over this column are derived or JPQL queries that
+--   name an ORDER BY and no COLLATE clause -- the combine step's ordered scan in
+--   batch-service, the statement and report scans in reporting-service, and the
+--   keyset paging in this module -- so without this pin their order is whatever
+--   collation the cluster carries.
+--
+--   That is not a precaution. The column holds identifiers that are NOT all
+--   digits: the interest accrual builds one by concatenating the ten-character
+--   business-date token straight into the key, which app/cbl/CBACT04C.cbl
+--   L476-L480 does with `DELIMITED BY SIZE` so the token contributes its raw
+--   bytes, and the migrated token is an ISO date -- so a run stores identifiers
+--   of the form `2024-01-15000001` beside posted ones of the form
+--   `2022071800000001`. A collation that gives punctuation no primary weight
+--   compares those two by their remaining digits and orders the hyphenated one
+--   LAST, where a byte comparison orders it FIRST, because the hyphen's code
+--   point is below every digit's. The reference orders it first. So on a cluster
+--   initialised from a linguistic locale the combined artefact would differ from
+--   the reference's on exactly the records the accrual pass produces, and the
+--   byte comparison the parity oracle performs would fail on a difference that
+--   no query in this repository states.
+--
+-- Alternatives Considered: (1) adding COLLATE "C" to each ORDER BY clause.
+--   Rejected: the ordering is a property of the column rather than of one
+--   caller, and a query added later would silently omit it, which is exactly
+--   the state this pin corrects. (2) Relying on the stored values being digits
+--   only, on which a linguistic collation and a byte comparison agree. Rejected
+--   because it is FALSE, not merely unguaranteed: the accrual identifiers above
+--   carry hyphens, so the two orders genuinely disagree on data the system
+--   produces every run. (3) Setting the database or cluster default collation to
+--   C. Rejected: it reaches every column in every schema, including descriptive
+--   text where linguistic ordering is the better default, so it changes far more
+--   than the ordering being fixed here.
+--
+-- Trade-offs: byte ordering is not the ordering a person would call
+--   alphabetical, and pinning it here means this column will never sort the way
+--   a locale-aware reader might expect -- the hyphenated accrual identifiers
+--   sort before every all-digit one, not among them. That is accepted
+--   deliberately, because byte ordering is the contract being preserved and the
+--   artefact this column feeds is compared byte for byte against a reference
+--   that produced it. The cost is confined to this one column, which is the
+--   reason the pin is stated here rather than raised to the database default.
+--
+-- Assumptions: "C" is a collation every PostgreSQL installation provides with
+--   no ICU or locale dependency, so this migration applies unchanged on any
+--   cluster. Assumptions: this is the only column in this schema on which the two
+--   orders can DISAGREE, which is a narrower property than having an ordering the
+--   reference fixes as bytes. Two sibling character columns have that wider
+--   property and are deliberately left unpinned:
+--   transaction_category_balances.type_cd and .category_cd are read in composite
+--   key order by finders that name no collation and are sorted
+--   `TRANCAT-TYPE-CD,A,TRANCAT-CD,A` by app/jcl/PRTCATBL.jcl L52, but every value
+--   either carries is a fixed all-digit code, and a byte comparison and a
+--   linguistic one cannot part on digits alone. transaction_id is the exception
+--   because the accrual identifiers above put a hyphen inside it. Assumptions:
+--   the remaining ordered reads over this schema do not involve a collation at
+--   all -- daily_transactions orders by its BIGINT ingest_seq, transaction_rejects
+--   by its BIGINT reject_seq, the range read by a TIMESTAMP, and the reporting
+--   projections reach the card number through a derived fingerprint rather than
+--   through this table's card_num.
+--
+-- Where it is verified: TransactionRepositoryIT asserts from the engine's own
+--   catalogue that this column's collation is "C", and that an ORDER BY naming
+--   no collation returns byte order for identifiers on which a punctuation-
+--   shifted collation demonstrably returns a different order -- the second half
+--   being what stops the first from passing vacuously. CombineTransactionsJobTest
+--   asserts the same ordering through the real combine job.
+-- =============================================================================

@@ -103,16 +103,32 @@ the package, stage byte-preserved source extracts, create schemas/roles and
 masked reporting views, verify database trust boundaries, bulk-load each dataset,
 and run the verification passes.
 
-The fixed-width readers, the Aurora bulk loader and the three verification passes
-are implemented and are reachable as the `load-dataset`, `verify-row-counts`,
-`verify-checksum`, `verify-money-parity` and `verify-row-count-report` subcommands --
-the last of which runs the whole-migration row-count report on a session it proves is
-the read-only reporting role, and reduces it to a process exit status a batch step can
-branch on. `load-dataset` serves all
-**ten** loadable records, covering every seeded table across the eight schemas; the
-three columns that hold ciphertext are sealed by the loader under the same key and
-in the same envelope framing the owning service reads, so nothing is written in the
-clear and nothing is left for a service to backfill.
+The fixed-width readers, the Aurora bulk loader, the three verification passes and the
+combined verification gate are implemented and are reachable as the `stage-dataset`,
+`refresh-dataset`, `load-dataset`, `verify-row-counts`, `verify-checksum`,
+`verify-money-parity`, `verify-row-count-report`, `verify-money-total-report` and
+`verify-all` subcommands. The two report commands run the whole-migration row-count and
+money-total reports on a session each proves is the read-only reporting role, and reduce
+them to a process exit status a batch step can branch on. `verify-all` is the gate: it runs
+all three passes in the fixed order 1, 2, 3, stops at the first pass that fails, offers no
+option that could skip a pass, and reduces the result to one exit status -- which is what
+the nightly chain's `VerifyMigration` state branches on, and the only edge into business
+processing. Its coverage is a `--manifest` when an operator supplies one and every dataset
+that ships a committed extract when none is. `load-dataset` serves all **eleven** loadable
+records, covering every seeded table across the eight schemas; the three columns that hold
+ciphertext are sealed by the loader under the same key and in the same envelope framing the
+owning service reads, so nothing is written in the clear and nothing is left for a service
+to backfill.
+
+The nightly chain does not invoke those commands one at a time. Its seed-refresh
+state runs `refresh-dataset` once per dataset, which composes the fetch, the staging,
+the load, all three verification passes and then one dataset-specific step — for the
+transaction master, the sequence reconciliation below; for each of the three
+reference datasets, the backup generation `app/jcl/DEFGDGD.jcl` creates from the same
+sequential file the load reads — into one exit status a batch step can branch on. The
+extracts it reads are the ones the runbook's `aws s3 sync` publishes under the
+dataset bucket's source-extract prefix; nothing is mounted and no filesystem is
+provisioned for them.
 
 **One step sits between the last load and enabling writes: `reconcile-sequences`.**
 `ledger.transaction_id_seq` — the allocator the interactive transaction-add and
@@ -123,13 +139,40 @@ range, so the first interactive write would fail on the primary key. The command
 advances it past every loaded identifier, only ever forward, and is a no-op on a
 deployment whose ledger was never loaded. The runbook states it as its own step.
 
-Two conditions still gate a cutover, and the runbook's cutover-gate section states
-both: the load must have resolved the keys of the environment the application will
-run in, which no verification pass can confirm; and the checksum pass serves three
-of the ten records today, so the evidence for the other seven is the row-count and
-money-parity passes plus the two whole-schema queries. Schema and security
-validation success must not be reported as a complete data migration, and neither
-must a partial load.
+Three conditions still gate a cutover, and the runbook's cutover-gate section numbers
+each. **One:** the load must have resolved the keys of the environment the application
+will run in, which no verification pass can confirm, because a row sealed under another
+environment's key stores and verifies cleanly and fails to decrypt days later -- and, on
+the same question of whether a load was performed against the right shape, an
+`account.customers` loaded before the customer envelope framing was aligned must be
+discarded rather than topped up, which a re-run of the load cannot do because no role this
+package uses holds `DELETE` or `TRUNCATE`. **Two:** the gate reads eleven datasets and
+compares ten of them; when a manifest is supplied the manifest fixes that population, so
+confirm it declared every record the cutover loaded. Confirm as well that each pass
+actually emitted its verdicts, which is a different question from whether it can: the
+checksum pass over `customers` and `cards` needs the same key-management grant their loads
+needed, and a session without it fails those two rather than skipping them. **Three:** `ledger.transactions`
+loading zero rows is the correct result on a corpus-only run and the wrong one on a
+cutover, which the pass output alone cannot distinguish. Schema and security validation
+success must not be reported as a complete data migration, and neither must a partial
+load.
+
+Refactoring Rationale: condition two above used to read differently -- that the checksum
+pass served three of the eleven records, so the evidence for the other eight was the
+row-count and money-parity passes plus the two whole-schema queries. That reason is gone
+rather than accepted: the pass could not digest the `BIGINT`, `DATE`, `SMALLINT`,
+`TIMESTAMP` and `UUID` values a driver returns, and it now canonicalises by value class,
+which lifted its reach from three records to every record that ships a committed
+extract -- ten of the eleven, compared record by record. The eleventh, `ledger.transactions`,
+ships no extract at all, so no per-dataset pass can be pointed at it and condition three is
+how its result is read. The three sealed columns, which no digest can compare because
+ciphertext differs on every write, are audited for well-formed envelopes instead, so
+nothing in a loaded row is looked at by no pass at all. The condition is kept rather than
+withdrawn, because the failure it guards against survived the fix in another form: a
+manifest silently short of a dataset produces a green run over the datasets it does declare,
+which reads as "the migration was verified". Only the obsolete reason is removed -- a gate
+citing a resolved obstacle is read as a gate that can be ignored, and a gate deleted while
+the runbook still numbers it is worse.
 
 Refactoring Rationale: this section recorded cutover as closed because `CUSTOMER`
 and `CARD` could not be loaded at all. That reason no longer exists, and leaving it

@@ -8,8 +8,15 @@ import com.carddemo.batch.dto.BatchErrorEvent;
 import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchReturnCode;
 import com.carddemo.batch.service.BatchErrorPublisher;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -498,6 +505,167 @@ class BatchApplicationTest {
             return true;
         }
     }
+
+    /**
+     * Asserts no diagnostic in this module hands a caught throwable to the logging facade unrendered.
+     *
+     * <p>⚠️ Purpose: the two catch arms of {@code runInContext} both did. One bound the throwable to a
+     * placeholder named {@code failureDigest={}}, where the facade renders it with {@code String.valueOf}
+     * and therefore with {@code Throwable.toString()} -- the type AND the message -- under a parameter name
+     * asserting the opposite. The other appended an {@code Error} as a fifth argument to a message carrying
+     * four placeholders, which the facade treats as the trailing throwable and renders as the message,
+     * every cause's message and the frames. Both are generic boundaries reached by failures nobody
+     * anticipated, so the messages arriving there are composed by whichever library failed: a driver
+     * reports the statement it could not run, a parser quotes the token it could not read, and either can
+     * carry an account identifier or a whole record.</p>
+     *
+     * <p>Assumptions: a throwable may reach a log line only through {@code ThrowableDigest.of(...)} or a
+     * class-name accessor. Those two are facts about CODE -- a type chain, a frame, a class name -- and can
+     * hold no request value, which is the property that makes them admissible where a message is not.</p>
+     *
+     * <p>Measured: with both call sites returned to their reviewed form, this case is the only one of the
+     * seventeen here that fails, and it names both -- {@code BatchApplication.java:701} for the
+     * placeholder-bound throwable and {@code :742} for the trailing one -- so it discriminates on each
+     * independently rather than on the pair.</p>
+     *
+     * <p>Assumptions: the subjects are the CAUGHT identifiers, collected from every {@code catch} clause in
+     * the source rather than from a list written here. A rule naming the two identifiers this class happens
+     * to use would be satisfied by a third arm that named its variable something else.</p>
+     *
+     * <p>Assumptions: string literals are removed from a call before it is examined, and that step is
+     * load-bearing rather than tidy. Every one of these templates spells its own parameter name in the
+     * format string -- {@code failure=}, {@code batch.job.fatal} -- so a match made against the raw text
+     * reports each of them and the rule would have to be weakened to something that passes.</p>
+     *
+     * <p>Alternatives Considered: capturing the logger and asserting the formatted output, which the cases
+     * above do for the tiers they drive. Rejected as the guard because it proves the property only for
+     * paths a test reaches: the fatal arm needs an {@code Error} raised inside a started context, which no
+     * test here provokes, and that is precisely the arm that carried a full trace. Reading the source
+     * asserts every template unconditionally, including the ones on unreachable paths.</p>
+     *
+     * <p>Alternatives Considered: scoping the walk to {@code BatchApplication.java} alone, since that is
+     * where both defects were, or promoting the rule into an ArchUnit rule in {@code common-lib} applied to
+     * every service. The first is rejected because nothing would then stop the next occurrence one package
+     * away -- the sibling authorization module learnt that from a disclosure rule written one class at a
+     * time. The second is deferred rather than dismissed: the sibling rule cannot be shared because what a
+     * diagnostic may still carry differs by context, whereas THIS rule is uniform, so a repository-wide
+     * form is possible and is a wider change than the finding it would close.</p>
+     *
+     * <p>Trade-offs: the walk lives in a class named for the entry point although it covers the module, and
+     * a new root-level class was rejected on purpose: the package charter beside this file closes the root
+     * to exactly one test class, and its own record shows that every figure derived from that roster has
+     * lapsed twice. Adding a case to the class whose defect prompted it keeps the roster true and keeps the
+     * assertion beside the code it was written for.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     *
+     * @throws java.io.IOException if the module's sources cannot be read
+     */
+    @Test
+    @DisplayName("no diagnostic in this module logs a caught throwable unrendered")
+    void noDiagnosticLogsACaughtThrowableUnrendered() throws java.io.IOException {
+        Path sources = Path.of("src", "main", "java");
+        assertThat(Files.isDirectory(sources))
+                .as("the walk must run from the module directory, or it would assert over nothing")
+                .isTrue();
+
+        List<String> offenders = new ArrayList<>();
+        try (Stream<Path> tree = Files.walk(sources)) {
+            for (Path source : tree.filter(path -> path.toString().endsWith(".java")).toList()) {
+                collectUnrenderedThrowableLogs(source, offenders);
+            }
+        }
+
+        assertThat(offenders)
+                .as("a throwable reaches a log line only through ThrowableDigest or a class-name accessor")
+                .isEmpty();
+    }
+
+    /**
+     * Records every logging call in one source that names a caught throwable outside an admitted rendering.
+     *
+     * @param source the source file to examine; must not be {@code null}
+     * @param offenders the list each offending call is appended to, as {@code file:line} plus the call
+     *     text; must not be {@code null}
+     * @throws java.io.IOException if the source cannot be read
+     */
+    private static void collectUnrenderedThrowableLogs(Path source, List<String> offenders)
+            throws java.io.IOException {
+
+        String text = Files.readString(source);
+        Set<String> caught = new LinkedHashSet<>();
+        Matcher clause = CATCH_CLAUSE.matcher(text);
+        while (clause.find()) {
+            caught.add(clause.group(1));
+        }
+        if (caught.isEmpty()) {
+            return;
+        }
+        Matcher call = LOGGING_CALL.matcher(text);
+        while (call.find()) {
+            String statement = text.substring(call.start(), endOfCall(text, call.end()));
+            // WHY : Assumptions: the admitted renderings are erased before the identifiers are looked
+            //       for, rather than being detected alongside them. A call may pass the same throwable
+            //       twice -- once as a class name and once as a digest, which both arms of this entry
+            //       point now do -- so a rule that merely required an admitted form to be PRESENT would
+            //       also pass a call that added the raw throwable beside it.
+            String examined = STRING_LITERAL.matcher(statement).replaceAll("\"\"");
+            examined = ADMITTED_DIGEST.matcher(examined).replaceAll("");
+            examined = ADMITTED_CLASS_NAME.matcher(examined).replaceAll("");
+            for (String name : caught) {
+                if (Pattern.compile("\\b" + Pattern.quote(name) + "\\b").matcher(examined).find()) {
+                    long line = text.substring(0, call.start()).chars().filter(c -> c == '\n').count() + 1;
+                    offenders.add(source.getFileName() + ":" + line + " names '" + name + "' in "
+                            + statement.replaceAll("\\s+", " "));
+                }
+            }
+        }
+    }
+
+    /**
+     * Finds the index just past the closing parenthesis of a call whose opening one has been consumed.
+     *
+     * <p>Assumptions: the scan balances parentheses rather than searching for the next {@code )}, because
+     * every one of these calls contains at least one nested call -- an accessor or a digest -- and a search
+     * for the first closing parenthesis would cut the statement short and hide whatever followed it.</p>
+     *
+     * @param text the whole source text
+     * @param afterOpeningParenthesis the index just past the call's opening parenthesis
+     * @return the index just past the matching closing parenthesis, or the text length if unbalanced
+     */
+    private static int endOfCall(String text, int afterOpeningParenthesis) {
+        int depth = 1;
+        int index = afterOpeningParenthesis;
+        while (index < text.length() && depth > 0) {
+            char character = text.charAt(index);
+            if (character == '(') {
+                depth++;
+            } else if (character == ')') {
+                depth--;
+            }
+            index++;
+        }
+        return index;
+    }
+
+    /** Matches the opening of a logging call at any severity this module uses. */
+    private static final Pattern LOGGING_CALL =
+            Pattern.compile("\\bLOG\\s*\\.\\s*(?:trace|debug|info|warn|error)\\s*\\(");
+
+    /** Matches a catch clause and captures the identifier it binds, multi-catch included. */
+    private static final Pattern CATCH_CLAUSE =
+            Pattern.compile("catch\\s*\\(\\s*[\\w.]+(?:\\s*\\|\\s*[\\w.]+)*\\s+(\\w+)\\s*\\)");
+
+    /** Matches a string literal, escapes included, so a template's own words are not read as code. */
+    private static final Pattern STRING_LITERAL = Pattern.compile("\"(?:\\\\.|[^\"\\\\])*\"");
+
+    /** Matches the admitted digest rendering. */
+    private static final Pattern ADMITTED_DIGEST =
+            Pattern.compile("ThrowableDigest\\s*\\.\\s*of\\s*\\(\\s*\\w+\\s*\\)");
+
+    /** Matches the admitted class-name renderings, both the qualified and the simple form. */
+    private static final Pattern ADMITTED_CLASS_NAME = Pattern.compile(
+            "\\b\\w+\\s*\\.\\s*getClass\\s*\\(\\s*\\)\\s*\\.\\s*get(?:Simple)?Name\\s*\\(\\s*\\)");
 
     /**
      * Builds a finished job execution carrying the given statuses and nothing else.

@@ -40,17 +40,15 @@ import com.carddemo.reference.dto.DisclosureGroupRateResponse;
  * something else, or normalised away: doing so would turn a group that discloses no interest into a
  * group that discloses an invented rate.</p>
  *
- * <p>Alternatives Considered: applying a reduction mode in this class was evaluated and rejected. Two
- * reduction contracts exist in {@code com.carddemo.common.money.Money} and neither is this class's to
- * exercise. The general one admits a decimal at the money scale under
- * {@code Money.GENERAL_ROUNDING}, half up, which governs every reduction that type performs except
- * one; the accrual one, {@code Money.monthlyInterest(java.math.BigDecimal)}, forms the product at
- * full precision and reduces exactly once at the division under
- * {@code Money.BASELINE_INTEREST_ROUNDING}, truncation, against the combined divisor
- * {@code Money.MONTHLY_RATE_DIVISOR}. The second belongs to the batch job that computes interest and
- * is not called from here at all. Reducing an already-exact operand before either contract sees it
- * would be an adjustment nothing asked for, and its effect would be a cent rather than an
- * exception.</p>
+ * <p>Alternatives Considered: applying a reduction in this class was evaluated and rejected. Two
+ * reduction ENTRY POINTS exist in {@code com.carddemo.common.money.Money} -- both reducing under the
+ * single mode {@code Money.GENERAL_ROUNDING}, half up -- and neither is this class's to exercise. One
+ * admits a decimal at the money scale directly; the other,
+ * {@code Money.monthlyInterest(java.math.BigDecimal)}, forms the product at full precision and reduces
+ * exactly once at the division against the combined divisor {@code Money.MONTHLY_RATE_DIVISOR}. The
+ * second belongs to the batch job that computes interest and is not called from here at all. Reducing
+ * an already-exact operand before either sees it would be an adjustment nothing asked for, and its
+ * effect would be a cent rather than an exception.</p>
  *
  * <p>Trade-offs: this class is deliberately incurious about the value it moves. It gains no defensive
  * normalisation, so a rate that somehow reached it out of contract would be published rather than
@@ -66,15 +64,15 @@ import com.carddemo.reference.dto.DisclosureGroupRateResponse;
  * reason the arithmetic sits in batch-service and the conversion sits here.</p>
  *
  * <p>Assumptions: the reference program carries no {@code ROUNDED} phrase on that statement, so it
- * truncates toward zero, and the migrated accrual reduces the same way under
- * {@code Money.BASELINE_INTEREST_ROUNDING} -- which is the accrual's own mode and is distinct from
- * the {@code Money.GENERAL_ROUNDING} half up that governs every other reduction. That mode belongs to
- * the accrual and not to this conversion, which applies neither.</p>
+ * discards the surplus digits of the quotient, while the migrated accrual reduces half up under
+ * {@code Money.GENERAL_ROUNDING} -- the one mode the money path declares, applied to every reduction.
+ * That reduction belongs to the accrual and not to this conversion, which applies none.</p>
  *
- * <p>Assumptions: the migrated accrual therefore differs from the reference by no cent at all, which
- * is why this path carries no registered rounding divergence. The identifier {@code C-ROUNDING} appears
- * in {@code docs/architecture/cobol-to-service-traceability.md} section 7.5 as a withdrawal record and
- * nowhere as a live divergence, and a reader who finds it there should read it that way.</p>
+ * <p>Assumptions: the migrated accrual therefore differs from the reference by one cent on a quotient
+ * landing exactly on a half cent, and that difference is registered as {@code C-ROUNDING} in
+ * {@code docs/architecture/cobol-to-service-traceability.md}. It is a live divergence of the ACCRUAL
+ * and not of this conversion: the rate this class moves is an operand carried across unchanged, so no
+ * cent of that difference originates here, which is the property this class exists to keep true.</p>
  *
  * <p>Assumptions: no binary floating-point type appears anywhere on this path, and unlike the same
  * prohibition in some sibling contexts it is mechanised rather than left to review. Rule A3 of

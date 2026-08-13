@@ -51,7 +51,7 @@
 --   - Eight schemas exist -- auth, account, card, ledger, reference, batch,
 --     authorization, reporting -- each owned by its matching NOLOGIN
 --     carddemo_<context>_owner role, never by the role a service connects as.
---   - THREE tiers of role exist, and the separation between them is the point:
+--   - FOUR tiers of role exist, and the separation between them is the point:
 --       * Eight NOLOGIN owner roles -- carddemo_auth_owner and its seven
 --         siblings. Each owns one schema and, through the migration mechanism
 --         below, every object in it. None can log in, so none has a credential
@@ -69,8 +69,17 @@
 --         USAGE on its schema and SELECT/INSERT/UPDATE plus sequence usage on its
 --         tables, and NOTHING else -- no CREATE, no DELETE, no TRUNCATE, no
 --         ownership, so it cannot alter, drop or replace the objects it reads.
---   - FIFTEEN credentials are applied by section 6: the eight runtime roles and
---     the seven migrators. The eight owners get none, by construction.
+--       * ONE LOGIN verification role -- carddemo_verifier. It holds USAGE and
+--         SELECT on the five schemas the ETL loads into (auth, account, card,
+--         ledger, reference) and NOTHING else: no write privilege of any kind, no
+--         CREATE, no sequence privilege, no ownership. Section 5b grants it and
+--         sets default_transaction_read_only on it, so every transaction it opens
+--         starts read-only. It exists because a post-load verification that
+--         connects as a service role holds INSERT and UPDATE on the very rows it
+--         is certifying.
+--   - SIXTEEN credentials are applied by section 6: the eight runtime roles, the
+--     seven migrators and the one verifier. The eight owners get none, by
+--     construction.
 --   - CREATE on schema public is revoked from PUBLIC.
 --   - carddemo_batch holds USAGE on ledger, account and reference, and
 --     default privileges that grant it SELECT/INSERT/UPDATE on ledger tables,
@@ -244,11 +253,37 @@ DECLARE
         'carddemo_reference',
         'carddemo_batch',
         'carddemo_authorization',
-        'carddemo_reporting'
+        'carddemo_reporting',
+
+        -- WHY : Refactoring Rationale: a NINTH login identity, and the only one
+        -- that is not a bounded context's service role. Post-load verification
+        -- used to connect as whichever service role owned the table it was
+        -- certifying -- so the identity comparing an extract against the database
+        -- held SELECT, INSERT and UPDATE on exactly the rows under examination,
+        -- and a defect in the verifier could have repaired the evidence it exists
+        -- to judge. That is privilege far in excess of the task, and it is not
+        -- fixed by care in the client: it is fixed by there being an identity
+        -- that cannot write.
+        --
+        -- WHY : Alternatives Considered: reusing carddemo_reporting, which is
+        -- already read-only. Rejected because it holds SELECT on the masked
+        -- aggregate views ONLY -- deliberately, so that masking is a boundary and
+        -- not a convention, as section 5 records -- while the checksum pass
+        -- compares whole rows field by field and therefore needs row-level,
+        -- UNMASKED reads. The choice was between widening reporting, which would
+        -- undo that boundary for every reporting query, and a separate identity
+        -- that may read the base tables and nothing else. Section 5b grants it.
+        --
+        -- WHY : Trade-offs: a sixteenth credential to generate, store and rotate.
+        -- What it buys is that "the verifier cannot alter what it certifies" is
+        -- enforced by the SERVER: no write privilege anywhere, and
+        -- default_transaction_read_only set on the role in section 5b, so even a
+        -- statement that slipped past review is refused by its own transaction.
+        'carddemo_verifier'
     ];
 
-    -- WHY : Refactoring Rationale: a ninth role, and the only one that is not a
-    -- service identity. It exists because the reporting context needs two
+    -- WHY : Refactoring Rationale: a TENTH role, and the only one that is not a
+    -- login identity at all. It exists because the reporting context needs two
     -- different capabilities that must not be held by the same role: something
     -- has to OWN the reporting schema and the read-only views inside it, and
     -- something has to CONNECT as the reporting service and read through them.
@@ -1699,6 +1734,128 @@ $$;
 
 
 -- =============================================================================
+-- 5b. Read-only privileges for the verification role
+--
+-- WHY : Assumptions: carddemo_verifier reads the five schemas whose records the
+-- ETL loads -- auth, account, card, ledger and reference -- and receives SELECT
+-- and nothing else on each. Those five are exactly the schemas holding the
+-- eleven tables data-migration loads and therefore the eleven the three
+-- verification passes certify: auth.users; account.accounts, account.customers
+-- and account.card_xref; card.cards; ledger.transactions,
+-- ledger.daily_transactions and ledger.transaction_category_balances; and
+-- reference.transaction_types, reference.transaction_categories and
+-- reference.disclosure_groups. batch and authorization are absent because this
+-- package loads nothing into either, and reporting is absent because a
+-- verification reads the records themselves rather than a presentation of them.
+--
+-- WHY : Assumptions: the reads are UNMASKED, and that is the whole reason this
+-- role exists rather than reusing carddemo_reporting. Verification pass 2
+-- compares a source record against the row it became, field by field, so a
+-- primary account number rendered to its last four digits would differ from the
+-- extract on every row of every card and cross-reference record and report a
+-- correct load as a defect. The masked views serve a reader; this role serves a
+-- comparison.
+--
+-- WHY : Trade-offs: the accepted cost is a credentialed identity able to read
+-- every migrated record in the clear. Three things bound it: it holds NO write
+-- privilege of any kind anywhere -- no INSERT, UPDATE, DELETE, TRUNCATE,
+-- REFERENCES or TRIGGER, no CREATE on any schema, no sequence privilege and no
+-- ownership -- so it cannot alter, destroy or extend what it reads; its
+-- default_transaction_read_only is set below, so a write statement is refused by
+-- its own transaction even if a grant were made in error elsewhere; and the
+-- package's verification passes render no field value into any report, so a
+-- value read here does not reach a log. What the role can do is prove the load
+-- is correct, which nothing with less authority can do.
+--
+-- WHY : Alternatives Considered: granting SELECT on ALL TABLES only, without the
+-- matching ALTER DEFAULT PRIVILEGES. Rejected because these schemas are empty at
+-- bootstrap: the per-service Flyway migrations create every table afterwards, so
+-- an ON ALL TABLES grant alone would grant nothing at all and the first
+-- verification run would fail with a permission error naming a table. The
+-- default privileges are what make a table created later readable. The converse
+-- alternative -- default privileges only -- fails on a re-run against a database
+-- whose tables already exist, so both are issued, exactly as sections 4 and 5 do
+-- for the batch and reporting owners.
+--
+-- WHY : Assumptions: the default privileges are declared FOR each owning role
+-- rather than for the migrator that connects. A default privilege applies to
+-- objects created BY the role named in FOR ROLE, and every table in these
+-- schemas is created by its NOLOGIN owner because each migrator issues SET ROLE
+-- to that owner before running. Naming the migrator would record a rule about
+-- objects nothing creates.
+-- =============================================================================
+
+GRANT USAGE ON SCHEMA auth, account, card, ledger, reference TO carddemo_verifier;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_auth_owner IN SCHEMA auth
+    GRANT SELECT ON TABLES TO carddemo_verifier;
+
+GRANT SELECT ON ALL TABLES IN SCHEMA auth TO carddemo_verifier;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_account_owner IN SCHEMA account
+    GRANT SELECT ON TABLES TO carddemo_verifier;
+
+GRANT SELECT ON ALL TABLES IN SCHEMA account TO carddemo_verifier;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_card_owner IN SCHEMA card
+    GRANT SELECT ON TABLES TO carddemo_verifier;
+
+GRANT SELECT ON ALL TABLES IN SCHEMA card TO carddemo_verifier;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_ledger_owner IN SCHEMA ledger
+    GRANT SELECT ON TABLES TO carddemo_verifier;
+
+GRANT SELECT ON ALL TABLES IN SCHEMA ledger TO carddemo_verifier;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_reference_owner IN SCHEMA reference
+    GRANT SELECT ON TABLES TO carddemo_verifier;
+
+GRANT SELECT ON ALL TABLES IN SCHEMA reference TO carddemo_verifier;
+
+-- WHY : Assumptions: CREATE is revoked on each of the five schemas explicitly,
+-- even though USAGE alone confers none. A schema's privileges can be widened by
+-- any later statement an operator runs, and a verification identity that could
+-- create an object in a schema it reads could create a view shadowing a table --
+-- so the revoke states the intent in the artifact that owns the role rather than
+-- leaving it to be inferred from the absence of a grant.
+REVOKE CREATE ON SCHEMA auth, account, card, ledger, reference FROM carddemo_verifier;
+
+-- WHY : Assumptions: no sequence privilege is granted anywhere. USAGE on a
+-- sequence is what nextval() needs, and nextval() is a WRITE -- it advances
+-- shared state and is not rolled back. A read-only identity has no use for one,
+-- and holding one would let a verification consume identifiers a later load then
+-- skips.
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA auth, account, card, ledger, reference
+    FROM carddemo_verifier;
+
+-- WHY : Assumptions: the role-level default makes read-only-ness a property of
+-- the SESSION rather than of the client. Every transaction the verifier opens
+-- starts read-only, so a write statement -- from a defect here, from a future
+-- caller, or from an operator using this credential by hand -- is refused by the
+-- server with "cannot execute INSERT in a read-only transaction" rather than
+-- succeeding on the strength of a grant nobody meant to make. The client checks
+-- this setting rather than assuming it: the verification session guard reads
+-- transaction_read_only back from the server and refuses to proceed if it is
+-- off, so a role mis-provisioned on some other cluster fails closed.
+--
+-- WHY : Alternatives Considered: leaving read-only-ness to the client, which
+-- issues SET TRANSACTION READ ONLY itself. Rejected as the sole mechanism for
+-- the reason this file applies elsewhere -- a control the client can forget is a
+-- convention, not a boundary -- and kept as the second mechanism, because the
+-- two fail differently: the role default protects a caller that forgot, and the
+-- client statement protects a session on a cluster where the default was lost.
+--
+-- WHY : Assumptions: this is the one ALTER ROLE ... SET in the file, and it does
+-- not contradict the decision recorded in section 2 not to set search_path per
+-- role. That decision turned on OWNERSHIP of the setting: each service pins its
+-- own schema twice already, so a role-level search_path would be a second owner
+-- of a setting that has one. Nothing else sets or wants to set
+-- default_transaction_read_only for this role, and the property it expresses --
+-- this identity may not write -- belongs to the role rather than to any caller.
+ALTER ROLE carddemo_verifier SET default_transaction_read_only = on;
+
+
+-- =============================================================================
 -- 6. Credential application, and the two assertions that must precede it
 --
 -- WHY : Refactoring Rationale: this section previously verified and REPORTED
@@ -1759,15 +1916,16 @@ $$;
 DO $$
 DECLARE
     service_role     text;
-    -- WHY : Refactoring Rationale: the seven carddemo_<context>_migrator roles are
-    -- listed here alongside the eight runtime roles, because every LOGIN role this
-    -- script creates needs a credential applied in this same transaction or the
-    -- assertion at the end of this section refuses to commit. The EIGHT owner roles
-    -- are deliberately absent: they are NOLOGIN, so there is nothing to apply and
-    -- nothing to store, which is the property that makes ownership unreachable by
-    -- authentication rather than merely unused.
+    -- WHY : Refactoring Rationale: the seven carddemo_<context>_migrator roles and
+    -- the one carddemo_verifier role are listed here alongside the eight runtime
+    -- roles, because every LOGIN role this script creates needs a credential
+    -- applied in this same transaction or the assertion at the end of this section
+    -- refuses to commit. The EIGHT owner roles are deliberately absent: they are
+    -- NOLOGIN, so there is nothing to apply and nothing to store, which is the
+    -- property that makes ownership unreachable by authentication rather than
+    -- merely unused.
     -- WHY : Assumptions: this array and infra/modules/secrets' service_role_names
-    -- input must agree element for element -- fifteen entries, not eight -- because
+    -- input must agree element for element -- sixteen entries, not eight -- because
     -- the module generates exactly one Secrets Manager entry per element and the
     -- bootstrap supplies exactly one session setting per element. A name in one and
     -- not the other surfaces as either a role that cannot authenticate or a
@@ -1787,7 +1945,13 @@ DECLARE
         'carddemo_ledger_migrator',
         'carddemo_reference_migrator',
         'carddemo_batch_migrator',
-        'carddemo_authorization_migrator'
+        'carddemo_authorization_migrator',
+
+        -- WHY : Assumptions: the verifier appears here for the same reason it
+        -- appears in section 1 -- it LOGS IN, so it needs a credential, and a
+        -- login role left without one is a verification step that cannot run.
+        -- Being read-only makes it no less an authenticated identity.
+        'carddemo_verifier'
     ];
     -- WHY : Assumptions: the supplied credential is held in a local variable for
     -- exactly as long as it takes to build one statement from it. It is never
@@ -1989,13 +2153,14 @@ BEGIN
     END LOOP;
 
     -- WHY : Trade-offs: the outcome is reported as counts plus role names, never
-    -- as a per-role line, because fifteen notices per run buries the one line that
+    -- as a per-role line, because sixteen notices per run buries the one line that
     -- matters.
     -- WHY : Refactoring Rationale: the denominator is array_length(service_roles, 1)
     -- rather than the literal 8 it used to be. The literal was already a second
-    -- place the inventory was stated, and extending the array to fifteen made it
-    -- wrong -- the notice read "Applied ... to 15 of 8 service roles", which is the
-    -- exact class of self-contradiction a hardcoded count produces. Role names are safe to print -- they are already public in this
+    -- place the inventory was stated, and extending the array -- first to fifteen
+    -- and now to sixteen -- made it wrong: the notice read "Applied ... to 15 of 8
+    -- service roles", which is the exact class of self-contradiction a hardcoded
+    -- count produces, and a second extension would have produced it again. Role names are safe to print -- they are already public in this
     -- file -- and they are what an operator needs in order to act.
     IF array_length(applied, 1) > 0 THEN
         RAISE NOTICE

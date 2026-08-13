@@ -504,12 +504,12 @@ class InterestRateLookupTest {
      * reference source -- the ABSENCE of a {@code ROUNDED} phrase is what establishes the first --
      * so a reader who cannot find them here has no other place to find them.</p>
      *
-     * <p>Refactoring Rationale: this expectation required the strings "rounded half up" and
-     * "C-ROUNDING". It now requires "truncated toward zero" and both mode constants by name, because
-     * the accrual truncates as the reference does and the divergence that identifier named has been
-     * withdrawn. Requiring BOTH constants is the point of the change rather than a side effect: this
-     * type's documentation has to state which of the two modes governs the accrual, and naming only
-     * one would leave a reader unable to tell whether the other exists.</p>
+     * <p>Refactoring Rationale: this expectation has required three different wordings as the accrual's
+     * disposition moved -- "rounded half up" with "C-ROUNDING", then "truncated toward zero" with two
+     * mode constants, and now "reduced half up" with the single constant the kernel declares and the
+     * divergence identifier restored. It requires the identifier as well as the mode because the mode
+     * alone would not tell a reader that the reference reduces differently, and that difference is the
+     * fact a parity reviewer needs from this type's documentation.</p>
      *
      * <p>This zero-argument test returns no value; failed expectations surface as assertion
      * errors.</p>
@@ -523,10 +523,10 @@ class InterestRateLookupTest {
         String source = Files.readString(lookupRecordSourcePath());
 
         assertThat(source)
-                .as("the accrual's own rounding contract, and the general one it is distinct from")
-                .contains("truncated toward zero")
-                .contains("BASELINE_INTEREST_ROUNDING")
-                .contains("GENERAL_ROUNDING");
+                .as("the accrual's rounding contract, and the divergence from the reference it implies")
+                .contains("reduced half up")
+                .contains("GENERAL_ROUNDING")
+                .contains("C-ROUNDING");
         assertThat(source)
                 .as("the order of the two operations, and the scale-4 intermediate it protects")
                 .contains("the product is formed before the quotient")
@@ -535,9 +535,10 @@ class InterestRateLookupTest {
                 .as("the accumulation property that rounding does not distribute over")
                 .contains("the sum of per-category reduced values");
         assertThat(source)
-                .as("the discriminating vector that makes the rounding choice concrete")
-                .contains("2.08")
-                .contains("2.09");
+                .as("the discriminating vector that makes the rounding choice concrete, in both"
+                        + " directions, so the registered divergence stays legible")
+                .contains("2.09")
+                .contains("2.08");
         assertThat(source)
                 .as("the arithmetic is stated to live in the shared kernel")
                 .contains("monthlyInterest");

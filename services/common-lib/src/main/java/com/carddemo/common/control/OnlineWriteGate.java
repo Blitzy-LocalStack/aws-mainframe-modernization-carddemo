@@ -1,5 +1,6 @@
 package com.carddemo.common.control;
 
+import com.carddemo.common.observability.ThrowableDigest;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -176,13 +177,28 @@ public class OnlineWriteGate {
             //       fail-closed decision in one branch instead of one branch per SDK failure mode.
             //       Trade-offs: this also catches a programming error such as a null field, which
             //       would then present as a refused write rather than as a stack trace. Accepted
-            //       because the log line below carries the throwable, so the defect is still
-            //       visible, and because refusing is the safe direction to be wrong in.
+            //       because the log line below names the failure's type chain and the frames that
+            //       raised it, so the defect is still locatable, and because refusing is the safe
+            //       direction to be wrong in.
+            // WHY : ⚠️ Refactoring Rationale: the throwable is NO LONGER passed as the trailing
+            //       logger argument, and the previous comment defended doing so by saying the line
+            //       "carries the throwable". It carried more than that. The facade renders a
+            //       trailing throwable as its own message, then every cause's message, then the
+            //       frames -- and the messages here are not written by this repository: a parameter
+            //       store denial names the parameter and the caller identity, a credential
+            //       resolution failure quotes the chain it walked, and an SDK transport failure
+            //       composes endpoint material into its text. ThrowableDigest keeps the type chain
+            //       and the frames, which are facts about CODE and can hold no request or
+            //       credential value, and drops the messages, which are the entire disclosure
+            //       channel. Trade-offs: an operator loses the SDK's own explanation and must
+            //       reproduce the read with debug logging raised for the SDK package -- a scoped,
+            //       auditable act, where the alternative is that every unanticipated read failure
+            //       logs whatever the failing library chose to quote into a retained store.
             LOG.warn(
                     "Online-write flag {} could not be read; refusing mutating work because this"
-                            + " gate fails closed",
+                            + " gate fails closed failureDigest={}",
                     this.parameterName,
-                    failure);
+                    ThrowableDigest.of(failure));
             enabled = false;
         }
 

@@ -17,8 +17,13 @@ import org.springframework.stereotype.Repository;
  * acknowledgement is a window in which the reply exists and the request does not yet know it, so a task
  * killed there, a container cycled there or an acknowledgement lost there leaves the request visible again
  * and the next delivery sends a SECOND reply bearing the same correlation identifier as the first. This
- * class is the durable side of the remedy: a reply is recorded under the requester's own identity and
- * committed BEFORE it is sent, so a redelivery can discover that the answer was already produced.</p>
+ * class is the durable side of the remedy: a reply is recorded under the identity the QUEUE SERVICE
+ * assigned the delivery and committed BEFORE it is sent, so a redelivery can discover that the answer
+ * was already produced. Refactoring Rationale: the key was the identity the PRODUCER supplied, which is
+ * neither authenticated nor unique per request, so a reused correlation identifier suppressed a second
+ * genuine inquiry; the caller chooses the key and
+ * {@link com.carddemo.account.service.InquiryMessageListener} records why it now prefers the
+ * broker's.</p>
  *
  * <p>Assumptions: the three statements are NATIVE and not JPQL, and the claim is why. A claim has to
  * insert a row if and only if no row holds that key, and report which of the two happened, in ONE round
@@ -137,7 +142,8 @@ public class InquiryReplyLedger {
      * rests on that order -- a reply sent before its record is committed is a reply a redelivery cannot
      * discover, which is the state this ledger exists to remove.</p>
      *
-     * @param requestKey the requester's own identity for its request; must not be {@code null} or blank
+     * @param requestKey the delivery's durable identity, broker-assigned where one is present; must not
+     *     be {@code null} or blank
      * @param payload the framed reply, stored verbatim so a re-send sends the same bytes; must not be
      *     {@code null}
      * @param destination the resolved reply destination, recorded so a re-send goes where the first send
@@ -167,7 +173,8 @@ public class InquiryReplyLedger {
     /**
      * Reads the reply an earlier delivery recorded for this request.
      *
-     * @param requestKey the requester's own identity for its request; must not be {@code null} or blank
+     * @param requestKey the delivery's durable identity, broker-assigned where one is present; must not
+     *     be {@code null} or blank
      * @return the recorded claim, or an empty optional when no delivery has recorded one
      */
     public Optional<RecordedReply> find(String requestKey) {
@@ -195,7 +202,8 @@ public class InquiryReplyLedger {
      * into a missing one -- the worse of the two failures, because a requester waiting on an answer that
      * will never arrive has no signal at all.</p>
      *
-     * @param requestKey the requester's own identity for its request; must not be {@code null} or blank
+     * @param requestKey the delivery's durable identity, broker-assigned where one is present; must not
+     *     be {@code null} or blank
      * @param sentAt the instant the send returned; must not be {@code null}
      * @return {@code true} when this call retired the claim, {@code false} when it was already retired
      */

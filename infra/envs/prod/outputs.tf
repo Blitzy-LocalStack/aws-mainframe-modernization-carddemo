@@ -59,7 +59,7 @@ output "messaging" {
 }
 
 output "batch_orchestration" {
-  description = "Complete daily, ad-hoc report, dataset round-trip and authorization-extract state-machine, execution-role and log-group contract."
+  description = "Complete daily, ad-hoc report, dataset round-trip and authorization-extract state-machine contract: the four machines, their per-machine execution roles, their log groups, the two bracket-release rules with their dead-letter queue and alarms, and the resolved dataset staging root."
   value       = module.step_functions
 }
 

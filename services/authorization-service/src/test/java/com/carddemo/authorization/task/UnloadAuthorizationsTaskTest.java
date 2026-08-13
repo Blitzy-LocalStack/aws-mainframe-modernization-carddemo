@@ -46,6 +46,15 @@ class UnloadAuthorizationsTaskTest {
     private static final byte[] CHILD_BYTES = "CHILDRECORD".getBytes(StandardCharsets.US_ASCII);
 
     /**
+     * The business date every case's parameters carry.
+     *
+     * <p>Assumptions: a fixed literal rather than {@code LocalDate.now()}, for the same reason every
+     * batch step in this migration takes its date as a parameter -- a clock read would make the run
+     * that happens to cross midnight produce a different outcome line from the run before it.</p>
+     */
+    private static final String BUSINESS_DATE = "2022-07-18";
+
+    /**
      * Both destinations carry their bytes once the export has returned.
      *
      * @param directory a fresh directory the case writes into; supplied by the framework
@@ -168,6 +177,23 @@ class UnloadAuthorizationsTaskTest {
                 Map.of(MaintenanceTaskRunner.ROOT_EXTRACT_PARAMETER, "/staged/roots")))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessageContaining("child extract");
+        // WHY : ⚠️ Refactoring Rationale: the business date joins the two destinations as a
+        //       parameter this task refuses to run without. It is checked HERE as well as in the
+        //       runner because the task bean is resolved and invoked directly -- which is how every
+        //       case in this class drives it -- so a check living only in the argument handling
+        //       would be absent from the path that opens the destinations and writes.
+        assertThatThrownBy(() -> task.run(Map.of(
+                MaintenanceTaskRunner.ROOT_EXTRACT_PARAMETER, "/staged/roots",
+                MaintenanceTaskRunner.CHILD_EXTRACT_PARAMETER, "/staged/children")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("business date");
+        assertThatThrownBy(() -> task.run(Map.of(
+                MaintenanceTaskRunner.ROOT_EXTRACT_PARAMETER, "/staged/roots",
+                MaintenanceTaskRunner.CHILD_EXTRACT_PARAMETER, "/staged/children",
+                MaintenanceTaskRunner.BUSINESS_DATE_PARAMETER, "2022-02-30")))
+                .as("a well-formed but impossible day is refused, not just a mis-shaped one")
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("business date");
     }
 
     /**
@@ -192,6 +218,10 @@ class UnloadAuthorizationsTaskTest {
         Map<String, String> parameters = new LinkedHashMap<>();
         parameters.put(MaintenanceTaskRunner.ROOT_EXTRACT_PARAMETER, roots.toString());
         parameters.put(MaintenanceTaskRunner.CHILD_EXTRACT_PARAMETER, children.toString());
+        // WHY : Assumptions: the business date is included in every case's parameters because the
+        //       task now REQUIRES it, and it is a fixed literal rather than today's date so a run
+        //       of this suite produces the same outcome line whenever it happens to execute.
+        parameters.put(MaintenanceTaskRunner.BUSINESS_DATE_PARAMETER, BUSINESS_DATE);
         if (form != null) {
             parameters.put(MaintenanceTaskRunner.EXTRACT_FORM_PARAMETER, form);
         }

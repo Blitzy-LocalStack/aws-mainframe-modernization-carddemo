@@ -97,4 +97,31 @@ public record TransactionAddPreview(
     public static TransactionAddPreview prompting(Money amount, String returnMessage) {
         return new TransactionAddPreview(amount, CAPTURE_WITHHELD, returnMessage);
     }
+
+    /**
+     * Renders this preview WITHOUT the amount it quotes.
+     *
+     * <p>Purpose. The amount is a monetary value and is prohibited from a diagnostic rendering by
+     * {@code docs/architecture/observability.md} L1093 to L1112. It is also the only component of this
+     * shape that carries data at all, the other two being a fixed discriminator and a message constant,
+     * so the compiler-generated rendering would have disclosed the whole of what the record holds.</p>
+     *
+     * <p>Assumptions: the amount is omitted rather than rounded, bucketed or reported as a digit count.
+     * Each of those is an abbreviation of a prohibited value, which the rule's first clause forbids for
+     * a reason that applies here in particular: this shape exists to be confirmed, so a bucketed figure
+     * in a log would be read as the figure that was confirmed.</p>
+     *
+     * <p>Trade-offs: the two remaining components are kept and they answer the question this shape is
+     * logged for -- the discriminator fixed to false proves the turn captured nothing, and the sentence
+     * is the verbatim confirmation prompt. What is lost is the ability to see the normalised figure a
+     * client would be confirming, which the request body and the subsequent capture both carry.</p>
+     *
+     * @return a rendering carrying the written discriminator and the return message, with the amount
+     *     omitted entirely; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "TransactionAddPreview[written=" + this.written
+                + ", returnMessage=" + this.returnMessage + ']';
+    }
 }

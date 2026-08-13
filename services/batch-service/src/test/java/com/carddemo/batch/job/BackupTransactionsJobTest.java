@@ -14,6 +14,8 @@ import static org.mockito.Mockito.when;
 import com.carddemo.batch.BatchApplication;
 import com.carddemo.batch.config.BatchConfig;
 import com.carddemo.batch.domain.Transaction;
+import com.carddemo.batch.domain.TransactionCategoryBalance;
+import com.carddemo.batch.domain.TransactionCategoryBalance.TransactionCategoryBalanceId;
 import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchReturnCode;
 import com.carddemo.batch.dto.BusinessDate;
@@ -21,6 +23,7 @@ import com.carddemo.batch.dto.DatasetGeneration;
 import com.carddemo.batch.dto.DatasetGeneration.DatasetFamily;
 import com.carddemo.batch.dto.DatasetGeneration.GenerationReference;
 import com.carddemo.batch.mapper.TransactionRecordMapper;
+import com.carddemo.batch.repository.TransactionCategoryBalanceRepository;
 import com.carddemo.batch.repository.TransactionRepository;
 import com.carddemo.batch.service.BatchStepLedger;
 import com.carddemo.batch.service.DatasetGenerationService;
@@ -33,7 +36,9 @@ import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -193,12 +198,19 @@ import org.springframework.transaction.PlatformTransactionManager;
  *
  * <p>Trade-offs: the output sink is asserted at the injected seam rather than against an object store,
  * emulated or otherwise. {@code services/batch-service/pom.xml} contributes the Testcontainers
- * PostgreSQL and JUnit modules and deliberately no object-store emulator module, and this class is
- * named to run under Surefire in the test phase where no container runtime is assumed. Byte-level
- * fidelity of the emitted image is fully decidable at the seam, because the staging call receives the
- * finished file; bucket-level concerns -- versioning, and the retention of five noncurrent versions
- * that stands in for {@code LIMIT(5) SCRATCH} -- belong to {@code infra/modules/s3-datasets} and are
- * asserted there, so no case here reads them.</p>
+ * PostgreSQL and JUnit modules and deliberately NO object-store emulator module, so there is no engine
+ * to assert a bucket against in the first place. Byte-level fidelity of the emitted image is fully
+ * decidable at the seam, because the staging call receives the finished file; bucket-level concerns --
+ * versioning, and the retention of five noncurrent versions that stands in for
+ * {@code LIMIT(5) SCRATCH} -- belong to {@code infra/modules/s3-datasets} and are asserted there, so no
+ * case here reads them.</p>
+ *
+ * <p>Refactoring Rationale: the paragraph above also argued from this class being "named to run under
+ * Surefire in the test phase where no container runtime is assumed", and that clause is removed rather
+ * than reworded because it is not true of this module. {@code CombineTransactionsJobTest} and
+ * {@code PreflightDailyTransactionsJobTest} carry the same plain suffix and both start a database
+ * container under the same runner. The absent object-store emulator is the whole of the reason and it
+ * stands on its own; the suffix carries no claim about a runtime.</p>
  *
  * <h2>What this file deliberately leaves to its siblings</h2>
  *
@@ -212,11 +224,21 @@ import org.springframework.transaction.PlatformTransactionManager;
  * the job-level behaviour of the deletion, and it takes the generation coordinate only as far as
  * proving which family and which reference form were requested.</p>
  *
+ * <p>Assumptions: a FIFTH subject is owned elsewhere, and it is the other half of a claim this file
+ * makes. That every transaction row is still present and unchanged after a run is asserted here at the
+ * repository seam, as an exhaustive census of the calls this job makes; the same claim is asserted
+ * against a real relation by {@code BackupTransactionsJobPersistenceTest}, which launches this job over
+ * seeded rows in a database container and compares every persisted column before and after. The split
+ * is deliberate and is argued at the case that makes it: the census catches a mutating call that does
+ * not exist yet, and the round trip catches a mutation that reaches the table by a route no call on
+ * this interface expresses.</p>
+ *
  * <p>Alternatives Considered: annotating this class with an active profile, as a test that loads
  * configuration would. Rejected because no case here starts a configured application context: the
  * behavioural cases construct the job configuration directly and drive it with the framework's
- * resourceless repository and transaction manager, exactly as the two sibling job tests in this
- * package do, and the one case that does assemble a context uses a narrow context runner. The profile
+ * resourceless repository and transaction manager, as {@code CalculateInterestJobTest} and
+ * {@code PostTransactionsJobTest} also do, and the one case that does assemble a context uses a narrow
+ * context runner. The profile
  * document {@code services/batch-service/src/test/resources/application-test.yml} configures a
  * datasource, a connection pool and schema migration for the container-backed classes in this module,
  * none of which this class needs. An inert annotation naming a profile that is never activated would
@@ -280,6 +302,28 @@ class BackupTransactionsJobTest {
     /** Zero-based offset of the trailing {@code FILLER PIC X(20)} at {@code app/cpy/CVTRA05Y.cpy:18}. */
     private static final int FILLER_OFFSET = 330;
 
+    /** The byte the reference leaves in a span no statement of either producer writes. */
+    private static final byte LOW_VALUE = 0x00;
+
+    /** The description text every posted row this class builds carries, from the posting producer. */
+    private static final String POSTED_DESCRIPTION = "Purchase at Abshire-Lowe";
+
+    /**
+     * The description text an accrual row carries, being the reference's own rendering.
+     *
+     * <p>Assumptions: the twenty-four characters are the prefix at {@code app/cbl/CBACT04C.cbl:485}
+     * followed by {@code ACCT-ID PIC 9(11)} at its full declared width, which is what
+     * {@code STRING ... DELIMITED BY SIZE} moves, so seventy-six bytes of the hundred-character field
+     * remain for the pad this case is about.</p>
+     */
+    private static final String ACCRUAL_DESCRIPTION = "Int. for a/c 00000000001";
+
+    /**
+     * Record length of one category balance, {@code LRECL=50} at {@code app/jcl/PRTCATBL.jcl:38} and the
+     * summed width of {@code app/cpy/CVTRA01Y.cpy}.
+     */
+    private static final int CATEGORY_BALANCE_RECORD_LENGTH = 50;
+
     /** The generation number the allocation stub hands back for every family. */
     private static final int ALLOCATED_GENERATION = 1;
 
@@ -293,6 +337,12 @@ class BackupTransactionsJobTest {
     /** The master repository, stubbed to stream {@link #masterRows} in key order. */
     private TransactionRepository ledger;
 
+    /** The category balances this job's third family copies, held as a mutable per-case list. */
+    private List<TransactionCategoryBalance> categoryBalanceRows;
+
+    /** The category-balance repository, stubbed to stream {@link #categoryBalanceRows} in key order. */
+    private TransactionCategoryBalanceRepository categoryBalances;
+
     /** The generation resolver, mocked so the staged bytes can be captured at its seam. */
     private DatasetGenerationService generations;
 
@@ -305,8 +355,20 @@ class BackupTransactionsJobTest {
     /** The shared parameter validator the job is built with. */
     private JobParametersValidator validator;
 
-    /** The bytes handed to the staging seam, captured so the image can be decoded. */
+    /**
+     * The bytes handed to the staging seam for the FULL transaction copy, captured so the image can be
+     * decoded.
+     *
+     * <p>Assumptions: this member holds the {@code transact.bkup} image specifically, not simply the
+     * last image staged. The run now stages three families and every case written before it staged one
+     * asserts against the full copy, so binding this member to that family's object name keeps each of
+     * those assertions asserting what it was written to assert. The other two images are reachable
+     * through {@link #stagedImages}.</p>
+     */
     private byte[] stagedImage;
+
+    /** Every staged image of the run, keyed by the dataset object name it was staged under. */
+    private Map<String, byte[]> stagedImages;
 
     /** The tier the job body handed back through the step ledger, captured per run. */
     private BatchReturnCode reportedTier;
@@ -324,12 +386,15 @@ class BackupTransactionsJobTest {
     @BeforeEach
     void buildCollaborators() {
         this.masterRows = new ArrayList<>();
+        this.categoryBalanceRows = new ArrayList<>();
         this.ledger = mock(TransactionRepository.class);
+        this.categoryBalances = mock(TransactionCategoryBalanceRepository.class);
         this.generations = mock(DatasetGenerationService.class);
         this.ledgerOfSteps = mock(BatchStepLedger.class);
         this.jobRepository = new ResourcelessJobRepository();
         this.validator = new BatchConfig().carddemoJobParametersValidator();
         this.stagedImage = null;
+        this.stagedImages = new HashMap<>();
         this.reportedTier = null;
         this.evaluatedBodies = 0;
 
@@ -358,6 +423,45 @@ class BackupTransactionsJobTest {
                         .sorted((left, right) -> left.getTransactionId()
                                 .compareTo(right.getTransactionId())));
 
+        // WHY : Assumptions: the daily-subset finder is stubbed from the SAME backing list as the full
+        //       copy, filtered by the half-open window the job passes and ordered by card then
+        //       identifier. Modelling the window here rather than returning the whole list is what lets
+        //       a case seed a row outside the night and assert it is absent from the daily generation
+        //       while still present in the full one -- the property that distinguishes the two families
+        //       app/jcl/TRANREPT.jcl:37-55 derives from one unload.
+        when(this.ledger.streamProcessedInWindowOrderedByCard(any(LocalDateTime.class),
+                any(LocalDateTime.class)))
+                .thenAnswer(call -> {
+                    LocalDateTime from = call.getArgument(0);
+                    LocalDateTime untilExclusive = call.getArgument(1);
+                    return this.masterRows.stream()
+                            .filter(row -> !row.getProcTs().isBefore(from)
+                                    && row.getProcTs().isBefore(untilExclusive))
+                            .sorted((left, right) -> {
+                                int byCard = left.getCardNum().compareTo(right.getCardNum());
+                                return byCard != 0 ? byCard
+                                        : left.getTransactionId().compareTo(right.getTransactionId());
+                            });
+                });
+
+        // WHY : Assumptions: the balance finder is stubbed to sort by the three key members in the order
+        //       app/jcl/PRTCATBL.jcl:52 names them, so its name and its behaviour agree here the same
+        //       way the master finder's do. A case can then seed rows out of order and assert the
+        //       staged generation carries the reference's sequence.
+        when(this.categoryBalances.findAllByOrderByIdAccountIdAscIdTypeCdAscIdCategoryCdAsc())
+                .thenAnswer(call -> this.categoryBalanceRows.stream()
+                        .sorted((left, right) -> {
+                            int byAccount = left.getId().getAccountId()
+                                    .compareTo(right.getId().getAccountId());
+                            if (byAccount != 0) {
+                                return byAccount;
+                            }
+                            int byType = left.getId().getTypeCd().compareTo(right.getId().getTypeCd());
+                            return byType != 0 ? byType
+                                    : left.getId().getCategoryCd()
+                                            .compareTo(right.getId().getCategoryCd());
+                        }));
+
         when(this.generations.allocateNewGeneration(any(DatasetFamily.class), any(BusinessDate.class),
                 anyString())).thenAnswer(call -> generation(call.getArgument(0), ALLOCATED_GENERATION));
         when(this.generations.generationsToScratch(any(DatasetFamily.class))).thenReturn(List.of());
@@ -370,8 +474,14 @@ class BackupTransactionsJobTest {
         //       seam is the only point at which the finished image exists on disk.
         when(this.generations.stageDataset(any(DatasetGeneration.class), anyString(), any(Path.class)))
                 .thenAnswer(call -> {
-                    this.stagedImage = Files.readAllBytes(call.getArgument(2, Path.class));
-                    return "ledger/transact-bkup/dt=" + BUSINESS_DATE_TOKEN + "/gen=0001/";
+                    String objectName = call.getArgument(1, String.class);
+                    byte[] image = Files.readAllBytes(call.getArgument(2, Path.class));
+                    this.stagedImages.put(objectName, image);
+                    if (BackupTransactionsJob.DATASET_OBJECT_NAME.equals(objectName)) {
+                        this.stagedImage = image;
+                    }
+                    return "ledger/transact-bkup/dt=" + BUSINESS_DATE_TOKEN + "/gen=0001/"
+                            + objectName;
                 });
     }
 
@@ -678,18 +788,27 @@ class BackupTransactionsJobTest {
                 .as("a ported cluster re-create would have replaced the rows")
                 .containsExactlyElementsOf(before);
 
-        // WHY : Alternatives Considered: asserting the surviving rows against a real database through
-        //       the container-backed harness, which is where a reader would expect a "the table is
-        //       still there" claim to be settled. Rejected for this class, and the reason is structural
-        //       rather than a preference: this module puts every container-backed class behind the
-        //       integration-test suffix that Failsafe owns -- PostingUnitOfWorkIT and
-        //       BatchRunRepositoryIT are the two in this subtree -- and this class carries the plain
-        //       suffix Surefire owns, which runs where no container runtime is assumed. Asserting at
-        //       the repository seam is also STRICTER than a round trip would be: a round trip proves
-        //       the rows survived THIS implementation, whereas the verification below proves that no
-        //       mutating call reaches the master at all, so a truncation introduced against
-        //       TransactionRepository fails this case rather than passing on a table that happens to be
-        //       repopulated.
+        // WHY : Trade-offs: this class settles the claim at the REPOSITORY SEAM and the sibling
+        //       BackupTransactionsJobPersistenceTest settles it against the engine, because the two
+        //       checks are strict in opposite directions and neither subsumes the other. The
+        //       interaction census below fails on ANY mutating call this job is not supposed to make,
+        //       including one added to TransactionRepository after this was written, which a round trip
+        //       cannot do -- a round trip over a table that was emptied and repopulated would pass. It
+        //       cannot, however, establish what a reader takes from it: a double answers whatever it
+        //       was told to answer, so a truncation reaching the table by a route no interaction on
+        //       this interface expresses would satisfy every verification here. That half is asserted
+        //       in the sibling class, which seeds distinguishable rows into ledger.transactions,
+        //       launches this job over them and compares every persisted column before and after.
+        // WHY : Refactoring Rationale: this block previously declined the round trip on the ground that
+        //       "this module puts every container-backed class behind the integration-test suffix that
+        //       Failsafe owns", naming PostingUnitOfWorkIT and BatchRunRepositoryIT as the only two.
+        //       Both halves were wrong when measured. CombineTransactionsJobTest and
+        //       PreflightDailyTransactionsJobTest carry the PLAIN suffix and both start a database
+        //       container under Surefire, and CrossSchemaFeedRepositoryIT is a third integration-test
+        //       class in this module -- so the suffix marks a case whose subject is a repository
+        //       contract, not the availability of a container runtime, and every runner this repository
+        //       defines provides one. The correction matters beyond accuracy: the false rule was the
+        //       stated reason this claim had no engine-backed half at all.
         verify(this.ledger).findAllByOrderByTransactionIdAsc();
         verify(this.ledger, never()).deleteAll();
         verify(this.ledger, never()).deleteAllInBatch();
@@ -697,6 +816,14 @@ class BackupTransactionsJobTest {
         verify(this.ledger, never()).save(any(Transaction.class));
         verify(this.ledger, never()).saveAll(any());
         verify(this.ledger, never()).flush();
+
+        // WHY : Refactoring Rationale: the ordered window read is named as an EXPECTED interaction, and
+        //       it was not there when the job staged one family. The step now stages three, and the
+        //       daily subset is derived from a second read of this same repository -- a read, so the
+        //       ruling this case makes is untouched. Naming it is what keeps the catch-all below
+        //       exhaustive rather than having to be loosened, which would have cost the whole assertion.
+        verify(this.ledger).streamProcessedInWindowOrderedByCard(
+                any(LocalDateTime.class), any(LocalDateTime.class));
 
         // WHY : Assumptions: the catch-all is what makes this ruling durable. The explicit refusals
         //       above name only the mutators TransactionRepository inherits from JpaRepository today,
@@ -948,18 +1075,27 @@ class BackupTransactionsJobTest {
     }
 
     /**
-     * The trailing pad is written out in full rather than trimmed away.
+     * The trailing pad is written out in full, and carries the byte the reference leaves there.
      *
      * <p>Pins {@code FILLER PIC X(20)} at {@code app/cpy/CVTRA05Y.cpy:18}, the last twenty bytes of the
-     * record. Trailing-blank stripping is the specific regression this guards against: the parity
+     * record. Trailing-blank stripping is one of the two regressions this guards against: the parity
      * harness records that stripping trailing whitespace collapses a 350-byte record to roughly 278
      * characters, which was a real defect in that harness, and under a fixed-blocked dataset a short
      * record shifts every record after it.</p>
      *
+     * <p>Refactoring Rationale: this case required the pad to be BLANK, which was a restatement of the
+     * shared codec's rebuild rather than a reading of the dataset this job copies. Section 6.1 of
+     * {@code services/batch-service/src/test/resources/fixtures/README.md} measures the pad of an
+     * output transaction record as twenty LOW VALUES, in the posting expectation and in all three
+     * interest expectations, because no {@code MOVE} in either producer names the item; the mapper now
+     * writes that byte and this case asserts it. Requiring the blank was the second regression, and it
+     * was the more dangerous one: a byte-image copy that substitutes a pad byte differs from the dataset
+     * it claims to reproduce in twenty positions per record, on a span no field assertion reaches.</p>
+     *
      * @throws Exception if the framework's own execution path raises, which no case here provokes
      */
     @Test
-    @DisplayName("preserve the trailing pad rather than trimming the record")
+    @DisplayName("preserve the trailing pad, carrying the low values the reference leaves there")
     void theTrailingPadIsPreservedRatherThanTrimmed() throws Exception {
         masterHolds(
                 transactionRow("0000000000000001", new BigDecimal("1.00"), "4859452612877065"),
@@ -968,11 +1104,75 @@ class BackupTransactionsJobTest {
         JobExecution execution = runBackup();
 
         assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
-        assertThat(fieldText(0, "FILLER")).hasSize(RECORD_LENGTH - FILLER_OFFSET).isBlank();
-        assertThat(fieldText(1, "FILLER")).hasSize(RECORD_LENGTH - FILLER_OFFSET).isBlank();
+        assertThat(fieldText(0, "FILLER")).hasSize(RECORD_LENGTH - FILLER_OFFSET);
+        assertThat(fieldText(1, "FILLER")).hasSize(RECORD_LENGTH - FILLER_OFFSET);
+        assertThat(padOf(0)).containsOnly(LOW_VALUE);
+        assertThat(padOf(1)).containsOnly(LOW_VALUE);
         assertThat(recordAt(1))
                 .as("the second record must start on the 350-byte boundary")
                 .hasSize(RECORD_LENGTH);
+    }
+
+    /**
+     * Each row class keeps its own producer's description padding across the copy.
+     *
+     * <p>Pins section 6.3 of {@code services/batch-service/src/test/resources/fixtures/README.md},
+     * which measures the description pad as a property of the program that WROTE the record rather than
+     * of the record type: the accrual pass builds its text with {@code STRING} at
+     * {@code app/cbl/CBACT04C.cbl:485-489} and leaves the remaining seventy-six bytes of
+     * {@code TRAN-DESC} at the low values the record area held, while the posting pass moves an
+     * already blank-padded feed field at {@code app/cbl/CBTRN02C.cbl:429}. This copy is a byte image of
+     * a master holding both classes, so both pads have to survive it.</p>
+     *
+     * <p>Assumptions: the two classes are asserted SIDE BY SIDE in one run rather than in two runs of
+     * one class each, because what is at stake is a per-row decision. A job that applied one producer's
+     * pad to the whole stream would satisfy either single-class case and fail this one.</p>
+     *
+     * <p>Assumptions: the accrual row is recognised from the attribution the accrual pass itself
+     * writes -- the {@code System} source at {@code app/cbl/CBACT04C.cbl:484} and the
+     * {@code Int. for a/c } description prefix at {@code :485} -- and the row built here carries both,
+     * so this case also pins that the recogniser reads the fields the reference sets rather than a
+     * marker invented by the target.</p>
+     *
+     * @throws Exception if the framework's own execution path raises, which no case here provokes
+     */
+    @Test
+    @DisplayName("keep each producer's description padding, both classes in one copy")
+    void eachRowClassKeepsItsOwnProducerDescriptionPadding() throws Exception {
+        masterHolds(
+                transactionRow("0000000000000001", new BigDecimal("1.00"), "4859452612877065"),
+                interestRow("2022-07-18000001", new BigDecimal("12.50"), "4859452612877065"));
+
+        JobExecution execution = runBackup();
+
+        assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
+
+        CopybookLayout.FieldSpec description = TRANSACTION_SPEC.field("TRAN-DESC");
+        int postedTextLength = POSTED_DESCRIPTION.length();
+        int accrualTextLength = ACCRUAL_DESCRIPTION.length();
+
+        assertThat(fieldText(0, "TRAN-DESC")).startsWith(POSTED_DESCRIPTION);
+        assertThat(fieldText(1, "TRAN-DESC")).startsWith(ACCRUAL_DESCRIPTION);
+
+        // WHY : Assumptions: each tail is read from the descriptor's own span and from the text's own
+        //       length rather than from an offset written here, so the two claims are located by the
+        //       same registry the encoder used. The posting tail is asserted to be blanks and the
+        //       accrual tail low values, which is the whole of the distinction section 6.3 measures.
+        assertThat(Arrays.copyOfRange(recordAt(0), description.start() + postedTextLength,
+                description.end()))
+                .as("the posting producer blank-pads its description")
+                .containsOnly((byte) ' ');
+        assertThat(Arrays.copyOfRange(recordAt(1), description.start() + accrualTextLength,
+                description.end()))
+                .as("the accrual producer leaves low values behind its description")
+                .containsOnly(LOW_VALUE);
+
+        // WHY : Assumptions: both records' trailing pads are asserted too, because the two pad rules
+        //       are independent -- the trailing pad is low values for BOTH producers while the
+        //       description pad differs -- and a change that made the description pad follow the
+        //       trailing one, or the reverse, would be caught by nothing else.
+        assertThat(padOf(0)).containsOnly(LOW_VALUE);
+        assertThat(padOf(1)).containsOnly(LOW_VALUE);
     }
 
     /**
@@ -1000,16 +1200,27 @@ class BackupTransactionsJobTest {
                 DatasetFamily.TRANSACT_BKUP, BUSINESS_DATE, RUN_ID);
         verify(this.generations, never()).resolveCurrentGeneration(any(DatasetFamily.class));
 
-        // WHY : Assumptions: the family is asserted as well as the reference form, because
+        // WHY : Assumptions: the families are asserted as well as the reference form, because
         //       DatasetGeneration.DatasetFamily declares TEN families -- one per generation base across
         //       app/jcl/DEFGDGB.jcl, app/jcl/DEFGDGD.jcl and app/jcl/DALYREJS.jcl -- and this job
-        //       writes exactly one of them. A copy staged under a neighbouring family would still
-        //       allocate, still stage and still report clean, and the loss would surface only in
-        //       whichever step went looking for the backup.
+        //       writes three of them. A copy staged under a neighbouring family would still allocate,
+        //       still stage and still report clean, and the loss would surface only in whichever step
+        //       went looking for the backup.
+        // WHY : Refactoring Rationale: this asserted ONE family and now asserts three, in the order the
+        //       step stages them. The step took over the two families that had no production writer at
+        //       all -- TRANSACT.DALY, which app/jcl/TRANREPT.jcl:37-55 derives from the same unload, and
+        //       TCATBALF.BKUP, which app/jcl/PRTCATBL.jcl:29-39 unloads -- so the list is asserted
+        //       EXACTLY rather than by containment: the IAM scoping in both environment roots reads this
+        //       list, and a family added here without a grant fails at run time and not at plan time.
         assertThat(BackupTransactionsJob.stagedFamilies())
-                .containsExactly(DatasetFamily.TRANSACT_BKUP);
+                .containsExactly(DatasetFamily.TRANSACT_BKUP, DatasetFamily.TRANSACT_DALY,
+                        DatasetFamily.TCATBALF_BKUP);
         assertThat(DatasetFamily.TRANSACT_BKUP.mainframeBaseName())
                 .isEqualTo("AWS.M2.CARDDEMO.TRANSACT.BKUP");
+        assertThat(DatasetFamily.TRANSACT_DALY.mainframeBaseName())
+                .isEqualTo("AWS.M2.CARDDEMO.TRANSACT.DALY");
+        assertThat(DatasetFamily.TCATBALF_BKUP.mainframeBaseName())
+                .isEqualTo("AWS.M2.CARDDEMO.TCATBALF.BKUP");
     }
 
     /**
@@ -1160,6 +1371,213 @@ class BackupTransactionsJobTest {
         assertThat(this.stagedImage).hasSize(2 * RECORD_LENGTH);
     }
 
+    // WHY : Assumptions: the three staged families are asserted by OBJECT NAME rather than by counting
+    //       staging calls, because the count alone would pass over a run that staged the same family
+    //       three times. The object name is what distinguishes the artifacts inside a generation
+    //       coordinate, so it is the property a consumer resolves and the one worth pinning.
+    /**
+     * The one step stages all three families the reference derives from a single unload.
+     *
+     * <p>Pins the consolidation of three reference jobs into state six. {@code app/jcl/TRANBKP.jcl:33}
+     * writes {@code TRANSACT.BKUP(+1)}; {@code app/jcl/TRANREPT.jcl:29-55} unloads the master AGAIN and
+     * sorts it into {@code TRANSACT.DALY(+1)}; {@code app/jcl/PRTCATBL.jcl:29-39} unloads the category
+     * balances into {@code TCATBALF.BKUP(+1)}. Two of those three families had no production writer at
+     * all before this step took them over, so the prefixes and five-generation lifecycle rules
+     * {@code infra/modules/s3-datasets} provisions for them governed nothing.</p>
+     *
+     * @throws Exception if the framework's own execution path raises
+     */
+    @Test
+    @DisplayName("stage all three generation families the reference derives from one unload")
+    void theStepStagesAllThreeFamilies() throws Exception {
+        this.masterRows.add(transactionRow("TXN0000000000001", new BigDecimal("10.00"),
+                "4111111111111111"));
+        this.categoryBalanceRows.add(categoryBalanceRow(11L, "01", "0001", "25.00"));
+
+        JobExecution execution = runBackup();
+
+        assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
+        assertThat(this.stagedImages.keySet())
+                .as("one pass, three artifacts, each under its own family's object name")
+                .containsExactlyInAnyOrder(
+                        BackupTransactionsJob.DATASET_OBJECT_NAME,
+                        BackupTransactionsJob.DAILY_DATASET_OBJECT_NAME,
+                        BackupTransactionsJob.CATEGORY_BALANCE_DATASET_OBJECT_NAME);
+        verify(this.generations).allocateNewGeneration(
+                DatasetFamily.TRANSACT_BKUP, BUSINESS_DATE, RUN_ID);
+        verify(this.generations).allocateNewGeneration(
+                DatasetFamily.TRANSACT_DALY, BUSINESS_DATE, RUN_ID);
+        verify(this.generations).allocateNewGeneration(
+                DatasetFamily.TCATBALF_BKUP, BUSINESS_DATE, RUN_ID);
+    }
+
+    // WHY : Assumptions: the daily subset is asserted to be ORDERED BY CARD THEN IDENTIFIER, and the
+    //       rows are seeded in neither order so the assertion cannot pass by accident. The card key is
+    //       the reference's -- SORT FIELDS=(TRAN-CARD-NUM,A) at app/jcl/TRANREPT.jcl:46 -- and the
+    //       identifier is the tie-break the target adds, registered as D-DALY-CARD-TIE-BREAK, because a
+    //       single-key sort leaves the order within one card undetermined and a staged generation whose
+    //       bytes differ between two runs over the same rows cannot serve as a comparison baseline.
+    /**
+     * The daily subset carries the reference's card ordering plus the registered identifier tie-break.
+     *
+     * @throws Exception if the framework's own execution path raises
+     */
+    @Test
+    @DisplayName("order the daily subset by card number, then by transaction identifier")
+    void theDailySubsetIsOrderedByCardThenIdentifier() throws Exception {
+        LocalDateTime withinTheNight = LocalDateTime.of(2022, 7, 18, 3, 0, 0);
+        this.masterRows.add(transactionRow("TXN0000000000004", "4222222222222222", withinTheNight));
+        this.masterRows.add(transactionRow("TXN0000000000002", "4111111111111111", withinTheNight));
+        this.masterRows.add(transactionRow("TXN0000000000003", "4222222222222222", withinTheNight));
+        this.masterRows.add(transactionRow("TXN0000000000001", "4111111111111111", withinTheNight));
+
+        JobExecution execution = runBackup();
+
+        assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
+        byte[] daily = this.stagedImages.get(BackupTransactionsJob.DAILY_DATASET_OBJECT_NAME);
+        assertThat(daily).hasSize(4 * RECORD_LENGTH);
+        assertThat(identifiersOf(daily))
+                .as("grouped by card, ascending by identifier inside each card")
+                .containsExactly("TXN0000000000001", "TXN0000000000002",
+                        "TXN0000000000003", "TXN0000000000004");
+        assertThat(cardNumbersOf(daily))
+                .containsExactly("4111111111111111", "4111111111111111",
+                        "4222222222222222", "4222222222222222");
+    }
+
+    // WHY : Assumptions: the window is asserted to be HALF-OPEN at both edges with rows placed one
+    //       microsecond inside and one microsecond outside. proc_ts is a TIMESTAMP(6) while the
+    //       reference's own selection field is TRAN-PROC-DT,305,10,CH -- the first TEN characters of it,
+    //       a date -- so a comparison that included the following midnight would carry a row the
+    //       reference's INCLUDE at app/jcl/TRANREPT.jcl:47-48 excludes.
+    /**
+     * The daily subset covers exactly the business date, and the full copy is unaffected by the window.
+     *
+     * @throws Exception if the framework's own execution path raises
+     */
+    @Test
+    @DisplayName("bound the daily subset to the business date while the full copy carries every row")
+    void theDailySubsetIsBoundedToTheBusinessDate() throws Exception {
+        this.masterRows.add(transactionRow("TXN0000000000001", "4111111111111111",
+                LocalDateTime.of(2022, 7, 17, 23, 59, 59, 999_999_000)));
+        this.masterRows.add(transactionRow("TXN0000000000002", "4111111111111111",
+                LocalDateTime.of(2022, 7, 18, 0, 0, 0)));
+        this.masterRows.add(transactionRow("TXN0000000000003", "4111111111111111",
+                LocalDateTime.of(2022, 7, 18, 23, 59, 59, 999_999_000)));
+        this.masterRows.add(transactionRow("TXN0000000000004", "4111111111111111",
+                LocalDateTime.of(2022, 7, 19, 0, 0, 0)));
+
+        JobExecution execution = runBackup();
+
+        assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
+        assertThat(identifiersOf(this.stagedImages.get(
+                BackupTransactionsJob.DAILY_DATASET_OBJECT_NAME)))
+                .as("the first instant of the date is in and the first instant of the next is out")
+                .containsExactly("TXN0000000000002", "TXN0000000000003");
+        assertThat(this.stagedImage)
+                .as("the full copy is the whole master and is not filtered by the window")
+                .hasSize(4 * RECORD_LENGTH);
+    }
+
+    // WHY : Assumptions: the balance generation is asserted at the FIFTY-byte record length declared by
+    //       app/jcl/PRTCATBL.jcl:38 and by app/cpy/CVTRA01Y.cpy, not merely as non-empty. The unload
+    //       this family replaces is a REPROC of the cluster, so its records are the cluster's records
+    //       byte for byte -- an image at any other length is not the artifact the sort step reads.
+    /**
+     * The category-balance generation carries fifty-byte records in the reference's sort order.
+     *
+     * @throws Exception if the framework's own execution path raises
+     */
+    @Test
+    @DisplayName("stage the category balances at fifty bytes each, in the reference's sort order")
+    void theCategoryBalanceGenerationCarriesFiftyByteRecords() throws Exception {
+        this.categoryBalanceRows.add(categoryBalanceRow(22L, "02", "0003", "30.00"));
+        this.categoryBalanceRows.add(categoryBalanceRow(11L, "01", "0002", "20.00"));
+        this.categoryBalanceRows.add(categoryBalanceRow(11L, "01", "0001", "10.00"));
+
+        JobExecution execution = runBackup();
+
+        assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
+        byte[] balances =
+                this.stagedImages.get(BackupTransactionsJob.CATEGORY_BALANCE_DATASET_OBJECT_NAME);
+        assertThat(balances)
+                .as("LRECL=50 at app/jcl/PRTCATBL.jcl:38, three records")
+                .hasSize(3 * CATEGORY_BALANCE_RECORD_LENGTH);
+        assertThat(categoryKeysOf(balances))
+                .as("SORT FIELDS=(TRANCAT-ACCT-ID,A,TRANCAT-TYPE-CD,A,TRANCAT-CD,A) at PRTCATBL.jcl:52")
+                .containsExactly("00000000011010001", "00000000011010002", "00000000022020003");
+    }
+
+    /**
+     * An empty relation produces a valid empty generation for each of the three families.
+     *
+     * @throws Exception if the framework's own execution path raises
+     */
+    @Test
+    @DisplayName("produce a valid empty generation per family when nothing was posted")
+    void everyFamilyProducesAValidEmptyGeneration() throws Exception {
+        JobExecution execution = runBackup();
+
+        assertThat(execution.getStatus()).isEqualTo(BatchStatus.COMPLETED);
+        assertThat(this.stagedImages).hasSize(3);
+        assertThat(this.stagedImages.values()).allSatisfy(image -> assertThat(image).isEmpty());
+        assertThat(this.reportedTier)
+                .as("an empty night is clean, because app/jcl/TRANBKP.jcl gates nothing on a count")
+                .isEqualTo(BatchReturnCode.CLEAN);
+    }
+
+    /**
+     * Reads the transaction identifier out of every record of a staged image.
+     *
+     * @param image the staged bytes, a whole number of 350-byte records
+     * @return the identifiers in the order the image carries them
+     */
+    private static List<String> identifiersOf(byte[] image) {
+        return fieldOf(image, RECORD_LENGTH, 0, 16);
+    }
+
+    /**
+     * Reads the card number out of every record of a staged image.
+     *
+     * <p>Assumptions: the offset is 262 and is stated as a literal here, matching the FILLER_OFFSET
+     * constant's own posture in this class. It is the sum of the declared widths above
+     * {@code TRAN-CARD-NUM} at {@code app/cpy/CVTRA05Y.cpy:16}, corroborated independently by
+     * {@code TRAN-CARD-NUM,263,16,ZD} at {@code app/jcl/TRANREPT.jcl:41} in one-based positions.</p>
+     *
+     * @param image the staged bytes, a whole number of 350-byte records
+     * @return the card numbers in the order the image carries them
+     */
+    private static List<String> cardNumbersOf(byte[] image) {
+        return fieldOf(image, RECORD_LENGTH, 262, 16);
+    }
+
+    /**
+     * Reads the seventeen-byte composite key out of every record of a staged balance image.
+     *
+     * @param image the staged bytes, a whole number of 50-byte records
+     * @return the keys in the order the image carries them
+     */
+    private static List<String> categoryKeysOf(byte[] image) {
+        return fieldOf(image, CATEGORY_BALANCE_RECORD_LENGTH, 0, 17);
+    }
+
+    /**
+     * Reads one fixed field out of every record of a staged image.
+     *
+     * @param image the staged bytes, a whole number of {@code recordLength}-byte records
+     * @param recordLength the fixed record length
+     * @param offset the zero-based field offset within a record
+     * @param width the field width
+     * @return the field value per record, in image order
+     */
+    private static List<String> fieldOf(byte[] image, int recordLength, int offset, int width) {
+        List<String> values = new ArrayList<>();
+        for (int start = 0; start < image.length; start += recordLength) {
+            values.add(new String(image, start + offset, width, StandardCharsets.US_ASCII));
+        }
+        return values;
+    }
+
     /**
      * Builds a context runner holding this job configuration and a stand-in for each collaborator.
      *
@@ -1181,6 +1599,8 @@ class BackupTransactionsJobTest {
         return new ApplicationContextRunner()
                 .withUserConfiguration(BatchConfig.class, BackupTransactionsJob.class)
                 .withBean(TransactionRepository.class, () -> mock(TransactionRepository.class))
+                .withBean(TransactionCategoryBalanceRepository.class,
+                        () -> mock(TransactionCategoryBalanceRepository.class))
                 .withBean(DatasetGenerationService.class, () -> mock(DatasetGenerationService.class))
                 .withBean(BatchStepLedger.class, () -> mock(BatchStepLedger.class))
                 .withBean(JobRepository.class, () -> mock(JobRepository.class))
@@ -1225,7 +1645,8 @@ class BackupTransactionsJobTest {
     private JobExecution runBackup(String businessDateToken, long instanceId, long executionId)
             throws Exception {
 
-        Job job = new BackupTransactionsJob(this.ledger, this.generations, this.ledgerOfSteps)
+        Job job = new BackupTransactionsJob(this.ledger, this.categoryBalances, this.generations,
+                this.ledgerOfSteps)
                 .backupTransactions(this.jobRepository, new ResourcelessTransactionManager(),
                         this.validator);
 
@@ -1345,7 +1766,7 @@ class BackupTransactionsJobTest {
         row.setTypeCd("01");
         row.setCategoryCd("0001");
         row.setSource("POS TERM");
-        row.setDescription("Purchase at Abshire-Lowe");
+        row.setDescription(POSTED_DESCRIPTION);
         row.setAmount(amount);
         row.setMerchantId(800000000L);
         row.setMerchantName("Abshire-Lowe");
@@ -1355,5 +1776,88 @@ class BackupTransactionsJobTest {
         row.setOrigTs(LocalDateTime.of(2022, 6, 10, 19, 27, 53));
         row.setProcTs(LocalDateTime.of(2022, 7, 18, 2, 15, 30));
         return row;
+    }
+
+    /**
+     * Reads the trailing pad bytes of one record of the captured image.
+     *
+     * <p>Assumptions: the span comes from the registered descriptor rather than from the two offset
+     * constants this class also declares, so a descriptor drift fails the case instead of agreeing with
+     * arithmetic written here. The bytes are returned rather than a String, because the byte under
+     * assertion is not a printable character and a String comparison would hide the difference between
+     * a low value and a blank in some renderings.</p>
+     *
+     * @param recordIndex the int zero-based ordinal of the record within the captured image
+     * @return the record's twenty trailing pad bytes, never {@code null}
+     */
+    private byte[] padOf(int recordIndex) {
+        CopybookLayout.FieldSpec pad = TRANSACTION_SPEC.field("FILLER");
+        return Arrays.copyOfRange(recordAt(recordIndex), pad.start(), pad.end());
+    }
+
+    /**
+     * Builds one row carrying the attribution the interest accrual pass writes onto what it generates.
+     *
+     * <p>Assumptions: the source and the description are the reference's own, taken from
+     * {@code app/cbl/CBACT04C.cbl:484-489}, because they are what identifies the writing producer to a
+     * flow re-emitting the row -- a relational row carries the description's text and not the bytes
+     * behind it. Building the row from those two literals rather than from a target-invented marker is
+     * what makes this case test the recogniser production uses.</p>
+     *
+     * @param transactionId the String key of exactly sixteen characters, which for an accrual row is
+     *     the business-date token followed by a six-digit run-scoped suffix
+     * @param amount the {@code BigDecimal} accrued amount at scale 2, exact fixed point and never a
+     *     binary approximation
+     * @param cardNum the String card number of exactly sixteen characters
+     * @return the populated row, never {@code null}
+     */
+    private static Transaction interestRow(String transactionId, BigDecimal amount, String cardNum) {
+        Transaction row = new Transaction(transactionId);
+        row.setTypeCd("01");
+        row.setCategoryCd("0005");
+        row.setSource("System");
+        row.setDescription(ACCRUAL_DESCRIPTION);
+        row.setAmount(amount);
+        row.setMerchantId(0L);
+        row.setMerchantName("");
+        row.setMerchantCity("");
+        row.setMerchantZip("");
+        row.setCardNum(cardNum);
+        row.setOrigTs(LocalDateTime.of(2022, 7, 18, 2, 15, 30));
+        row.setProcTs(LocalDateTime.of(2022, 7, 18, 2, 15, 30));
+        return row;
+    }
+
+    /**
+     * Builds one posted transaction with an explicit processing instant, for the window cases.
+     *
+     * @param transactionId the sixteen-character identifier
+     * @param cardNum the sixteen-digit card number, the daily subset's leading sort key
+     * @param procTs the processing instant the half-open window is evaluated against
+     * @return the row
+     */
+    private static Transaction transactionRow(
+            String transactionId, String cardNum, LocalDateTime procTs) {
+
+        Transaction row = transactionRow(transactionId, new BigDecimal("100.00"), cardNum);
+        row.setProcTs(procTs);
+        return row;
+    }
+
+    /**
+     * Builds one transaction-category balance row.
+     *
+     * @param accountId the eleven-digit account identifier
+     * @param typeCd the two-character transaction type code
+     * @param categoryCd the four-character transaction category code
+     * @param balance the category balance at scale two
+     * @return the row
+     */
+    private static TransactionCategoryBalance categoryBalanceRow(
+            long accountId, String typeCd, String categoryCd, String balance) {
+
+        return new TransactionCategoryBalance(
+                new TransactionCategoryBalanceId(accountId, typeCd, categoryCd),
+                new BigDecimal(balance));
     }
 }

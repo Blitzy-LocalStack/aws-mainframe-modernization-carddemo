@@ -17,6 +17,7 @@ import jakarta.persistence.PersistenceException;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Optional;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -511,6 +512,76 @@ class PostingUnitOfWorkIT {
         assertThat(this.crossReferences.findByCardNum("4000000000000099"))
                 .as("a card the cross-reference does not carry misses, which is reject reason 100")
                 .isEmpty();
+    }
+
+    // WHY : Assumptions: this case exists because the ordering and the window it asserts are the two
+    //       properties a mocked repository cannot establish. BackupTransactionsJobTest stubs this finder
+    //       and models its contract, which proves the JOB stages what the finder returns; only a real
+    //       engine proves the FINDER returns it -- that the composite ORDER BY resolves in the declared
+    //       sequence, and that a strict upper bound on a TIMESTAMP(6) excludes the following midnight.
+    /**
+     * The daily-subset finder orders by card then identifier and bounds its window half-open.
+     *
+     * <p>Pins {@code app/jcl/TRANREPT.jcl:37-55}, whose sort declares the single control field
+     * {@code SORT FIELDS=(TRAN-CARD-NUM,A)} at L46 and selects on
+     * {@code TRAN-PROC-DT,305,10,CH} at L47-L48 -- the first ten characters of the processing
+     * timestamp, so a date. The identifier tie-break the query adds is registered as
+     * {@code D-DALY-CARD-TIE-BREAK}.</p>
+     */
+    @Test
+    @DisplayName("the daily-subset finder orders by card then identifier over a half-open window")
+    void theDailySubsetFinderOrdersAndBoundsAtTheDatabase() {
+        LocalDateTime dayStart = PROCESSED_AT.toLocalDate().atStartOfDay();
+        LocalDateTime dayEnd = dayStart.plusDays(1L);
+
+        // WHY : Assumptions: the two out-of-window rows sit ONE MICROSECOND outside each edge, which is
+        //       the resolution the column is declared at. A row a whole second or a whole day outside
+        //       would be excluded by any comparison, including a wrong one, so it would assert nothing
+        //       about the boundary this case exists for.
+        this.transactionTemplate.executeWithoutResult(status -> {
+            persistPosted("TXN0000000000004", "4000000000000099", dayStart.plusHours(3L));
+            persistPosted("TXN0000000000002", CARD_NUM, dayStart);
+            persistPosted("TXN0000000000003", "4000000000000099", dayStart.plusHours(1L));
+            persistPosted("TXN0000000000001", CARD_NUM, dayEnd.minusNanos(1_000L));
+            persistPosted("TXN0000000000000", CARD_NUM, dayStart.minusNanos(1_000L));
+            persistPosted("TXN0000000000005", CARD_NUM, dayEnd);
+            this.entityManager.flush();
+        });
+
+        List<String> ordered = this.transactionTemplate.execute(status ->
+                this.ledger.streamProcessedInWindowOrderedByCard(dayStart, dayEnd)
+                        .map(row -> row.getCardNum() + "/" + row.getTransactionId())
+                        .toList());
+
+        assertThat(ordered)
+                .as("grouped by card ascending, then by identifier ascending inside each card")
+                .containsExactly(
+                        CARD_NUM + "/TXN0000000000001",
+                        CARD_NUM + "/TXN0000000000002",
+                        "4000000000000099/TXN0000000000003",
+                        "4000000000000099/TXN0000000000004");
+    }
+
+    /**
+     * Persists one posted transaction with an explicit card number and processing instant.
+     *
+     * <p>Assumptions: the row is built through the production mapper and then its two varying members
+     * are set, rather than being assembled field by field. The mapper is what decides every other
+     * column, so a row built any other way could satisfy this case while the posted rows the job writes
+     * differed.</p>
+     *
+     * @param transactionId the identifier the posted row carries; must not be {@code null}
+     * @param cardNum the sixteen-digit card number, the finder's leading sort key; must not be
+     *     {@code null}
+     * @param processedAt the processing instant the window is evaluated against; must not be
+     *     {@code null}
+     */
+    private void persistPosted(String transactionId, String cardNum, LocalDateTime processedAt) {
+        Transaction posted = DailyTransactionMapper.toPostedTransaction(
+                feedRecord(transactionId, DESCRIPTION), processedAt);
+        posted.setCardNum(cardNum);
+        posted.setProcTs(processedAt);
+        this.ledger.save(posted);
     }
 
     /**

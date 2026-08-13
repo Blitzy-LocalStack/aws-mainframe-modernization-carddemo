@@ -40,7 +40,7 @@ class ReportSubmissionOutcomeTest {
     void aCancellationCarriesNoMessageAndNoRun() {
         ReportSubmissionOutcome cancelled = ReportSubmissionOutcome.cancelled();
 
-        assertThat(cancelled.submitted()).isFalse();
+        assertThat(cancelled.outcome()).isEqualTo(ReportSubmissionOutcome.Outcome.DECLINED);
         assertThat(cancelled.message())
                 .as("app/cbl/CORPT00C.cbl L480 to L483 moves nothing into the message on this branch,"
                         + " so a sentence here would be one the reference never emitted")
@@ -55,7 +55,7 @@ class ReportSubmissionOutcomeTest {
         ReportSubmissionOutcome accepted =
                 ReportSubmissionOutcome.accepted(ACCEPTED_RUN, "Monthly report submitted for printing ...");
 
-        assertThat(accepted.submitted()).isTrue();
+        assertThat(accepted.outcome()).isEqualTo(ReportSubmissionOutcome.Outcome.STARTED);
         assertThat(accepted.message()).isEqualTo("Monthly report submitted for printing ...");
         assertThat(accepted.submission()).isSameAs(ACCEPTED_RUN);
     }
@@ -68,7 +68,8 @@ class ReportSubmissionOutcomeTest {
     @Test
     @DisplayName("a blank message is refused, where an absent one is admitted")
     void aBlankMessageIsRefused() {
-        assertThatThrownBy(() -> new ReportSubmissionOutcome(false, "   ", null))
+        assertThatThrownBy(() -> new ReportSubmissionOutcome(
+                ReportSubmissionOutcome.Outcome.UNANSWERED, "   ", null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("must not be blank");
     }
@@ -79,7 +80,8 @@ class ReportSubmissionOutcomeTest {
     void anOverWideMessageIsRefused() {
         String tooWide = "x".repeat(ReportSubmissionOutcome.MESSAGE_WIDTH + 1);
 
-        assertThatThrownBy(() -> new ReportSubmissionOutcome(false, tooWide, null))
+        assertThatThrownBy(() -> new ReportSubmissionOutcome(
+                ReportSubmissionOutcome.Outcome.UNANSWERED, tooWide, null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining(String.valueOf(ReportSubmissionOutcome.MESSAGE_WIDTH));
     }
@@ -90,25 +92,86 @@ class ReportSubmissionOutcomeTest {
     void aMessageOfExactlyTheDeclaredWidthIsAdmitted() {
         String exact = "x".repeat(ReportSubmissionOutcome.MESSAGE_WIDTH);
 
-        assertThat(new ReportSubmissionOutcome(false, exact, null).message()).isEqualTo(exact);
+        assertThat(new ReportSubmissionOutcome(
+                ReportSubmissionOutcome.Outcome.UNANSWERED, exact, null).message()).isEqualTo(exact);
     }
 
-    /** Asserts a body claiming a submission without a handle is refused. */
+    /** Asserts a body claiming a started run without a handle is refused. */
     @Test
-    @DisplayName("a submitted outcome without a run description is refused")
-    void aSubmittedOutcomeWithoutARunIsRefused() {
-        assertThatThrownBy(() -> new ReportSubmissionOutcome(true, "started", null))
+    @DisplayName("a started outcome without a run description is refused")
+    void aStartedOutcomeWithoutARunIsRefused() {
+        assertThatThrownBy(() -> new ReportSubmissionOutcome(
+                ReportSubmissionOutcome.Outcome.STARTED, "started", null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("must carry the accepted run");
     }
 
-    /** Asserts a body carrying a handle while claiming nothing was started is refused. */
+    /** Asserts a body carrying a handle while reporting that nothing started is refused. */
     @Test
-    @DisplayName("a cancelled outcome carrying a run description is refused")
-    void aCancelledOutcomeCarryingARunIsRefused() {
-        assertThatThrownBy(() -> new ReportSubmissionOutcome(false, null, ACCEPTED_RUN))
+    @DisplayName("an outcome that started nothing but carries a run description is refused")
+    void anOutcomeThatStartedNothingCarryingARunIsRefused() {
+        assertThatThrownBy(() -> new ReportSubmissionOutcome(
+                ReportSubmissionOutcome.Outcome.DECLINED, null, ACCEPTED_RUN))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("must not carry a run description");
+    }
+
+    // WHY : ⚠️ Refactoring Rationale: the four cases below are new, and they exist because the boolean
+    //       this type used to carry could not express the third turn at all. An unanswered confirmation
+    //       was reported exactly like a decline, and the browser client -- reading only the status --
+    //       labelled it DECLINED, telling a caller it had cancelled when it had merely not answered yet.
+    //       The three factories are asserted to produce three DISTINCT discriminators, and the two
+    //       message rules that separate the turns are asserted in both directions.
+    /** Asserts an unanswered turn is discriminated from a decline rather than sharing its shape. */
+    @Test
+    @DisplayName("an unanswered turn is discriminated from a decline")
+    void anUnansweredTurnIsDiscriminatedFromADecline() {
+        ReportSubmissionOutcome unanswered =
+                ReportSubmissionOutcome.unanswered("Confirm to print the Monthly report ...");
+
+        assertThat(unanswered.outcome()).isEqualTo(ReportSubmissionOutcome.Outcome.UNANSWERED);
+        assertThat(unanswered.outcome())
+                .as("the two turns that share HTTP 200 must not share a discriminator")
+                .isNotEqualTo(ReportSubmissionOutcome.cancelled().outcome());
+        assertThat(unanswered.message()).isEqualTo("Confirm to print the Monthly report ...");
+        assertThat(unanswered.submission()).isNull();
+    }
+
+    /** Asserts a decline carrying a sentence is refused, the reference writing none. */
+    @Test
+    @DisplayName("a declined outcome carrying a sentence is refused")
+    void aDeclinedOutcomeCarryingASentenceIsRefused() {
+        assertThatThrownBy(() -> new ReportSubmissionOutcome(
+                ReportSubmissionOutcome.Outcome.DECLINED, "something", null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("carries no sentence");
+    }
+
+    /**
+     * Asserts an unanswered outcome without the prompt is refused, the caller having no question.
+     *
+     * <p>Measured: collapsing the two per-outcome sentence rules into one not-started arm -- the shape a
+     * boolean discriminator could express -- fails exactly this case and
+     * {@code aDeclinedOutcomeCarryingASentenceIsRefused}, both with {@code Expecting code to raise a
+     * throwable}. The pair is what stops a declined turn carrying a sentence it should not have and an
+     * unanswered one arriving without the question it exists to ask.</p>
+     */
+    @Test
+    @DisplayName("an unanswered outcome without the prompt is refused")
+    void anUnansweredOutcomeWithoutThePromptIsRefused() {
+        assertThatThrownBy(() -> new ReportSubmissionOutcome(
+                ReportSubmissionOutcome.Outcome.UNANSWERED, null, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must carry the confirmation prompt");
+    }
+
+    /** Asserts an absent discriminator is refused rather than defaulted to a turn. */
+    @Test
+    @DisplayName("an absent discriminator is refused")
+    void anAbsentDiscriminatorIsRefused() {
+        assertThatThrownBy(() -> new ReportSubmissionOutcome(null, null, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("outcome");
     }
 
     /** Asserts the accepted factory still requires the sentence the reference composes for that branch. */

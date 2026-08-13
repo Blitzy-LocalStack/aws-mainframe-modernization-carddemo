@@ -671,6 +671,146 @@ class UserRepositoryIT {
     }
 
     /**
+     * The engine refuses a key that is folded but not trimmed, which the service could never address.
+     *
+     * <p>Assumptions: this is asserted against the repository's own native insert rather than through
+     * an entity, because that statement is the writer being modelled: {@code UserService} calls it
+     * having first derived the key through its fold, and a caller that omits that derivation is
+     * exactly the writer the constraint exists for. Storing through the entity would prove nothing
+     * about the engine, since the mapper trims on the way in.
+     *
+     * <p>Assumptions: the identifier carries a LEADING blank specifically. A trailing blank is storage
+     * padding that {@code CHAR(8)} adds and strips, so it cannot express this violation at all -- the
+     * case beside this one asserts that padding is not data. A leading blank survives {@code upper()}
+     * untouched, which is what made it the one shape the earlier predicate admitted.
+     *
+     * <p>⚠️ Assumptions: the refusal must name a guard on the IDENTIFIER and not merely be a refusal,
+     * because a case matching on the exception type alone would pass against a constraint refusing for an
+     * unrelated reason -- and nothing else about this row is inadmissible, since its subject is distinct
+     * and its type is admissible. The match is on the shared prefix {@code ck_users_user_id} rather than
+     * on one guard's full name: this shape violates BOTH deployed guards, because
+     * {@code V6__auth_canonical_user_id.sql} carries the same {@code upper(btrim(...))} comparison, and
+     * PostgreSQL does not document which of two violated CHECK constraints it reports. Measured on this
+     * engine it reports the canonical one, so naming this one would fail while the invariant it asserts
+     * held perfectly. The prefix is what the case is actually about.
+     */
+    // WHY : Refactoring Rationale: this case exists because V4__auth_folded_user_id.sql asserted
+    //       CHECK (user_id = upper(user_id)) and recorded that leading blanks were deliberately left
+    //       unconstrained, on the reasoning that the identifier's shape is asserted at the adapter.
+    //       That left the defect V4 was written to eliminate reachable through one input shape, and
+    //       the adapter argument cannot cover it: the writer the constraint exists for is the one
+    //       that never reaches the adapter. V5__auth_folded_user_id_trim.sql widened the predicate to
+    //       upper(btrim(...)), which is both halves of what UserService#canonicalKey derives, and this
+    //       case is what stops the narrower predicate returning unnoticed.
+    // WHY : Assumptions: the fixture is SEVEN significant characters behind its leading blank rather
+    //       than the eight the other fixtures in this class use, and the difference is load-bearing.
+    //       CHAR(8) removes trailing blanks before checking the declared width but not leading ones,
+    //       so " USER0001" is nine characters to the engine and is refused with "value too long for
+    //       type character(8)" -- a DATA exception raised before any CHECK is evaluated. This case
+    //       would then pass on the exception TYPE while proving nothing about the constraint, which is
+    //       precisely what it did until the fixture was shortened. Eight characters including the
+    //       blank is the only width at which an untrimmed key reaches the predicate at all.
+    @Test
+    void theDatabaseRefusesAKeyThatIsFoldedButNotTrimmed() {
+        String untrimmedKey = " " + USER_ID_PREFIX + "001";
+
+        assertThatThrownBy(() -> this.commit.executeWithoutResult(
+                        status -> this.users.insertUser(untrimmedKey, "Given", "Family", ADMIN_TYPE,
+                                subjectFor(untrimmedKey).toString())))
+                .as("a leading blank survives upper(), so only the trim half of the fold can refuse it")
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(failure -> assertThat(causeChainText(failure))
+                        .contains("ck_users_user_id"));
+
+        assertThat(this.users.count())
+                .as("a refused write must leave no row behind")
+                .isZero();
+    }
+
+    /**
+     * The engine refuses a key of nothing but blanks.
+     *
+     * <p>Assumptions: this is a separate case from the untrimmed one because the two are refused by
+     * DIFFERENT terms of the same predicate, and a constraint carrying only the first term would
+     * satisfy the case above while admitting this row. On a {@code CHAR(8)} column an all-blank value
+     * converts to the empty string, and {@code upper(btrim(''))} is also the empty string, so the
+     * comparison term alone holds -- which is why the predicate carries an explicit non-blank term.
+     *
+     * <p>Assumptions: such a row is worth refusing rather than tolerating because it is addressable by
+     * no caller at all. The fold of every candidate spelling an operator could type is non-blank, so a
+     * blank row is unreachable by construction, which is the same defect class as the untrimmed key.
+     *
+     * <p>⚠️ Assumptions: the refusal is asserted to name this guard and NOT to name
+     * {@code ck_users_user_id_canonical}, and that negative half is the load-bearing one. The canonical
+     * guard {@code V6__auth_canonical_user_id.sql} adds ADMITS this value: on a {@code CHAR(8)} column an
+     * all-blank key converts to the empty string, {@code upper(btrim(''))} is also the empty string, and
+     * the character-domain term holds vacuously on it, so both canonical terms are satisfied. This is
+     * therefore the one shape the canonical guard cannot see, which is the whole reason that guard does
+     * not subsume this one and this one is kept beside it. It is also why the name is deterministic here
+     * where the untrimmed case's is not: only one of the two predicates is violated, so the engine has no
+     * choice of which to report.
+     */
+    @Test
+    void theDatabaseRefusesAKeyOfNothingButBlanks() {
+        String blankKey = " ".repeat(8);
+
+        assertThatThrownBy(() -> this.commit.executeWithoutResult(
+                        status -> this.users.insertUser(blankKey, "Given", "Family", ADMIN_TYPE,
+                                subjectFor(blankKey).toString())))
+                .as("an all-blank key satisfies the comparison term, so the non-blank term must refuse it")
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(failure -> assertThat(causeChainText(failure))
+                        .contains("ck_users_user_id_folded")
+                        .doesNotContain("ck_users_user_id_canonical"));
+
+        assertThat(this.users.count())
+                .as("a refused write must leave no row behind")
+                .isZero();
+    }
+
+    /**
+     * The deployed constraint asserts both halves of the service's key derivation, and admits a folded
+     * key.
+     *
+     * <p>Assumptions: the predicate is read from the engine's own catalogue rather than inferred from
+     * the two refusal cases above, because those cases would also pass against a constraint that
+     * happened to refuse for an unrelated reason. Reading the definition is what ties the enforcement
+     * to {@code V5__auth_folded_user_id_trim.sql} having been applied, and it is the only assertion
+     * here that fails if the migration is absent while V4's narrower one is present.
+     *
+     * <p>Assumptions: the positive half is asserted in the same case rather than in a third one,
+     * because the risk being covered is a constraint written too WIDE -- one refusing an ordinary
+     * folded key would satisfy both refusal cases above and break every create path. Storing one and
+     * reading it back is what separates a correct predicate from an unconditionally false one.
+     */
+    @Test
+    void theFoldedKeyConstraintAssertsBothHalvesOfTheDerivationAndAdmitsAFoldedKey() {
+        String definition = String.valueOf(singleNativeResult(
+                "select pg_get_constraintdef(c.oid) from pg_constraint c"
+                        + " join pg_class t on t.oid = c.conrelid"
+                        + " join pg_namespace n on n.oid = t.relnamespace"
+                        + " where n.nspname = ?1 and t.relname = ?2 and c.conname = ?3",
+                IDENTITY_SCHEMA, IDENTITY_TABLE, "ck_users_user_id_folded"));
+
+        assertThat(definition)
+                .as("the fold half of UserService#canonicalKey must appear in the deployed predicate")
+                .contains("upper");
+        assertThat(definition)
+                .as("the trim half must appear too; its absence is the V4 predicate this replaced")
+                .contains("btrim");
+        assertThat(definition)
+                .as("the non-blank term must appear, since the comparison alone admits an all-blank key")
+                .contains("<>");
+
+        this.commit.executeWithoutResult(status -> this.users.insertUser(ADMIN_USER_ID, "Given",
+                "Family", ADMIN_TYPE, subjectFor(ADMIN_USER_ID).toString()));
+
+        assertThat(this.users.findById(ADMIN_USER_ID))
+                .as("an already-folded key must still be storable; a wider refusal would break create")
+                .isPresent();
+    }
+
+    /**
      * The subject column is a native UUID and refuses a duplicate value.
      *
      * <p>Assumptions: both halves are asserted because each can hold without the other. The TYPE is
@@ -750,6 +890,58 @@ class UserRepositoryIT {
                 .isPresent()
                 .get()
                 .satisfies(stored -> assertThat(stored.getUserType()).isEqualTo(ADMIN_TYPE));
+    }
+
+    /**
+     * A refused write names the constraint it broke and withholds the rejected row's contents.
+     *
+     * <p>Purpose: this is the end-to-end proof that {@code logServerErrorDetail: false} reaches a live
+     * connection. That key is set once, in {@code carddemo-common-defaults.yml}, and travels to this
+     * context through the service's own {@code spring.config.import} plus map-key accumulation across
+     * property sources. Every link in that chain is invisible in the YAML, so nothing short of asking a
+     * real engine to refuse a real write demonstrates that the setting is actually in force.
+     *
+     * <p>Assumptions: the constraint chosen is the {@code user_type} domain check rather than a key
+     * violation, and the choice is the whole point. A duplicate key reports {@code Key (user_id)=(...)}
+     * — one column. A check violation reports {@code DETAIL: Failing row contains (...)} and enumerates
+     * EVERY column of the rejected row, so with the driver default it is the personal-name fields that
+     * arrive in the log. This case therefore exercises the widest disclosure the schema can produce,
+     * not the narrowest.
+     *
+     * <p>Assumptions: both directions are asserted because each holds without the other. The
+     * constraint name proves the DIAGNOSTIC half survived — an operator can still see which rule was
+     * broken and on which relation — and the absent sentinel surname proves the IDENTIFYING half did
+     * not. A case asserting only the absence would pass identically against a connection that failed
+     * to reach the engine at all.
+     *
+     * <p>Trade-offs: the sentinel is a surname with no other reason to appear anywhere in the failure
+     * text. A first name or a value resembling an identifier could plausibly be echoed by the SQL
+     * statement Hibernate attaches to its own message, which would make an absence assertion
+     * ambiguous; a distinctive surname appears only if the row's contents were disclosed.
+     */
+    @Test
+    void aRefusedWriteNamesTheConstraintAndWithholdsTheRejectedRowContents() {
+        assertThatThrownBy(() -> this.commit.executeWithoutResult(
+                        status -> this.users.insertUser(ADMIN_USER_ID, "Grace", "Nightingale",
+                                "X", subjectFor(ADMIN_USER_ID).toString())))
+                .as("a user_type outside the A/U domain must be refused by the engine")
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(refusal -> {
+                    String text = causeChainText(refusal);
+                    assertThat(text)
+                            .as("the constraint name is the diagnostic half and must survive redaction")
+                            .contains("users_user_type_check");
+                    assertThat(text)
+                            .as("the server's DETAIL line enumerates the whole rejected row and must be withheld")
+                            .doesNotContain("failing row contains");
+                    assertThat(text)
+                            .as("no value from the rejected row may reach the failure text; this surname is the sentinel")
+                            .doesNotContain("nightingale");
+                });
+
+        assertThat(this.users.findById(ADMIN_USER_ID))
+                .as("the refused row must not have been stored")
+                .isEmpty();
     }
 
     /**
@@ -1070,13 +1262,24 @@ class UserRepositoryIT {
     }
 
     /**
-     * The ledger table admits only the three operations and the three statuses its applier implements.
+     * The ledger table admits only the operations and statuses its applier implements.
      *
-     * <p>Purpose: the operation and status domains are enforced by {@code CHECK} constraints in
-     * {@code V2__auth_identity_sync.sql}, and this case asserts the engine refuses a value outside each
-     * one. Assumptions: the constraints matter because the applier switches exhaustively over the three
-     * operations and refuses an unrecognised one as a programming error; a row carrying a fourth value
-     * would make that refusal reachable from data rather than from code.</p>
+     * <p>Purpose: the operation domain is enforced by a {@code CHECK} constraint in
+     * {@code V2__auth_identity_sync.sql} as narrowed by {@code V3__auth_identity_sync_operations.sql},
+     * and the status domain by the constraint {@code V7__auth_identity_sync_provisioning_guard.sql}
+     * replaced it with. This case asserts the engine refuses a value outside each one. Assumptions: the
+     * constraints matter because the applier switches exhaustively over the operations and refuses an
+     * unrecognised one as a programming error; a row carrying an undeclared value would make that refusal
+     * reachable from data rather than from code.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this case asserted that {@code CLAIMED} was REFUSED, and it is now
+     * admitted -- the assertion was inverted deliberately rather than deleted. The create path commits a
+     * withdrawal guard BEFORE it calls the identity provider, and that guard has to be recorded in a state
+     * no reconciliation drain will act on while the create is still in flight, because a drain that
+     * applied it would withdraw the account the create is about to bind its row to. {@code CLAIMED} is
+     * that state and {@code CANCELLED} is how a guard closes when the withdrawal turned out not to be
+     * owed, so both had to enter the domain. The refusal is still asserted, against a value that is
+     * genuinely outside the five, so the constraint is still proven to discriminate.</p>
      *
      * <p>Assumptions: the ledger's {@code user_id} carries NO foreign key to the identity table, and this
      * case asserts that absence deliberately. A withdrawal intention is recorded in the same transaction
@@ -1091,15 +1294,25 @@ class UserRepositoryIT {
                 .isInstanceOf(ConstraintViolationException.class)
                 .satisfies(failure -> assertThat(causeChainText(failure))
                         .contains("ck_identity_sync_task_operation"));
-        assertThatThrownBy(() -> insertLedgerRow(IdentitySyncTask.OPERATION_WITHDRAW, "CLAIMED"))
-                .as("a status outside the three the entity transitions between is refused")
+        // Assumptions: the refused status is a value no revision of this schema has ever declared, which
+        //   is what keeps this assertion meaningful as the domain grows. Naming a status that was once
+        //   inadmissible and later became part of the state machine is how this case came to assert the
+        //   opposite of the behaviour the create path needs.
+        assertThatThrownBy(() -> insertLedgerRow(IdentitySyncTask.OPERATION_WITHDRAW, "SUPERSEDED"))
+                .as("a status outside the five the entity transitions between is refused")
                 .isInstanceOf(ConstraintViolationException.class)
                 .satisfies(failure -> assertThat(causeChainText(failure))
                         .contains("ck_identity_sync_task_status"));
 
-        // Assumptions: an ADMISSIBLE row is inserted too, so the two refusals above are evidence that the
-        //   constraints discriminate rather than that the statement was malformed for every input.
-        insertLedgerRow(IdentitySyncTask.OPERATION_WITHDRAW, IdentitySyncTask.STATUS_PENDING);
+        // Assumptions: every ADMISSIBLE status is inserted too, so the refusals above are evidence that
+        //   the constraints discriminate rather than that the statement was malformed for every input --
+        //   and so the two states the provisioning guard depends on are proven to be admitted by the
+        //   engine rather than only by the entity, which is the half a unit test cannot reach.
+        for (String admissible : List.of(IdentitySyncTask.STATUS_CLAIMED, IdentitySyncTask.STATUS_PENDING,
+                IdentitySyncTask.STATUS_APPLIED, IdentitySyncTask.STATUS_CANCELLED,
+                IdentitySyncTask.STATUS_ABANDONED)) {
+            insertLedgerRow(IdentitySyncTask.OPERATION_WITHDRAW, admissible);
+        }
 
         assertThat(nativeStringColumn(
                         "select c.conname from pg_catalog.pg_constraint c"
@@ -1110,6 +1323,307 @@ class UserRepositoryIT {
                         IDENTITY_SCHEMA))
                 .as("the ledger names no foreign key, so a withdrawal intention outlives its row")
                 .isEmpty();
+    }
+
+    /**
+     * The canonical-key constraint refuses a leading blank, which is what its predecessor admitted.
+     *
+     * <p>⚠️ Purpose: this is the engine-level half of the canonical identity key and it can only be
+     * asserted here, because the writer that matters is the one that does NOT go through the service.
+     * {@code V4__auth_folded_user_id.sql} guarded the key with {@code CHECK (user_id = upper(user_id))},
+     * and a leading blank survives {@code upper()} unchanged -- measured on this engine: {@code ' ABC'}
+     * and {@code '  ABC'} both satisfy that predicate. The service derives its key by trimming BEFORE it
+     * folds, so a request naming {@code ' ABC'} resolves to {@code ABC}: the blank-prefixed row was
+     * addressable by no request at all, and {@code ABC} could then be inserted beside it as a second row
+     * for one logical identity, each with its own identity-pool account.</p>
+     *
+     * <p>Assumptions: the insert is issued as a NATIVE statement, for the reason the sibling ledger case
+     * records -- the service's own canonicalisation would refuse the value before the engine saw it, and
+     * it is the engine's refusal this case is about.</p>
+     *
+     * <p>Assumptions: an ADMISSIBLE key is inserted in the same case, so the refusals are evidence that
+     * the constraint DISCRIMINATES rather than that the statement was malformed for every input.</p>
+     *
+     * <p>Assumptions: a TRAILING blank is asserted to be ADMITTED, and that is not an inconsistency. The
+     * column is {@code CHAR(8)} so trailing blanks are the storage form of every key shorter than eight
+     * characters -- refusing them would refuse every row the table holds. The asymmetry is exactly what
+     * the trim in the service's derivation expresses, and stating both directions here is what keeps a
+     * later reader from "fixing" the constraint into one that admits nothing.</p>
+     *
+     * <p>Assumptions: the LEADING-BLANK refusal is matched on the shared prefix {@code ck_users_user_id}
+     * rather than on one guard's full name, and so is the unfolded one. Both shapes violate BOTH deployed
+     * guards -- {@code V5__auth_folded_user_id_trim.sql} widened the fold guard to
+     * {@code upper(btrim(...))} too -- and PostgreSQL does not document which of two violated CHECK
+     * constraints it reports. Measured on this engine it reports the canonical one for both, but that is
+     * an evaluation-order detail rather than a contract, so naming one guard here would assert the
+     * detail instead of the invariant. The cases that DO name a guard are the ones where only a single
+     * predicate is violated: the domain case beside this one, and the all-blank case.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    void theCanonicalKeyConstraintRefusesALeadingBlankAndAdmitsTrailingPadding() {
+        assertThatThrownBy(() -> insertUserRow(" CANON1"))
+                .as("a leading blank makes the row unreachable and permits a second logical identity, "
+                        + "so the engine must refuse it")
+                .isInstanceOf(ConstraintViolationException.class)
+                .satisfies(failure -> assertThat(causeChainText(failure))
+                        .contains("ck_users_user_id"));
+        assertThatThrownBy(() -> insertUserRow("canon2"))
+                .as("an unfolded key is refused, which is the half the predecessor did enforce")
+                .isInstanceOf(ConstraintViolationException.class)
+                .satisfies(failure -> assertThat(causeChainText(failure))
+                        .contains("ck_users_user_id"));
+
+        insertUserRow("CANON3");
+        insertUserRow("CANON4  ");
+
+        assertThat(nativeStringColumn(
+                        "select user_id from " + IDENTITY_SCHEMA + ".users"
+                                + " where user_id like 'CANON%' order by user_id"))
+                .as("both admissible spellings are stored, and the trailing-padded one is the same "
+                        + "value the column would have padded anyway")
+                .containsExactly("CANON3  ", "CANON4  ");
+    }
+
+    /**
+     * The canonical-key constraint refuses every character outside the invariant printable domain.
+     *
+     * <p>⚠️ Purpose: the domain term is what makes the service's definition of the key and the column's
+     * guard the SAME definition. Java folds under the root locale; the engine's {@code upper()} folds
+     * through the database collation, and the two are only guaranteed to agree inside the invariant set.
+     * Outside it a value can satisfy one and violate the other -- measured on this engine, {@code 'ÄBC'}
+     * satisfies the fold term and is refused only by the domain term -- so without this term the two
+     * definitions could disagree on the same input and the single-definition property would be lost.</p>
+     *
+     * <p>Assumptions: the interior blank is asserted alongside the non-invariant letter and the control
+     * character, because the three fail for the same reason and a term written to catch only one of them
+     * would pass a case that tried only that one. The interior blank additionally matters to the
+     * reference: {@code app/cbl/COUSR01C.cbl} L256, {@code COUSR02C.cbl} L373 and {@code COUSR03C.cbl}
+     * L319 render the identifier {@code DELIMITED BY SPACE}, so the confirmation a user reads names a
+     * different identifier from the one stored.</p>
+     *
+     * <p>Assumptions: punctuation INSIDE the domain is asserted to be admitted. Restricting the domain to
+     * the letters and digits the committed extract uses was rejected as narrower than necessary, and this
+     * assertion is what pins that decision -- a later narrowing to {@code [A-Z0-9]} would fail here
+     * rather than silently refusing values the reference terminal can send.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    void theCanonicalKeyConstraintRefusesEveryCharacterOutsideTheInvariantDomain() {
+        assertThatThrownBy(() -> insertUserRow("CAN ON5"))
+                .as("an interior blank truncates the reference's own confirmation message")
+                .isInstanceOf(ConstraintViolationException.class)
+                .satisfies(failure -> assertThat(causeChainText(failure))
+                        .contains("ck_users_user_id_canonical"));
+        assertThatThrownBy(() -> insertUserRow("CAN\tON6"))
+                .as("a control character is outside the domain the service's pattern admits")
+                .isInstanceOf(ConstraintViolationException.class)
+                .satisfies(failure -> assertThat(causeChainText(failure))
+                        .contains("ck_users_user_id_canonical"));
+        assertThatThrownBy(() -> insertUserRow("\u00c4NON7"))
+                .as("a non-invariant letter folds identically under upper() and differently under the "
+                        + "root locale, so only the domain term can refuse it")
+                .isInstanceOf(ConstraintViolationException.class)
+                .satisfies(failure -> assertThat(causeChainText(failure))
+                        .contains("ck_users_user_id_canonical"));
+
+        insertUserRow("CAN-ON8");
+        insertUserRow("CAN_ON9");
+
+        assertThat(nativeStringColumn(
+                        "select user_id from " + IDENTITY_SCHEMA + ".users"
+                                + " where user_id like 'CAN%ON%' order by user_id"))
+                .as("punctuation inside the invariant set is admitted, which pins the decision not to "
+                        + "narrow the domain to letters and digits alone")
+                .containsExactly("CAN-ON8 ", "CAN_ON9 ");
+    }
+
+    /**
+     * Both identifier guards stand on the deployed schema, and neither one subsumes the other.
+     *
+     * <p>⚠️ Purpose: the two guards are COMPLEMENTARY, and this case is what stops either being removed
+     * as redundant. Each refuses one shape the other admits, measured against the engine on the applied
+     * pair: {@code ck_users_user_id_canonical} carries the character-domain term and is the only guard
+     * that refuses {@code 'CAN ON5'}, while {@code ck_users_user_id_folded} carries an explicit
+     * {@code btrim(...) <> ''} term and is the only guard that refuses a key of eight blanks -- a value
+     * the canonical predicate ADMITS, because on a {@code CHAR(8)} column it converts to the empty
+     * string and both canonical terms hold on it. Dropping the fold guard as implied would therefore
+     * open exactly the unreachable-row defect this pair exists to close.</p>
+     *
+     * <p>Refactoring Rationale: a sibling case asserted the opposite -- that the fold guard had been
+     * RETIRED and the canonical one stood alone -- on the reasoning that one invariant should carry one
+     * name and that the fold predicate was implied by the canonical one's first term. That assertion is
+     * WITHDRAWN and this case replaces it. The reasoning was not merely outweighed, it was false on the
+     * second half: the predicates overlap without either containing the other. What the retired case was
+     * really objecting to was V4's {@code COMMENT} describing the key as "blank-trimmed" while enforcing
+     * no such thing, and that objection is answered where it arose -- by
+     * {@code V5__auth_folded_user_id_trim.sql} widening V4's predicate to match its own comment -- rather
+     * than by deleting the constraint that carried it.</p>
+     *
+     * <p>Assumptions: the definitions are read from the catalogue rather than inferred from refusals,
+     * because two constraints whose predicates were accidentally identical would satisfy every refusal
+     * case in this class while losing the complementarity the pair depends on.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    void bothIdentifierGuardsStandAndNeitherSubsumesTheOther() {
+        List<String> checks = nativeStringColumn(
+                "select c.conname from pg_catalog.pg_constraint c"
+                        + " join pg_catalog.pg_class t on t.oid = c.conrelid"
+                        + " join pg_catalog.pg_namespace n on n.oid = t.relnamespace"
+                        + " where n.nspname = ?1 and t.relname = 'users'"
+                        + " and c.contype = 'c' and c.conname like 'ck_users_user_id%'"
+                        + " order by c.conname",
+                IDENTITY_SCHEMA);
+
+        assertThat(checks)
+                .as("both identifier guards are deployed, because each refuses a shape the other admits")
+                .containsExactly("ck_users_user_id_canonical", "ck_users_user_id_folded");
+
+        assertThat(String.valueOf(singleNativeResult(
+                        "select pg_get_constraintdef(c.oid) from pg_constraint c"
+                                + " join pg_class t on t.oid = c.conrelid"
+                                + " join pg_namespace n on n.oid = t.relnamespace"
+                                + " where n.nspname = ?1 and t.relname = ?2 and c.conname = ?3",
+                        IDENTITY_SCHEMA, IDENTITY_TABLE, "ck_users_user_id_canonical")))
+                .as("the canonical guard carries the character-domain term the fold guard has not")
+                .contains("!\"#$%&");
+
+        assertThat(String.valueOf(singleNativeResult(
+                        "select pg_get_constraintdef(c.oid) from pg_constraint c"
+                                + " join pg_class t on t.oid = c.conrelid"
+                                + " join pg_namespace n on n.oid = t.relnamespace"
+                                + " where n.nspname = ?1 and t.relname = ?2 and c.conname = ?3",
+                        IDENTITY_SCHEMA, IDENTITY_TABLE, "ck_users_user_id_folded")))
+                .as("the fold guard carries the non-blank term the canonical guard has not, which is why "
+                        + "it is not redundant")
+                .contains("<>");
+    }
+
+    /**
+     * Both key constraints are VALIDATED on a database no defective write ever reached.
+     *
+     * <p>Purpose: a constraint marked {@code NOT VALID} makes no assertion about the rows already present,
+     * and both key constraints are added that way on purpose -- a validating {@code ADD} scans the table
+     * and fails on exactly the databases that still hold a non-canonical row, which would replace a data
+     * defect a query can find with a service that will not start. {@code V6__auth_canonical_user_id.sql}
+     * reconciles what it can and then promotes BOTH constraints when nothing violates them, which is what
+     * this case asserts. Without it, a fresh database would carry two permanently unvalidated constraints
+     * and a later reader would have no way to tell an unproven invariant from a proven one.</p>
+     *
+     * <p>Assumptions: this container is such a database. It is created by the migrations alone and no case
+     * in this class can write a non-canonical key -- the constraints refuse one -- so the conditional
+     * promotion in that migration must have taken its validating branch.</p>
+     */
+    @Test
+    void bothKeyConstraintsAreValidatedOnAFreshDatabase() {
+        assertThat(nativeStringColumn(
+                        "select c.conname from pg_catalog.pg_constraint c"
+                                + " join pg_catalog.pg_class t on t.oid = c.conrelid"
+                                + " join pg_catalog.pg_namespace n on n.oid = t.relnamespace"
+                                + " where n.nspname = ?1 and t.relname = ?2"
+                                + " and c.contype = 'c' and c.conname like 'ck_users_user_id%'"
+                                + " and c.convalidated order by c.conname",
+                        IDENTITY_SCHEMA,
+                        IDENTITY_TABLE))
+                .as("both key constraints are validated once the reconciliation left nothing violating"
+                        + " them")
+                .containsExactly("ck_users_user_id_canonical", "ck_users_user_id_folded");
+    }
+
+    /**
+     * A duplicate key and an over-wide name report DIFFERENT SQL states from the same exception class.
+     *
+     * <p>Purpose: this is the premise the service's create path classifies on, asserted against a live
+     * engine rather than assumed. The framework's translator maps the persistence provider's
+     * constraint-violation type and its data type onto ONE {@code DataIntegrityViolationException}, so the
+     * exception class cannot tell "that identifier is taken" from "that name is too wide for its column".
+     * The service therefore walks the cause chain for a SQL state and answers the reference conflict
+     * sentence only for the unique-violation state; every other integrity failure is a fault carrying the
+     * add sentence. If either state below changed, that classification would silently answer the wrong
+     * status, and only a case that reads them from the engine would notice.</p>
+     *
+     * <p>Assumptions: the two states are named by value here -- 23505 for a unique violation and 22001 for
+     * string data right truncation -- because a case that read them from the service would assert only that
+     * the service agrees with itself.</p>
+     */
+    @Test
+    void aDuplicateKeyAndAnOverWideNameReportDifferentSqlStates() {
+        seedUsers(newUser(ADMIN_USER_ID, ADMIN_TYPE));
+
+        assertThat(sqlStateOfRefusal(() -> this.commit.executeWithoutResult(
+                        status -> this.users.insertUser(ADMIN_USER_ID, "Second", "Writer", USER_TYPE,
+                                subjectFor("a-different-subject").toString()))))
+                .as("a refused duplicate key reports the unique-violation state the conflict is keyed on")
+                .isEqualTo("23505");
+
+        assertThat(sqlStateOfRefusal(() -> this.commit.executeWithoutResult(
+                        status -> this.users.insertUser("OVER0001", "A".repeat(21), "Writer", USER_TYPE,
+                                subjectFor("over-wide-name").toString()))))
+                .as("a name too wide for its column reports a DIFFERENT state, so the two are"
+                        + " distinguishable")
+                .isEqualTo("22001");
+    }
+
+    /**
+     * Runs a write expected to be refused and reports the SQL state its cause chain carries.
+     *
+     * <p>Assumptions: the chain is walked rather than the top-level failure being examined, because the
+     * translation layer wraps the driver's exception and only the driver's link carries a state. The walk
+     * is bounded by the same depth this class's message walk uses, and stops at a self-referential cause.
+     * </p>
+     *
+     * @param write the write expected to be refused, of type {@code Runnable}
+     * @return the first SQL state found in the cause chain, of type {@code String}, or {@code null} when
+     *     the chain carries none
+     * @throws AssertionError if the write was not refused at all, since a case reading a state from a
+     *     successful write would assert nothing
+     */
+    private static String sqlStateOfRefusal(Runnable write) {
+        Throwable refusal = org.assertj.core.api.Assertions.catchThrowable(write::run);
+        assertThat(refusal)
+                .as("the write must be refused, or there is no state to read")
+                .isNotNull();
+
+        Throwable current = refusal;
+        for (int depth = 0; current != null && depth < MAX_CAUSE_DEPTH; depth++) {
+            if (current instanceof java.sql.SQLException reported && reported.getSQLState() != null) {
+                return reported.getSQLState();
+            }
+            Throwable next = current.getCause();
+            if (next == current) {
+                return null;
+            }
+            current = next;
+        }
+        return null;
+    }
+
+    /**
+     * Inserts one user row directly, so the identifier's check constraint can be observed refusing it.
+     *
+     * <p>Assumptions: the statement is native for the same reason {@link #insertLedgerRow(String, String)}
+     * is -- the service canonicalises before it writes, so a value the engine should refuse never reaches
+     * the engine through the service. The refusal therefore arrives as the provider's own
+     * constraint-violation type rather than the framework's translated one, because exception translation
+     * is applied by the repository proxy and this statement does not pass through one.</p>
+     *
+     * <p>Assumptions: a fresh subject is generated per call rather than reused, so a case attempting
+     * several keys cannot have one of them refused by the unique subject constraint instead of by the
+     * constraint under test -- which would pass the assertion for the wrong reason.</p>
+     *
+     * @param userId the identifier to attempt, canonical or not; must not be {@code null}
+     */
+    private void insertUserRow(String userId) {
+        this.commit.executeWithoutResult(status -> bind(
+                        "insert into " + IDENTITY_SCHEMA + ".users"
+                                + " (user_id, first_name, last_name, user_type, cognito_sub)"
+                                + " values (?1, 'Ada', 'Lovelace', 'U', gen_random_uuid())",
+                        userId)
+                .executeUpdate());
     }
 
     /**

@@ -253,13 +253,15 @@ def service_role_names() -> tuple[str, ...]:
     hide itself.
 
     WHY : Refactoring Rationale: this returned the EIGHT connection roles
-    (``SCHEMA_ROLES.values()``). It now returns fifteen, because V0 creates seven
+    (``SCHEMA_ROLES.values()``). It now returns sixteen, because V0 creates seven
     ``carddemo_<context>_migrator`` login roles alongside them -- the credentials Flyway
-    authenticates as so that no runtime credential holds DDL authority. Leaving them out was the
-    self-hiding omission this docstring warns about in the paragraph above: the seven roles would
-    exist with a null ``rolpassword``, :func:`verify_role_credentials` would report the cluster
-    fully bootstrapped, and the first affected service would fail to start on an authentication
-    error that named a role no bootstrap report had mentioned.
+    authenticates as so that no runtime credential holds DDL authority -- and one
+    ``carddemo_verifier``, the read-only identity a post-load verification authenticates as so
+    that nothing certifying a load can alter it. Leaving either group out is the self-hiding
+    omission this docstring warns about in the paragraph above: those roles would exist with a
+    null ``rolpassword``, :func:`verify_role_credentials` would report the cluster fully
+    bootstrapped, and the first affected step would fail on an authentication error that named a
+    role no bootstrap report had mentioned.
 
     WHY : Assumptions: this inventory is the LOGIN roles only, and excluding the owner roles is a
     correctness requirement rather than a simplification. V0 also creates eight
@@ -269,16 +271,20 @@ def service_role_names() -> tuple[str, ...]:
     cluster that is in fact fully bootstrapped -- and a verification that cannot pass is
     indistinguishable, to whoever next reads it, from one that is not worth running. Verified
     against a live PostgreSQL 17.10 catalogue after replaying V0: of the twenty-three
-    ``carddemo*`` roles it creates, exactly fifteen have ``rolcanlogin`` true and they are
-    exactly :data:`~carddemo_migration.config.LOGIN_ROLE_NAMES`; the master user has a credential
-    already, and all eight ``_owner`` roles have ``rolcanlogin`` false.
+    ``carddemo*`` roles it created at the time of that measurement, exactly fifteen had
+    ``rolcanlogin`` true and they were exactly
+    :data:`~carddemo_migration.config.LOGIN_ROLE_NAMES`; the master user has a credential already,
+    and all eight ``_owner`` roles have ``rolcanlogin`` false. The login count is now SIXTEEN --
+    the measurement predates ``carddemo_verifier`` -- and the shape it established is the point:
+    every role V0 creates with ``LOGIN`` appears in that constant and no ``NOLOGIN`` role does,
+    which is a property the sibling test asserts against the script rather than against a count.
 
     Returns
     -------
     tuple of str
-        Every service login role name -- eight connection roles and seven migration roles --
-        sorted so that output ordering is deterministic across runs and a diff of two bootstrap
-        logs is meaningful.
+        Every login role name -- eight connection roles, seven migration roles and the one
+        read-only verification role -- sorted so that output ordering is deterministic across runs
+        and a diff of two bootstrap logs is meaningful.
     """
     return LOGIN_ROLE_NAMES
 
@@ -491,7 +497,7 @@ def roles_without_credential(connection: _Connection) -> tuple[str, ...]:
 
     Purpose
     -------
-    Answer the question V0 can only report on: which of the fifteen login roles exist but cannot
+    Answer the question V0 can only report on: which of the sixteen login roles exist but cannot
     authenticate. Reads ``pg_authid.rolpassword`` and tests it for null, never selecting or
     returning the column's value.
 
@@ -623,6 +629,13 @@ def credentials_from_config() -> dict[str, str]:
     whether a schema has a migration role -- restating the exclusion
     ``MIGRATION_SCHEMA_ROLES`` already encodes.
 
+    WHY : Refactoring Rationale: the verifier's credential is read by a THIRD resolution, and it
+    is a single call rather than a loop because there is one such role and it belongs to no schema.
+    It is here for the same reason the migration pass is: ``V0__schemas_and_roles.sql`` creates
+    ``carddemo_verifier`` with ``LOGIN`` and refuses to commit while any login role it created
+    still holds no credential, so omitting it would fail the bootstrap -- correctly, and for a
+    reason an operator would have to trace back to this function.
+
     WHY : Trade-offs: the returned mapping holds plaintext credentials in process memory for the
     life of the bootstrap. That is unavoidable for anything that applies them, and it is bounded
     deliberately: the mapping is built immediately before use, is never written anywhere, and no
@@ -632,8 +645,8 @@ def credentials_from_config() -> dict[str, str]:
     Returns
     -------
     dict of str to str
-        Role name to plaintext credential, one entry per login role -- eight connection roles and
-        seven migration roles.
+        Role name to plaintext credential, one entry per login role -- eight connection roles,
+        seven migration roles and the one read-only verification role.
 
     Raises
     ------
@@ -648,12 +661,24 @@ def credentials_from_config() -> dict[str, str]:
     #       reaches boto3 through config's resolution path, and the module docstring records that
     #       importing this file must not require AWS or a driver -- that is what lets
     #       scram_sha256_verifier be tested in isolation. A top-level import would undo it.
-    from carddemo_migration.config import resolve_aurora_settings, resolve_migration_settings
+    from carddemo_migration.config import (
+        VERIFICATION_SCOPE,
+        VERIFIER_ROLE,
+        resolve_aurora_settings,
+        resolve_migration_settings,
+        resolve_verifier_settings,
+    )
 
     credentials: dict[str, str] = {}
+    # Assumptions: the verifier is expressed as a one-entry inventory keyed by its SCOPE label
+    #       rather than by a schema, so it flows through the same duplicate-credential check the
+    #       other two tiers do without either of them having to learn about it. A schema key would
+    #       be a lie -- the role reads five schemas and owns none.
+    verification_inventory = {VERIFICATION_SCOPE: VERIFIER_ROLE}
     for inventory, resolve in (
         (SCHEMA_ROLES, resolve_aurora_settings),
         (MIGRATION_SCHEMA_ROLES, resolve_migration_settings),
+        (verification_inventory, lambda _scope: resolve_verifier_settings()),
     ):
         for schema, role in sorted(inventory.items()):
             settings = resolve(schema)

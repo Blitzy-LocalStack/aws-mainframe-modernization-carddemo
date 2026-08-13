@@ -100,4 +100,49 @@ package com.carddemo.account.dto;
 public record CustomerDisplayView(String firstName, String middleName, String lastName,
         String addressLine1, String addressLine2, String addressLine3, String stateCode,
         String zipCode, String phoneNumber1) {
+
+    /**
+     * The stand-in printed in place of the personal values, matching the marker the sibling projections of
+     * this same customer data already use.
+     */
+    private static final String WITHHELD = "[REDACTED]";
+
+    /**
+     * Renders this projection WITHOUT any of the personal values it carries.
+     *
+     * <p>Purpose. Every one of the nine components is personal data about an identified cardholder: a name in
+     * three parts, a postal address in five and a telephone number. The compiler-generated rendering would
+     * print all nine, and this record is rendered precisely where that is worst -- a response projection
+     * reaches a diagnostic when the exchange that produced it went wrong, which is the moment a whole name
+     * and a whole home address would enter a log that outlives the request.</p>
+     *
+     * <p>Assumptions: all nine are withheld TOGETHER rather than field by field, and no member is kept. The
+     * rule at {@code docs/architecture/observability.md} L1075 to L1081 omits a prohibited value rather than
+     * abbreviating it, and there is no reading on which one component of a home address is safe to print
+     * while another is not -- a state code and a postal code identify a household as surely as the street
+     * line does once the surname is beside them, and this record always publishes them beside it.</p>
+     *
+     * <p>Alternatives Considered: keeping a non-disclosing status character in their place, the way
+     * {@code AccountViewResponse.CustomerDetail} keeps its primary-cardholder indicator. Rejected because
+     * this projection has no such component -- it publishes the nine display fields one screen renders and
+     * nothing else, so there is no member here that both survives the rule and carries information.</p>
+     *
+     * <p>Trade-offs: what is kept instead is the presence of the two members the contract permits to be
+     * absent, which is the same choice {@code AccountViewResponse.CustomerDetail} makes for the same two
+     * columns. This is what makes the rendering worth emitting at all: a screen that renders a blank second
+     * address line or a collapsed middle name is debugged by learning whether the value was absent in the
+     * response or dropped by the client, and a presence flag answers that without disclosing anything. The
+     * remaining seven are omitted with no flag, because the schema declares them non-nullable, so a flag
+     * over them would be a constant dressed as an observation.</p>
+     *
+     * @return a rendering naming the type, reporting which optional members are present, and withholding
+     *     every personal value; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "CustomerDisplayView[middleNamePresent=" + (this.middleName != null)
+                + ", addressLine2Present=" + (this.addressLine2 != null)
+                + ", personalData=" + WITHHELD
+                + ']';
+    }
 }

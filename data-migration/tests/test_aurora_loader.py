@@ -2236,7 +2236,8 @@ def test_the_merge_path_issues_no_guarding_count(
     Raises
     ------
     AssertionError
-        If a count is issued on the merge path, or the merge does not commit.
+        If the emptiness precondition is issued on the merge path, if any count other than the
+        content-conflict probe is issued, or the merge does not commit.
     """
     # WHY : Assumptions: the merge path must NOT decline a populated target -- being populated is
     #   its normal state, since `V2__seed_reference.sql` writes those three tables and the
@@ -2252,8 +2253,18 @@ def test_the_merge_path_issues_no_guarding_count(
         [{"TRAN-TYPE": "01", "TRAN-TYPE-DESC": "Purchase" + " " * 42}],
     )
 
-    executed = " ".join(fake_aurora.executed_sql()).casefold()
-    assert "count(*)" not in executed
+    executed = fake_aurora.executed_sql()
+    # WHY : Refactoring Rationale: this asserted that the merge path issued NO `count(*)` at all,
+    #   and that is no longer the property to hold. The path now issues one aggregate -- the
+    #   same-key content-conflict probe, which is what stops a staged row disagreeing with a stored
+    #   one being reported as an exact duplicate. The property that still matters is the one the
+    #   comment above states, and it is now asserted DIRECTLY: the emptiness precondition, whose
+    #   whole purpose was to decline a populated target, is not issued. Keeping the substring
+    #   assertion would have forced the choice between the guard's absence and the probe's presence,
+    #   which are unrelated.
+    assert target.count_statement() not in executed
+    counts = [sql for sql in executed if "count(" in sql.casefold()]
+    assert counts == [target.conflict_statement()]
     assert fake_aurora.commits == 1
 
 
@@ -2611,3 +2622,370 @@ def test_an_unreadable_allocator_refuses_to_let_writes_be_enabled(
     assert "writes must not be enabled" in message
     assert target.schema == "ledger"
     assert [statement for statement in fake_aurora.executed_sql() if "setval" in statement] == []
+
+
+def _conflict_row(
+    target: TableTarget, *, rows: int, differing: tuple[str, ...]
+) -> list[tuple[int, ...]]:
+    """Build the one row the content-conflict probe projects, for an arranged answer.
+
+    Purpose
+    -------
+    Compose the probe's result positionally from the target's own compared-column list, so a test
+    states which columns disagree by NAME and the arity follows the target rather than a literal.
+
+    Parameters
+    ----------
+    target : TableTarget
+        The target whose probe is being answered.
+    rows : int
+        How many staged rows conflict.
+    differing : tuple[str, ...]
+        The compared columns that differ, by target column name.
+
+    Returns
+    -------
+    list[tuple[int, ...]]
+        A one-row result set: the conflicting-row total followed by one count per compared column.
+
+    Raises
+    ------
+    AssertionError
+        If a named column is not one the probe compares, which would make the test assert about a
+        column the statement never reads.
+    """
+    compared = target.content_columns()
+    unknown = set(differing) - set(compared)
+    assert not unknown, f"{sorted(unknown)} are not columns the probe compares"
+    return [(rows, *(rows if column in differing else 0 for column in compared))]
+
+
+def test_a_staged_row_disagreeing_with_a_stored_row_is_refused_not_counted_as_a_duplicate(
+    fake_aurora: FakeAuroraDatabase,
+) -> None:
+    """Refuse a same-key, different-content load instead of reporting it as already present.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double for the driver.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the load succeeds, merges, commits, or fails to name the count and the columns.
+    """
+    # WHY : Assumptions: this is the finding. `ON CONFLICT ... DO NOTHING` skips a key the table
+    #   already holds WITHOUT reading the stored row, so a staged row that disagrees with it was
+    #   counted as skipped and the load returned success -- which makes a wrong table
+    #   indistinguishable from a re-run of a correct one. The check has to happen before the merge,
+    #   because afterwards the disagreement has already been discarded.
+    target = target_for("TRANCAT")
+    fake_aurora.arrange_rows(
+        "count(*) filter (", _conflict_row(target, rows=3, differing=("description",))
+    )
+    connection = fake_aurora.connect(**_connection_params())
+
+    with pytest.raises(AuroraLoadError) as raised:
+        load_records(
+            connection,
+            target,
+            [{"TRAN-TYPE-CD": "01", "TRAN-CAT-CD": "0001", "TRAN-CAT-TYPE-DESC": "Regular Sales"}],
+        )
+
+    message = str(raised.value)
+    assert "3 staged row(s)" in message
+    assert f"{target.schema}.{target.table}" in message
+    assert "description" in message
+    assert "nothing was loaded" in message
+    # WHY : the VALUE is asserted absent. Every one of these tables carries a primary account
+    #   number, a national identifier or a cardholder name, and `cli.py` writes this message
+    #   straight to a container log -- so naming the differing column is the whole of what a
+    #   refusal may disclose.
+    assert "Regular Sales" not in message
+    # WHY : the merge must NOT have run. A refusal issued after the merge would have let the
+    #   disagreeing rows be skipped first, so the transaction it rolls back is one that had already
+    #   decided to ignore them.
+    assert target.merge_statement() not in fake_aurora.executed_sql()
+    assert fake_aurora.commits == 0
+    assert fake_aurora.rollbacks == 1
+    # WHY : the refusal carries no `__cause__`, matching every other diagnostic out of this module:
+    #   a chained cause puts the driver's own DETAIL -- which names the conflicting key's value --
+    #   into the traceback of anything logging `exc_info`.
+    assert raised.value.__cause__ is None
+
+
+def test_a_conflicting_load_names_every_differing_column_and_no_agreeing_one(
+    fake_aurora: FakeAuroraDatabase,
+) -> None:
+    """Name exactly the columns that differ, so the refusal points at the disagreement.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double for the driver.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If a differing column is unnamed or an agreeing one is named.
+    """
+    target = target_for("XREF")
+    fake_aurora.arrange_rows(
+        "count(*) filter (", _conflict_row(target, rows=1, differing=("account_id",))
+    )
+    connection = fake_aurora.connect(**_connection_params())
+
+    with pytest.raises(AuroraLoadError) as raised:
+        load_records(
+            connection,
+            target,
+            [
+                {
+                    "XREF-CARD-NUM": "4" * 16,
+                    "XREF-CUST-ID": "000000001",
+                    "XREF-ACCT-ID": "00000000001",
+                }
+            ],
+        )
+
+    message = str(raised.value)
+    # WHY : Assumptions: naming only the columns that DIFFER is what makes the message actionable.
+    #   Listing every compared column would be true of any conflict and would leave an operator
+    #   reading the extract and the table side by side to find the one that moved -- which for the
+    #   customer master is fifteen columns.
+    assert "account_id" in message
+    assert "customer_id" not in message
+
+
+def test_a_re_run_whose_rows_agree_merges_and_commits(fake_aurora: FakeAuroraDatabase) -> None:
+    """Let an exact re-run through, so idempotency survives the new refusal.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double for the driver.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If a load whose staged rows match the stored ones is refused.
+    """
+    # WHY : Assumptions: this is the other half of the finding and the reason the check compares
+    #   CONTENT rather than refusing every present key. A Step Functions redrive re-runs a
+    #   completed load, and `V2__seed_reference.sql` may have written the same rows first; both must
+    #   still succeed reporting nothing added.
+    target = target_for("TRANTYPE")
+    fake_aurora.arrange_rows("count(*) filter (", _conflict_row(target, rows=0, differing=()))
+    fake_aurora.arrange_affected_rows("insert into", 0)
+    connection = fake_aurora.connect(**_connection_params())
+
+    outcome = load_records(
+        connection, target, [{"TRAN-TYPE": "01", "TRAN-TYPE-DESC": "Purchase" + " " * 42}]
+    )
+
+    assert outcome.skipped == 1
+    assert fake_aurora.commits == 1
+    assert fake_aurora.rollbacks == 0
+
+
+def test_the_whole_row_merge_target_is_not_probed_for_a_content_conflict(
+    fake_aurora: FakeAuroraDatabase,
+) -> None:
+    """Skip the probe for the daily feed, whose merge already compares every column.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double for the driver.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the probe is issued for a whole-row-merge target.
+    """
+    # WHY : Assumptions: "same key, different content" is not a conflict for this target, it is a
+    #   second feed row. Its merge is an anti-join over every column, so a staged row differing
+    #   anywhere is a row the table does not hold and is inserted -- and the baseline's own daily
+    #   file genuinely carries repeated identifiers. Probing it would refuse a correct load.
+    target = target_for("DALYTRAN")
+    assert target.strategy is LoadStrategy.WHOLE_ROW_MERGE
+    connection = fake_aurora.connect(**_connection_params())
+
+    load_records(connection, target, [])
+
+    assert [sql for sql in fake_aurora.executed_sql() if "count(" in sql.casefold()] == []
+    assert fake_aurora.commits == 1
+
+
+def test_a_probe_count_that_cannot_be_read_as_a_whole_number_is_refused(
+    fake_aurora: FakeAuroraDatabase,
+) -> None:
+    """Treat an unreadable probe answer as absent evidence rather than as no conflict.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double for the driver.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If a non-integer count is coerced instead of refused.
+    """
+    # WHY : Assumptions: the safe reading of "I could not read the answer" is a refusal, not a
+    #   pass. `int("0")` and `int(None)` fail differently and `int(0.4)` succeeds while discarding
+    #   the answer, so a coercion here would let a driver or double that answered oddly be read as
+    #   reporting no conflict -- which is exactly the silent success this check exists to remove.
+    target = target_for("TCATBAL")
+    fake_aurora.arrange_rows("count(*) filter (", [("2", 0)])
+    connection = fake_aurora.connect(**_connection_params())
+
+    with pytest.raises(AuroraLoadError, match="could not be established"):
+        load_records(connection, target, _tcatbal_records())
+
+    assert fake_aurora.commits == 0
+    assert fake_aurora.rollbacks == 1
+
+
+def test_a_probe_of_the_wrong_arity_is_refused(fake_aurora: FakeAuroraDatabase) -> None:
+    """Refuse a probe answer that does not match the compared-column list.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double for the driver.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If a short row is accepted, which would leave later columns unread and unreported.
+    """
+    target = target_for("TCATBAL")
+    fake_aurora.arrange_rows("count(*) filter (", [(1,)])
+    connection = fake_aurora.connect(**_connection_params())
+
+    with pytest.raises(AuroraLoadError, match="projected 1 column"):
+        load_records(connection, target, _tcatbal_records())
+
+
+@pytest.mark.parametrize("record", ["CARD", "CUSTOMER"])
+def test_a_sealed_column_is_never_compared(record: str) -> None:
+    """Keep an enciphered column out of the comparison, whatever else changes.
+
+    Parameters
+    ----------
+    record : str
+        A record whose target seals at least one column.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If a sealed column is compared, or if the key columns are.
+    """
+    # WHY : Assumptions: an envelope draws a fresh initialisation vector per value, so the same
+    #   card verification value enciphered twice is different bytes. A probe reading `cvv_encrypted`
+    #   would report a conflict on EVERY row of every re-run of the card load, and the refusal would
+    #   be indistinguishable from a genuine disagreement -- which would make the check worse than
+    #   its absence, because the usual response to an always-red gate is to remove it.
+    target = target_for(record)
+    sealed = {
+        column
+        for field, column in target.columns.items()
+        if target.projections.get(field, Projection.VERBATIM)
+        in {Projection.SEALED_IDENTIFIER, Projection.SEALED_VERIFICATION_VALUE}
+    }
+    assert sealed, f"{record} declares no sealed column, so this test asserts nothing"
+    compared = set(target.content_columns())
+    assert not compared & sealed
+    assert not compared & set(target.key_columns)
+    # Assumptions: the positive half is asserted too, so this cannot pass for a target that
+    #   compares nothing at all.
+    assert compared
+
+
+def test_a_target_bound_to_no_record_has_no_conflict_statement() -> None:
+    """Refuse to compose a probe for a construct that was never meant to load a dataset.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If an unbound target composes a probe, which would compare on no key at all.
+    """
+    unbound = TableTarget(
+        record="",
+        schema="account",
+        table="accounts",
+        columns={"ACCT-ID": "account_id", "ACCT-ACTIVE-STATUS": "active_status"},
+    )
+    with pytest.raises(AuroraLoadError, match="not expressible"):
+        unbound.conflict_statement()
+
+
+def test_a_target_with_no_comparable_column_has_no_conflict_statement() -> None:
+    """Refuse a probe for a target whose every mapped column is part of its key.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If such a target composes a probe with an empty projection list.
+    """
+    # WHY : Assumptions: an empty statement is not returned for this case, because a caller that
+    #   received one would read "no rows conflicted" out of a query that compared nothing. No
+    #   declared target is in this shape today; the refusal is what keeps that true rather than
+    #   assumed.
+    keys_only = TableTarget(
+        record="XREF",
+        schema="account",
+        table="card_xref",
+        columns={"XREF-CARD-NUM": "card_num"},
+    )
+    assert keys_only.key_columns == ("card_num",)
+    assert keys_only.content_columns() == ()
+    with pytest.raises(AuroraLoadError, match="not expressible"):
+        keys_only.conflict_statement()

@@ -323,7 +323,7 @@ public class CardXrefController {
             consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE)
     public CardXrefByAccountView lookupByAccount(@Valid @RequestBody AccountLookupRequest request) {
-        return this.reads.resolveCardCrossReferenceByAccount(request.accountId());
+        return this.reads.resolveCardCrossReferenceByAccount(request.accountIdNumber());
     }
 
     /**
@@ -411,6 +411,6 @@ public class CardXrefController {
             Principal principal) {
 
         return this.reads.listCardCrossReferences(
-                request.accountId(), cursor, direction, principal.getName());
+                request.accountIdNumber(), cursor, direction, principal.getName());
     }
 }

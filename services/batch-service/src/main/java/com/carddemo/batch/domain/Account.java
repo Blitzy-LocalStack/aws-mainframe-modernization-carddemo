@@ -148,7 +148,7 @@ import org.hibernate.annotations.JdbcTypeCode;
  *
  * <p>It holds state and does not compute. Every monetary adjustment the two programs make is
  * arithmetic, and arithmetic belongs to {@code com.carddemo.common.money.Money}, which owns the
- * two rounding contracts this migration needs and is the single place either is expressed. Date
+ * ONE rounding contract this migration needs and is the single place it is expressed. Date
  * edit rules, including leap-year handling, belong to
  * {@code com.carddemo.common.validation.DateEditValidator}, transcribed from
  * {@code app/cbl/CSUTLDTC.cbl} with {@code app/cpy/CSUTLDPY.cpy} and
@@ -283,11 +283,10 @@ public class Account {
     //       never re-declared here. By the time a value reaches this member it is a signed decimal
     //       and nothing else.
     // WHY : Assumptions: arithmetic on this member belongs to the service layer through
-    //       com.carddemo.common.money.Money, which owns both rounding contracts the migration
-    //       needs -- the general half-up reduction, and the truncating mode the interest divide
-    //       requires because app/cbl/CBACT04C.cbl lines 464 to 465 carry no ROUNDED phrase and no
-    //       statement anywhere in that program does. This type holds state and computes nothing,
-    //       so a caller assigns a value that Money has already produced.
+    //       com.carddemo.common.money.Money, which owns the one rounding contract the migration
+    //       declares -- the half-up reduction transformation rule T3 states for the money path, applied
+    //       to the accrual quotient as well as to every other reduction. This type holds state and
+    //       computes nothing, so a caller assigns a value that Money has already produced.
     @Column(name = "curr_bal", precision = 12, scale = 2)
     private BigDecimal currBal;
 

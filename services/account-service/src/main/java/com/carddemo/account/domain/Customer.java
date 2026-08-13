@@ -59,15 +59,28 @@ import org.hibernate.annotations.JdbcTypeCode;
  *   fico_credit_score          SMALLINT     NOT NULL   -- no range check; see the field below
  *   version                    BIGINT       NOT NULL DEFAULT 0
  *   CONSTRAINT pk_customers               PRIMARY KEY (customer_id)
- *   CONSTRAINT ck_customers_pri_card_holder_ind CHECK (pri_card_holder_ind IN ('Y', 'N'))
+ *   -- no check constraint: no field of CUSTOMER-RECORD declares a value set
  *   -- no foreign key to account.accounts or account.card_xref
  * </pre>
  *
- * <p>Assumptions: the only value constraint in that shape is the one on the primary-holder indicator, and
- * it is safe against the migration load because all fifty seeded records carry Y. No range constraint is
- * declared on the credit score, and the field below records why one must never be added. Constraints are
- * declared in the migration and never here: an entity that also declared them would be a second statement
- * of the same fact, free to drift from the schema that actually enforces it.</p>
+ * <p>Assumptions: that shape declares NO value constraint at all, and the absence is deliberate on both
+ * columns where one might be expected. No range constraint bounds the credit score, and the field below
+ * records why one must never be added. No closed domain bounds the primary-holder indicator either:
+ * {@code CVCUS01Y.cpy} L21 declares {@code PIC X(01)} and attaches no 88-level value set -- there is not one
+ * such level anywhere in this record -- so the storage layer admits any one character, exactly as the VSAM
+ * cluster it replaces does. Constraints are declared in the migration and never here: an entity that also
+ * declared them would be a second statement of the same fact, free to drift from the schema that actually
+ * enforces it.</p>
+ *
+ * <p>Refactoring Rationale: a check closing the indicator at Y and N was declared and is removed. Its
+ * authority was {@code FLG-PRI-CARDHOLDER-ISVALID VALUES 'Y', 'N'} at {@code app/cbl/COACTUPC.cbl:350},
+ * which sits on {@code WS-EDIT-PRI-CARDHOLDER} -- a WORKING-STORAGE edit flag in one online program -- and
+ * not on the record field, so it states what that screen ACCEPTS rather than what the file HOLDS. The
+ * migration plan's transformation rule T1 makes the copybook normative, and its section 0.4.1.3 turns an
+ * 88-level value set into a check constraint; neither licenses a domain the record layout does not state.
+ * The Y-or-N rule itself is preserved where the reference applies it: {@code 1220-EDIT-YESNO} at L1856 to
+ * L1894, migrated as {@code AccountUpdateService.editYesNo} and applied to this field on every update, so a
+ * submission still cannot set a third character while a loaded record carrying one is no longer refused.</p>
  *
  * <p>Assumptions: {@code @Table} names the table without qualifying it with a schema, matching
  * {@link Account} and {@link CardXref}. The qualifier is deliberately absent rather than forgotten: the
@@ -403,17 +416,25 @@ public class Customer {
     /**
      * Whether this customer is the primary cardholder, {@code CUST-PRI-CARD-HOLDER-IND PIC X(01)}.
      */
-    // WHY : Alternatives Considered: a boolean or an enum, since the schema constrains this column to Y or
-    //   N and every one of the fifty seeded records carries Y. Both were rejected in favour of the
+    // WHY : Alternatives Considered: a boolean or an enum, since every one of the fifty seeded records
+    //   carries Y and the online screen accepts only Y or N. Both were rejected in favour of the
     //   one-character string the reference declares. CVCUS01Y.cpy line 21 states only PIC X(01) and
     //   attaches no 88-level value set -- there is not one such level anywhere in this record -- and
     //   app/cbl/COACTUPC.cbl compares the field through FUNCTION TRIM at lines 1764 and 1766 rather than
-    //   against a value list. Contrast the account status, whose Y-or-N domain the reference does state
-    //   outright, in the message at lines 503 and 504. A boolean would also have to invent a mapping for
-    //   any third character the reference would accept, and an enum would fail to construct on one rather
-    //   than carrying it.
-    // WHY : Assumptions: CHAR(1) in V1__account.sql, constrained to Y or N. VARCHAR(1) would
-    //       validate against a different declared type and would compare under text rules.
+    //   against a value list. A boolean would have to invent a mapping for any third character the file
+    //   can hold, and an enum would fail to construct on one rather than carrying it.
+    // WHY : Refactoring Rationale: this comment used to say the schema constrains the column to Y or N,
+    //   and used to contrast it with the account status as a domain "the reference does state outright".
+    //   Both halves were wrong in the same direction. The check has been removed from V1__account.sql
+    //   because the value set it enforced is declared on an EDIT FLAG in one online program and not on the
+    //   record field, and the account status is in the same position -- its own value set sits on
+    //   WS-EDIT-ACCT-STATUS at app/cbl/COACTUPC.cbl:193 -- so the contrast asserted a difference that does
+    //   not exist. That neighbouring constraint is left in place because this correction was scoped to
+    //   this column, and the asymmetry is recorded here rather than left for a reader to trip over.
+    // WHY : Assumptions: CHAR(1) in V1__account.sql, and UNCONSTRAINED. The reference's Y-or-N rule is
+    //       enforced on the update path by AccountUpdateService.editYesNo, which is where
+    //       1220-EDIT-YESNO enforces it. VARCHAR(1) would validate against a different declared type and
+    //       would compare under text rules.
     @JdbcTypeCode(Types.CHAR)
     @Column(name = "pri_card_holder_ind", length = 1, nullable = false)
     private String primaryCardHolderIndicator;
@@ -650,6 +671,13 @@ public class Customer {
      * {@link #applyUpdate} refuses it for the other rather than the type doing so. One type for both
      * columns keeps the caller's shape uniform; the refusal names the column, which a type-level split
      * could not do as clearly.</p>
+     *
+     * <p>Refactoring Rationale: this type used to hold the caller's ciphertext array by ALIAS and hand the
+     * same array back, so an intent was not immutable in the one component that carries a protected value.
+     * A caller reusing a buffer across two identifiers -- or mutating one after stating its intent -- could
+     * therefore have a value written that it never declared, and nothing in the type or the entity would
+     * report the substitution. Both the constructor and the accessor copy now, so the intent is fixed at
+     * construction whichever side the array is touched from.</p>
      */
     public static final class ProtectedValueUpdate {
 
@@ -666,13 +694,20 @@ public class Customer {
         private final boolean clearing;
 
         /**
-         * Creates one intent.
+         * Creates one intent, taking its own copy of any ciphertext.
+         *
+         * <p>Assumptions: the array is COPIED here rather than retained. An array is mutable, so retaining
+         * the caller's would leave the value this intent declares changeable after the declaration was
+         * made -- by the caller, deliberately or by reusing a working buffer -- and the value finally
+         * stored would then be whatever the array held at write time rather than what the caller stated.
+         * Copying at construction is what makes this type's name true: it is an INTENT, fixed when it is
+         * created.</p>
          *
          * @param ciphertext the replacement ciphertext, or {@code null} when this intent replaces nothing
          * @param clears whether this intent clears the column
          */
         private ProtectedValueUpdate(byte[] ciphertext, boolean clears) {
-            this.replacement = ciphertext;
+            this.replacement = defensiveCopy(ciphertext);
             this.clearing = clears;
         }
 
@@ -733,10 +768,20 @@ public class Customer {
         /**
          * The replacement ciphertext.
          *
-         * @return the ciphertext this intent stores, or {@code null} when it replaces nothing
+         * <p>Assumptions: a COPY is returned, for the same reason the constructor takes one. Handing out the
+         * held array would let a reader alter what a later read of this intent reports, which is the whole
+         * property the constructor's copy establishes -- one leak on either side is enough to lose it.</p>
+         *
+         * <p>Trade-offs: the value is copied twice on the write path, once here and once by
+         * {@link #applyUpdate}, and the second copy is deliberately kept. That one is the ENTITY's own
+         * invariant and also guards the constructor path, which takes raw arrays from a mapper; removing it
+         * would make the entity's protection depend on this nested type's accessor, so the two are held
+         * independently. The cost is one clone of a short ciphertext per protected column per update.</p>
+         *
+         * @return a copy of the ciphertext this intent stores, or {@code null} when it replaces nothing
          */
         byte[] ciphertext() {
-            return this.replacement;
+            return defensiveCopy(this.replacement);
         }
 
         /**

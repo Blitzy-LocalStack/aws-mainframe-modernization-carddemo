@@ -94,9 +94,9 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
  * beside the job it concerns is the smaller and more honest change than editing a sibling's file to
  * make an inventory tidy.
  *
- * <p>Assumptions: <b>it is nonetheless unscheduled.</b> The eleven states of
- * {@code carddemo-daily-batch} are quiesce, stage, preflight, post, interest, backup, combine,
- * statements, reports, analyze and resume. Neither export nor import is among them. Both are
+ * <p>Assumptions: <b>it is nonetheless unscheduled.</b> The twelve states of
+ * {@code carddemo-daily-batch} are quiesce, stage, verify, preflight, post, interest, backup,
+ * combine, statements, reports, analyze and resume. Neither export nor import is among them. Both are
  * operator-invoked branch-migration utilities reached only through the container's {@code --job=}
  * argument, which is exactly what the job-control header quoted above implies: a branch migration is an
  * operator event, not a nightly one.
@@ -2072,7 +2072,32 @@ public class ImportJob {
         private Artefact(CopybookLayout.RecordSpec layout, Map<String, String> fieldMoves) {
             this(layout, fieldMoves, Map.of());
         }
-    }
+    
+        /**
+         * Renders the layout and the SIZES of its two lists.
+         *
+         * <p>Purpose. Nothing here is protected -- a layout name, the field moves a record required and the
+         * redactions applied to it are all metadata about a copybook this migration does not alter -- so
+         * this renderer exists for the collection reason in
+         * {@code docs/architecture/observability.md} L1093 to L1112: both lists are as long as the layout,
+         * so the generated rendering emitted a whole record's field-by-field trace per artefact.</p>
+         *
+         * <p>Assumptions: the redaction COUNT is worth rendering even though the redactions themselves are
+         * not. An import that applied no redactions to a layout that declares sensitive fields is a real
+         * fault, and the count is what makes it visible without naming a field.</p>
+         *
+         * @return a rendering naming the layout and the number of field moves and redactions, with the
+         *     lists themselves omitted; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "Artefact[layout=" + this.layout
+                    + ", fieldMoves=" + (this.fieldMoves == null ? "absent"
+                            : this.fieldMoves.size() + " entries")
+                    + ", redactions=" + (this.redactions == null ? "absent"
+                            : this.redactions.size() + " entries") + ']';
+        }
+}
 
     /**
      * The six output accumulators one import run assembles, staged outside the heap.

@@ -401,5 +401,26 @@ public class CategoryBalanceService {
      *     as {@code TRAN-CAT-BAL PIC S9(09)V99} declares, and signed, never {@code null}
      */
     public record Outcome(Arm arm, BigDecimal balance) {
-    }
+    
+        /**
+         * Renders the ARM taken, never the resulting balance.
+         *
+         * <p>Purpose. The balance is a monetary value withheld by
+         * {@code docs/architecture/observability.md} L1093 to L1112, and this record is produced once per
+         * posted transaction, so the generated rendering emitted a category balance for every posting the
+         * nightly chain performed.</p>
+         *
+         * <p>Assumptions: the arm is the whole diagnostic content and it is a bounded value. The reference
+         * program distinguishes a create from an update at its two paragraphs, and which of the two ran is
+         * the parity property the golden masters assert; the resulting figure is asserted against the
+         * masters themselves rather than read from a log.</p>
+         *
+         * @return a rendering naming which arm was taken, with the resulting balance omitted; never
+         *     {@code null}
+         */
+        @Override
+        public String toString() {
+            return "Outcome[arm=" + this.arm + ']';
+        }
+}
 }

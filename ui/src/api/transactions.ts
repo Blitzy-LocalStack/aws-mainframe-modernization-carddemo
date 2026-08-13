@@ -113,8 +113,8 @@
  * at L21 and the literal `'*'` at L24, and a handler that answers with a field-error array has no
  * first-entry-versus-re-entry distinction left to make.
  *
- * The two operations with two success statuses
- * -------------------------------------------
+ * The three operations with two success statuses
+ * ---------------------------------------------
  * Refactoring Rationale: `addTransaction`, `copyLastTransaction` and `payAccountBalanceInFull` each
  * declare both a 200 and a 201, and this module reports a DISCRIMINATED UNION rather than one
  * optional-heavy shape. The distinction is the baseline's confirmation gate: `app/cbl/COTRN02C.cbl`
@@ -125,7 +125,7 @@
  * money depends on.
  */
 
-import { getApiClient, requestPath } from './client';
+import { getApiClient, keysetPagingMembers, requestPath } from './client';
 import type {
   BillPaymentOutcome,
   BillPaymentPreview,
@@ -236,6 +236,301 @@ const HTTP_CREATED = 201;
  */
 const MASKED_CARD_NUMBER = /^[*]{12}[0-9]{4}$/u;
 
+/*
+ * WHY : Refactoring Rationale: the four helpers below check a write response MEMBER BY MEMBER, and the
+ *       revision they replace cast each body to its outcome type with a type assertion. The assertion
+ *       stated a guarantee without testing it, so a body that omitted `transactionId` or `amount`
+ *       produced a typed outcome whose members read `undefined` -- and the call still reported success.
+ *       That is the one failure at this boundary that money depends on: an operator would be shown a
+ *       confirmed capture with no identifier and no amount, several frames away from the response that
+ *       was already wrong when it arrived. `./reporting` reached the same conclusion at
+ *       `submitTransactionReport` and checks its started-run members for exactly this reason.
+ * WHY : Assumptions: the STATUS still selects which shape is expected, and these helpers never choose a
+ *       shape. 201 means the record was written and 200 means it was not, which is what the contract
+ *       makes normative, so a body that fails the check for its status is reported as a malformed
+ *       response rather than re-read as the other outcome -- re-reading it is precisely what the
+ *       discriminated union exists to prevent, because a written transaction reported as a preview
+ *       invites a second submission of the same money.
+ * WHY : Alternatives Considered: (1) trusting the status alone, which is what the previous revision
+ *       did. Rejected above. (2) validating with a schema library. Rejected because it would add a
+ *       runtime dependency, and the three shapes between them declare eleven members whose rules are
+ *       already written down in the contract this file is authored against -- so the checks are short
+ *       enough to read, and reading them is what makes them auditable against that document. (3)
+ *       checking presence and JavaScript type but not the published pattern. Rejected because the
+ *       members at issue are money and identifiers: `TransactionAmount` and `AccountBalance` are exact
+ *       decimal strings with two decimal places, and a value such as `50.4` or `5e1` is a string of the
+ *       right type that no screen can render and no reader should have to defend against.
+ * WHY : Trade-offs: a response that breaches the contract is now refused where it used to be rendered,
+ *       so a service fault surfaces as a named error on the screen that made the call instead of as
+ *       blank fields. That is the intended exchange at a financial boundary. What is given up is
+ *       tolerance of a service that drifts from its own document, which is not a property worth keeping.
+ */
+
+/** The shape the contract publishes for a transaction identifier: exactly sixteen digits. */
+const TRANSACTION_ID = /^[0-9]{16}$/u;
+
+/**
+ * The shape the contract publishes for a transaction amount.
+ *
+ * Assumptions: this is `TransactionAmount` from `transaction-api.yaml` verbatim -- an optional sign, one
+ * to nine integer digits, a point, and exactly two decimals -- which is the serialised form of
+ * `TRAN-AMT PIC S9(09)V99` at `app/cpy/CVTRA05Y.cpy` L10. The two decimal places are mandatory rather
+ * than optional, because the scale is part of the value: `50.4` and `50.40` are the same number but only
+ * one of them is the rendering an exact fixed-point field produces.
+ */
+const TRANSACTION_AMOUNT = /^-?[0-9]{1,9}\.[0-9]{2}$/u;
+
+/** The shape the contract publishes for an account identifier: exactly eleven digits. */
+const ACCOUNT_ID = /^[0-9]{11}$/u;
+
+/**
+ * The shape the contract publishes for an account balance.
+ *
+ * Assumptions: one integer digit more than an amount admits, because `ACCT-CURR-BAL PIC S9(10)V99` at
+ * `app/cpy/CVACT01Y.cpy` L7 is a ten-digit field where the transaction amount is a nine-digit one. The
+ * two are deliberately separate constants for that reason; sharing one would silently widen or narrow
+ * whichever member did not own it.
+ */
+const ACCOUNT_BALANCE = /^-?[0-9]{1,10}\.[0-9]{2}$/u;
+
+/**
+ * Reads a response body as a member bag, refusing anything that is not one.
+ *
+ * Assumptions: `typeof null` is `'object'`, so null is excluded explicitly; an array is admitted by this
+ * check and then fails on its first absent member, which reports the same breach one line later and
+ * needs no separate branch.
+ * @param {unknown} body - The parsed response body exactly as the transport delivered it.
+ * @param {string} outcome - The outcome the status selected, named in the message so a reader knows
+ *   which of the two shapes was expected.
+ * @returns {Record<string, unknown>} The body, readable member by member.
+ * @throws {RangeError} If the body is not a non-null object.
+ */
+function requireBody(body: unknown, outcome: string): Record<string, unknown> {
+  if (!isMemberBag(body)) {
+    throw new RangeError(`A ${outcome} response must carry an object body.`);
+  }
+  return body;
+}
+
+/**
+ * Reports whether a value is a non-null object whose members can be read individually.
+ *
+ * Assumptions: this is the same predicate `./client` declares for the problem document it validates, and
+ * it is declared here rather than imported because it is one expression of a language rule rather than a
+ * shared contract -- importing it would couple this module's response validation to that module's
+ * failure handling for no gain. The narrowing is what removes the need for a type assertion: `object` has
+ * no index signature, so a body would otherwise have to be asserted before any member could be read, and
+ * an assertion is exactly what these helpers exist to replace.
+ * @param {unknown} value - A response body of unknown shape.
+ * @returns {boolean} `true` for a non-null object, narrowing it to a bag of unknown members so each one
+ *   is checked before use.
+ */
+function isMemberBag(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+/**
+ * Requires one member to be a string matching the shape the contract publishes for it.
+ *
+ * Assumptions: the message names the MEMBER and the outcome and never the rejected value. Two of the
+ * members checked through here are an account identifier and a transaction identifier, which the
+ * migration's sensitive-data logging contract names alongside the primary account number, so quoting a
+ * rejected value would place it in whatever renders or logs the failure.
+ * @param {unknown} value - The member as read from the body.
+ * @param {RegExp} shape - The published pattern the member must match.
+ * @param {string} member - The member's name in the contract, for the message.
+ * @param {string} outcome - The outcome the status selected, for the message.
+ * @returns {string} The member, once it is a string of the published shape.
+ * @throws {RangeError} If the member is absent, is not a string, or does not match the shape.
+ */
+function requireShaped(value: unknown, shape: RegExp, member: string, outcome: string): string {
+  if (typeof value !== 'string' || !shape.test(value)) {
+    throw new RangeError(
+      `A ${outcome} response must carry ${member} in the form the contract publishes for it.`,
+    );
+  }
+  return value;
+}
+
+/**
+ * Requires one boolean member to carry the fixed value the contract declares for this outcome.
+ *
+ * Assumptions: this CROSS-CHECKS the flag against the status rather than deriving the outcome from it.
+ * The contract fixes `written` to false on a preview and `paid` to true on a payment and false on a
+ * preview, so a flag disagreeing with the status is a service fault in which the two sources of the same
+ * fact contradict each other. Reporting it is the only safe reading: resolving it in favour of the flag
+ * would report a write that did not happen, and resolving it silently in favour of the status would hide
+ * a service that has begun answering incorrectly.
+ * @param {unknown} value - The member as read from the body.
+ * @param {boolean} expected - The value the contract fixes for this outcome.
+ * @param {string} member - The member's name in the contract, for the message.
+ * @param {string} outcome - The outcome the status selected, for the message.
+ * @returns {boolean} The member, once it carries the fixed value.
+ * @throws {RangeError} If the member is absent, is not a boolean, or contradicts the status.
+ */
+function requireFixedFlag(
+  value: unknown,
+  expected: boolean,
+  member: string,
+  outcome: string,
+): boolean {
+  if (value !== expected) {
+    throw new RangeError(
+      `A ${outcome} response must carry ${member} set to ${String(expected)}, which is what the` +
+        ' contract fixes for this status.',
+    );
+  }
+  return value;
+}
+
+/**
+ * Reads an optional sentence member, admitting absence and an explicit null alike.
+ *
+ * Assumptions: absence and null are BOTH admitted and are kept distinct rather than folded together.
+ * The service sets `default-property-inclusion: always`, so a null sentence arrives as a present null;
+ * a member missing entirely is a body from an older or different producer. Neither is substituted with
+ * an empty string, because a blank message band renders as a deliberate silence that is
+ * indistinguishable from correct behaviour -- the reasoning `./reporting` records for the same member.
+ * @param {unknown} value - The member as read from the body.
+ * @param {string} outcome - The outcome the status selected, for the message.
+ * @returns {string | null | undefined} The sentence, an explicit null, or undefined when absent.
+ * @throws {RangeError} If the member is present and is neither a string nor null.
+ */
+function optionalSentence(value: unknown, outcome: string): string | null | undefined {
+  if (value === undefined || value === null || typeof value === 'string') {
+    return value;
+  }
+  throw new RangeError(`A ${outcome} response must carry returnMessage as a string or null.`);
+}
+
+/**
+ * Validates the body a written transaction answers with.
+ *
+ * Assumptions: all three members are required, which is what `TransactionCreated` declares in the
+ * contract, and the sentence is required as a non-empty string because the service assembles it on
+ * every written turn -- `TransactionAddService.appendTransaction` supplies it unconditionally from its
+ * one production call site, and the contract states its assembly verbatim from
+ * `app/cbl/COTRN02C.cbl` L728 to L733.
+ * @param {unknown} body - The parsed 201 body.
+ * @returns {TransactionCreated} The written transaction's identifier, amount and sentence.
+ * @throws {RangeError} If any of the three required members is absent or malformed.
+ */
+function requireTransactionCreated(body: unknown): TransactionCreated {
+  const members = requireBody(body, 'created transaction');
+  const transactionId = requireShaped(
+    members.transactionId,
+    TRANSACTION_ID,
+    'transactionId',
+    'created transaction',
+  );
+  const amount = requireShaped(members.amount, TRANSACTION_AMOUNT, 'amount', 'created transaction');
+  const returnMessage = members.returnMessage;
+  if (typeof returnMessage !== 'string' || returnMessage.length === 0) {
+    throw new RangeError(
+      'A created transaction response must carry the confirmation sentence the contract requires' +
+        ' beside the identifier it assigned.',
+    );
+  }
+  return { transactionId, amount, returnMessage };
+}
+
+/**
+ * Validates the body an unwritten transaction submission answers with.
+ * @param {unknown} body - The parsed 200 body.
+ * @returns {TransactionAddPreview} The amount a confirmed submission would capture, the false capture
+ *   flag, and the prompt when the service sent one.
+ * @throws {RangeError} If a required member is absent or malformed, or the capture flag contradicts the
+ *   status.
+ */
+function requireTransactionAddPreview(body: unknown): TransactionAddPreview {
+  const members = requireBody(body, 'previewed transaction');
+  const amount = requireShaped(
+    members.amount,
+    TRANSACTION_AMOUNT,
+    'amount',
+    'previewed transaction',
+  );
+  const written = requireFixedFlag(members.written, false, 'written', 'previewed transaction');
+  const returnMessage = optionalSentence(members.returnMessage, 'previewed transaction');
+  // Refactoring Rationale: the member is CARRIED, as null when the service sent none, where this block
+  //   used to omit it and the type declared it optional. `transaction-api.yaml` publishes it in the
+  //   schema's `required` list against a `ReturnMessage` component whose second branch is `type: null`,
+  //   and always-inclusion is pinned for the fleet in
+  //   `services/common-lib/src/main/resources/carddemo-common-defaults.yml` -- so the wire always
+  //   carries the key and a screen never has to distinguish an absent member from a null one. An
+  //   ABSENT member is still tolerated on the read and normalised to null rather than refused, because
+  //   this validator's subject is a malformed body and a missing message line is not one.
+  return { amount, written, returnMessage: returnMessage ?? null };
+}
+
+/**
+ * Validates the body a posted bill payment answers with.
+ * @param {unknown} body - The parsed 201 body.
+ * @returns {BillPaymentResponse} The transaction the payment wrote, the account, the balance as it stood
+ *   before the payment, the true payment flag, and the sentence when the service sent one.
+ * @throws {RangeError} If a required member is absent or malformed, or the payment flag contradicts the
+ *   status.
+ */
+function requireBillPaymentResponse(body: unknown): BillPaymentResponse {
+  const members = requireBody(body, 'posted payment');
+  const transactionId = requireShaped(
+    members.transactionId,
+    TRANSACTION_ID,
+    'transactionId',
+    'posted payment',
+  );
+  const accountId = requireShaped(members.accountId, ACCOUNT_ID, 'accountId', 'posted payment');
+  const currentBalance = requireShaped(
+    members.currentBalance,
+    ACCOUNT_BALANCE,
+    'currentBalance',
+    'posted payment',
+  );
+  const paid = requireFixedFlag(members.paid, true, 'paid', 'posted payment');
+  const returnMessage = optionalSentence(members.returnMessage, 'posted payment');
+  // Refactoring Rationale: carried as null when the service sent none, for the reason recorded on
+  //   {@link requireTransactionAddPreview}: the contract requires the key and publishes null as its
+  //   empty value, so omitting it here would have produced a shape the published schema does not.
+  return { transactionId, accountId, currentBalance, paid, returnMessage: returnMessage ?? null };
+}
+
+/**
+ * Validates the body a bill payment answers with when nothing was paid.
+ *
+ * Assumptions: `payableBalance` is NULLABLE here and null-valued on one of the three turns this shape
+ * serves, because that turn reaches no account read at all -- the declined confirmation clears the
+ * screen at `app/cbl/COBIL00C.cbl` L180 without reaching the read at L343. The contract expresses that
+ * as a required member with an explicit null branch rather than as an absent one, so the key is always
+ * present and a screen reads null as "no balance applies". The account identifier is non-null on all
+ * three, since even the declined turn echoes what it was sent.
+ *
+ * Refactoring Rationale: both nullable members were OPTIONAL here and are now carried, because
+ * `BillPaymentPreview` in `./types` declares each `string | null` to match the contract's `required`
+ * list. A body that omits either is still accepted and read as null rather than refused: this
+ * validator exists to reject a malformed value, and an absent message line or balance is not one.
+ * @param {unknown} body - The parsed 200 body.
+ * @returns {BillPaymentPreview} The account, the balance a confirmed request would pay or null when the
+ *   turn read none, the false payment flag, and the sentence or null.
+ * @throws {RangeError} If a required member is absent or malformed, if the balance is present but
+ *   malformed, or if the payment flag contradicts the status.
+ */
+function requireBillPaymentPreview(body: unknown): BillPaymentPreview {
+  const members = requireBody(body, 'previewed payment');
+  const accountId = requireShaped(members.accountId, ACCOUNT_ID, 'accountId', 'previewed payment');
+  const paid = requireFixedFlag(members.paid, false, 'paid', 'previewed payment');
+  const payableBalance =
+    members.payableBalance === undefined || members.payableBalance === null
+      ? null
+      : requireShaped(
+          members.payableBalance,
+          ACCOUNT_BALANCE,
+          'payableBalance',
+          'previewed payment',
+        );
+  const returnMessage = optionalSentence(members.returnMessage, 'previewed payment');
+  return { accountId, payableBalance, paid, returnMessage: returnMessage ?? null };
+}
+
 /**
  * Builds the browse query string members from the caller's criteria.
  *
@@ -246,11 +541,19 @@ const MASKED_CARD_NUMBER = /^[*]{12}[0-9]{4}$/u;
  * attributable error naming both inputs. What this deliberately is NOT is a substitute for
  * server-side validation: the service remains the authority on every value, including the width and
  * digit-shape of the identifier, and it is the side that returns the per-field error array a screen
- * renders. This check therefore refuses only the one combination that cannot be meaningful, and
- * passes every individual value through untouched.
+ * renders. This check therefore refuses only the combinations that cannot be meaningful, and passes
+ * every individual value through untouched.
+ *
+ * Refactoring Rationale: there are now TWO such combinations, and the second is why this paragraph
+ * changed. A direction supplied without a cursor used to be dropped here in silence while the
+ * sentence above claimed every individual value passed through untouched — a claim the drop made
+ * false. It is now refused by `keysetPagingMembers` in `./client`, which establishes the pair for all
+ * seven paged clients, so both inadmissible pairs are refused the same way and by one implementation
+ * rather than by seven copies.
  * @param {TransactionListQuery} query - The caller's criteria, any member of which may be absent.
  * @returns {Record<string, string>} The query members to send, empty when the caller supplied none.
- * @throws {RangeError} If a starting identifier and a cursor are supplied together.
+ * @throws {RangeError} If a starting identifier and a cursor are supplied together, or if a direction
+ *   is supplied without a cursor.
  */
 function browseQueryParameters(query: TransactionListQuery): Record<string, string> {
   if (query.transactionIdFilter !== undefined && query.cursor !== undefined) {
@@ -259,19 +562,19 @@ function browseQueryParameters(query: TransactionListQuery): Record<string, stri
         ' already states the position to read from.',
     );
   }
-
   const params: Record<string, string> = {};
   if (query.transactionIdFilter !== undefined) {
     params.transactionIdFilter = query.transactionIdFilter;
   }
-  if (query.cursor !== undefined) {
-    params.cursor = query.cursor;
-    // Assumptions: the direction accompanies the cursor and is omitted without one, because the
-    //   contract declares it meaningful only alongside a cursor -- a direction alone would describe a
-    //   position relative to nothing. `next` is named explicitly rather than left to the contract's
-    //   default so the request records which side was asked for, which is what makes a sealed cursor
-    //   replayed in the wrong direction a 400 the caller can read rather than a silently wrong page.
-    params.direction = query.direction ?? 'next';
+  // Refactoring Rationale: ⚠️ the pair is established by `keysetPagingMembers`, which refuses a
+  //   direction supplied without a cursor rather than dropping it as this block did. The direction is
+  //   still named EXPLICITLY whenever a cursor is present, for the reason recorded there: the value
+  //   that reaches the request is what decides whether a browse advances or is refused, so a request
+  //   replayed from a log states which side was asked for without knowing the contract's default.
+  const paging = keysetPagingMembers(query.cursor, query.direction);
+  if (paging !== undefined) {
+    params.cursor = paging.cursor;
+    params.direction = paging.direction;
   }
   return params;
 }
@@ -280,11 +583,13 @@ function browseQueryParameters(query: TransactionListQuery): Record<string, stri
  * Lists transactions as one keyset-paged browse, optionally starting from a given identifier.
  * @param {TransactionListQuery} [query] - Optional criteria: an exact sixteen-digit starting
  *   identifier, OR a sealed cursor with the direction it is being replayed for. The two are mutually
- *   exclusive. Omit the argument entirely for the opening page.
+ *   exclusive, and a direction is only accepted alongside a cursor. Omit the argument entirely for the
+ *   opening page.
  * @returns {Promise<PageResponse<TransactionSummary>>} One bounded page: up to ten rows in ascending
  *   identifier order, plus the `firstKey` and `lastKey` cursors a backward or forward step is issued
  *   from and the `hasNext` flag the service sets by reading beyond the page rather than by counting.
- * @throws {RangeError} If a starting identifier and a cursor are supplied together.
+ * @throws {RangeError} If a starting identifier and a cursor are supplied together, or if a direction
+ *   is supplied without a cursor -- a position relative to nothing, which the contract refuses.
  * @throws {Error} An `ApiRequestError` from `./client` for every transport failure, carrying the
  *   normalised `ApiError` problem document with its per-field error array: HTTP 400 for a malformed
  *   identifier or a cursor the service will not accept, 401 when the token is absent or expired, 403
@@ -352,14 +657,20 @@ export async function viewTransaction(transactionId: string): Promise<Transactio
 //       `app/cbl/COTRN02C.cbl` L444 and L449 with nothing holding a lock across the two statements --
 //       so a client-side value would collide under exactly the concurrency the keyset paging above
 //       exists to tolerate.
-// WHY : Alternatives Considered: narrowing each branch with a runtime type predicate over the body,
-//       rejected because the status has ALREADY established which shape arrived. A predicate would
-//       test the same fact a second time from a different source, and the two can disagree -- a 201
-//       whose body a predicate declined would leave a written transaction reported as a preview, which
-//       is the failure the discriminated union exists to prevent. An assertion is required on both
-//       branches here, unlike the payment below, because neither `TransactionAddPreview` nor
-//       `TransactionCreated` is structurally assignable to the other: the first requires `written` and
-//       the second requires `transactionId`.
+// WHY : Refactoring Rationale: the status selects which shape is expected and the selected shape is
+//       then CHECKED, where an earlier revision asserted it with `as`. The two steps answer different
+//       questions and both have to be answered: the status says which outcome the service reports, and
+//       the check says whether the body it sent carries that outcome's members. Asserting instead of
+//       checking left the second question unanswered, so a 201 body missing `transactionId` became a
+//       typed capture whose identifier read `undefined` while the call reported success -- and the
+//       rationale that stood here argued the assertion was sufficient BECAUSE the status had already
+//       established the shape, which conflates the service's claim about the outcome with the body's
+//       conformance to it.
+// WHY : Assumptions: a body failing its status's check is reported as malformed and is never re-read as
+//       the other outcome. Falling back would turn a written transaction into a reported preview, which
+//       invites a second submission of the same money, and the discriminated union exists precisely so
+//       that cannot happen. `requireTransactionCreated` and `requireTransactionAddPreview` above are
+//       therefore total: each either returns its own shape or raises.
 
 /**
  * Submits a transaction, either as an unconfirmed preview or as a confirmed write.
@@ -372,6 +683,9 @@ export async function viewTransaction(transactionId: string): Promise<Transactio
  *   `confirmation` set to a 'Y' answer to write and omitted or set to 'N' to preview.
  * @returns {Promise<TransactionAddOutcome>} `CREATED` carrying the identifier the service assigned
  *   and the amount as it normalised it, or `PREVIEWED` carrying that amount with nothing written.
+ * @throws {RangeError} If the body the service sent does not carry the members its status's shape
+ *   requires -- a capture without its identifier, amount or sentence, or a preview without its amount
+ *   -- which is reported as a malformed response and never re-read as the other outcome.
  * @throws {Error} An `ApiRequestError` from `./client` for every transport failure, carrying the
  *   normalised `ApiError` problem document with its per-field error array: HTTP 400 for a field the
  *   service refused, 401 when the token is absent or expired, 403 for a caller outside the permitted
@@ -381,15 +695,12 @@ export async function viewTransaction(transactionId: string): Promise<Transactio
 export async function addTransaction(
   request: TransactionCreateRequest,
 ): Promise<TransactionAddOutcome> {
-  const response = await getApiClient().post<TransactionAddPreview | TransactionCreated>(
-    requestPath(ADD_TRANSACTION),
-    request,
-  );
+  const response = await getApiClient().post<unknown>(requestPath(ADD_TRANSACTION), request);
 
   if (response.status === HTTP_CREATED) {
-    return { outcome: 'CREATED', created: response.data as TransactionCreated };
+    return { outcome: 'CREATED', created: requireTransactionCreated(response.data) };
   }
-  return { outcome: 'PREVIEWED', preview: response.data as TransactionAddPreview };
+  return { outcome: 'PREVIEWED', preview: requireTransactionAddPreview(response.data) };
 }
 
 /**
@@ -404,6 +715,8 @@ export async function addTransaction(
  *   card and whose `confirmation` decides whether the copied capture is written.
  * @returns {Promise<TransactionAddOutcome>} `CREATED` carrying the identifier the service assigned to
  *   the copied record, or `PREVIEWED` carrying the amount it read with nothing written.
+ * @throws {RangeError} If the body the service sent does not carry the members its status's shape
+ *   requires, which is reported as a malformed response and never re-read as the other outcome.
  * @throws {Error} An `ApiRequestError` from `./client` for every transport failure, carrying the
  *   normalised `ApiError` problem document with its per-field error array: HTTP 400 for a field the
  *   service refused, 401 when the token is absent or expired, 403 for a caller outside the permitted
@@ -413,15 +726,12 @@ export async function addTransaction(
 export async function copyLastTransaction(
   request: TransactionCreateRequest,
 ): Promise<TransactionAddOutcome> {
-  const response = await getApiClient().post<TransactionAddPreview | TransactionCreated>(
-    requestPath(COPY_LAST_TRANSACTION),
-    request,
-  );
+  const response = await getApiClient().post<unknown>(requestPath(COPY_LAST_TRANSACTION), request);
 
   if (response.status === HTTP_CREATED) {
-    return { outcome: 'CREATED', created: response.data as TransactionCreated };
+    return { outcome: 'CREATED', created: requireTransactionCreated(response.data) };
   }
-  return { outcome: 'PREVIEWED', preview: response.data as TransactionAddPreview };
+  return { outcome: 'PREVIEWED', preview: requireTransactionAddPreview(response.data) };
 }
 
 /**
@@ -438,7 +748,11 @@ export async function copyLastTransaction(
  *   and omitted or set to 'N' to preview the payable balance. The payment cannot be made without it.
  * @returns {Promise<BillPaymentOutcome>} `PAID` carrying the transaction the payment wrote and the
  *   balance as it stood before it, or `PREVIEWED` carrying the balance a confirmed request would pay
- *   -- absent on a declined answer, which reaches no account read at all.
+ *   -- null on a declined answer, which reaches no account read at all.
+ * @throws {RangeError} If the body the service sent does not carry the members its status's shape
+ *   requires -- a payment without its transaction identifier, account or balance, or either shape whose
+ *   `paid` flag contradicts the status -- which is reported as a malformed response and never re-read as
+ *   the other outcome.
  * @throws {Error} An `ApiRequestError` from `./client` for every transport failure, carrying the
  *   normalised `ApiError` problem document with its per-field error array: HTTP 400 for a malformed
  *   account identifier or a confirmation outside the accepted set, 401 when the token is absent or
@@ -449,21 +763,27 @@ export async function copyLastTransaction(
 export async function payAccountBalanceInFull(
   request: BillPaymentRequest,
 ): Promise<BillPaymentOutcome> {
-  const response = await getApiClient().post<BillPaymentPreview | BillPaymentResponse>(
+  const response = await getApiClient().post<unknown>(
     requestPath(PAY_ACCOUNT_BALANCE_IN_FULL),
     request,
   );
 
   if (response.status === HTTP_CREATED) {
-    return { outcome: 'PAID', payment: response.data as BillPaymentResponse };
+    return { outcome: 'PAID', payment: requireBillPaymentResponse(response.data) };
   }
 
-  // WHY : Assumptions: this branch carries NO assertion where the one above does, and the asymmetry is
-  //       a property of the two shapes rather than an oversight. Every member `BillPaymentPreview`
-  //       declares is one `BillPaymentResponse` also declares or leaves optional, so the response shape
-  //       is structurally assignable to the preview shape and the union already satisfies this slot; an
-  //       assertion here would be refused by the type-aware lint rule as unnecessary. The reverse does
-  //       not hold, because the response declares `transactionId` and `currentBalance` that the preview
-  //       has no member for, which is why the branch above must narrow explicitly.
-  return { outcome: 'PREVIEWED', preview: response.data };
+  // WHY : Refactoring Rationale: this branch is VALIDATED, symmetrically with the one above, where it
+  //       used to pass the body through on a cast. Two arguments once excused that cast and neither
+  //       survives. The first was structural -- every member the preview declares is one the payment
+  //       shape also declares or leaves optional, so the union already satisfied this slot without an
+  //       assertion. That was about what the COMPILER would accept, not about what arrived: the
+  //       compiler's knowledge of the body came from the type argument on the request, which asserted
+  //       the shape rather than observing it, so the branch that needed no cast was equally the branch
+  //       that checked nothing, and a 200 body carrying no `accountId` reached a screen as a preview of
+  //       an account it could not name. The second was that assignability held only while
+  //       `payableBalance` was OPTIONAL -- an accident of the type system rather than a property of the
+  //       wire. The contract now publishes that member as required and nullable, because the service
+  //       writes it on every response and carries null on the declined turn, so a cast would assert
+  //       precisely the shape the wire is no longer guaranteed to match. Narrowing observes it instead.
+  return { outcome: 'PREVIEWED', preview: requireBillPaymentPreview(response.data) };
 }

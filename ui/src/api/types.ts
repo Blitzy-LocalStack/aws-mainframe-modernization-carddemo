@@ -478,6 +478,30 @@ export type Timestamp26 = string;
 //       the service is forbidden from sending.
 
 /**
+ * The request body both account-keyed reads take: the account to resolve, and nothing else.
+ *
+ * Assumptions: this mirrors `AccountLookupRequest` in `account-api.yaml`, whose single property is
+ * required and is declared `type: string` with `pattern: '^[0-9]{1,11}$'` and `maxLength: 11` -- the
+ * eleven-digit width `XREF-ACCT-ID PIC 9(11)` declares at L7 of `app/cpy/CVACT03Y.cpy`.
+ *
+ * Refactoring Rationale: the shape is declared HERE and no longer written inline where the body is
+ * composed. `ui/src/api/accounts.ts` used to declare its own `{ accountId: number }` return type at the
+ * point of use, which made a second definition of one contract shape -- free to drift from the document
+ * and outside the reach of the gate in `ui/src/api/contracts.test.ts` that keeps every wire shape to one
+ * definition. Naming it here puts it beside the response shapes of the same contract.
+ *
+ * Assumptions: the member is TEXT and is never a number, which is the same reason every identifier in
+ * this module is text. The reference holds it as characters and reinterprets it as a number only for
+ * arithmetic -- `10 CC-ACCT-ID PIC X(11)` at `app/cpy/CVCRD01Y.cpy` L34 with
+ * `10 CC-ACCT-ID-N REDEFINES CC-ACCT-ID PIC 9(11).` at L36 -- and the eleven-character width carries
+ * leading zeroes that no numeric type can hold. A screen sends what its operator typed; the service
+ * converts once, when it addresses the stored row.
+ */
+export interface AccountLookupRequest {
+  readonly accountId: string;
+}
+
+/**
  * One account and its customer as the account-view operation returns them.
  *
  * Assumptions: this mirrors `AccountViewResponse` in `account-api.yaml`, whose five members are all
@@ -1422,7 +1446,7 @@ export interface TransactionDetail {
   readonly cardNumber: string;
   readonly originTimestamp: Timestamp26;
   readonly processTimestamp: string | null;
-  readonly returnMessage?: string | null;
+  readonly returnMessage: string | null;
 }
 
 /**
@@ -1465,7 +1489,7 @@ export interface CreatedUserResponse extends UserResponse {
 export interface TransactionAddPreview {
   readonly amount: string;
   readonly written: boolean;
-  readonly returnMessage?: string | null;
+  readonly returnMessage: string | null;
 }
 
 export interface TransactionCreated {
@@ -1494,17 +1518,18 @@ export interface BillPaymentRequest {
 export interface BillPaymentPreview {
   readonly accountId: string;
   /**
-   * The balance a confirmed request would pay, absent on the DECLINED turn.
+   * The balance a confirmed request would pay, NULL on the declined turn.
    *
-   * Refactoring Rationale: the member is optional because one of the three non-paying turns carries no
-   * balance at all. `app/cbl/COBIL00C.cbl` L178 to L181 answers a declined confirmation by clearing the
-   * screen and reaching no account read, so there is no figure to report; the service answers with the
-   * account identifier alone. Declaring it required made this shape unassignable from the 200 union and,
-   * worse, told a caller a figure would always be there.
+   * Refactoring Rationale: required and nullable rather than optional. `app/cbl/COBIL00C.cbl` L178 to L181
+   * answers a declined confirmation by clearing the screen and reaching no account read, so there is no
+   * figure to report -- but `BillPaymentPreview.cleared` constructs the component as `null` and the
+   * services pin `default-property-inclusion: always`, so the member is WRITTEN carrying null. It was
+   * previously optional AND non-nullable, which described an omission the service cannot produce while
+   * promising a decimal string on the one turn that answers null.
    */
-  readonly payableBalance?: string;
+  readonly payableBalance: string | null;
   readonly paid: boolean;
-  readonly returnMessage?: string | null;
+  readonly returnMessage: string | null;
 }
 
 export interface BillPaymentResponse {
@@ -1512,7 +1537,7 @@ export interface BillPaymentResponse {
   readonly accountId: string;
   readonly currentBalance: string;
   readonly paid: boolean;
-  readonly returnMessage?: string | null;
+  readonly returnMessage: string | null;
 }
 
 export type BillPaymentOutcome =
@@ -1796,6 +1821,25 @@ export type FraudAction = 'F' | 'R';
  * matching `PA-ACCOUNT-STATUS PIC X(02) OCCURS 5 TIMES` at
  * `app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy` L22 as the schema declares it. The fixed arity
  * of five is part of the contract, and an array would admit a sixth.
+ *
+ * Refactoring Rationale: ⚠️ the four CUSTOMER display members -- `customerName`, `addressLine1`,
+ * `addressLine2` and `phoneNumber1` -- were absent from this shape while `PendingAuthSummaryView`
+ * returned them and `authorization-api.yaml` published all four, so the header this interface exists to
+ * describe could not be rendered from it at all: the reference screen shows the cardholder's name and
+ * address beside the amounts (`app/app-authorization-ims-db2-mq/cpy-bms/COPAU00.cpy` declares `CNAMEI`,
+ * `ADDR001I`, `ADDR002I` and `PHONE1I`, composed at `cbl/COPAUS0C.cbl` L757 to L779), and a screen
+ * author reading this type would have concluded the service did not send them.
+ *
+ * Assumptions: every member here is PRESENT and ten of them are nullable, so nothing in this shape is
+ * optional. The service serialises this header from a record, every service resolves
+ * `spring.jackson.default-property-inclusion: always` -- declared once for the fleet in
+ * `services/common-lib/src/main/resources/carddemo-common-defaults.yml` -- and no service narrows it, so
+ * a value it has nothing for arrives as an explicit null rather than as a missing key -- including the
+ * four display members, whose null is what a summary whose neighbouring customer record is gone carries.
+ * An unresolved customer therefore leaves all four NULL rather than blank, which is the one value that
+ * distinguishes "not resolved" from "resolved and empty". `authorization-api.yaml` now publishes all
+ * twenty as required for that reason, and this shape mirrors it: a member declared `?:` here would make
+ * a screen provide for an absence the wire never sends.
  */
 export interface PendingAuthSummary {
   readonly accountId: string;
@@ -1814,6 +1858,10 @@ export interface PendingAuthSummary {
   readonly declinedAuthCnt: number;
   readonly approvedAuthAmt: string;
   readonly declinedAuthAmt: string;
+  readonly customerName: string | null;
+  readonly addressLine1: string | null;
+  readonly addressLine2: string | null;
+  readonly phoneNumber1: string | null;
 }
 
 /**
@@ -1846,7 +1894,7 @@ export interface PendingAuthListItem {
 export interface PendingAuthListResponse {
   readonly summary: PendingAuthSummary;
   readonly page: PageResponse<PendingAuthListItem>;
-  readonly screenMessage?: string | null;
+  readonly screenMessage: string | null;
 }
 
 /**
@@ -1904,7 +1952,23 @@ export interface PendingAuthDetail {
  * Assumptions: the six chrome members are non-nullable because the service derives every one of them
  * from its own constants and clock and accepts none from the caller. The authorizer-supplied members
  * stay nullable for the reason recorded on {@link PendingAuthDetail}: the segments behind them are
- * populated from an external message, and a field that message omitted is absent rather than blank.
+ * populated from an external message, and a field that message omitted is null here rather than blank.
+ *
+ * Refactoring Rationale: ⚠️ `authDate`, `authTime`, `posEntryMode` and `cardExpiry` were declared
+ * non-nullable and are now nullable, because all four are RENDERED from a nullable stored value and the
+ * renderer returns null when it has nothing to render -- `PendingAuthDetailMapper.renderOriginatingDate`,
+ * `renderOriginatingTime`, `renderPosEntryMode` and `renderCardExpiry` each answer null for a blank or
+ * absent field, and `authorization-api.yaml` publishes all four with a null branch. Their columns --
+ * `auth_orig_date`, `auth_orig_time`, `pos_entry_mode` and `card_expiry_date` in
+ * `V1__authorization.sql` -- carry no NOT NULL, because an authorizer's message may omit any of them.
+ * Declaring them non-nullable told a screen it could read `.length` or `.slice` off each of them
+ * unconditionally, which is the reading that throws on the first authorization whose message omitted an
+ * originating date.
+ *
+ * Assumptions: `authDate` and `authTime` here are the RENDERED strings and not the packed key numbers
+ * {@link PendingAuthDetail} carries under the same two names. The key members are the row's identity and
+ * are never null; these two are what the terminal displayed, and the terminal displayed blanks when the
+ * authorizer sent none.
  */
 export interface PendingAuthDetailScreen {
   readonly transactionName: string;
@@ -1914,16 +1978,16 @@ export interface PendingAuthDetailScreen {
   readonly title02: string;
   readonly currentTime: string;
   readonly cardNumber: string;
-  readonly authDate: string;
-  readonly authTime: string;
+  readonly authDate: string | null;
+  readonly authTime: string | null;
   readonly authResponse: string;
   readonly authResponseReason: string;
   readonly processingCode: string | null;
   readonly approvedAmount: string;
-  readonly posEntryMode: string;
+  readonly posEntryMode: string | null;
   readonly messageSource: string | null;
   readonly merchantCategoryCode: string | null;
-  readonly cardExpiry: string;
+  readonly cardExpiry: string | null;
   readonly authType: string | null;
   readonly transactionId: string;
   readonly matchStatus: MatchStatus;
@@ -1982,10 +2046,17 @@ export interface FraudMarkRequest {
  * Assumptions: this shape describes SUCCESS only. A write that failed is answered with a non-2xx
  * status and a problem document, so `updateStatus` never reports a failure and a caller must not read
  * it as one.
+ *
+ * Refactoring Rationale: ⚠️ `message` was `?: string | null` and is now a plain `string`, matching the
+ * contract member it mirrors. Both published factories word their outcome -- 'ADD SUCCESS' for an
+ * insert and 'UPDT SUCCESS' for an update -- and a failed write is answered with a problem document
+ * rather than with a sentence-less success, so neither absence nor null is a state this body has. The
+ * two spellings were a client-side widening of a contract that had itself published the member as
+ * optional; both sides are corrected rather than one bent to the other.
  */
 export interface FraudMarkResponse {
   readonly updateStatus: string;
-  readonly message?: string | null;
+  readonly message: string;
 }
 
 export interface PendingAuthListQuery {
@@ -2059,7 +2130,8 @@ export interface ReportSubmission {
  * no message, so the screen redisplays cleared with no indication of which occurred.
  */
 export type ReportSubmissionOutcome =
-  | { readonly outcome: 'DECLINED'; readonly message: string | null }
+  | { readonly outcome: 'DECLINED'; readonly message: null }
+  | { readonly outcome: 'UNANSWERED'; readonly message: string }
   | {
       readonly outcome: 'STARTED';
       readonly submission: ReportSubmission;
@@ -2077,11 +2149,46 @@ export type ReportSubmissionOutcome =
  * both range bounds a caller would have read as `undefined`. The message is nullable on the declined
  * arm and not on the started one, which is the contract's own asymmetry: the reference writes no
  * sentence when a confirmation is declined, at `app/cbl/CORPT00C.cbl` L480 to L483.
+ *
+ * Refactoring Rationale: the discriminator is the published `outcome` member and WAS the boolean
+ * `submitted`. Two of the three turns answer HTTP 200 -- a caller that declined the confirmation and
+ * a caller that has not answered it yet -- so the status cannot separate them, and this client
+ * separated them by status alone and labelled every non-created answer `DECLINED`. A caller who had
+ * merely left the confirmation blank was therefore told it had cancelled, and the prompt naming the
+ * report was dropped on the floor. The union above now carries an `UNANSWERED` arm whose message is
+ * that prompt and is never null, while the declined arm carries no sentence at all -- which is the
+ * asymmetry the reference itself has.
  */
 export interface ReportSubmissionOutcomeBody {
-  readonly submitted: boolean;
+  readonly outcome: 'STARTED' | 'DECLINED' | 'UNANSWERED';
   readonly message: string | null;
   readonly submission: ReportSubmission | null;
+}
+
+/**
+ * What became of one submitted report run, and where its document is when there is one.
+ *
+ * Refactoring Rationale: this shape is new because the handle a submission returns was consumed by
+ * nothing. A caller could not tell a run still going from one that had failed, and could not reach
+ * the document a succeeded run produced -- so a submitted state was the last thing a screen could
+ * show. Every member after the first four is null while it is unknowable: the coordinates are absent
+ * for a run this surface did not start, and the result pair is absent until the run has succeeded and
+ * its document is actually in the store.
+ *
+ * Assumptions: `resultUri` and `resultGeneratedAt` move together. Either both are present or both are
+ * null, because a location with no write instant would leave a caller unable to tell a fresh document
+ * from a stale one, and an instant with no location names nothing.
+ */
+export interface ReportExecutionStatus {
+  readonly executionName: string;
+  readonly status: 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'TIMED_OUT' | 'ABORTED' | 'PENDING_REDRIVE';
+  readonly startedAt: Timestamp26;
+  readonly stoppedAt: Timestamp26 | null;
+  readonly reportType: string | null;
+  readonly startDate: string | null;
+  readonly endDate: string | null;
+  readonly resultUri: string | null;
+  readonly resultGeneratedAt: Timestamp26 | null;
 }
 
 export interface TransactionReportLine {
@@ -2134,6 +2241,19 @@ export interface StatementRequest {
  * the asymmetry is the statement layout's rather than an inconsistency to normalise:
  * `app/cpy/COSTM01.CPY` declares a twenty-character carrier, and reporting the layout's width is what
  * keeps a value it can hold from being truncated on the way out.
+ *
+ * Refactoring Rationale: the two locations and the stamp beside them are NULLABLE, and were required.
+ * A run publishes two artifacts for the whole run rather than one pair per card, so before that run has
+ * produced them there is nothing to follow -- and a required location forced a value to be reported
+ * whether or not one existed, which left a caller unable to tell a rendered statement from an
+ * unrendered one. Each is null exactly when the artifact it describes is not stored, and the two
+ * locations are independent of each other because a run interrupted between its two writes leaves one.
+ *
+ * Refactoring Rationale: `firstRecord` and `recordCount` name WHERE this card's block sits inside those
+ * run-wide artifacts, which is the only way a caller can collect a document and then find the part
+ * belonging to the statement it asked for. Both are null on the same terms as the locations. They are
+ * ordinals into a document rather than a count of anything a caller displays, which is why they are
+ * numbers here and not the rendered strings every monetary member of this file carries.
  */
 export interface Statement {
   readonly cardNumber: string;
@@ -2141,9 +2261,11 @@ export interface Statement {
   readonly customerName: string;
   readonly totalAmount: string;
   readonly transactionCount: number;
-  readonly plainTextUri: string;
-  readonly htmlUri: string;
-  readonly generatedAt: Timestamp26;
+  readonly plainTextUri: string | null;
+  readonly htmlUri: string | null;
+  readonly generatedAt: Timestamp26 | null;
+  readonly firstRecord: number | null;
+  readonly recordCount: number | null;
 }
 
 export interface StatementTransaction {

@@ -175,7 +175,9 @@ convention already established for the test suite at
   request under a per-message transaction and lets a failure propagate, so the
   message is deleted only on success and redelivered otherwise; `AuthReplyOutbox` is
   the reply-intent row committed with the decision; `OutboxPublisher` sends it
-  afterwards; and `auth_reply_outbox` is created by `V1__authorization.sql`.
+  afterwards; and `auth_reply_outbox` is created by `V1__authorization.sql` and extended
+  by `V4__authorization_outbox_send_acceptance.sql` with the accepted-send record that stops
+  a reply being sent twice.
   Assumptions: those four artifacts are named individually rather than summarised,
   because a specification note that understates what is landed sends a reader looking
   for absent code and past the code that is there. **No COBOL is changed**; the baseline remains exactly as it
@@ -1084,7 +1086,9 @@ the moment it returns and the acknowledgement is a separate call afterwards, so 
 task killed between them leaves the request visible again and the next delivery
 sends a **second** reply bearing the same correlation identifier as the first — two
 answers to one question, with nothing on the wire to tell them apart. The remedy is
-a durable **claim** keyed by the requester's own identity, in
+a durable **claim** keyed by the **queue service's own identifier for the
+delivery** — stable across every redelivery of one message, unique per accepted
+send, and not settable by a producer — in
 `account.inquiry_reply_ledger` from
 [`V2__account_inquiry_reply_ledger.sql`](../../services/account-service/src/main/resources/db/migration/V2__account_inquiry_reply_ledger.sql),
 read and written by `com.carddemo.account.repository.InquiryReplyLedger`: the reply
@@ -1104,13 +1108,37 @@ suppresses its duplicate or re-sends the **recorded** bytes.
   moved. Closing it entirely would need the queue send and the database mark to
   commit together across two resource managers, which is the two-phase commit this
   migration records as eliminated.
-- Trade-offs: a request carrying **neither** a message identity nor a correlation
-  identity is answered unguarded, and the consumer logs that it was. Keying the
-  claim on a digest of the payload was rejected because it cannot distinguish a
-  redelivery of one request from a second, legitimately identical request, so it
-  would answer only the first of two genuine inquiries. Treating an unidentified
-  request as new is also the baseline's own behaviour, which performs no idempotency
-  check of any kind.
+- Refactoring Rationale: the claim was keyed on the **producer-supplied** message
+  attribute, falling back to the correlation identifier, and that inverted the
+  guarantee for a whole class of requester. Neither value is authenticated or
+  constrained, and a requester is entitled to reuse one correlation identifier
+  across several questions — so a second, genuine inquiry was suppressed as a
+  redelivery of the first and the requester received the earlier answer for the
+  later question. The broker identifier removes that outcome by construction,
+  because a second send is a second identifier whatever the producer labels it
+  with. The consumer reads `Sqs_Msa_messageId`, falling back to
+  `Sqs_RawMessageId`, and both names are derived from the framework's own
+  constants rather than written as literals. The two producer-supplied values
+  remain **below** it as explicitly legacy fallbacks, reachable only by a request
+  that never passed the broker.
+- Assumptions: every identity that reaches the durable row is **bounded at intake**
+  by the shared queue-identity rule in `com.carddemo.common.messaging.MessagingCorrelationId`
+  — non-blank, at most 64 characters, printable US-ASCII. An unbounded producer
+  value previously reached `request_key VARCHAR(128)` and an outbound message
+  attribute unchecked, so the insert or the send raised, the request was
+  redelivered, and the requester ended with **no reply** and its request on the
+  dead-letter queue. A value failing the rule is now treated as absent for the
+  exchange — not keyed on, not echoed, not recorded, with `NULL` stored rather
+  than a truncation that is neither the requester's value nor absent — the request
+  is still answered, and a controlled protocol diagnostic naming the attribute and
+  its **length** goes to the error sink.
+- Trade-offs: a request carrying **neither** a broker identifier nor a usable
+  identity of its own is answered unguarded, and the consumer logs that it was.
+  Keying the claim on a digest of the payload was rejected because it cannot
+  distinguish a redelivery of one request from a second, legitimately identical
+  request, so it would answer only the first of two genuine inquiries. Treating an
+  unidentified request as new is also the baseline's own behaviour, which performs
+  no idempotency check of any kind.
 
 - Alternatives Considered: **one consumer abstraction for all three flows was
   evaluated and rejected.** A single shared listener would have been reusable
@@ -1191,6 +1219,7 @@ part of it can be opened:
 | Part of the contract | Where it is authored |
 |---|---|
 | The `auth_reply_outbox` table, its primary key and its two partial unpublished-row indexes | `services/authorization-service/src/main/resources/db/migration/V1__authorization.sql` **L948**, **L1120**, **L1142** and **L1166** |
+| The row's accepted-send record — `sent_at`, `send_expires_at`, `broker_message_id`, `broker_sequence_number`, their three check constraints and the partial index over unconfirmed accepted sends | `services/authorization-service/src/main/resources/db/migration/V4__authorization_outbox_send_acceptance.sql` |
 | The reply-intent row itself | `authorization/domain/AuthReplyOutbox.java` |
 | Its persistence, including the group-head and group-follower claim queries | `authorization/repository/OutboxRepository.java` |
 | The request consumer and its per-message transaction boundary | `authorization/service/AuthorizationRequestListener.java` |
@@ -1217,11 +1246,26 @@ no application message has been sent through these queues.
 - Trade-offs: the outbox adds one database write and a publisher, and it changes
   reply delivery from the baseline's send-then-commit sequence — in which a reply can
   be emitted for a decision that never commits — to at-least-once publication of a
-  committed decision. A requester may therefore receive a duplicate reply after a send
-  succeeds but before the publisher records success. That is accepted because the
-  reply carries the transaction identifier at ordinal 2, allowing idempotent
-  duplicate suppression, whereas neither a consumed request nor an uncommitted
-  decision reported as final can be reconstructed reliably.
+  committed decision. That is accepted because the reply carries the transaction
+  identifier at ordinal 2, allowing idempotent duplicate suppression, whereas neither a
+  consumed request nor an uncommitted decision reported as final can be reconstructed
+  reliably.
+- Refactoring Rationale: this paragraph said "a requester may therefore receive a
+  duplicate reply after a send succeeds but before the publisher records success", and
+  the window it described is now narrower than one statement. The publisher records the
+  broker's ACCEPTANCE — the send instant, the deadline the message carried, and the
+  broker's message identity and sequence number — in its own transaction between the
+  send and the publication write, in the four columns
+  `V4__authorization_outbox_send_acceptance.sql` adds. A pass that meets a row already
+  carrying an acceptance reconciles it, marking it published and logging
+  `event=auth.reply.publish-reconciled`, and does **not** send again. What remains is
+  the interval between the broker accepting and that one acceptance statement
+  committing; a retry landing in it travels under the same deduplication identifier, so
+  inside the broker's five-minute deduplication window — which the configured retry
+  delay is far inside — the second send is suppressed and the requester keeps the first
+  message. The residual window and the reason a wider transaction was rejected are
+  recorded on `OutboxPublisher.recordSendAccepted` and asserted by
+  `OutboxPublisherTest.anUncommittedAcceptanceLeavesTheReplySendable`.
 
 ---
 

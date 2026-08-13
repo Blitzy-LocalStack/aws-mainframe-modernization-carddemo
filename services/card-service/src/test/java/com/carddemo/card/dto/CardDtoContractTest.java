@@ -49,8 +49,15 @@ class CardDtoContractTest {
     /** The masked rendering the shared masker produces for {@link #RAW_CARD_NUMBER}. */
     private static final String MASKED_CARD_NUMBER = "************0011";
 
-    /** An eleven-digit account identifier of the width the copybook declares. */
-    private static final String ACCOUNT_ID = "00000000011";
+    /**
+     * An eleven-digit account identifier of the width the copybook declares.
+     *
+     * <p>Refactoring Rationale: the last four digits differ from the four the masked card number
+     * discloses, and they were identical before. Two protected values sharing a fragment make the tail
+     * assertion below undecidable, because a search for the account's tail would match the card's tail
+     * that every one of these renderings prints in full.</p>
+     */
+    private static final String ACCOUNT_ID = "00000000253";
 
     /** The embossed name a diagnostic rendering must not disclose. */
     private static final String EMBOSSED_NAME = "JOHN Q PUBLIC";
@@ -133,14 +140,32 @@ class CardDtoContractTest {
                 EXPIRATION_DATE, "Y", 3).toString();
         String request = new CardUpdateRequest(EMBOSSED_NAME, "Y", "12", "2026", 3).toString();
 
-        for (String rendering : List.of(summary, detail, request)) {
+        String adminDetail = new AdminCardDetail(SELECTOR, MASKED_CARD_NUMBER, ACCOUNT_ID, EMBOSSED_NAME,
+                EXPIRATION_DATE, "Y", 3, RAW_CARD_NUMBER).toString();
+
+        for (String rendering : List.of(summary, detail, request, adminDetail)) {
             assertThat(rendering)
                     .as("a record's generated rendering prints every component, so each of these has to"
                             + " be overridden rather than trusted")
                     .doesNotContain(ACCOUNT_ID)
                     .doesNotContain(EMBOSSED_NAME)
                     .doesNotContain(RAW_CARD_NUMBER);
+            // WHY : Assumptions: the tail assertion is what a whole-value search cannot do. Two of these
+            //       three renderings abbreviated the account identifier through the card masker for one
+            //       revision, which preserves width and keeps the last four characters, so every
+            //       whole-value assertion above passed while four digits of the identifier were being
+            //       disclosed. The tail search is decidable because the fixture's account tail differs
+            //       from the card tail these renderings legitimately print.
+            assertThat(rendering)
+                    .as("an abbreviation of a prohibited value is a disclosure of it")
+                    .doesNotContain(ACCOUNT_ID.substring(ACCOUNT_ID.length() - 4));
         }
+        // WHY : Refactoring Rationale: the administrative shape is included here and was absent. It is
+        //       the one shape in this package carrying an unmasked primary account number, so it is the
+        //       shape whose rendering matters most -- and it was the shape rendering the account
+        //       identifier in full, which no case in this class would have caught while it enumerated
+        //       only the other three.
+        assertThat(adminDetail).doesNotContain(EXPIRATION_DATE);
         assertThat(detail).doesNotContain(EXPIRATION_DATE);
         assertThat(request).doesNotContain("2026").doesNotContain("12,");
 

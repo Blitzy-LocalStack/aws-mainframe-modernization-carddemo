@@ -294,12 +294,31 @@ terraform fmt -check -recursive infra/modules/kms
 
 # WHAT: parse and type-check the module's configuration with no state backend
 #       and no credentials.
-# WHY : Assumptions: `validate` refuses to run in an uninitialised directory, so `init` must
-#       precede it, and `-backend=false` is what lets it run offline -- this
-#       directory has no backend of its own to configure. The GATING path is
-#       the transitive one: CI validates the three roots, and validating a root
-#       parses every module it calls.
-terraform -chdir=infra/modules/kms init -backend=false -input=false
+# WHY : Assumptions: `validate` refuses to run in an uninitialised directory, so
+#       `init` must precede it. `-backend=false` skips BACKEND initialisation, and
+#       that is the whole of what it does: no state is read, no bucket is
+#       addressed and no AWS credential is needed. It is what makes this pair
+#       runnable against an account you cannot reach -- and this directory has no
+#       backend of its own to configure in any case.
+# WHY : Assumptions: `-backend=false` does NOT make `init` offline. `init` still
+#       resolves and installs the provider plugins that `validate` type-checks
+#       against, so it needs either network access to the provider registry or a
+#       populated local plugin cache. To run with neither, point
+#       TF_PLUGIN_CACHE_DIR (or `plugin_cache_dir` in the CLI configuration file)
+#       at a directory already holding hashicorp/aws and hashicorp/random at the
+#       versions versions.tf constrains, and pass `-lockfile=readonly` so `init`
+#       reuses the committed lock rather than trying to update it -- which is
+#       exactly what .github/workflows/infra-ci.yml does.
+#       Refactoring Rationale: this note previously said `-backend=false` "is what
+#       lets it run offline", conflating two independent requirements. Backend and
+#       credential independence come from the flag; network independence comes from
+#       the provider cache. A reader who believed the flag covered both would run
+#       this on an air-gapped host and receive a provider-download failure with
+#       nothing here to explain it.
+# WHY : Assumptions: the GATING path is the transitive one: CI validates the three
+#       roots, and validating a root parses every module it calls. Running the pair
+#       here is a convenience for iterating on this module alone.
+terraform -chdir=infra/modules/kms init -backend=false -lockfile=readonly -input=false
 terraform -chdir=infra/modules/kms validate
 
 # WHAT: run the HCL lint gate over this directory.
@@ -413,7 +432,7 @@ no second table competes with it.
 | <a name="input_deletion_window_in_days"></a> [deletion\_window\_in\_days](#input\_deletion\_window\_in\_days) | Days a destroyed key spends pending deletion before the service removes it and every ciphertext under it becomes permanently unreadable; the service accepts 7 through 30, and this is one of the retention values the dev and prod roots are permitted to set differently without changing the stack's shape. | `number` | `7` | no |
 | <a name="input_enable_key_rotation"></a> [enable\_key\_rotation](#input\_enable\_key\_rotation) | Whether all four customer-managed keys rotate their key material automatically on the service's own interval. The module accepts only true because rotation is an architecture invariant rather than an environment preference. | `bool` | `true` | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Prefix concatenated into each KMS alias name ahead of the key's purpose and the environment, giving the four keys one greppable identity shared with the rest of the stack's resource names; lowercase letters, digits and hyphens only, at most 32 characters, matching the characters an alias name accepts. | `string` | `"carddemo"` | no |
-| <a name="input_s3_cloudfront_distribution_arns"></a> [s3\_cloudfront\_distribution\_arns](#input\_s3\_cloudfront\_distribution\_arns) | CloudFront distribution ARNs the S3 key's mandatory `cloudfront.amazonaws.com` decrypt grant is confined to; empty narrows the grant to every distribution in THIS account and partition, which is the tightest scope expressible without a dependency cycle. | `list(string)` | `[]` | no |
+| <a name="input_s3_cloudfront_distribution_arns"></a> [s3\_cloudfront\_distribution\_arns](#input\_s3\_cloudfront\_distribution\_arns) | ADDITIONAL exact CloudFront distribution ARNs admitted by the S3 key's `cloudfront.amazonaws.com` decrypt grant, beyond the mandatory `cloudfront_distribution_arn`. Empty -- the default -- confines the grant to that one distribution. Wildcards are refused: the grant's condition is `ArnEquals`, which performs no wildcard expansion, so a pattern entry would match nothing and every asset request under it would answer 403. | `list(string)` | `[]` | no |
 | <a name="input_s3_encryption_context_bucket_arns"></a> [s3\_encryption\_context\_bucket\_arns](#input\_s3\_encryption\_context\_bucket\_arns) | Exact S3 bucket ARNs accepted by the S3 key policy. The policy derives both bucket and object encryption-context forms so S3 Bucket Keys and direct object keys remain scoped to these buckets. | `list(string)` | `[]` | no |
 | <a name="input_s3_key_user_role_arns"></a> [s3\_key\_user\_role\_arns](#input\_s3\_key\_user\_role\_arns) | Exact IAM role ARNs the S3 key policy permits to use the key through Amazon S3 for the named bucket encryption contexts. Wildcards, assumed-role session ARNs, users, roots and service principals are refused. | `list(string)` | `[]` | no |
 | <a name="input_secrets_encryption_context_arns"></a> [secrets\_encryption\_context\_arns](#input\_secrets\_encryption\_context\_arns) | Exact Secrets Manager secret ARNs accepted in the `SecretARN` KMS encryption context. A non-empty Secrets Manager role trust list requires at least one exact secret ARN. | `list(string)` | `[]` | no |

@@ -61,12 +61,46 @@
 #                     and report states invoke through container overrides.
 #   Everything else arrives as environment variables that the ECS task definition
 #   supplies from AWS Systems Manager Parameter Store and AWS Secrets Manager.
-#   The placeholders in application.yml that declare NO fallback, so the listener
-#   cannot start without them, are the datasource triple, the resource-server
-#   issuer URI, the expected client id, the state-machine identifier, the
-#   artifact-store bucket, the artifact signing key, and the listener keystore
-#   credential -- the last of which the entry point mints for this one task
-#   rather than reading from the deployment.
+#   The placeholders across application.yml and application-prod.yml that declare NO
+#   fallback, so the listener cannot start without them, are named individually
+#   below rather than described by category -- a category ("the datasource triple")
+#   reads as complete while leaving a reader unable to check it, and a name is what
+#   a task definition actually has to carry:
+#     - SPRING_DATASOURCE_URL, SPRING_DATASOURCE_USERNAME, SPRING_DATASOURCE_PASSWORD
+#     - SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI
+#     - CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID
+#     - CARDDEMO_REPORTING_STEP_FUNCTIONS_STATE_MACHINE_ARN -- the on-demand report
+#       state machine this context starts, standing in for the baseline's write to
+#       the JOBS transient-data queue.
+#     - CARDDEMO_REPORTING_S3_OUTPUT_BUCKET -- the artifact store statements and
+#       reports are written to.
+#     - CARDDEMO_REPORTING_ARTIFACT_HMAC_KEY -- the key an artifact's download
+#       reference is sealed with, so a reference cannot be forged or retargeted.
+#   That list is COMPLETE, and its completeness is mechanically held rather than
+#   asserted: common-lib's RuntimeConfigurationContractTest re-derives the
+#   no-fallback placeholder set from those two files and fails the build if any
+#   member of it is absent from this file. This module declares no SPRING_FLYWAY_*
+#   pair, and that is a property rather than an omission: it owns no schema and runs
+#   no migration, reading the other contexts through read-only cross-schema views.
+#   ONE further no-fallback placeholder is deliberately excluded from the list:
+#     - CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD is NOT an operator-supplied value.
+#       config/docker/generate-listener-material.sh, the entry point named below,
+#       mints the keystore and exports its password itself for this one task's single
+#       use, so a deployment that injected one would be overriding material the task
+#       generates for itself. It is documented HERE, as entrypoint-supplied, rather
+#       than listed among the values a deployment must pass.
+#   One input is required, is NOT an application.yml placeholder, and is therefore
+#   easy to miss when reading only the list above:
+#     - CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY, the environment form of the property
+#       carddemo.pagination.cursor.signing-key, base64 over at least 32 bytes. The
+#       shared kernel publishes the keyset-cursor signer only when that property is
+#       set -- the bean carries @ConditionalOnProperty on it and the kernel defaults
+#       it nowhere, deliberately, so that no deployment can sign cursors with a key
+#       another deployment also holds. Omitting it does not silently degrade the
+#       artifact listing's paging: it removes the bean, ReportController requires
+#       one, and the context then fails to start.
+#   Every entry above is a variable NAME. No value, and therefore no credential,
+#   connection string, issuer URI, bucket name, ARN or key, appears in this file.
 #
 # Return values:
 #   0 (integer)         the JVM exited after a requested shutdown, or the

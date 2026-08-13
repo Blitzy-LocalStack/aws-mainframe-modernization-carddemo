@@ -18,7 +18,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { SIGN_ON_AUTHENTICATED, answerSignOnChallenge, refreshTokens, signOn } from '../api/auth';
 import type { SignOnChallenge, SignOnResult, SignOnTokens } from '../api/auth';
-import { setAccessToken } from '../api/client';
+import { setAccessToken, subscribeToAuthenticationRequired } from '../api/client';
 
 /** Group name granting the administrative surface, as the pool and the contracts name it. */
 export const ADMIN_GROUP = 'carddemo-admin';
@@ -147,6 +147,9 @@ function storedIdToken(): string | null {
  * production caller of that exported setter — before it existed, the setter had no caller at all and
  * every request left the browser unauthenticated.
  * @param {SignOnTokens} tokens - Tokens returned by sign-on, challenge or refresh.
+ * @returns {void} Nothing; the four session-storage keys are written. A refresh token is written only
+ *   when one was issued, so a set without one leaves any earlier value in place rather than clearing
+ *   it -- clearing belongs to `clearTokens`, which is the one path that ends a session.
  */
 function installTokens(tokens: SignOnTokens): void {
   setAccessToken(tokens.accessToken);
@@ -163,6 +166,8 @@ function installTokens(tokens: SignOnTokens): void {
  * Assumptions: the access token is cleared through the same setter that installs it, for the same
  * single-key reason, and the identity and refresh tokens are removed alongside it so no signed claim
  * outlives the credential it accompanied.
+ * @returns {void} Nothing; all four session-storage keys are removed. This is the storage half of a
+ *   sign-out; the state half is the caller's, which is why the two always run together.
  */
 function clearTokens(): void {
   setAccessToken(null);
@@ -180,6 +185,21 @@ function clearTokens(): void {
  * memory only — would sign an operator out on every refresh, which the 3270 workflow this replaces
  * never did. `sessionStorage` rather than `localStorage` bounds the exposure to the tab and clears
  * it when the tab closes.
+ *
+ * Assumptions: FOUR keys carry the session, and they are named here because "held in
+ * `sessionStorage`" does not tell a reader what to clear or what a cross-site script could reach:
+ * `carddemo.access-token` (written and cleared by `setAccessToken` in `ui/src/api/client.ts`),
+ * `carddemo.id-token`, `carddemo.user-id` and `carddemo.refresh-token` — the last present only when
+ * the pool issued one — all written by `installTokens` and removed by `clearTokens` below. Because
+ * the scope is the TAB, a session survives a reload and an in-tab navigation, does not exist in a
+ * second tab, and is discarded when the tab closes; nothing is ever written to `localStorage`.
+ *
+ * Assumptions: all four are cleared together, on three triggers and by one path. An explicit
+ * sign-out, a refresh exchange the pool refuses, and any 401 answered to a request that CARRIED a
+ * bearer token all reach `clearTokens`, so no signed claim outlives the credential it accompanied.
+ * Two statuses deliberately clear NOTHING: a 401 from the sign-on request itself, which means a
+ * rejected password rather than an expired session, and a 403, which is a valid token refused one
+ * route. `ui/.env.example` states the same three facts for a reader who never opens this file.
  * @returns {AuthApi} The current session and the operations that change it.
  */
 export function useAuth(): AuthApi {
@@ -266,6 +286,60 @@ export function useAuth(): AuthApi {
       setExpiresInSeconds(null);
     },
     [],
+  );
+
+  useEffect(
+    /**
+     * Signs the operator out when a service stops accepting the session this tab holds.
+     *
+     * Assumptions: this subscription is what makes the transport's re-authentication signal have an
+     * effect. `ui/src/api/client.ts` discards the access token on a 401 that CARRIED one and then
+     * notifies its listener registry, deliberately signalling rather than navigating; before this
+     * effect existed the registry had no production subscriber, so the identity token, the refresh
+     * token and the retained identifier all survived a rejected session, and the refresh this hook had
+     * scheduled went on re-presenting a credential belonging to a session already refused. The guards in
+     * `ui/src/routes/guards.tsx` read `signedOn` from the identity token, so a tab in that state kept
+     * rendering protected screens for an operator whose every request was refused — a stale-session
+     * state the operator could only leave by signing out by hand or closing the tab.
+     *
+     * Assumptions: the listener is `signOut` itself rather than a narrower clear, so an expired
+     * session and a deliberate sign-out take the SAME path. Clearing only what the interceptor missed
+     * would leave two partial clears to keep in agreement, and the next credential added to
+     * `installTokens` would have to be remembered in both; routing both through one function means a
+     * credential added in one place is discarded in every case by construction. The failure is
+     * deliberately not inspected either: the client raises this signal only for a 401 on a request that
+     * actually CARRIED a bearer, so the decision "was this session refused" has already been taken by
+     * the module that saw the response, and a 403 -- a valid token refused one route -- never reaches
+     * here, which is what keeps an ordinary operator meeting an administrative screen signed in.
+     *
+     * Trade-offs: `signOut` takes no argument while a listener is handed the normalised 401, so the
+     * failure — and with it the correlation identifier and the service's own sentence — is discarded
+     * here. That is accepted because this hook renders no message: the screen that issued the request
+     * receives the same rejection through its own await and is the one placed to report it, whereas a
+     * message raised from here would appear detached from any action the operator took.
+     *
+     * Trade-offs: routing is NOT performed here either. `signOut` returns this hook to its signed-off
+     * state and `ui/src/routes/guards.tsx`, which reads that state, sends the operator to the sign-on
+     * screen; navigating from a subscription would duplicate the guards' decision in a second place and
+     * would make this hook untestable without a router.
+     *
+     * Alternatives Considered: hoisting session state into a module-level store read through
+     * `useSyncExternalStore`, so one clear served every consumer. It is the better long-term shape
+     * and is refused here as disproportionate: this hook holds its state per instance, so that change
+     * rewrites its state model and touches every screen that calls it, whereas the defect is only
+     * that a published signal had nobody listening. Per-instance subscription is correct in the
+     * meantime because `clearTokens` is idempotent — several mounted instances each clearing the same
+     * three keys is the same end state as one — and because each instance must reset its OWN
+     * `useState` to re-render, which a single module-level clear could not have made it do.
+     *
+     * Alternatives Considered: subscribing once from the app shell. Rejected because the shell holds
+     * none of this state, so it would have to reach into the hook to reset it, and any screen mounted
+     * outside the shell — the sign-on screen is one — would not be covered.
+     * @returns {() => void} The registry's own unsubscribe, returned as the effect's cleanup so a
+     *   torn-down hook stops being told and cannot set state after it unmounts.
+     */
+    () => subscribeToAuthenticationRequired(signOut),
+    [signOut],
   );
 
   useEffect(

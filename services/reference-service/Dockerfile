@@ -12,11 +12,17 @@
 #   them.
 #   Two start-up behaviours of the packaged jar are what the health probe below is
 #   sized for. Flyway applies TWO migrations rather than one: V1__reference.sql
-#   creates the six `reference` tables and V2__seed_reference.sql seeds them, this
-#   being the only module in the migration that carries a V2, because it seeds the
-#   mandatory 'DEFAULT' disclosure-group row and the address allow-lists that other
-#   contexts read to validate an address. DateInquiryMessageListener then begins
-#   polling SQS, which is what replaces CODATE01's IBM MQ front door.
+#   creates the six `reference` tables and V2__seed_reference.sql then SEEDS them --
+#   with the mandatory 'DEFAULT' disclosure-group row, the transaction types and
+#   categories, and the address allow-lists that other contexts read to validate an
+#   address. What matters for the probe is that this module's start does DATA work and
+#   not only schema work, so its first-start migration time is dominated by inserts
+#   rather than by DDL. No claim is made here about how many migrations any sibling
+#   applies: this note previously called V2 unique to this module and to the tree,
+#   which is false in both readings -- six of the eight contexts carry a V2 and the
+#   auth context reaches V4 -- and neither reading was load-bearing for the probe
+#   anyway. DateInquiryMessageListener then begins polling SQS, which is what replaces
+#   CODATE01's IBM MQ front door.
 #
 # Stages:
 #   build   - installs the pinned database trust anchor, resolves the reactor's
@@ -61,11 +67,27 @@
 #     - CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE,
 #       CARDDEMO_REFERENCE_INQUIRY_REPLY_QUEUE and
 #       CARDDEMO_REFERENCE_INQUIRY_ERROR_QUEUE
-#   That is the complete set of no-fallback placeholders in application.yml with ONE
-#   deliberate exclusion. CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD has no fallback either
+#   That is the complete set of no-fallback placeholders across application.yml and
+#   application-prod.yml with ONE deliberate exclusion, and the completeness is
+#   mechanically held rather than asserted: common-lib's
+#   RuntimeConfigurationContractTest re-derives that placeholder set from the two
+#   files and fails the build if any member of it is absent from this file.
+#   CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD has no fallback either
 #   and is omitted on purpose: the entry point mints the keystore and exports its
 #   password itself, so a deployment that injected one would be overriding material
-#   this task generates for its own single use.
+#   this task generates for its own single use. It is named here, as
+#   entrypoint-supplied, rather than left out of the file altogether.
+#   One further input is required, is NOT a placeholder in either file, and is
+#   therefore easy to miss when reading only the list above:
+#     - CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY, the environment form of the property
+#       carddemo.pagination.cursor.signing-key, base64 over at least 32 bytes. The
+#       shared kernel publishes the keyset-cursor signer only when that property is
+#       set -- the bean carries @ConditionalOnProperty on it and the kernel defaults
+#       it nowhere, deliberately, so that no deployment can sign cursors with a key
+#       another deployment also holds. Omitting it does not silently degrade the
+#       transaction-type list's paging: it removes the bean, and both
+#       TransactionTypeController and TransactionCategoryController take one as a
+#       constructor argument, so the context then fails to refresh.
 #   Refactoring Rationale: SPRING_FLYWAY_USER and SPRING_FLYWAY_PASSWORD were absent
 #   from this list while application.yml required them, which is the worst shape for a
 #   list like this one -- it read as exhaustive and was not, so an operator following
@@ -373,10 +395,11 @@ RUN chmod 0555 /usr/local/bin/carddemo-entrypoint.sh
 USER carddemo:carddemo
 
 # WHY : Trade-offs: the container start period below is 30 seconds even though this
-#       context applies the only two-migration Flyway chain in the tree - V2 seeds the
+#       context's V2 migration does DATA work on first start - it seeds the
 #       transaction types, the categories, the mandatory 'DEFAULT' disclosure-group
 #       row and the address allow-lists drawn from the 490 codes of
-#       app/cpy/CSLKPCDY.cpy. A longer period was considered and rejected: the health
+#       app/cpy/CSLKPCDY.cpy, so its first-start time is dominated by inserts rather
+#       than by DDL. A longer period was considered and rejected: the health
 #       endpoint reports not-ready while Flyway runs, and the retry budget below
 #       already covers that, so lengthening the period would only delay detection of a
 #       genuinely stuck start.

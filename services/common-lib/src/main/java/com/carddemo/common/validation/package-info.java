@@ -255,8 +255,8 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel holds 40 production classes and 11 package charter files,
- * for 51 compilation units in total. This package contributes 2 of those
+ * <p>The shared kernel holds 44 production classes and 11 package charter files,
+ * for 55 compilation units in total. This package contributes 2 of those
  * production classes -- {@code DateEditValidator} and {@code FieldValidationFlag},
  * both present in this directory -- and 1 of those charters. The arithmetic is
  * recorded so that a class absent from the module is distinguishable from one the
@@ -273,15 +273,18 @@
  * root 2 + money 3 + codec 7 + error 8 + web 5 + security 10 + observability 5 + time 2 + validation 3 + messaging 5 + control 5 = 55
  * </pre>
  *
- * <p>The root contributes its charter and the one auto-configuration class. And
- * 39 production classes plus 11 charters is 50. All three paths agree, and this
- * file is one of the eleven charters.
+ * <p>The root contributes its charter and the one auto-configuration class, and the
+ * two sums above are the two paths to the totals. A third arithmetic restatement
+ * stood here -- "39 production classes plus 11 charters is 50" -- and it is deleted
+ * rather than corrected: nothing re-derived it, and it was the figure that drifted
+ * while both labelled sums beside it stayed right. Both remaining sums agree, and
+ * this file is one of the eleven charters.
  *
- * <p>Assumptions: the authoritative totals are <strong>39 production classes and
- * 50 compilation units, 11 of them charters</strong>. The total is always stated
- * beside a breakdown that re-derives it, which is why both are kept here instead
- * of the total alone: a figure that does not reproduce all three sums above is
- * rejected on sight rather than adopted.
+ * <p>Assumptions: the authoritative totals are <strong>44 production classes and
+ * 55 compilation units, 11 of them charters</strong>. The total is always stated
+ * beside a labelled sum that re-derives it, which is why both are kept here instead
+ * of the total alone: a figure that does not reproduce both sums above is rejected on
+ * sight rather than adopted.
  *
  * <p>Refactoring Rationale: this section previously recorded 21 production classes
  * in 30 compilation units across 9 charters, and named eight subpackages. Every one

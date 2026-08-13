@@ -58,14 +58,6 @@
  *       {@code app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl}.</li>
  *   <li>{@code AuthorizationRequestListenerTest} exercises {@code AuthorizationRequestListener} against
  *       {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl}.</li>
- *   <li>{@code ContainerCyclingWindowBoundaryTest} exercises {@code ContainerCyclingWindowBoundary},
- *       the asynchronous half of that same program's five-hundred-message processing window at
- *       {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl}. Refactoring Rationale: this is a
- *       separate class from the listener test rather than more cases in it, because the property it
- *       asserts is an ORDERING between three operations on a collaborator the listener only hands a
- *       callback to -- that intake reopens between the container stopping and starting again, on every
- *       path including the ones where either operation throws. The listener test cannot observe that
- *       ordering at all, since it supplies the boundary as a double that runs the callback immediately.</li>
  *   <li>{@code AuthorizationDecisionServiceTest} exercises {@code AuthorizationDecisionService} against
  *       that same program's {@code 6000-MAKE-DECISION} paragraph at lines 657 to 734. The decision is a
  *       collaborator of the listener rather than a service role of its own.</li>
@@ -91,7 +83,17 @@
  *       for this class's absence was that the mechanism needed "a live queue" -- which is false, both
  *       collaborators being interfaces. The enforcement half of a published guarantee therefore had no test
  *       at all, and could not have raised one: a boundary that cycles nothing lets every window run long and
- *       reports nothing.</li>
+ *       reports nothing.
+ *       Assumptions: the property is an ORDERING between three operations on a collaborator the listener
+ *       only hands a callback to -- that intake reopens between the container stopping and starting
+ *       again, on every path including the ones where either operation throws -- which is why it is a
+ *       separate class rather than more cases in the listener test. That test supplies the boundary as a
+ *       double that runs the callback immediately, so it cannot observe the ordering at all.
+ *       Refactoring Rationale: this class had TWO entries in this roster, so the roster carried twenty
+ *       for the nineteen test files the marker above measures. The shorter entry is removed and the
+ *       sentence only it carried is folded in here, because deleting a duplicate is otherwise a silent
+ *       way to lose a rationale -- and the census being off by one in the direction of claiming an extra
+ *       class is what makes the marker and the roster disagree without either being obviously wrong.</li>
  *   <li>{@code OutboxMetadataConfidentialityTest} exercises that same publisher for one separable
  *       property, that no value taken off the wire reaches a log line or an exception message.</li>
  *   <li>{@code PurgeJobTest} exercises {@code PurgeJob} against
@@ -244,6 +246,21 @@
  *       receiver, and here an over-long token fails loudly instead of losing its final digit. Owner:
  *       {@code AuthorizationRequestListenerTest}.</li>
  * </ul>
+ *
+ * <p>⚠️ Assumptions: the eight above are the LETTER-CODED family, and that is the whole of what this list
+ * enumerates. The register of record also carries SLUG-NAMED entries, and two of them are asserted from
+ * this context -- {@code D-AUTH-SUMMARY-MONEY-DOMAIN}, whose assertions live in the sibling
+ * {@code domain} package's {@code PendingAuthSummaryMoneyDomainTest}, and
+ * {@code D-SUMMARY-COUNTER-SATURATION}, whose reporting halves are asserted here by
+ * {@code AuthorizationRequestListenerTest} and {@code PurgeJobTest}. They are deliberately NOT added to
+ * the list, because the eight and the parent charter's nine are reconciled against each other in the
+ * paragraph below and a slug-named entry joining one list and not the other would break that
+ * reconciliation. Trade-offs: the cost is that this list is not a census of every divergence the context
+ * carries, so the scope is stated here rather than left for a reader to infer from an absence -- which is
+ * how the two counts below came to need reconciling in the first place. Both slug-named entries are
+ * registered in {@code docs/architecture/cobol-to-service-traceability.md} section 7.4 and each names its
+ * verifying classes there, so the register remains the complete account and this list remains the
+ * letter-coded one.</p>
  *
  * <p>Trade-offs: the parent charter enumerates NINE divergences and this package owns eight of them. The
  * ninth is the one logical amount with two textual forms, a zero-suppressed rendering on the wire against

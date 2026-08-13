@@ -40,25 +40,54 @@
 #   Javadoc in either module compiled here fails `docker build` itself.
 #
 # Parameters:
-#   This image takes no command arguments. The entrypoint is the exec-form JVM
-#   invocation below and the process is a long-running HTTP listener, so there is
-#   no per-run token of the kind the batch image accepts.
+#   This image REQUIRES no command argument, because the process is a long-running
+#   HTTP listener rather than a job and so takes no per-run token of the kind the
+#   batch image accepts. Any argument that IS supplied still reaches the JVM: the
+#   entry point below is the shared listener-material script, whose final line
+#   replaces itself with the JVM and forwards "$@" unchanged.
 #   Runtime configuration arrives entirely through environment variables that the
 #   ECS task definition supplies from Parameter Store and Secrets Manager, whose
 #   values are produced by the Terraform outputs of infra/envs/{dev,prod}. The
 #   variables whose application.yml placeholders declare NO fallback, so the context
 #   cannot start without them, are:
 #     - SPRING_DATASOURCE_URL, SPRING_DATASOURCE_USERNAME, SPRING_DATASOURCE_PASSWORD
+#     - SPRING_FLYWAY_USER, SPRING_FLYWAY_PASSWORD -- the migration identity is
+#       SEPARATE from the runtime identity above and is not defaulted to it, so the
+#       schema owner's credential is never the credential the request path holds.
 #     - SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI
 #     - CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID
+#     - CARDDEMO_ACCOUNT_CONTEXT_BASE_URL -- bill payment debits an account this
+#       context does not own, so the account context's address is a start-time input.
+#     - CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY -- the key this context
+#       signs its outbound service-to-service assertions with.
+#   The list above is the COMPLETE set of no-fallback placeholders across
+#   application.yml and application-prod.yml, with ONE deliberate exclusion, and the
+#   completeness is not a promise a reader has to take on trust: common-lib's
+#   RuntimeConfigurationContractTest re-derives the placeholder set from those two
+#   files and fails the build if any member of it is absent from this file.
+#   The one exclusion is CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD. It has no fallback
+#   either, but it is NOT an operator-supplied value and belongs in a different
+#   category from every name above: config/docker/generate-listener-material.sh, run
+#   by the entry point below, mints the keystore and exports its password itself for
+#   this one task's single use. A deployment that injected one would be overriding
+#   material the task generates for itself, so the name is documented HERE, as
+#   entrypoint-supplied, rather than listed among the values a deployment must pass.
+#   One further input is required, is NOT an application.yml placeholder, and is
+#   therefore easy to miss when reading only the list above:
+#     - CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY, the environment form of the property
+#       carddemo.pagination.cursor.signing-key, base64 over at least 32 bytes. The
+#       shared kernel publishes the keyset-cursor signer only when that property is
+#       set -- the bean carries @ConditionalOnProperty on it and the kernel defaults
+#       it nowhere, deliberately, so that no deployment can sign cursors with a key
+#       another deployment also holds. Omitting it does not silently degrade paging:
+#       it removes the bean, and TransactionController takes one as a constructor
+#       argument -- passing it on into TransactionListService -- so the context fails
+#       to refresh.
 #   Every entry above is a variable NAME. No value, and therefore no credential,
 #   connection string, issuer URI, queue URL, account identifier or key ARN, appears
 #   anywhere in this file: it declares no ENV and no ARG at all, so there is nothing
 #   here for a deployment to inherit a secret from and nothing for a reader to
-#   mistake for one. CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD has no fallback either and
-#   is deliberately omitted from the list: the entry point mints the keystore and
-#   exports its password itself, so a deployment that injected one would be
-#   overriding material this task generates for its own single use.
+#   mistake for one.
 #
 # Return values:
 #   The container's exit status is the JVM's, because the JVM is PID 1. Three codes

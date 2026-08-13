@@ -276,22 +276,73 @@ jobs:
               return found
 
 
+          NESTED_DECLARATION = (
+              ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda
+          )
+
+
           def raises_something(node):
-              """Report whether a body can raise, counting assert as a raise.
+              """Report whether one body can raise, counting assert as a raise.
 
               Parameters:
-                  node (ast.AST): The module or function node whose body is examined.
+                  node (ast.AST): The module or function node whose OWN body is examined.
               Returns:
-                  bool: True if the body contains a raise or an assert statement.
+                  bool: True if that body contains a raise or an assert statement outside
+                      any nested declaration.
               Raises:
                   None.
               """
               # Assumptions: a nested function's own statements are not counted for its
-              #   parent, so each definition is judged on what it does itself.
-              for child in ast.walk(node):
+              #   parent, so each definition is judged on what it does itself. That is why
+              #   this walks explicitly instead of calling ast.walk: ast.walk descends
+              #   through EVERY child including nested FunctionDef, ClassDef and Lambda
+              #   bodies, so a parent that raises nothing would have been required to
+              #   document Raises: because an inner helper raises -- while the same inner
+              #   helper is also judged on its own, one entry later in `subjects`. The
+              #   traversal below stops at each declaration boundary, so exactly one
+              #   subject accounts for each raise.
+              # WHY : Refactoring Rationale: the comment above described this behaviour
+              #   while the code did the opposite. The direction of the error was
+              #   conservative -- it over-required Raises: rather than under-requiring it,
+              #   so no undocumented raise escaped -- but the gate reported the reason
+              #   wrongly, naming a parent for a raise it does not contain, which is the
+              #   part that costs a reader time.
+              pending = list(ast.iter_child_nodes(node))
+              while pending:
+                  child = pending.pop()
+                  if isinstance(child, NESTED_DECLARATION):
+                      continue
                   if isinstance(child, (ast.Raise, ast.Assert)):
                       return True
+                  pending.extend(ast.iter_child_nodes(child))
               return False
+
+
+          # Assumptions: the boundary above is asserted here rather than trusted, because
+          #   it is the one behaviour of this gate that its own output cannot reveal -- an
+          #   over-broad traversal still produces a green run on a compliant workflow, so
+          #   the defect it had would have survived every passing build. The two snippets
+          #   are the smallest pair that distinguishes the two traversals: `outer` raises
+          #   nothing itself and must answer False, while the nested `inner` and the
+          #   enclosing module must both answer True.
+          _BOUNDARY_PROBE = ast.parse(
+              "raise ValueError('module level')\n"
+              "def outer():\n"
+              "    def inner():\n"
+              "        raise KeyError('nested')\n"
+              "    return inner\n"
+          )
+          _PROBE_OUTER = _BOUNDARY_PROBE.body[1]
+          _PROBE_INNER = _PROBE_OUTER.body[0]
+          assert raises_something(_BOUNDARY_PROBE), (
+              "raises_something must see a module-level raise"
+          )
+          assert not raises_something(_PROBE_OUTER), (
+              "raises_something must NOT attribute a nested function's raise to its parent"
+          )
+          assert raises_something(_PROBE_INNER), (
+              "raises_something must see a nested function's own raise when judging it"
+          )
 
 
           def missing_elements(source, label):
@@ -378,22 +429,57 @@ jobs:
       # Assumptions: validate needs initialized provider schemas, while a normal
       # init would require the remote backend and credentials. -backend=false
       # resolves modules/providers without touching state.
+      # Assumptions: the environment roots are reached by the GLOB infra/envs/*/ for
+      # the same reason the terraform-docs step below uses one -- this step's own name
+      # claims it covers "every Terraform root", and with dev and prod written out by
+      # hand that claim was true only for as long as there are exactly two
+      # environments. A third one would have gone unvalidated with the step still
+      # reporting green and still calling itself exhaustive. bootstrap stays explicit
+      # because it is not an environment and does not sit under infra/envs.
+      # Trade-offs: the glob needs the same floor the drift step needs, because an
+      # unmatched pattern survives `set -u` as a literal and a loop over nothing exits
+      # zero. Three is a lower bound, so adding an environment is not a failure.
       - name: Initialize and validate every Terraform root without a backend
         shell: bash
         run: |
           set -euo pipefail
-          for root in infra/bootstrap infra/envs/dev infra/envs/prod; do
+          roots=(infra/bootstrap infra/envs/*/)
+          validated=0
+          for root in "${roots[@]}"; do
+            test -f "$root/main.tf" || { echo "not a Terraform root: $root" >&2; exit 1; }
             terraform -chdir="$root" init -backend=false -lockfile=readonly -input=false
             terraform -chdir="$root" validate
+            validated=$((validated + 1))
           done
+          if [ "$validated" -lt 3 ]; then
+            echo "validated only $validated Terraform roots; expected at least 3" >&2
+            exit 1
+          fi
+          echo "validated $validated Terraform roots"
 
       # Assumptions: the AWS ruleset is itself pinned in infra/.tflint.hcl.
       # Initialization verifies its signature before recursive lint executes.
+      # Assumptions: the recursive pass runs FROM infra/, not from the repository
+      # root, because --recursive traverses every directory beneath the working
+      # directory. From the root that traversal enters services/, ui/,
+      # data-migration/ and — on a workspace that has built — services/*/target and
+      # ui/node_modules, none of which hold HCL; the run is slower and its verdict is
+      # reached over a tree the configuration was never written for. infra/.tflint.hcl
+      # records this invocation as its own contract and states that it "is not
+      # optional"; this step now matches it rather than contradicting it.
+      # Assumptions: --config stays ABSOLUTE. Under --recursive a relative path is
+      # resolved against each visited directory, so a relative one would find the
+      # configuration in infra/ and nowhere else — and TFLint treats an absent
+      # configuration as a default configuration, which makes the run PASS while
+      # checking almost nothing. That is the failure this absolute path exists to
+      # prevent, and it is why the path is not shortened once the working directory
+      # is infra/.
       - name: Run the Rule 1 HCL lint gate
         shell: bash
         run: |
           set -euo pipefail
           tflint --init --config="$GITHUB_WORKSPACE/infra/.tflint.hcl"
+          cd "$GITHUB_WORKSPACE/infra"
           tflint --recursive --config="$GITHUB_WORKSPACE/infra/.tflint.hcl"
 
       # Assumptions: this gate decides what TFLint cannot. TFLint asserts that a
@@ -421,13 +507,37 @@ jobs:
       # Alternatives Considered: regenerating README tables in CI. Rejected
       # because silent mutation would hide the documentation drift this gate is
       # intended to make reviewable.
+      # Assumptions: the environment roots are reached by the GLOB infra/envs/*/ and
+      # not by naming dev and prod. infra/.terraform-docs.yml publishes both loops as
+      # globs and argues the point at length -- "the hazard being avoided is
+      # ENUMERATION, and a glob is not an enumeration" -- because the same enumeration
+      # has already gone stale once in this package: infra/modules/step-functions-batch
+      # landed after that file was written, and the module glob picked it up with no
+      # edit here while a hand-written list would have excluded it silently and stayed
+      # green. Naming dev and prod reintroduced exactly that hazard for the
+      # environments, which is the half more likely to grow.
+      # Trade-offs: a glob under `set -u` needs its own floor, because bash leaves an
+      # unmatched pattern as a literal and terraform-docs would then be handed a path
+      # that does not exist -- or, if nullglob were ever set, nothing at all, and a
+      # loop over nothing exits zero. The count check below is what makes an empty or
+      # mistyped glob a failure instead of a pass. It is a lower bound rather than an
+      # equality so a third environment is not a failure; losing one is.
       - name: Check terraform-docs drift across all modules and roots
         shell: bash
         run: |
           set -euo pipefail
-          for dir in infra/bootstrap infra/modules/* infra/envs/dev infra/envs/prod; do
+          directories=(infra/bootstrap infra/modules/*/ infra/envs/*/)
+          checked=0
+          for dir in "${directories[@]}"; do
+            test -f "$dir/main.tf" || { echo "not a Terraform directory: $dir" >&2; exit 1; }
             terraform-docs --config "$GITHUB_WORKSPACE/infra/.terraform-docs.yml" --output-check "$dir"
+            checked=$((checked + 1))
           done
+          if [ "$checked" -lt 19 ]; then
+            echo "terraform-docs drift check covered only $checked directories; expected at least 19" >&2
+            exit 1
+          fi
+          echo "terraform-docs drift check covered $checked directories"
 
       # WHY : terraform-docs above regenerates the GENERATED table and can therefore only
       #       detect drift in the part of a document a tool writes. Every count claim in this
@@ -987,9 +1097,27 @@ jobs:
           assert 'resource "aws_sqs_queue_redrive_allow_policy" "exact_source"' in sqs
           assert 'redrivePermission = "byQueue"' in sqs
 
-          assert 'sid       = "ObserveAndStopTasksInApprovedCluster"' in step
-          assert 'actions   = ["ecs:DescribeTasks", "ecs:StopTask"]' in step
+          # Refactoring Rationale: this cluster asserted one combined
+          #   ObserveAndStopTasksInApprovedCluster statement carrying
+          #   ["ecs:DescribeTasks", "ecs:StopTask"] under a shared ecs:cluster
+          #   condition. AWS's service authorization reference lists the task
+          #   resource type for StopTask, so the narrowest supported bound for it
+          #   is a task ARN rather than a condition; the statement is now split so
+          #   each action carries the bound its own service enforces. The
+          #   assertions follow the split rather than being relaxed: StopTask must
+          #   be scoped to the cluster's task ARN pattern and must NOT reacquire a
+          #   condition, and the read and list actions keep the cluster condition.
+          assert 'sid       = "StopTasksInApprovedCluster"' in step
+          assert 'actions   = ["ecs:StopTask"]' in step
+          assert 'resources = [local.cluster_task_arn_pattern]' in step
+          assert 'sid       = "DescribeTasksInApprovedCluster"' in step
+          assert 'actions   = ["ecs:DescribeTasks"]' in step
+          assert 'sid       = "ListTasksInApprovedCluster"' in step
+          assert 'actions   = ["ecs:ListTasks"]' in step
+          assert 'ObserveAndStopTasksInApprovedCluster' not in step
           assert 'variable = "ecs:cluster"' in step
+          assert 'sid       = "TagTasksCreatedByRunTask"' in step
+          assert 'variable = "ecs:CreateAction"' in step
           assert 'sid    = "DeliverExecutionLogs"' in step
           assert '"logs:CreateLogDelivery"' in step
           assert step.count('resources = ["*"]') >= 2

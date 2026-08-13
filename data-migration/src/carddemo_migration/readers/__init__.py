@@ -9,8 +9,8 @@ decoded records, and each module additionally publishes the privacy-safe renderi
 diagnostic may emit for the record it owns.
 
 This module is the subpackage entry point. It publishes the complete inventory of readers, the
-mapping from a record layout to the module that owns it, and lazy access to every one of those
-modules by attribute.
+mapping from a record layout to the module that owns it, one dispatch registry per corpus with the
+resolver that selects between them, and lazy access to every one of those modules by attribute.
 
 The contract every reader is held to
 ------------------------------------
@@ -51,6 +51,26 @@ AttributeError
 KeyError
     Raised by :func:`reader_module` for a layout no reader owns, with a message that enumerates
     the layouts that do have one.
+LayoutError
+    Raised by :func:`dataset_reader` for an unknown corpus, a layout no reader owns, or a layout
+    that publishes no entry point for the requested corpus. That function documents at its own
+    definition why its failure is typed differently from :func:`reader_module`'s.
+
+Dispatching by record and by corpus
+-----------------------------------
+:data:`DATASET_READERS` holds the twelve whole-extract EBCDIC entry points and
+:data:`ASCII_DATASET_READERS` the ten whole-extract character entry points, both keyed by layout
+name; :data:`CHARACTER_PATH_ABSENT_RECORDS` is the derived difference between them, and
+:func:`dataset_reader` selects one callable from a layout name and a corpus name.
+
+Assumptions: a caller that needs decoded records reaches them through :func:`dataset_reader` rather
+than by building a reader from a layout with :mod:`carddemo_migration.readers.factory`. The two are
+NOT interchangeable and the difference is a security boundary, not a convenience: a factory-built
+reader carries the geometry and the suppression contract, and it carries none of the per-record
+policy the twelve modules add on top -- ``card``'s ``ProtectedValue`` wrapper on the card
+verification value, ``usrsec``'s A/U user-type domain, the processing-timestamp validation in
+``dalytran`` and ``transaction``, and ``transaction``'s absent-source semantics. ``factory`` exists
+to build a reader, and the twelve modules are what a caller should dispatch to.
 
 The twelve readers, their copybooks and their record lengths
 -----------------------------------------------------------
@@ -370,7 +390,11 @@ import importlib
 from types import MappingProxyType, ModuleType
 from typing import TYPE_CHECKING, Final
 
-from carddemo_migration.copybook.layouts import EXPORT_HEADER_LAYOUT, base_master_names
+from carddemo_migration.copybook.layouts import (
+    EXPORT_HEADER_LAYOUT,
+    LayoutError,
+    base_master_names,
+)
 from carddemo_migration.readers import (
     account,
     card,
@@ -406,6 +430,8 @@ if TYPE_CHECKING:  # pragma: no cover - imported for annotations only
 #   caller needs, and `__dir__` had to compensate for the omission rather than derive from the
 #   declaration.
 __all__ = [
+    "ASCII_DATASET_READERS",
+    "CHARACTER_PATH_ABSENT_RECORDS",
     "DATASET_READERS",
     "READER_MODULES",
     "SUPPORT_MODULES",
@@ -413,10 +439,12 @@ __all__ = [
     "card",
     "customer",
     "dalytran",
+    "dataset_reader",
     "discgrp",
     "export_record",
     "factory",
     "reader_module",
+    "ships_committed_extract",
     "source",
     "tcatbal",
     "trancatg",
@@ -490,6 +518,55 @@ DATASET_READERS: Final[Mapping[str, Callable[[pathlib.Path], Iterator[Mapping[st
             EXPORT_HEADER_LAYOUT.name: export_record.read_ebcdic_export_records,
         }
     )
+)
+
+# WHY : Refactoring Rationale: the CHARACTER counterpart of the mapping above is now declared too,
+#   because a caller that could reach only the EBCDIC entry point through this boundary had no way
+#   to honour a `--encoding ascii` request except by building a GENERIC reader from the layout --
+#   which is exactly what `cli.py` did, and it silently bypassed every policy the owning readers
+#   enforce: `card`'s card-verification value came back as bare text instead of a `ProtectedValue`,
+#   `usrsec`'s A/U user-type domain went unchecked, `dalytran` and `transaction` skipped their
+#   processing-timestamp validation, and `transaction`'s absent-source semantics were replaced by
+#   an ordinary open failure. Publishing the character entry points here is what lets a dispatching
+#   caller pick a CORPUS without also picking a weaker decoder.
+# WHY : Alternatives Considered: deriving each character entry point from its EBCDIC sibling's
+#   `__name__` -- replacing the `ebcdic` segment with `ascii` -- was evaluated and rejected. It
+#   would work for all ten today and it is the same class of mistake this package already refuses
+#   for module names: a derivation that is right until one reader is spelled differently, and whose
+#   failure is an `AttributeError` from inside a dispatch rather than a missing registry entry.
+#   Declaring the ten costs ten lines and cannot be right for nine records and wrong for one.
+# WHY : Assumptions: this mapping holds TEN entries against the twelve above, and the two absences
+#   are deliberate and unlike each other. `SECUSER` COULD have a character path and is denied one,
+#   because every transcode of that record is another copy of a plaintext password --
+#   `factory.CHARACTER_PATH_WITHHELD_RECORDS` states the same refusal for the generic reader, so
+#   the path is closed at both doors. `EXPORT` could not have one at all: three of its five payload
+#   regimes are not characters in any code page. The two are kept distinguishable rather than
+#   merged into one "no ASCII" set because the first is a policy that could be revisited and the
+#   second is a property of the bytes that cannot.
+ASCII_DATASET_READERS: Final[
+    Mapping[str, Callable[[pathlib.Path], Iterator[Mapping[str, object]]]]
+] = MappingProxyType(
+    {
+        "ACCOUNT": account.read_ascii_accounts,
+        "CARD": card.read_ascii_cards,
+        "CUSTOMER": customer.read_ascii_customers,
+        "XREF": xref.read_ascii_card_xrefs,
+        "DALYTRAN": dalytran.read_ascii_daily_transactions,
+        "TRAN": transaction.read_ascii_transactions,
+        "DISGROUP": discgrp.read_ascii_disclosure_groups,
+        "TCATBAL": tcatbal.read_ascii_category_balances,
+        "TRANCAT": trancatg.read_ascii_transaction_categories,
+        "TRANTYPE": trantype.read_ascii_transaction_types,
+    }
+)
+
+# WHY : Assumptions: the set is DERIVED from the two registries rather than written out, so a
+#   reader that gains or loses a character entry point changes this set by construction. Writing
+#   `{"SECUSER", "EXPORT"}` here would be a fourth statement of one fact -- alongside the two
+#   registries and `factory.CHARACTER_PATH_WITHHELD_RECORDS` -- and the copy would keep reading
+#   plausibly after the original changed.
+CHARACTER_PATH_ABSENT_RECORDS: Final[frozenset[str]] = frozenset(DATASET_READERS) - frozenset(
+    ASCII_DATASET_READERS
 )
 
 # WHY : Assumptions: the inventory is derived from the mapping above rather than written a second
@@ -578,6 +655,76 @@ def reader_module(layout_name: str) -> ModuleType:
     #   already-imported name is a `sys.modules` lookup, which is what makes reaching the module
     #   this way no more expensive than holding a second mapping to it.
     return importlib.import_module(reader.__module__)
+
+
+def dataset_reader(
+    layout_name: str, encoding: str
+) -> Callable[[pathlib.Path], Iterator[Mapping[str, object]]]:
+    """Return the owning reader's whole-extract entry point for one layout and one corpus.
+
+    Purpose
+    -------
+    Give a dispatching caller the ONE callable that reads a named record from a named corpus with
+    every validation and value type that record's own reader enforces -- so a caller choosing a
+    corpus cannot end up choosing a weaker decoder as well.
+
+    Parameters
+    ----------
+    layout_name : str
+        A layout name as :mod:`carddemo_migration.copybook.layouts` spells it -- ``ACCOUNT``,
+        ``SECUSER``, ``EXPORT`` and so on. The comparison is exact and case-sensitive.
+    encoding : str
+        ``"ebcdic"`` for the ``.PS`` dataset form or ``"ascii"`` for the seed text form. Any other
+        spelling is refused rather than defaulted, because defaulting would silently read a binary
+        extract as text or the reverse.
+
+    Returns
+    -------
+    Callable[[pathlib.Path], Iterator[Mapping[str, object]]]
+        The owning reader's ``read_ebcdic_*`` or ``read_ascii_*`` generator, taking the extract
+        path and yielding one decoded record at a time.
+
+    Raises
+    ------
+    LayoutError
+        If the encoding is not one of the two corpora, if no reader owns the layout, or if the
+        layout has no entry point for that corpus. The message names the closed set in each case.
+    """
+    # WHY : Alternatives Considered: this raises `LayoutError` where the sibling `reader_module`
+    #   raises `KeyError` for the same missing layout, and the difference is deliberate rather than
+    #   an inconsistency. `reader_module` answers an INTERNAL question -- which module owns this
+    #   record -- and `cli.py` already catches its `KeyError` to mean "no reader, so no suppression
+    #   set". This function answers a question that came straight from a command argument, and its
+    #   failure has to reach the operator as a classified non-zero exit rather than a traceback:
+    #   `LayoutError` is in `cli.py`'s `_STEP_ERRORS`, and it is the type the owning readers already
+    #   raise when a corpus is refused, so a caller needs one `except` clause rather than two.
+    registries = {"ebcdic": DATASET_READERS, "ascii": ASCII_DATASET_READERS}
+    registry = registries.get(encoding)
+    if registry is None:
+        raise LayoutError(
+            f"unknown extract encoding {encoding!r}; the corpora this package reads are"
+            f" {sorted(registries)}"
+        )
+    reader = registry.get(layout_name)
+    if reader is not None:
+        return reader
+    # WHY : Assumptions: the two refusals are reported SEPARATELY, because they send a maintainer to
+    #   different places. "No reader owns this layout" means the name is one of the derived layouts
+    #   the migrated pipeline produces, so there is no extract to read at all; "no character entry
+    #   point" means the record is real and ships in one corpus only, which is a fact about that
+    #   record's own contract. One shared message would send half of each audience to the wrong
+    #   file.
+    if layout_name not in DATASET_READERS:
+        raise LayoutError(
+            f"no reader owns layout {layout_name!r}; the layouts with a reader are"
+            f" {sorted(DATASET_READERS)}. The derived layouts are readerless on purpose: each is"
+            " produced by the migrated pipeline rather than shipped as an extract"
+        )
+    raise LayoutError(
+        f"layout {layout_name!r} publishes no character entry point, so it cannot be read from the"
+        f" ASCII seed form; the records without one are"
+        f" {sorted(CHARACTER_PATH_ABSENT_RECORDS)}. Read it from its EBCDIC extract instead"
+    )
 
 
 def __getattr__(name: str) -> ModuleType:
@@ -681,3 +828,45 @@ if frozenset(DATASET_READERS) != _EXPECTED_LAYOUTS:
         f" {sorted(frozenset(DATASET_READERS) - _EXPECTED_LAYOUTS)}, declared without a reader"
         f" {sorted(_EXPECTED_LAYOUTS - frozenset(DATASET_READERS))}"
     )
+
+
+def ships_committed_extract(layout_name: str) -> bool:
+    """Report whether a record layout has a committed seed extract that can be read.
+
+    Purpose
+    -------
+    Publish the one authority for "does an extract for this record exist in the repository", so that
+    every caller which has to decide whether to READ one branches on the owning reader's own
+    declaration rather than on a list of layout names it maintains itself.
+
+    Parameters
+    ----------
+    layout_name : str
+        A record layout name owned by one of the readers.
+
+    Returns
+    -------
+    bool
+        True when the layout's reader does not declare itself unseeded.
+
+    Raises
+    ------
+    KeyError
+        Propagated from :func:`reader_module` if no reader owns the layout, with a message
+        enumerating the layouts that do.
+    """
+    # WHY : Refactoring Rationale: this was a private helper inside
+    #   `carddemo_migration.verify.money_parity`, and it is published here because a second caller
+    #   appeared that must not disagree with the first. The combined verification gate must decide
+    #   which registered datasets it may read an extract for, and the money pass must decide which
+    #   columns it requires a source total for. Two copies of that rule is how the gate comes
+    #   to offer an extract the pass refuses -- or, worse, to read a file that is not a full record.
+    # WHY : Assumptions: the default is TRUE -- a reader that says nothing ships an extract -- and
+    #   only a reader declaring the flag False is unseeded. `readers/transaction.py` is the one that
+    #   declares it: no `app/data/ASCII/transact.txt` and no TRANSACT extract under
+    #   `app/data/EBCDIC` exist, and `app/jcl/TRANFILE.jcl` primes that cluster from a single
+    #   350-byte initializer record whose unpopulated fields do not decode as a whole transaction.
+    #   Defaulting to False would make every other layout look unseeded, and an unseeded column is a
+    #   PASSING not-comparable line -- so the wrong default would turn a forgotten extract into a
+    #   clean bill of health.
+    return bool(getattr(reader_module(layout_name), "HAS_COMMITTED_SEED_DATASET", True))

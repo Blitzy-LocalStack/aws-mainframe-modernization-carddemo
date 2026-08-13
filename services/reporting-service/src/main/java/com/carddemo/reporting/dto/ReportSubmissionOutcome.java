@@ -37,16 +37,17 @@ import java.util.Objects;
  * constraint to admit one would remove the guarantee that a returned handle is observable, which is
  * the only reason a caller reads it.
  *
- * @param submitted whether a run was accepted for execution; {@code false} for a deliberate
- *     cancellation and {@code true} otherwise
+ * @param outcome which of the three turns this was: {@code STARTED} when a run was accepted,
+ *     {@code DECLINED} when the caller answered no, and {@code UNANSWERED} when the confirmation has not
+ *     been answered yet
  * @param message a sentence for a person to read, at most the 78 characters the message field of the
  *     report-request map declares at {@code app/cpy-bms/CORPT00.CPY} L120, or {@code null} on a
  *     deliberate cancellation, which the reference answers with a cleared message line
- * @param submission the accepted run, or {@code null} when {@code submitted} is {@code false},
- *     because a cancelled request has no run to describe
+ * @param submission the accepted run, or {@code null} for either turn that started nothing, because a
+ *     request that was declined or is still being confirmed has no run to describe
  */
 public record ReportSubmissionOutcome(
-        boolean submitted,
+        Outcome outcome,
         @Size(max = MESSAGE_WIDTH) String message,
         ReportSubmissionResponse submission) {
 
@@ -103,19 +104,34 @@ public record ReportSubmissionOutcome(
                     "message exceeds " + MESSAGE_WIDTH + " characters");
         }
 
-        // WHY : Assumptions: the flag and the run description are checked against each other rather
-        //       than being allowed to disagree, because a client reads one of them and not both. A
-        //       body claiming a submission while carrying no handle, or carrying a handle while
-        //       claiming none, would be read differently by two conforming clients, and neither
-        //       reading would be wrong. Refusing the pair at construction removes the ambiguity from
-        //       the wire instead of documenting a precedence rule for it.
-        if (submitted && submission == null) {
+        // WHY : Assumptions: the discriminator and the run description are checked against each other
+        //       rather than being allowed to disagree, because a client reads one of them and not both. A
+        //       body reporting a started run while carrying no handle, or carrying a handle while
+        //       reporting that nothing started, would be read differently by two conforming clients and
+        //       neither reading would be wrong. Refusing the pair at construction removes the ambiguity
+        //       from the wire instead of documenting a precedence rule for it.
+        // WHY : Refactoring Rationale: the check is now driven by the three-valued discriminator rather
+        //       than by a boolean, so the two turns that start nothing are checked SEPARATELY -- and the
+        //       unanswered turn is the one that carries a sentence while the declined turn does not,
+        //       which a single not-started arm could not have expressed.
+        Objects.requireNonNull(outcome, "outcome must not be null");
+        if (outcome == Outcome.STARTED && submission == null) {
             throw new IllegalArgumentException(
-                    "a submitted outcome must carry the accepted run it describes");
+                    "a started outcome must carry the accepted run it describes");
         }
-        if (!submitted && submission != null) {
+        if (outcome != Outcome.STARTED && submission != null) {
             throw new IllegalArgumentException(
-                    "a cancelled outcome must not carry a run description");
+                    "an outcome that started nothing must not carry a run description");
+        }
+        if (outcome == Outcome.DECLINED && message != null) {
+            throw new IllegalArgumentException(
+                    "a declined outcome carries no sentence, because the reference clears the message "
+                            + "line at app/cbl/CORPT00C.cbl L480 to L483");
+        }
+        if (outcome == Outcome.UNANSWERED && message == null) {
+            throw new IllegalArgumentException(
+                    "an unanswered outcome must carry the confirmation prompt, which is the question "
+                            + "the reference composes at app/cbl/CORPT00C.cbl L464 to L474");
         }
     }
 
@@ -139,7 +155,7 @@ public record ReportSubmissionOutcome(
             ReportSubmissionResponse accepted, String message) {
         Objects.requireNonNull(accepted, "accepted");
         Objects.requireNonNull(message, "message");
-        return new ReportSubmissionOutcome(true, message, accepted);
+        return new ReportSubmissionOutcome(Outcome.STARTED, message, accepted);
     }
 
     /**
@@ -154,7 +170,7 @@ public record ReportSubmissionOutcome(
      * @return an outcome reporting that nothing was submitted and saying nothing about it
      */
     public static ReportSubmissionOutcome cancelled() {
-        return new ReportSubmissionOutcome(false, null, null);
+        return new ReportSubmissionOutcome(Outcome.DECLINED, null, null);
     }
 
     /**
@@ -174,6 +190,41 @@ public record ReportSubmissionOutcome(
      */
     public static ReportSubmissionOutcome unanswered(String prompt) {
         Objects.requireNonNull(prompt, "prompt");
-        return new ReportSubmissionOutcome(false, prompt, null);
+        return new ReportSubmissionOutcome(Outcome.UNANSWERED, prompt, null);
+    }
+
+    /**
+     * Which of the three turns a submission request produced.
+     *
+     * <p>⚠️ Refactoring Rationale: this REPLACES a boolean {@code submitted} member, and the replacement
+     * closes a defect a review found. There are three outcomes -- a run was started, the caller declined,
+     * or the confirmation has not been answered yet -- and the reference itself distinguishes all three,
+     * at L478, L480 and L464 of {@code app/cbl/CORPT00C.cbl}. A boolean cannot carry three states, so the
+     * unanswered turn was reported as {@code submitted=false} exactly like a decline, leaving the two
+     * distinguishable only by whether {@code message} happened to be null. The browser client duly read
+     * the status code alone and labelled every non-created response {@code DECLINED}, so a caller that had
+     * merely not answered yet was told it had cancelled. The same argument is already recorded one layer
+     * down, on the service's own three-valued confirmation enum; this is the response side of it.
+     *
+     * <p>Assumptions: the discriminator is a MEMBER rather than only an HTTP status. The status still
+     * distinguishes a started run (201) from a turn that started nothing (200), which a client may switch
+     * on cheaply; what a status cannot do is separate the two turns that share it, and inferring that from
+     * the presence of another member is precisely the inference that produced the wrong label.
+     *
+     * <p>Alternatives Considered: keeping {@code submitted} and adding this beside it. Rejected because
+     * two members would then encode one fact, and nothing would stop them disagreeing -- a body reporting
+     * {@code submitted=true} with {@code outcome=DECLINED} would be admitted by the contract and mean
+     * nothing.
+     */
+    public enum Outcome {
+
+        /** A run was accepted for execution, per L478 and L479 of the reference. */
+        STARTED,
+
+        /** The caller answered no; nothing ran and nothing is reported, per L480 to L483. */
+        DECLINED,
+
+        /** The confirmation has not been answered; the caller is re-prompted, per L464 to L474. */
+        UNANSWERED
     }
 }

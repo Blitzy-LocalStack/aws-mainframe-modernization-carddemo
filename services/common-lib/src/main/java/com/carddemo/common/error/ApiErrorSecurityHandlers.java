@@ -96,8 +96,15 @@ public final class ApiErrorSecurityHandlers {
      *
      * <p>Assumptions: the same media type every other error in this stack is rendered as, so a client
      * parses one body shape regardless of which layer refused the request.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the value is now READ from {@link ApiError#MEDIA_TYPE} rather than
+     * restated as a literal here. Three components wrote this shape before the dispatcher ran and each
+     * declared its own copy of the string, so nothing tied any of them to what the published contracts
+     * declared -- and the account contract declared a different media type on every failing response
+     * for exactly that reason. One authority is what lets a contract test compare the declaration
+     * against the emitter.</p>
      */
-    private static final String PROBLEM_MEDIA_TYPE = "application/json";
+    private static final String PROBLEM_MEDIA_TYPE = ApiError.MEDIA_TYPE;
 
     /**
      * The writer that renders both refusal bodies.
@@ -256,7 +263,14 @@ public final class ApiErrorSecurityHandlers {
         }
 
         String correlationId = MDC.get(CorrelationIdFilter.CORRELATION_ID_MDC_KEY);
-        String path = CardNumberMasker.maskEmbeddedCardNumbers(request.getRequestURI());
+        // WHY : ⚠️ Refactoring Rationale: the sanitizer is the IDENTIFIER-aware one, and it used to be
+        //       the card-only one. maskEmbeddedCardNumbers recognises a run of sixteen digits and nothing
+        //       shorter, so a rejected path carrying the nine-digit customer identifier or the
+        //       eleven-digit account identifier reached this problem body -- and the three log lines
+        //       below -- in the clear, while the shared advice narrowed the same path at nine. Two rules
+        //       for one value, and the sites that took the narrower one leaked. There is one rule now and
+        //       it lives in the security package that owns the mask character and the visible tail.
+        String path = CardNumberMasker.maskEmbeddedIdentifiers(request.getRequestURI());
         ApiError problem = new ApiError(code, "", message, ApiError.Severity.WARNING,
                 ApiError.Subsystem.APPLICATION, status, correlationId, path,
                 com.carddemo.common.time.TimestampFormatter.formatNow(clock), List.of(), null);
@@ -324,7 +338,7 @@ public final class ApiErrorSecurityHandlers {
             //       reach. The class alone distinguishes an absent token from an invalid one, which is
             //       what an operator needs.
             LOG.warn("event=api.request.unauthenticated code={} status=401 path={} exception={}",
-                    CODE_UNAUTHENTICATED, CardNumberMasker.maskEmbeddedCardNumbers(
+                    CODE_UNAUTHENTICATED, CardNumberMasker.maskEmbeddedIdentifiers(
                             request.getRequestURI()), failure.getClass().getName());
 
             this.challenge.commence(request, response, failure);
@@ -373,7 +387,7 @@ public final class ApiErrorSecurityHandlers {
                 AccessDeniedException failure) throws java.io.IOException {
 
             LOG.warn("event=api.request.forbidden code={} status=403 path={} exception={}",
-                    GlobalExceptionHandler.CODE_FORBIDDEN, CardNumberMasker.maskEmbeddedCardNumbers(
+                    GlobalExceptionHandler.CODE_FORBIDDEN, CardNumberMasker.maskEmbeddedIdentifiers(
                             request.getRequestURI()), failure.getClass().getName());
 
             writeProblem(request, response, HttpServletResponse.SC_FORBIDDEN,
@@ -423,7 +437,7 @@ public final class ApiErrorSecurityHandlers {
                 RequestRejectedException failure) throws java.io.IOException {
 
             LOG.warn("event=api.request.rejected code={} status=400 path={} exception={}",
-                    ApiError.CODE_VALIDATION, CardNumberMasker.maskEmbeddedCardNumbers(
+                    ApiError.CODE_VALIDATION, CardNumberMasker.maskEmbeddedIdentifiers(
                             request.getRequestURI()), failure.getClass().getName());
 
             writeProblem(request, response, HttpServletResponse.SC_BAD_REQUEST,

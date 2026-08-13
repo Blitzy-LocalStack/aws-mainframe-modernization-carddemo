@@ -1,6 +1,5 @@
 package com.carddemo.card.dto;
 
-import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.security.MaskedCardNumber;
 import com.carddemo.common.security.SealedSelector;
 
@@ -692,7 +691,7 @@ public record CardDetail(
      * request. {@code displayCardNumber} prints because it arrives ALREADY MASKED -- the constructor above
      * admits no other form into this shape. {@code activeStatus} prints because it is a two-valued flag
      * carrying no personal content, and {@code version} prints because a concurrency conflict cannot be
-     * traced without it. {@code accountId} prints masked, matching {@link CardSummary}.
+     * traced without it. {@code accountId} is WITHHELD, for the reason recorded below.
      * {@code expirationDate} is withheld alongside the embossed name: on its own it identifies nobody,
      * but printed beside a partial card number it completes two of the three components of a card
      * credential, and it has no diagnostic use here that the correlating selector does not already
@@ -704,9 +703,19 @@ public record CardDetail(
      * loses a value. The exposure being closed is incidental stringification, not the deliberate act of
      * reading a component the contract publishes.</p>
      *
+     * <p>Refactoring Rationale: the account identifier was MASKED here rather than withheld, on the
+     * argument that it "is an identifier rather than a secret". {@code docs/architecture/observability.md}
+     * L1093 to L1112 refutes that twice over: its first clause names the account identifier among the
+     * values a rendering must OMIT and requires omission rather than abbreviation, so that masking keeps
+     * its single owner in the {@code mapper} package; and its second clause confines the masker to a
+     * PRIMARY ACCOUNT NUMBER, so applying it here reused a card rule on a non-card value. Because that
+     * function preserves input width and keeps the last four characters, the rendering disclosed the last
+     * four digits of the account on every line it produced. {@link CardSummary} carried the same defect
+     * and is corrected with it.</p>
+     *
      * @return a single-line description of this record naming every component in contract order, in which
-     *     the account identifier is masked and the embossed name and the expiry date are each represented
-     *     by a placeholder and never rendered
+     *     the account identifier, the embossed name and the expiry date are each represented by a
+     *     placeholder and never rendered
      */
     @Override
     public String toString() {
@@ -715,7 +724,7 @@ public record CardDetail(
         //   this line. Only the withheld and masked values depart from it.
         return "CardDetail[key=" + key
                 + ", displayCardNumber=" + displayCardNumber
-                + ", accountId=" + CardNumberMasker.mask(accountId)
+                + ", accountId=" + REDACTED_PERSONAL
                 + ", embossedName=" + REDACTED_PERSONAL
                 + ", expirationDate=" + REDACTED_PERSONAL
                 + ", activeStatus=" + activeStatus

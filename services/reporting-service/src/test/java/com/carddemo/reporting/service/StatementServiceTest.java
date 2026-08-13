@@ -25,6 +25,8 @@ import com.carddemo.reporting.repository.StatementAccountRepository;
 import com.carddemo.reporting.repository.StatementCardXrefRepository;
 import com.carddemo.reporting.repository.StatementCustomerRepository;
 import com.carddemo.reporting.repository.StatementTransactionRepository;
+import com.carddemo.reporting.sink.S3StatementSink;
+import java.io.ByteArrayInputStream;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
@@ -89,8 +91,18 @@ class StatementServiceTest {
     /** The customer the cross-reference names. */
     private static final long CUSTOMER_ID = 100_000_001L;
 
-    /** The bucket artifacts are published to, standing for the deployment's own. */
-    private static final String BUCKET = "carddemo-datasets-test";
+    /** A stored artifact size, standing for whatever a run happens to have written. */
+    private static final long ARTIFACT_SIZE = 4_096L;
+
+    /**
+     * The instant the store reports an artifact was written, in the twenty-six-character form.
+     *
+     * <p>Assumptions: a fixed value rather than a clock reading, so the case asserting that the
+     * response reports the STORE's instant can assert an exact value. A clock reading would only let
+     * the case assert that something non-blank arrived, which the 26 blanks this replaces would also
+     * have satisfied.</p>
+     */
+    private static final String WRITTEN_AT = "2022-07-18 03:14:15.926535";
 
     /** The key prefix artifacts sit under, matching the base configuration document. */
     private static final String PREFIX = "statements/";
@@ -113,10 +125,17 @@ class StatementServiceTest {
 
     private StatementAccountRepository accounts;
 
+    private ArtifactStore artifacts;
+
     private StatementService service;
 
     /**
-     * Builds the service over mocked reads and a real tokeniser.
+     * Builds the service over mocked reads, a mocked artifact store and a real tokeniser.
+     *
+     * <p>Assumptions: the store is stubbed to HOLD both artifacts by default, because that is the
+     * state every case other than the two absence cases is about, and a default of absent would make
+     * each of them restate the same stubbing. The two absence cases override it explicitly, so the
+     * state they exercise is visible at the case rather than inherited from here.</p>
      */
     @BeforeEach
     void setUp() {
@@ -124,8 +143,19 @@ class StatementServiceTest {
         cardXrefs = Mockito.mock(StatementCardXrefRepository.class);
         customers = Mockito.mock(StatementCustomerRepository.class);
         accounts = Mockito.mock(StatementAccountRepository.class);
+        artifacts = Mockito.mock(ArtifactStore.class);
+        // WHY : Assumptions: the two ARTIFACTS are stubbed present and the INDEX is stubbed absent by
+        //       default, which is deliberately the awkward combination. It is the state a deployment is
+        //       in between a run written by an earlier revision and the first run of this one, and
+        //       defaulting to it means every case that does not care about positions still asserts that
+        //       an absent index degrades to no position rather than to a failure.
+        when(artifacts.describe(anyString())).thenAnswer(call -> Optional.of(
+                new ArtifactStore.ArtifactDescriptor(
+                        call.getArgument(0), ARTIFACT_SIZE, WRITTEN_AT)));
+        when(artifacts.describe(PREFIX + StatementService.INDEX_OBJECT))
+                .thenReturn(Optional.empty());
         service = new StatementService(transactions, cardXrefs, customers, accounts,
-                BUCKET, PREFIX, new OpaqueIdentifier(ARTIFACT_KEY));
+                PREFIX, artifacts, new OpaqueIdentifier(ARTIFACT_KEY));
     }
 
     // WHY : Assumptions: the two halves of exactly-one-of are asserted separately and each names the
@@ -303,12 +333,14 @@ class StatementServiceTest {
                 FINGERPRINT, "", StatementService.MAX_RESPONSE_TRANSACTIONS);
     }
 
-    // WHY : Refactoring Rationale: this is the metadata-disclosure case. The earlier object key was
-    //       composed from the account identifier and the card's last four digits, and an object key
-    //       appears in a bucket listing, an access log, a lifecycle report and a storage inventory
-    //       export -- so listing one prefix enumerated the portfolio without a single object being
-    //       read. The assertions name the values that must be ABSENT, because a key can only regress
-    //       by gaining one.
+    // WHY : Refactoring Rationale: this is the metadata-disclosure case, and it survives a change of
+    //       design. The earlier object key was composed from the account identifier and the card's
+    //       last four digits, and an object key appears in a bucket listing, an access log, a
+    //       lifecycle report and a storage inventory export -- so listing one prefix enumerated the
+    //       portfolio without a single object being read. The published value is now a served path
+    //       rather than an object location, and it reaches a wider audience than a key does: it is
+    //       returned to a browser, kept in its history and written into every intermediary's access
+    //       log. So the absence assertions are kept verbatim and only the prefix assertion moves.
     /**
      * Asserts that neither artifact location carries an identifier or any card-number fragment.
      */
@@ -320,53 +352,378 @@ class StatementServiceTest {
         StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
 
         for (String uri : List.of(response.plainTextUri(), response.htmlUri())) {
-            assertThat(uri).startsWith("s3://" + BUCKET + "/" + PREFIX);
+            assertThat(uri).startsWith(StatementService.ARTIFACT_LOCATION_PREFIX);
             assertThat(uri)
-                    .as("no key may carry the account identifier")
+                    .as("no location may carry the account identifier")
                     .doesNotContain(String.valueOf(ACCOUNT_ID));
             assertThat(uri)
-                    .as("no key may carry any part of the card number")
+                    .as("no location may carry any part of the card number")
                     .doesNotContain(SEED_CARD_NUMBER)
                     .doesNotContain("7065")
                     .doesNotContain("485945");
             assertThat(uri)
-                    .as("no key may carry the fingerprint either, which names the card exactly")
+                    .as("no location may carry the fingerprint either, which names the card exactly")
                     .doesNotContain(FINGERPRINT);
         }
         assertThat(response.plainTextUri())
-                .as("the two renderings of one statement share one token and differ by suffix")
-                .isEqualTo(response.htmlUri().replace(
-                        StatementService.HTML_SUFFIX, StatementService.PLAIN_TEXT_SUFFIX));
+                .as("the two artifacts of one run are two locations, not one repeated")
+                .isNotEqualTo(response.htmlUri());
     }
 
     /**
-     * Asserts that the object-key token is the tokeniser's declared width and nothing longer.
+     * Asserts that the artifact selector is the tokeniser's declared width and nothing longer.
      */
     @Test
-    @DisplayName("the object-key token is exactly the tokeniser's declared width")
-    void theObjectKeyTokenIsTheDeclaredWidth() {
+    @DisplayName("the artifact selector is exactly the tokeniser's declared width")
+    void theArtifactSelectorIsTheDeclaredWidth() {
         stubOneCard();
 
         String uri = service.describe(new StatementRequest(SEED_CARD_NUMBER, null)).plainTextUri();
-        String object = uri.substring(uri.lastIndexOf('/') + 1);
+        String selector = uri.substring(StatementService.ARTIFACT_LOCATION_PREFIX.length());
 
-        assertThat(object)
-                .hasSize(OpaqueIdentifier.TOKEN_LENGTH + StatementService.PLAIN_TEXT_SUFFIX.length());
+        assertThat(selector).hasSize(OpaqueIdentifier.TOKEN_LENGTH);
+    }
+
+    // WHY : Refactoring Rationale: this is the case the retired shape could not have passed, and it is
+    //       the whole point of the change. The response used to compose a per-card location from a
+    //       token, while the writer publishes exactly two run-wide objects, so every published
+    //       location named an object nothing writes. The assertion follows the location the response
+    //       returns all the way back to a key and compares it with the writer's OWN constant, so the
+    //       two sides can no longer be changed independently.
+    /**
+     * Asserts that each published location resolves to the object the statement writer writes.
+     */
+    @Test
+    @DisplayName("a published artifact location resolves to the object the writer wrote")
+    void aPublishedLocationResolvesToTheWrittenObject() {
+        stubOneCard();
+
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+
+        assertThat(service.resolveArtifactKey(selectorOf(response.plainTextUri())))
+                .as("the plain-text location resolves to the object S3StatementSink writes")
+                .contains(PREFIX + S3StatementSink.PLAIN_TEXT_OBJECT);
+        assertThat(service.resolveArtifactKey(selectorOf(response.htmlUri())))
+                .as("the markup location resolves to the object S3StatementSink writes")
+                .contains(PREFIX + S3StatementSink.HTML_OBJECT);
+    }
+
+    // WHY : Assumptions: absence is asserted on ALL THREE members together, because the three are one
+    //       statement about the world -- there is no artifact -- and a response reporting an absent
+    //       location beside a present production instant would be reporting a document that both does
+    //       and does not exist.
+    /**
+     * Asserts that an absent artifact is reported as absent rather than as an unreachable location.
+     */
+    @Test
+    @DisplayName("no stored artifact yields no location and no production instant")
+    void noStoredArtifactYieldsNoLocation() {
+        stubOneCard();
+        when(artifacts.describe(anyString())).thenReturn(Optional.empty());
+
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+
+        assertThat(response.plainTextUri())
+                .as("a location that resolves to nothing is worse than no location")
+                .isNull();
+        assertThat(response.htmlUri()).isNull();
+        assertThat(response.generatedAt())
+                .as("26 blanks claimed a production instant for a document nothing produced")
+                .isNull();
+    }
+
+    // WHY : Assumptions: the two artifacts are described independently, so this case stubs ONE of them
+    //       present. A run interrupted between its two writes, or a lifecycle rule that expires one,
+    //       leaves the store in exactly this state, and an implementation that reported both on the
+    //       strength of either would publish a location that resolves to nothing.
+    /**
+     * Asserts that one stored artifact is reported without the other being invented.
+     */
+    @Test
+    @DisplayName("one stored artifact is reported without inventing the other")
+    void oneStoredArtifactIsReportedAlone() {
+        stubOneCard();
+        when(artifacts.describe(anyString())).thenReturn(Optional.empty());
+        when(artifacts.describe(PREFIX + S3StatementSink.PLAIN_TEXT_OBJECT))
+                .thenReturn(Optional.of(new ArtifactStore.ArtifactDescriptor(
+                        PREFIX + S3StatementSink.PLAIN_TEXT_OBJECT, ARTIFACT_SIZE, WRITTEN_AT)));
+
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+
+        assertThat(response.plainTextUri()).isNotNull();
+        assertThat(response.htmlUri())
+                .as("the markup artifact is absent and is reported absent")
+                .isNull();
+        assertThat(response.generatedAt())
+                .as("the instant comes from the artifact that exists")
+                .isEqualTo(WRITTEN_AT);
+    }
+
+    /**
+     * Asserts that the production instant is the store's own record and not a clock reading.
+     */
+    @Test
+    @DisplayName("the production instant is the artifact's own write instant")
+    void theProductionInstantIsTheStoreInstant() {
+        stubOneCard();
+
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+
+        assertThat(response.generatedAt()).isEqualTo(WRITTEN_AT);
+    }
+
+    // WHY : Assumptions: the refusal is asserted at the RESPONSE boundary rather than at the encoder,
+    //       because the encoder already refused it and this path never reaches the encoder -- the two
+    //       request-edge operations return a total without emitting an artifact. The figure used is the
+    //       smallest one requiring a tenth integer position, so the case pins the boundary and not an
+    //       arbitrary excess.
+    /**
+     * Asserts that a total too large for the reference regime is refused rather than published.
+     */
+    @Test
+    @DisplayName("a statement total needing a tenth integer digit is refused")
+    void aTotalNeedingATenthIntegerDigitIsRefused() {
+        stubOneCard();
+        when(transactions.aggregateByCardFingerprint(FINGERPRINT))
+                .thenReturn(aggregate("1000000000.00", 3L));
+
+        assertThatExceptionOfType(ArithmeticException.class)
+                .isThrownBy(() -> service.describe(new StatementRequest(SEED_CARD_NUMBER, null)))
+                .withMessageContaining("integer positions")
+                .withMessageNotContaining("1000000000");
+    }
+
+    /**
+     * Asserts that the greatest total the reference regime can hold is still published.
+     */
+    @Test
+    @DisplayName("a statement total at nine integer digits is published")
+    void aTotalAtNineIntegerDigitsIsPublished() {
+        stubOneCard();
+        when(transactions.aggregateByCardFingerprint(FINGERPRINT))
+                .thenReturn(aggregate("999999999.99", 3L));
+
+        assertThat(service.describe(new StatementRequest(SEED_CARD_NUMBER, null)).totalAmount())
+                .isEqualTo(Money.of(new BigDecimal("999999999.99")));
+    }
+
+    // WHY : Assumptions: an unknown selector and an absent artifact are asserted to be the SAME
+    //       refusal, because telling them apart would tell a caller which selectors are real. The
+    //       fabricated selector is the right length, so the case cannot pass merely because a length
+    //       check rejected it.
+    /**
+     * Asserts that a selector this service did not mint resolves to nothing.
+     */
+    @Test
+    @DisplayName("a selector this service did not mint is refused")
+    void anUnmintedSelectorIsRefused() {
+        assertThat(service.resolveArtifactKey("f".repeat(OpaqueIdentifier.TOKEN_LENGTH))).isEmpty();
+        assertThat(service.resolveArtifactKey(null)).isEmpty();
+        assertThatExceptionOfType(NoSuchElementException.class)
+                .isThrownBy(() -> service.collectArtifact(
+                        "f".repeat(OpaqueIdentifier.TOKEN_LENGTH)));
+        verify(artifacts, never()).open(anyString());
+    }
+
+    // WHY : Assumptions: the key the store is asked for is CAPTURED rather than assumed, because the
+    //       property under test is that no part of a caller-supplied selector reaches an object key --
+    //       an implementation that concatenated the selector into a key would satisfy every assertion
+    //       above and still let a caller address another run's artifact.
+    /**
+     * Asserts that collection opens the resolved key and never a caller-composed one.
+     */
+    @Test
+    @DisplayName("collection opens the resolved key and nothing derived from the selector")
+    void collectionOpensTheResolvedKey() {
+        stubOneCard();
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+        when(artifacts.open(anyString())).thenReturn(new ArtifactStore.OpenArtifact(
+                ARTIFACT_SIZE, new ByteArrayInputStream(new byte[] {0})));
+
+        service.collectArtifact(selectorOf(response.htmlUri()));
+
+        ArgumentCaptor<String> key = ArgumentCaptor.forClass(String.class);
+        verify(artifacts).open(key.capture());
+        assertThat(key.getValue()).isEqualTo(PREFIX + S3StatementSink.HTML_OBJECT);
+    }
+
+    // WHY : Refactoring Rationale: this is the other half of what a review found wrong with the
+    //       statement surface. The two artifacts cover the WHOLE run, so pointing a caller at them
+    //       without saying where its own statement sits inside them left the caller with a document
+    //       covering every cardholder and no way to find one. The index is what closes that, and this
+    //       case follows it end to end: the position the run recorded is the position the response
+    //       reports.
+    /**
+     * Asserts that a card named by the run index is reported with its position in the artifact.
+     */
+    @Test
+    @DisplayName("a card named by the run index is reported with its position in the artifact")
+    void aCardInTheIndexIsReportedWithItsPosition() {
+        stubOneCard();
+        stubIndex(new StatementIndexEntry(FINGERPRINT, 240L, 27L));
+
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+
+        assertThat(response.firstRecord()).isEqualTo(240L);
+        assertThat(response.recordCount()).isEqualTo(27L);
+    }
+
+    // WHY : Assumptions: the index is searched by BISECTION, so a case with one entry cannot tell a
+    //       search from a linear scan of one element. Three entries with the wanted card LAST is the
+    //       smallest shape that distinguishes them: a bisection probes the middle, finds it low and
+    //       moves right, which a scan that stopped at the first entry would never reach.
+    /**
+     * Asserts that a card sitting last in the index is still found.
+     */
+    @Test
+    @DisplayName("a card sitting last in the index is found by bisection")
+    void aCardLastInTheIndexIsFound() {
+        stubOneCard();
+        stubIndex(
+                new StatementIndexEntry("0".repeat(63) + "1", 0L, 30L),
+                new StatementIndexEntry("5".repeat(63) + "5", 30L, 12L),
+                new StatementIndexEntry(FINGERPRINT, 42L, 9L));
+
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+
+        assertThat(response.firstRecord()).isEqualTo(42L);
+        assertThat(response.recordCount()).isEqualTo(9L);
+    }
+
+    // WHY : Assumptions: a card ABSENT from the index yields no position rather than a failure or a
+    //       neighbouring card's position. The neighbouring position is the dangerous answer -- a
+    //       bisection that returned its last probe rather than nothing would send a caller to another
+    //       cardholder's records -- so the fabricated index deliberately brackets the wanted card.
+    /**
+     * Asserts that a card the index does not name yields no position rather than a neighbour's.
+     */
+    @Test
+    @DisplayName("a card the index does not name yields no position")
+    void aCardAbsentFromTheIndexYieldsNoPosition() {
+        stubOneCard();
+        stubIndex(
+                new StatementIndexEntry("0".repeat(63) + "1", 0L, 30L),
+                new StatementIndexEntry("f".repeat(63) + "f", 30L, 12L));
+
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+
+        assertThat(response.firstRecord()).isNull();
+        assertThat(response.recordCount()).isNull();
+    }
+
+    /**
+     * Asserts that an absent index degrades to no position rather than to a failure.
+     */
+    @Test
+    @DisplayName("an absent index degrades to no position")
+    void anAbsentIndexYieldsNoPosition() {
+        stubOneCard();
+
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+
+        assertThat(response.firstRecord()).isNull();
+        assertThat(response.recordCount()).isNull();
+        verify(artifacts, never()).readRange(anyString(), anyLong(), anyLong());
+    }
+
+    // WHY : Assumptions: a TRUNCATED index is refused outright rather than searched, because an
+    //       artifact whose size is not a whole number of entries makes every derived position wrong --
+    //       a probe would land mid-record and decode a fingerprint spliced from two cards. The refusal
+    //       names the size and not the card, since the fault is in the artifact.
+    /**
+     * Asserts that an index of a partial entry is refused rather than searched.
+     */
+    @Test
+    @DisplayName("an index that is not a whole number of entries is refused")
+    void aTruncatedIndexIsRefused() {
+        stubOneCard();
+        when(artifacts.describe(PREFIX + StatementService.INDEX_OBJECT))
+                .thenReturn(Optional.of(new ArtifactStore.ArtifactDescriptor(
+                        PREFIX + StatementService.INDEX_OBJECT,
+                        StatementIndexEntry.ENCODED_WIDTH + 1L, WRITTEN_AT)));
+
+        assertThatExceptionOfType(IllegalStateException.class)
+                .isThrownBy(() -> service.describe(new StatementRequest(SEED_CARD_NUMBER, null)))
+                .withMessageContaining("not a whole number of entries");
+    }
+
+    // WHY : Assumptions: the probe count is asserted, not just the answer. A search that read every
+    //       entry would return the same position and would transfer the whole index on every statement
+    //       read, which is the cost this shape exists to avoid -- and a wrong probe count is the only
+    //       symptom.
+    /**
+     * Asserts that locating one card among seven costs three probes rather than seven.
+     */
+    @Test
+    @DisplayName("locating a card costs a logarithmic number of probes")
+    void locatingACardCostsLogarithmicProbes() {
+        stubOneCard();
+        List<StatementIndexEntry> entries = new ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            entries.add(new StatementIndexEntry(String.valueOf(i).repeat(64), i * 10L, 10L));
+        }
+        entries.add(new StatementIndexEntry(FINGERPRINT, 60L, 10L));
+        entries.sort((left, right) -> left.cardFingerprint().compareTo(right.cardFingerprint()));
+        stubIndex(entries.toArray(new StatementIndexEntry[0]));
+
+        service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+
+        verify(artifacts, Mockito.atMost(3)).readRange(anyString(), anyLong(), anyLong());
+    }
+
+    /**
+     * Stubs the store to hold an index artifact composed of the supplied entries, in the order given.
+     *
+     * <p>Assumptions: the stub serves entries by RANGE, computing which entry a range names the way the
+     * artifact would, so the case exercises the real search arithmetic rather than a lookup table keyed
+     * by fingerprint. A stub answering by fingerprint would pass against a search that ignored the
+     * ordinal entirely.</p>
+     *
+     * @param entries the index entries in the order the artifact holds them; must be sorted by
+     *     fingerprint for a search to be correct
+     */
+    private void stubIndex(StatementIndexEntry... entries) {
+        String key = PREFIX + StatementService.INDEX_OBJECT;
+        when(artifacts.describe(key)).thenReturn(Optional.of(
+                new ArtifactStore.ArtifactDescriptor(key,
+                        (long) entries.length * StatementIndexEntry.ENCODED_WIDTH, WRITTEN_AT)));
+        when(artifacts.readRange(eq(key), anyLong(), anyLong())).thenAnswer(call -> {
+            long firstByte = call.getArgument(1);
+            return entries[(int) (firstByte / StatementIndexEntry.ENCODED_WIDTH)].encode();
+        });
+    }
+
+    /**
+     * Extracts the opaque selector from a published artifact location.
+     *
+     * @param location the location a statement response published; must not be {@code null}
+     * @return the selector alone, with the served path prefix removed
+     */
+    private static String selectorOf(String location) {
+        return location.substring(StatementService.ARTIFACT_LOCATION_PREFIX.length());
     }
 
     // WHY : Assumptions: the whole-run walk is asserted by the SECOND chunk's continuation argument.
     //       A walk that restarted from the beginning would loop forever on a real portfolio and would
     //       pass any assertion that only counted statements, because the first chunk alone satisfies
     //       a count.
+    // WHY : Refactoring Rationale: the continuation is asserted as the WHOLE ordering tuple, where it
+    //       was asserted as the fingerprint alone. Both fixture cards deliberately carry the SAME
+    //       masked rendering, which is the case the single-component predicate mishandled -- it
+    //       compared a component the sequence does not lead on, so cards were skipped and repeated.
+    //       A regression to that predicate cannot satisfy this case, because the stub it would call
+    //       carries a different argument list and Mockito answers an unstubbed call with an empty
+    //       list, which fails the count below.
     /**
-     * Asserts that the whole-run walk continues from the last fingerprint of the previous chunk.
+     * Asserts that the whole-run walk continues from the whole ordering tuple of the previous chunk.
      */
     @Test
     @DisplayName("the whole-run walk continues by keyset from the previous chunk")
     void theWholeRunWalkContinuesByKeyset() {
-        when(cardXrefs.findHeadingChunk("", StatementService.HEADING_CHUNK_SIZE))
+        when(cardXrefs.findHeadingChunk("", "", StatementService.HEADING_CHUNK_SIZE))
                 .thenReturn(List.of(headingRow(FINGERPRINT), headingRow(OTHER_FINGERPRINT)));
-        when(cardXrefs.findHeadingChunk(OTHER_FINGERPRINT, StatementService.HEADING_CHUNK_SIZE))
+        when(cardXrefs.findHeadingChunk(MASKED_CARD, OTHER_FINGERPRINT,
+                StatementService.HEADING_CHUNK_SIZE))
                 .thenReturn(List.of());
         when(transactions.aggregateByCardFingerprint(anyString()))
                 .thenReturn(aggregate("0.00", 0L));
@@ -374,14 +731,27 @@ class StatementServiceTest {
                 .thenReturn(List.of());
 
         RecordingSink sink = new RecordingSink();
-        int written = service.generateStatements(sink);
+        StatementRunOutcome outcome = service.generateStatements(sink);
 
-        assertThat(written).as("both cards produced a statement").isEqualTo(2);
+        assertThat(outcome.statementsProduced()).as("both cards produced a statement").isEqualTo(2);
+        // WHY : Assumptions: the index is asserted to cover BOTH cards and to be contiguous, which is
+        //       the property a consumer of the run-wide artifact depends on. A gap between one card's
+        //       last record and the next card's first would mean records belonging to no statement, and
+        //       an overlap would mean one card's records reported inside another card's statement.
+        assertThat(outcome.index()).hasSize(2);
+        assertThat(outcome.index().get(0).firstRecord()).isZero();
+        assertThat(outcome.index().get(1).firstRecord())
+                .as("the second statement begins where the first ended")
+                .isEqualTo(outcome.index().get(0).recordCount());
+        assertThat(outcome.index().get(0).recordCount() + outcome.index().get(1).recordCount())
+                .as("the index accounts for every plain-text record the run wrote")
+                .isEqualTo(sink.plainRecords.size());
         assertThat(sink.replacements).as("the previous run's artifacts are cleared once").isEqualTo(1);
         assertThat(sink.plainRecords).as("the plain-text artifact received records").isNotEmpty();
         assertThat(sink.markupRecords).as("the markup artifact received records").isNotEmpty();
-        verify(cardXrefs).findHeadingChunk("", StatementService.HEADING_CHUNK_SIZE);
-        verify(cardXrefs).findHeadingChunk(OTHER_FINGERPRINT, StatementService.HEADING_CHUNK_SIZE);
+        verify(cardXrefs).findHeadingChunk("", "", StatementService.HEADING_CHUNK_SIZE);
+        verify(cardXrefs).findHeadingChunk(MASKED_CARD, OTHER_FINGERPRINT,
+                StatementService.HEADING_CHUNK_SIZE);
     }
 
     // WHY : Refactoring Rationale: this case exists because the run aborted on it. Two of the projected
@@ -396,9 +766,10 @@ class StatementServiceTest {
     @Test
     @DisplayName("a customer with no middle name and no second address line still statements")
     void aCustomerMissingOptionalAttributesStillStatements() {
-        when(cardXrefs.findHeadingChunk("", StatementService.HEADING_CHUNK_SIZE))
+        when(cardXrefs.findHeadingChunk("", "", StatementService.HEADING_CHUNK_SIZE))
                 .thenReturn(List.of(sparseHeadingRow()));
-        when(cardXrefs.findHeadingChunk(FINGERPRINT, StatementService.HEADING_CHUNK_SIZE))
+        when(cardXrefs.findHeadingChunk(MASKED_CARD, FINGERPRINT,
+                StatementService.HEADING_CHUNK_SIZE))
                 .thenReturn(List.of());
         when(transactions.aggregateByCardFingerprint(anyString()))
                 .thenReturn(aggregate("0.00", 0L));
@@ -417,7 +788,7 @@ class StatementServiceTest {
     @Test
     @DisplayName("a run over an empty portfolio still clears the previous artifacts")
     void anEmptyRunStillClearsThePreviousArtifacts() {
-        when(cardXrefs.findHeadingChunk("", StatementService.HEADING_CHUNK_SIZE))
+        when(cardXrefs.findHeadingChunk("", "", StatementService.HEADING_CHUNK_SIZE))
                 .thenReturn(List.of());
 
         RecordingSink sink = new RecordingSink();

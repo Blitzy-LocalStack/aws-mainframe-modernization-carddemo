@@ -82,4 +82,33 @@ package com.carddemo.reference.dto;
  *     value from one that does not, and a numeric member would render the two alike
  */
 public record UsStateZipPrefixResponse(String stateZipCd) {
+
+    /**
+     * Renders the code in full, because this is a reference key and not a cardholder's postal code.
+     *
+     * <p>Purpose. This renderer exists to record a decision rather than to withhold a value. A component
+     * whose name ends in a postal-code word is exactly what a reviewer -- or the census gate in
+     * {@code com.carddemo.common.architecture} -- flags as personal data, and here it is not: the value is
+     * a two-character state code followed by a two-character postal prefix, seeded from the reference
+     * lookup copybook, published in full by this very operation, and shared by every address in a region
+     * rather than belonging to any one of them.</p>
+     *
+     * <p>Assumptions: the distinction that matters is between a value that LOCATES a person and one that
+     * CLASSIFIES a region. {@code docs/architecture/observability.md} L1093 to L1112 withholds an
+     * identified cardholder's address components, which is why the account context's customer projection
+     * withholds its own postal code; a four-character allow-list entry naming a state and a prefix
+     * identifies nobody, and redacting it would leave this context unable to log which reference row a
+     * validation consulted.</p>
+     *
+     * <p>Trade-offs: rendering it makes this the one place in the migration where a component matching the
+     * protected-name vocabulary is printed in full, so the reason is written here rather than in a shared
+     * exemption list -- a list of names would have to be read together with the file to be understood,
+     * whereas this paragraph is read by whoever next opens the file that prints the value.</p>
+     *
+     * @return a rendering naming the four-character state and postal-prefix code; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "UsStateZipPrefixResponse[stateZipCd=" + this.stateZipCd + ']';
+    }
 }

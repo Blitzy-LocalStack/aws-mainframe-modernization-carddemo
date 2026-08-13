@@ -892,13 +892,16 @@ class AuthApiContractTest {
     }
 
     /**
-     * Asserts that the page envelope declares and requires exactly the five members the shared
+     * Asserts that the page envelope declares and requires exactly the four members the shared
      * response type carries, so no generated client receives an accessor for a member no service
      * emits and no strict client rejects a valid response for a member no service sends.
      *
-     * <p>Assumptions: the five are read from the shared type rather than restated as a literal list
-     * where the type can be reached, because the whole defect this asserts against was a contract that
-     * named members the type does not declare.</p>
+     * <p>Assumptions: the four are {@code items}, {@code firstKey}, {@code lastKey} and
+     * {@code hasNext} -- the closed set {@code com.carddemo.common.web.PageResponse} declares -- read
+     * from the shared type rather than restated as a literal list where the type can be reached,
+     * because the whole defect this asserts against was a contract that named members the type does
+     * not declare. Refactoring Rationale: this Javadoc said five while its display name and its
+     * assertion said four; the arity is stated once now, from the record.</p>
      */
     @Test
     @DisplayName("the page envelope declares and requires exactly the shared envelope's four members")
@@ -1069,5 +1072,70 @@ class AuthApiContractTest {
         return onAccessor != null
                 ? onAccessor
                 : record.getDeclaredField(component.getName()).getAnnotation(Size.class);
+    }
+
+    /**
+     * Asserts that every published operation declares the transport refusals this service can produce,
+     * and that each of the three has a shape a client can bind to.
+     *
+     * <p>⚠️ Refactoring Rationale: all three were reachable and UNDECLARED. The shared advice in
+     * {@code services/common-lib} answers a wrong method with 405, a body in the wrong media type with
+     * 415 and an unsatisfiable {@code Accept} header with 406, on every route of every service, and this
+     * contract declared none of them. A client generated from it had no branch for any of the three and a
+     * hand-written one, {@code ui/src/api/client.ts}, could only report each as an unrecognised body. The
+     * census is written as a loop rather than as a list of paths so that an operation added later is
+     * covered without this case being edited.</p>
+     *
+     * <p>Assumptions: the operation count is asserted so the loop cannot pass vacuously. A scanner that
+     * matched nothing -- because a path item gained a member, or because the document was restructured --
+     * would otherwise assert nothing at all while reading as though it had checked every route.</p>
+     */
+    @Test
+    @DisplayName("every operation declares the transport refusals the shared advice can produce")
+    void theTransportRefusalsAreDeclaredWhereTheyCanOccur() {
+        Map<String, Object> document = this.contract;
+        Map<String, Object> paths = mapping(document, "paths");
+        int operations = 0;
+
+        for (String path : paths.keySet()) {
+            Map<String, Object> methods = mapping(paths, path);
+            for (String method : methods.keySet()) {
+
+                // WHY : Assumptions: a path item carries members that are not operations -- a shared
+                //       description, a shared parameter list -- so an operation is identified by carrying
+                //       an operationId rather than by the key not being one of those. Naming the
+                //       exclusions instead would need amending every time a path item gained a member.
+                if (!(methods.get(method) instanceof Map)) {
+                    continue;
+                }
+                Map<String, Object> operation = mapping(methods, method);
+                if (!operation.containsKey("operationId")) {
+                    continue;
+                }
+                operations++;
+                Map<String, Object> responses = mapping(operation, "responses");
+                assertThat(responses)
+                        .as("%s %s must declare both refusals every route can produce", method, path)
+                        .containsKeys("405", "406");
+                if (operation.containsKey("requestBody")) {
+                    assertThat(responses)
+                            .as("%s %s accepts a body, so it can refuse the body's media type",
+                                    method, path)
+                            .containsKey("415");
+                }
+            }
+        }
+
+        assertThat(operations)
+                .as("the census is not vacuous; every published operation was examined")
+                .isEqualTo(8);
+
+        Map<String, Object> declared = mapping(mapping(document, "components"), "responses");
+        assertThat(declared)
+                .as("each refusal is declared once and referenced, so the three cannot drift apart")
+                .containsKeys("MethodNotAllowed", "NotAcceptable", "UnsupportedMediaType");
+        assertThat(mapping(mapping(declared, "MethodNotAllowed"), "headers"))
+                .as("a 405 names the methods the route does publish, which is what a client acts on")
+                .containsKey("Allow");
     }
 }

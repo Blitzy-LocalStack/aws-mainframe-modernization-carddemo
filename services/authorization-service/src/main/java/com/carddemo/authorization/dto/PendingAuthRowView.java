@@ -176,4 +176,38 @@ public record PendingAuthRowView(
     private static void requireMaskedCardNumber(String candidate) {
         MaskedCardNumber.require("cardNum", candidate);
     }
+
+    /**
+     * Renders this row WITHOUT its amount, and without the sealed selector that addresses it.
+     *
+     * <p>Purpose. The amount is a monetary value and is prohibited from a diagnostic rendering by
+     * {@code docs/architecture/observability.md} L1093 to L1112. The exposure this closes is multiplied
+     * by the shape: this is the element type of a page, so one page rendered as many approved amounts as
+     * it carried rows, and the reference screen carried five.</p>
+     *
+     * <p>Assumptions: the card number is rendered because the component receives an ALREADY-MASKED value
+     * -- the list deliberately publishes the last four digits, which the reference list did not show at
+     * all -- so printing it abbreviates nothing here and lets rows be grouped by card in a log exactly as
+     * a client groups them on screen.</p>
+     *
+     * <p>Trade-offs: the sealed selector is omitted although it discloses nothing. It is a keyed token up
+     * to the shared kernel's own two-hundred-and-fifty-six character ceiling, so rendering it would make
+     * a five-row page unreadable while adding no fact the transaction identifier does not already give;
+     * a selector that fails to open is diagnosed where it is opened, which is the only place holding the
+     * key that can tell a stale token from a forged one.</p>
+     *
+     * @return a rendering carrying the transaction identifier, the originating date and time, the
+     *     authorization type, the approval and match statuses and the masked card number, with the amount
+     *     and the sealed selector omitted; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "PendingAuthRowView[transactionId=" + this.transactionId
+                + ", authOrigDate=" + this.authOrigDate
+                + ", authOrigTime=" + this.authOrigTime
+                + ", authType=" + this.authType
+                + ", approvalStatus=" + this.approvalStatus
+                + ", matchStatus=" + this.matchStatus
+                + ", maskedCardNumber=" + this.cardNum + ']';
+    }
 }

@@ -310,23 +310,32 @@ public class BatchConfig {
     /**
      * The number of feed rows a job fetches per keyset page while walking its input, one hundred.
      *
-     * <p>Assumptions: this bounds a READ, not a commit. Every step in this module is a single
-     * transactional tasklet that returns {@link RepeatStatus#FINISHED} from its first invocation, so one
-     * step invocation is one transaction and the whole pass commits exactly once; there is no
-     * commit-per-page boundary anywhere in this module for this value to set. It is consumed as the page
-     * limit of a keyset query -- {@code PostTransactionsJob} and
+     * <p>Assumptions: this bounds a READ, not a commit, and no step in this module commits per PAGE.
+     * Every step is a tasklet returning {@link RepeatStatus#FINISHED} from its first invocation, so a
+     * step is never chunk-oriented and this value never becomes a commit interval. It is consumed as
+     * the page limit of a keyset query -- {@code PostTransactionsJob} and
      * {@code PreflightDailyTransactionsJob} each pass it as the {@code Limit} of a
-     * greater-than-last-key query -- so what it governs is how many rows are materialised at a time
-     * inside that one transaction.</p>
+     * greater-than-last-key query -- so what it governs is how many rows are materialised at a
+     * time.</p>
+     *
+     * <p>Assumptions: the two commit shapes behind that page differ per job and neither is set here.
+     * {@code PostTransactionsJob} declares its tasklet {@code PROPAGATION_NOT_SUPPORTED} and opens one
+     * transaction PER FEED RECORD, so a page of one hundred rows spans up to one hundred commits; every
+     * other job in this module leaves the tasklet's own boundary in place and commits once for the
+     * pass. The distinction is recorded because it is the reason this value cannot be read as a
+     * restart granularity in either case: reducing it changes how many rows are held in memory at
+     * once and changes no commit boundary at all.</p>
      *
      * <p>Refactoring Rationale: this description previously presented the value as the number of records
      * a chunk-oriented step processes before committing, and reasoned about the window a failure
      * discards and the locks a page holds as though each page committed. That reading does not match the
-     * delivered step shape and understated the transaction's true extent, which is the entire pass. The
-     * distinction is not cosmetic: a reader who believed a page committed could reduce this value
-     * expecting finer restart granularity and would get none, or could assume a partially posted run is
-     * observable when it is not. The charter beside this file already recorded the tasklet shape, so the
-     * two now agree.</p>
+     * delivered step shape, and the correction of it then over-corrected: it asserted that the whole
+     * pass commits exactly once for EVERY job in the module, which stopped being true when
+     * {@code PostTransactionsJob} moved its boundary to one transaction per feed record. Both readings
+     * mattered rather than being cosmetic -- a reader who believed a page committed would reduce this
+     * value expecting finer restart granularity and get none, and a reader who believed the posting
+     * pass commits once would conclude that a partially posted run is unobservable when for that one
+     * job it now is. The per-job shape is therefore stated above rather than generalised.</p>
      *
      * <p>Assumptions: the atomicity that matters is a property of the step, not of this number, and it
      * is what the reference requires. {@code app/cbl/CBTRN02C.cbl:424} opens
@@ -458,6 +467,65 @@ public class BatchConfig {
     public static BusinessDate businessDateOf(ChunkContext context) {
         return new BusinessDate(
                 requiredParameter(context, BatchApplication.BUSINESS_DATE_PARAMETER));
+    }
+
+    /**
+     * Reads the same injected token, in its OTHER role: the date component of a dataset generation.
+     *
+     * <p>Assumptions: this reads the identical parameter and returns the identical value as
+     * {@link #businessDateOf(ChunkContext)}, and it exists anyway, because TWO different baseline
+     * mechanisms collapse onto that one parameter and a reader of a job needs to know which one the
+     * job is standing in for.</p>
+     *
+     * <p>Assumptions: the first mechanism is a PROGRAM LINKAGE PARAMETER, and only the interest
+     * accrual has one. {@code app/cbl/CBACT04C.cbl:175-178} declares {@code 05 PARM-DATE PIC X(10).}
+     * under {@code 01 EXTERNAL-PARMS.} and receives it at line 180, {@code app/jcl/INTCALC.jcl:22}
+     * supplies it as {@code PARM='2022071800'}, and lines 476 to 480 concatenate it into a generated
+     * transaction identifier -- so there the token is BUSINESS INPUT whose bytes reach stored data.
+     * That reading is {@link #businessDateOf(ChunkContext)} and this method is not it.</p>
+     *
+     * <p>Assumptions: the second mechanism is a JCL RELATIVE GENERATION REFERENCE, and it is what this
+     * method stands in for. A step that writes a new generation of a dataset names it in a data
+     * definition rather than receiving a date: {@code app/jcl/POSTTRAN.jcl:34-38} allocates the reject
+     * stream as {@code DSN=AWS.M2.CARDDEMO.DALYREJS(+1)} with {@code DISP=(NEW,CATLG,DELETE)}, and
+     * {@code app/jcl/TRANBKP.jcl} and {@code app/jcl/COMBTRAN.jcl} likewise carry {@code (+1)} data
+     * definitions and no {@code PARM=} on any step. The migration plan's rule T6 maps a
+     * {@code DD DSN=} to an object-store location and a GDG {@code (+1)} to a new generation prefix,
+     * and section 0.4.1.7 fixes that prefix as {@code dt=YYYY-MM-DD/gen=NNNN}. The {@code dt=}
+     * component is a date the migrated step must be TOLD, because section 0.7.5 forbids reading it
+     * from a clock -- a generation keyed off the clock is one a rerun cannot land in again. So the
+     * token here is ORCHESTRATION METADATA: it names where the output goes and reaches no stored
+     * field.</p>
+     *
+     * <p>Alternatives Considered: a separately named job parameter for the generation date, so the two
+     * roles would have two carriers as well as two names. Rejected because the two roles always carry
+     * the SAME value -- the state machine passes one {@code $.businessDate} to every state, and a night
+     * that accrued interest for one date while filing its reject stream under another would be a defect
+     * rather than a feature -- so a second parameter would add a way for one run to disagree with
+     * itself and would have to be validated back into agreement. Trade-offs: with one carrier, the
+     * distinction lives in which accessor a job calls and in these two paragraphs, which is weaker than
+     * a type-level separation; it is accepted because the alternative buys its strength by admitting an
+     * inconsistent state that cannot currently exist.</p>
+     *
+     * <p>Assumptions: three jobs read the token through this method and two read it through
+     * {@link #businessDateOf(ChunkContext)}. Posting and combine consume it solely to partition a
+     * generation; the interest accrual consumes it solely as business input; and the backup holds
+     * BOTH roles at once, so it reads it through both accessors -- through this one to name the
+     * {@code dt=} prefix its three families land under, and through the business reading to select
+     * the day whose transactions its card-ordered subset contains. No job derives a stored field
+     * from the reading taken here. {@code LedgerGuardedStep} hands its body the token through its
+     * own reader for jobs built on that seam.</p>
+     *
+     * @param context the chunk context the framework passes into a tasklet; must not be {@code null}
+     * @return the date component the run's output generations are partitioned under, never
+     *     {@code null}
+     * @throws IllegalStateException if the parameter is absent, which the validator makes unreachable
+     *     through the supported entry point and which therefore names a job started some other way
+     * @throws IllegalArgumentException if the parameter is present but is not a token the business
+     *     date accepts
+     */
+    public static BusinessDate generationDateOf(ChunkContext context) {
+        return businessDateOf(context);
     }
 
     /**

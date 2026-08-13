@@ -892,10 +892,21 @@ public class PurgeJob {
                     summary.getApprovedAuthAmount().subtract(this.approvedAmount), accountOrdinal);
             reportNarrowing("declinedAuthAmount",
                     summary.getDeclinedAuthAmount().subtract(this.declinedAmount), accountOrdinal);
+            // WHY : Assumptions: the two COUNTERS are checked on the same terms as the two amounts, and
+            //       the check is reachable for a reason specific to them: a counter that saturated at 9999
+            //       recorded fewer children than the account accumulated, so reversing every expired child
+            //       can subtract more than the counter holds and drive it below -9999. The statement
+            //       clamps it; this line is what tells an operator the stored count no longer reconciles
+            //       with the children that were deleted.
+            reportCounterNarrowing("approvedAuthCount",
+                    summary.getApprovedAuthCount() - this.approvedCount, accountOrdinal);
+            reportCounterNarrowing("declinedAuthCount",
+                    summary.getDeclinedAuthCount() - this.declinedCount, accountOrdinal);
             summaries.reverseExpiredAuthorizations(summary.getAccountId(), this.approvedCount,
                     this.approvedAmount, this.declinedCount, this.declinedAmount,
                     PendingAuthSummary.MONEY_MAX_MAGNITUDE,
-                    PendingAuthSummary.MONEY_MAX_MAGNITUDE.negate());
+                    PendingAuthSummary.MONEY_MAX_MAGNITUDE.negate(),
+                    PendingAuthSummary.COUNTER_MAX, PendingAuthSummary.COUNTER_MIN);
         }
 
         /**
@@ -905,6 +916,16 @@ public class PurgeJob {
          * and the bound that will be stored instead. An authorization amount is transaction detail, and a
          * maintenance log is read by more people than the data is.</p>
          *
+         * <p>⚠️ Assumptions: the bound reported is the one that will ACTUALLY BE STORED, sign included,
+         * which is why it is taken from the narrowing function rather than named as a constant.
+         * Refactoring Rationale: this line logged {@code PendingAuthSummary.MONEY_MAX_MAGNITUDE}
+         * unconditionally while the sentence above promised "the bound that will be stored instead" -- and
+         * every narrowing this method can actually observe is a SUBTRACTION passing the NEGATIVE bound, so
+         * the reported value carried the opposite sign to the value stored. An operator reconciling a
+         * clamped row against this line would have found a stored total of minus one thousand million
+         * reported as plus one thousand million, and the reasonable conclusion from that is that the log
+         * refers to a different row.</p>
+         *
          * @param field the member whose stored value will be reduced; must not be {@code null}
          * @param reversed the value the subtraction produces before any bound is applied; must not be
          *     {@code null}
@@ -913,7 +934,39 @@ public class PurgeJob {
         private static void reportNarrowing(String field, BigDecimal reversed, int accountOrdinal) {
             if (PendingAuthSummary.exceedsStoredDomain(reversed)) {
                 LOG.warn("event=authorization.purge.money-narrowed field={} accountOrdinal={} bound={}",
-                        field, accountOrdinal, PendingAuthSummary.MONEY_MAX_MAGNITUDE);
+                        field, accountOrdinal,
+                        PendingAuthSummary.narrowedToStoredDomain(reversed));
+            }
+        }
+
+        /**
+         * Warns when one counter of the reversal will be reduced to the four-digit domain's floor.
+         *
+         * <p>Assumptions: the reported bound is the value that will be stored, taken from the same
+         * narrowing function the statement's clamp mirrors, for the reason recorded on the money
+         * reporter above. Only the field and the account's per-run ordinal accompany it, so nothing
+         * identifying is written.</p>
+         *
+         * <p>⚠️ Assumptions: a narrowing on THIS path is expected rather than exceptional, which is why
+         * it is reported at warn and not raised. A root whose counter already saturated at the ceiling
+         * has lost the excess it could not record, so reversing every expired child it does hold can
+         * legitimately drive the counter to the floor -- the divergence and its consequences are
+         * registered as {@code D-SUMMARY-COUNTER-SATURATION} in
+         * {@code docs/architecture/cobol-to-service-traceability.md}. Refactoring Rationale: the earlier
+         * policy raised at the bound, which abended the sweep mid-table and left the rows already
+         * deleted deleted and the ones behind them not.</p>
+         *
+         * @param field the counter whose stored value will be reduced; must not be {@code null}
+         * @param reversed the value the subtraction produces before any bound is applied, of type
+         *     {@code int}
+         * @param accountOrdinal this account's one-based position within the current window
+         */
+        private static void reportCounterNarrowing(String field, int reversed, int accountOrdinal) {
+            if (PendingAuthSummary.exceedsCounterDomain(reversed)) {
+                LOG.warn("event=authorization.purge.counter-narrowed field={} accountOrdinal={} "
+                                + "bound={}",
+                        field, accountOrdinal,
+                        PendingAuthSummary.narrowedCounterToStoredDomain(reversed));
             }
         }
     }
@@ -1252,7 +1305,32 @@ public class PurgeJob {
      * @param exhausted {@code true} when no summaries remain above {@code lastAccountId}
      */
     private record PurgeWindow(PurgeOutcome outcome, long lastAccountId, boolean exhausted) {
-    }
+    
+        /**
+         * Renders the outcome and the exhaustion flag, WITHOUT the account the window stopped at.
+         *
+         * <p>Purpose. The last account identifier is an account identifier, which
+         * {@code docs/architecture/observability.md} L1093 to L1112 names among the values a rendering must
+         * omit. A purge window is logged on every batch pass, so the generated rendering named one real
+         * account per pass in a store that outlives the pass.</p>
+         *
+         * <p>Assumptions: the identifier is omitted rather than replaced by a presence flag. Its absence is
+         * already implied by the exhaustion flag -- a window that reported exhaustion carries no
+         * continuation point -- so a separate flag would restate a value already rendered beside it.</p>
+         *
+         * <p>Trade-offs: an operator cannot resume a purge by reading a log line and must read the window
+         * from the caller that holds it. That is the correct direction: a continuation point is state the
+         * job carries, not a fact about the run, and the accessor returns it to any caller that needs
+         * it.</p>
+         *
+         * @return a rendering naming the outcome and the exhaustion flag, with the continuation account
+         *     identifier omitted; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "PurgeWindow[outcome=" + this.outcome + ", exhausted=" + this.exhausted + ']';
+        }
+}
 
     /**
      * What a purge run did, in the four counts the reference program reports at its L173 to L176.

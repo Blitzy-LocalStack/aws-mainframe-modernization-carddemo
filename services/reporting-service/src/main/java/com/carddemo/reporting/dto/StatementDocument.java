@@ -63,4 +63,32 @@ public record StatementDocument(
         //       mutate a document this type has already validated.
         transactions = List.copyOf(transactions);
     }
+
+    /**
+     * Renders the document as the SHAPE of what it holds, delegating to neither component.
+     *
+     * <p>Purpose. This type is a statement header beside every transaction on that statement, so the
+     * compiler-generated rendering emitted a cardholder's name, a masked card number, a period total and
+     * then one line per transaction with its own amount and merchant. It is the single widest
+     * stringification exposure in this context, and its width grows with the account's activity.</p>
+     *
+     * <p>Alternatives Considered: relying on the two nested renderings, each of which is already safe.
+     * Rejected on both counts: the transaction list would still print one safe rendering per row, so a
+     * busy account still produces an unbounded line; and this type's disclosure would become a property of
+     * two other files, where a component added without its renderer updated would leak through here with
+     * nothing in this file to show it.</p>
+     *
+     * <p>Trade-offs: the transaction count is the one fact kept, and it is the fact a statement fault is
+     * usually about -- a statement rendered with no transactions, or with more than the period should
+     * contain, is visible from the count alone. Everything else is read from the generated artifact.</p>
+     *
+     * @return a rendering naming the transaction count and whether a header is present, with the header's
+     *     own values and every transaction omitted; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "StatementDocument[statementPresent=" + (this.statement != null)
+                + ", transactions=" + (this.transactions == null ? "absent"
+                        : this.transactions.size() + " entries") + ']';
+    }
 }

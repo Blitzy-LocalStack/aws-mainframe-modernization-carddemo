@@ -3,6 +3,7 @@ package com.carddemo.reporting.config;
 import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.security.CognitoAccessTokenValidator;
 import com.carddemo.common.security.JwtRoleConverter;
+import jakarta.servlet.DispatcherType;
 import java.time.Clock;
 import java.util.List;
 import org.springframework.beans.factory.annotation.Value;
@@ -465,6 +466,31 @@ public class SecurityConfig {
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(requests -> requests
+                        // WHY : (1) ⚠️ Refactoring Rationale: the container's own ERROR dispatch is taken
+                        //       off this chain's authorization, and it was on it. A servlet forward to the
+                        //       error path keeps the ORIGINAL request method and arrives with no
+                        //       authentication -- the bearer-token filter is a once-per-request filter and
+                        //       skips an error dispatch -- so a refusal this service rendered before any
+                        //       handler ran was re-judged by the catch-all below and answered 401 instead of
+                        //       the status it had already decided. A caller owed 415, 413 or 406 therefore
+                        //       received 401 on a path it never addressed.
+                        // WHY : (2) Assumptions: this became reachable when this document began publishing
+                        //       406, 413 and 415, and it matters most on the two artifact collections: they
+                        //       produce application/octet-stream only, so an Accept naming a renderable
+                        //       type is refused before any handler runs, which is precisely the forward this
+                        //       rule keeps out of the authorization decision.
+                        // WHY : (3) Assumptions: the rule matches the DISPATCHER TYPE and not the path, so a
+                        //       caller addressing /error directly still arrives on a REQUEST dispatch and is
+                        //       judged by the rules below exactly as it is today -- including the deny rule
+                        //       on the management namespace. A path permit would open that path to any
+                        //       caller, and the container's error body is not a shape
+                        //       src/main/resources/openapi/reporting-api.yaml publishes anywhere.
+                        // WHY : (4) Alternatives Considered: narrowing this chain to the REQUEST dispatch
+                        //       alone, which has the same effect here. Rejected because it silently
+                        //       withdraws authorization from ASYNC dispatches too, so an asynchronous
+                        //       handler added later would run outside every rule below. The other six
+                        //       chains resolve it this same way, which is what keeps them comparable.
+                        .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                         // WHY : Assumptions: the diagnostic group is declared FIRST and the permitted
                         //       health namespace second, because /actuator/health/** matches the
                         //       diagnostic path too and the first matching rule decides. Reversing the two

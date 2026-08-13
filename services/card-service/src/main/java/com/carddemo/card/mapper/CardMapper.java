@@ -7,16 +7,19 @@ import com.carddemo.card.dto.CardUpdateRequest;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.security.SealedSelector;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.stereotype.Component;
+import com.carddemo.common.web.CorrelationIdFilter;
 import com.carddemo.common.web.PageResponse;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.regex.Pattern;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
+import org.springframework.stereotype.Component;
 
 /**
  * The anti-corruption layer between the stored card row and the bodies this context publishes.
@@ -157,6 +160,15 @@ public class CardMapper {
 
     /** Records that a stored row could not be rendered, and never any part of the value. */
     private static final Logger LOG = LoggerFactory.getLogger(CardMapper.class);
+
+    /**
+     * Stands in for the correlation identifier on a diagnostic line emitted outside a correlated request.
+     *
+     * <p>Assumptions: a non-empty token rather than an empty field, because an empty one renders as
+     * {@code correlationId=} followed by the next key and reads as a truncated line rather than as a
+     * deliberate absence.</p>
+     */
+    private static final String CORRELATION_ID_ABSENT = "(none)";
 
     /**
      * Seals and opens the opaque row selector, and is the only collaborator this class holds.
@@ -445,7 +457,9 @@ public class CardMapper {
      * than the query selected, without the response saying so: the envelope has no member able to report a
      * row it could not render, and adding one would change a shape every consumer of it declares. The
      * omission is therefore reported to the operational record instead, which is where a data fault this
-     * service cannot repair belongs.</p>
+     * service cannot repair belongs — as ONE line per page carrying the counts, each omitted row's
+     * position and no identifier of any of them, for the reasons recorded on
+     * {@link #recordOmittedRows(List, int)}.</p>
      *
      * @param page the page of stored cards as the caller's query settled it, which must not be
      *     {@code null}
@@ -459,7 +473,9 @@ public class CardMapper {
 
         List<Card> rows = page.items();
         List<CardSummary> items = new ArrayList<>(rows.size());
-        for (Card row : rows) {
+        List<Integer> omittedOrdinals = new ArrayList<>();
+        for (int ordinal = 0; ordinal < rows.size(); ordinal++) {
+            Card row = rows.get(ordinal);
 
             // WHY : Assumptions: the test is on the STORED key's own characters and not on a caught
             //       refusal from the conversion. Catching would also swallow a rendering failure with a
@@ -468,20 +484,49 @@ public class CardMapper {
             //       page. Testing the one condition that is a property of the DATA keeps every other
             //       cause loud.
             if (!renderableCardNumber(row.getCardNum())) {
-
-                // WHY : Assumptions: the record names the account and the stored width and NOTHING of the
-                //       key itself. A value reaching this branch is not a card number, but it is a value
-                //       from the card master and may be a mistyped or mis-offset one, so quoting it would
-                //       write cardholder credential material into a durable record -- the one destination
-                //       the masking everywhere else in this class exists to keep it out of. The account
-                //       and the width are what an operator needs to find the row with the query the
-                //       migration's own header states.
-                LOG.warn("event=card.list.row.unrenderable reason=card-number-outside-domain"
-                        + " accountId={} storedWidth={}", row.getAccountId(),
-                        row.getCardNum() == null ? 0 : row.getCardNum().length());
+                // WHY : Assumptions: the row is COUNTED and POSITIONED here and quoted nowhere. A value
+                //       reaching this branch is not a card number, but it is a value from the card master
+                //       and may be a mistyped or mis-offset one, so quoting it -- or the account it
+                //       belongs to -- would write cardholder material into a durable record, the one
+                //       destination the masking everywhere else in this class exists to keep it out of.
+                // WHY : ⚠️ Refactoring Rationale: the record this feeds named the ACCOUNT IDENTIFIER and
+                //       the invalid key's STORED WIDTH, and both are withdrawn. The observability
+                //       standard -- docs/architecture/observability.md, "A prohibited value is OMITTED,
+                //       not abbreviated" -- names the account identifier as prohibited outright and
+                //       states that a protected value's LENGTH is prohibited on the same terms as its
+                //       content, so the width was not a safe abbreviation of the key but a measurement
+                //       of it. The comment defending them said they were "what an operator needs to find
+                //       the row"; that is true and is not a permission. What replaces them is what the
+                //       standard itself nominates for exactly this case: the correlation identifier,
+                //       which locates the request, and a per-page ORDINAL, which locates the row within
+                //       the page the same query returns. Both disclose nothing.
+                //       Alternatives Considered: a keyed opaque token over the account identifier
+                //       through OpaqueIdentifier, which the sibling authorization mapper does hold.
+                //       Rejected here because it would add key material and its configuration to this
+                //       service for one diagnostic line, and the standard already records that an
+                //       UNKEYED digest is worse than omission -- eleven digits is enumerable, so a
+                //       confirmable token discloses the value it was meant to withhold.
+                //       Trade-offs: an operator can no longer go straight from this line to the row by
+                //       identifier, and that is a real cost the standard accepts explicitly. The ordinal
+                //       plus the correlation identifier reach it in two steps instead of one: re-run the
+                //       listing the correlated request made, and count.
+                // WHY : Alternatives Considered: emitting the line HERE, once per unrenderable row.
+                //       Rejected in favour of accumulating the ordinal and recording ONCE for the page
+                //       below: a per-row line reports the same reason once per row, so a wholly corrupt
+                //       page writes one line per row and none of them says what proportion of the page
+                //       was affected -- which is the figure that tells an operator whether a page is
+                //       degraded or empty. Accumulating loses neither datum: the page-level record names
+                //       every omitted row's ordinal as well as the proportion, so the position this
+                //       branch establishes survives into the record without the volume that emitting it
+                //       here would cost.
+                omittedOrdinals.add(ordinal + 1);
                 continue;
             }
             items.add(toSummary(row));
+        }
+
+        if (!omittedOrdinals.isEmpty()) {
+            recordOmittedRows(omittedOrdinals, rows.size());
         }
 
         // WHY : Trade-offs: the two boundary tokens are carried across VERBATIM -- neither masked, nor
@@ -503,6 +548,67 @@ public class CardMapper {
         //       which way it read; a mapper that minted them would have to be told, and would then be
         //       able to mint the wrong one.
         return new PageResponse<>(items, page.firstKey(), page.lastKey(), page.hasNext());
+    }
+
+    /**
+     * Records that a page omitted rows, naming each one's position and no identifier of any of them.
+     *
+     * <p>⚠️ Refactoring Rationale: this record used to be emitted per row and to carry
+     * {@code accountId={}} in the clear. Both halves were wrong. The clear account identifier is
+     * prohibited outright by the sensitive-data logging contract in
+     * {@code docs/architecture/observability.md}, whose target prohibition names account and customer
+     * identifiers alongside the primary account number — a log group is durable, operator-facing and
+     * exported, so an identifier written there has left the boundary every mask in this class exists
+     * to hold. {@code CardListService} logs the same read with booleans only
+     * ({@code accountNarrowed=}), so this class was the one place in the module that broke the rule
+     * the rest of it keeps. The per-row emission was the lesser fault and is corrected with it: a page
+     * of twenty non-conforming rows wrote twenty lines saying the same thing.</p>
+     *
+     * <p>Assumptions: the operator does not need an identifier from this line, and that is why
+     * removing it costs nothing operationally. The rows this line reports are exactly the rows
+     * {@code ck_cards_card_num_digits} refuses, and
+     * {@code src/main/resources/db/migration/V2__card_num_digit_domain.sql} publishes the query that
+     * lists them; a person diagnosing this condition runs that query against the database rather than
+     * reconstructing a row set from a log stream. What the line has to do is say that the condition
+     * occurred, how much of the page it affected, and under which request — and it does all three.</p>
+     *
+     * <p>Assumptions: the correlation identifier is read from the diagnostic context and named
+     * explicitly rather than left to the encoder. It is published there by
+     * {@link com.carddemo.common.web.CorrelationIdFilter}, so a deployment whose encoder renders the
+     * context already carries it — but this line is the join between a served page and the data fault
+     * behind it, and naming the field is what lets a test assert the join exists rather than assert a
+     * property of whichever appender a deployment happens to configure. A conversion reached outside
+     * a request has no context, which is reported as {@code none} rather than as an empty field.</p>
+     *
+     * <p>Trade-offs: the line says WHERE each omitted row was and never WHICH row it was. That is
+     * accepted deliberately: every alternative that would identify a row — an account identifier, a
+     * stored width beside a page of one, a truncated key — reintroduces exactly the disclosure the
+     * contract forbids, whereas a position within a reproducible page discloses nothing and still
+     * reaches the row in two steps, by re-running the correlated listing and counting. The proportion
+     * is carried beside the positions rather than in place of them, because it is the figure that
+     * distinguishes one stray row from a wholesale offset error, and that distinction is what changes
+     * what an operator does next.</p>
+     *
+     * @param omittedOrdinals the one-based position within the stored page of every row this page could
+     *     not render, in the order the rows were read, never {@code null} and never empty at the one call
+     *     site
+     * @param selected the number of rows the caller's query returned, which bounds
+     *     {@code omittedOrdinals}
+     */
+    // WHY : Assumptions: the ORDINALS are named alongside the counts, and the position is the row's own
+    //       place in the STORED page rather than in the answer -- the answer is what the omission
+    //       already changed, while re-running the correlated listing returns the stored page, so the
+    //       stored position is the only count an operator can reproduce.
+    // WHY : Trade-offs: every ordinal is named rather than the first few and a count. The list is
+    //       bounded by the page, and the page is bounded by the contract's published maximum, so the
+    //       line cannot grow without limit; a truncated list, by contrast, would report a proportion
+    //       whose rows an operator could not finish enumerating from the record alone.
+    private static void recordOmittedRows(List<Integer> omittedOrdinals, int selected) {
+        LOG.warn("event=card.list.rows.unrenderable reason=card-number-outside-domain"
+                        + " omitted={} selected={} rowOrdinal={} correlationId={}",
+                omittedOrdinals.size(), selected,
+                String.join(",", omittedOrdinals.stream().map(String::valueOf).toList()),
+                correlationIdOrAbsent());
     }
 
     /**
@@ -591,6 +697,37 @@ public class CardMapper {
     }
 
     /**
+     * Reads the correlation identifier the shared filter recorded for the request being served.
+     *
+     * <p>Assumptions: the identifier is read from the logging context rather than taken as a parameter,
+     * because the filter accepts a conforming inbound header but generates a value when the caller sends
+     * none, and only the context holds whichever of the two is in force. It is read explicitly rather
+     * than left to a log pattern because no module in this reactor configures one that renders context
+     * keys, so a line that does not name the identity itself does not carry it.</p>
+     *
+     * <p>Assumptions: an absent value yields a fixed token rather than {@code null}, so a line emitted
+     * outside a request -- from a test, or from a caller reached other than through the filter chain --
+     * reads as having no correlation instead of reading as the four characters {@code null}, which a
+     * search for a real identifier could otherwise match.</p>
+     *
+     * <p>Trade-offs: the value is not the row and cannot be turned into one on its own. It is the join
+     * key to the request record, and reaching a row needs that record too. Naming the row directly was
+     * the alternative, and {@code docs/architecture/observability.md} forecloses it: the identifiers
+     * that would name it are prohibited in a durable record whether written whole, abbreviated,
+     * measured or digested.</p>
+     *
+     * @return the correlation identifier in force, or {@link #CORRELATION_ID_ABSENT} when none was
+     *     recorded; never {@code null}
+     */
+    private static String correlationIdOrAbsent() {
+        String correlationId = MDC.get(CorrelationIdFilter.CORRELATION_ID_MDC_KEY);
+        // WHY : Assumptions: a BLANK value is treated as absent alongside a null one. The filter never
+        //       publishes one, but a value made only of spaces would otherwise render as spaces after
+        //       the field name, which reads as a truncated line rather than as no correlation at all.
+        return correlationId == null || correlationId.isBlank() ? CORRELATION_ID_ABSENT : correlationId;
+    }
+
+    /**
      * Renders a stored account identifier as the fixed-width digit string the contract publishes.
      *
      * @param accountId the stored account identifier, which must not be {@code null} and must not be
@@ -627,7 +764,7 @@ public class CardMapper {
                             + " rendering has no position for a sign");
         }
 
-        String digits = String.format("%0" + ACCOUNT_ID_WIDTH + "d", accountId);
+        String digits = String.format(Locale.ROOT, "%0" + ACCOUNT_ID_WIDTH + "d", accountId);
         if (digits.length() != ACCOUNT_ID_WIDTH) {
             throw new IllegalArgumentException(
                     "account identifier occupies " + digits.length() + " digits where the record field"

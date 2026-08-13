@@ -3,6 +3,7 @@ package com.carddemo.account.config;
 import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.security.CognitoAccessTokenValidator;
 import com.carddemo.common.security.JwtRoleConverter;
+import jakarta.servlet.DispatcherType;
 import java.time.Clock;
 import java.util.List;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -424,6 +425,43 @@ public class SecurityConfig {
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(requests -> requests
+                        // WHY : Purpose: the container's ERROR dispatch is admitted before any other rule,
+                        //       so that a request whose response could not be written is answered by the
+                        //       error page rather than by this chain's catch-all. The catch-all requires a
+                        //       group authority, and the error page is not a path any rule above names, so
+                        //       without this rule the caller received a refusal on /error -- a path it
+                        //       never addressed -- in place of the failure it provoked.
+                        // WHY : Measured: that refusal is 401 rather than 403, even for a caller whose
+                        //       original request presented a valid group token, and the reason matters
+                        //       when reading a log. The framework's authentication filters extend
+                        //       OncePerRequestFilter, whose shouldNotFilterErrorDispatch returns true, so
+                        //       BearerTokenAuthenticationFilter is skipped on an error dispatch and the
+                        //       rules are reached with NO principal; the authorization filter is not one of
+                        //       those and does run. Neutralising this rule and re-running
+                        //       SecurityChainDispatchTest fails exactly the two end-user error-dispatch
+                        //       cases, both with 401.
+                        // WHY : Assumptions: the rule matches the DISPATCHER TYPE and not the error path's
+                        //       name, because the deployment owns that mapping and this configuration does
+                        //       not. A path-based permit would additionally let any caller address the error
+                        //       page directly and provoke the container's own error body, which no
+                        //       operation in openapi/account-api.yaml declares; matching the dispatcher
+                        //       type leaves a direct request to that path refused by the catch-all exactly
+                        //       as before.
+                        // WHY : Assumptions: it is stated here even though carddemo-common-defaults.yml
+                        //       registers the security filter for REQUEST and ASYNC only, which keeps a
+                        //       deployed chain from seeing an error dispatch at all. A chain must state its
+                        //       own security intent: a sliced or hand-wired context builds this chain
+                        //       WITHOUT that property, and the property is a registration detail a later
+                        //       deployment could widen without anyone re-reading this file.
+                        // WHY : Trade-offs: this rule does NOT decide the error dispatches of the internal
+                        //       machine-token addresses. Those are claimed by the earlier-ordered chain in
+                        //       InternalApiSecurityConfig, which matches them on their ORIGINAL address, so
+                        //       each dispatch is governed by the rules of the chain that admitted the
+                        //       request itself. Both halves are needed: this one keeps an end-user error
+                        //       page off this chain's catch-all, and that one keeps an internal caller's
+                        //       error page off a rule that demands a Cognito group its credential cannot
+                        //       carry.
+                        .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                         .requestMatchers(HEALTH_PATH).permitAll()
                         // WHY : Assumptions: the management endpoints this module publishes beyond
                         //       health are granted by NETWORK POSITION and not by authority,

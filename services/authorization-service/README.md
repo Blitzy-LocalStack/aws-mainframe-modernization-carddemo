@@ -705,14 +705,55 @@ message stays invisible until its visibility timeout expires, and redelivery —
 the dead-letter queue at five receives — is what retries it. Nothing is re-decided from a
 buffer that was never refilled.
 
-### 6.5 The remaining registered divergences
+### 6.5 Further registered divergences — a selection, not the whole set
+
+⚠ **This subsection is not exhaustive, and it no longer claims to be.** The complete and only
+authority is
+[`docs/architecture/cobol-to-service-traceability.md`](../../docs/architecture/cobol-to-service-traceability.md)
+§7. The rows below are the ones a reader of *this* document is most likely to need, drawn
+from the register; the four narrated at length in §6.1–§6.4 are not repeated here.
 
 | Identifier | What differs |
 |---|---|
 | `D-AUTH-FRAUD-TARGET-STATE` | The fraud operation takes a target state and is idempotent, where `cbl/COPAUS1C.cbl` L230–L243 inverts whatever it re-reads |
+| `D-AUTH-FRAUD-ONE-CLOCK` | The two fraud report dates come from one clock rather than two, so they cannot straddle midnight |
 | `D-REPLY-PUT-LENGTH` | This service emits exactly 63 reply bytes and accepts 63 or 64, where the reference transmits 64 for 63 built characters ([§5.1](#51-the-wire-shape-is-the-contract)) |
 | `D-AUTHORIZATION-FIFO-IDENTITY-METADATA` | The card number reaches queue metadata as the ordering identity ([§5](#5-messaging-contract)) |
+| `D-AUTH-AMOUNT-TOLERANT-READ` | The declared-width amount token is emitted and read whole rather than at the narrower width the reference writes |
+| `D-NEGATIVE-AUTH-AMOUNT` | An authorization amount outside the declared domain is refused rather than decided on |
+| `D-AUTH-REASON-WIDTH` | The composed authorization reason is capped at the screen's twenty characters rather than overflowing |
+| `D-AUTH-SUMMARY-MONEY-DOMAIN` | The summary's money columns **saturate** at the column's greatest magnitude where the baseline's packed fields truncate silently, and the saturation is reported |
+| `D-SUMMARY-LIMIT-REFRESH` | The stored limits are refreshed only on a request whose account was actually read, not on every request |
+| `D-DECLINED-AMT-CURRENT` | The declined total accumulates the current request's amount, which the reference leaves out of it |
+| `D-LOAD-PREFIX-REFUSED` | An undecodable parent key is reported, where the loader's guard has no else branch |
+| `D-LOAD-READ-BOUNDED` | The load walk cannot fail to terminate, where two of the reference's read branches suspend it |
+| `D-UNLOAD-SKIP-REPORTED` | A root the unload cannot attribute is counted and reported, where the reference passes it over in silence |
 | `D-PURGE-EXPIRY-FLOOR` | A zero expiry threshold is refused rather than honoured ([§11](#11-the-three-maintenance-jobs)) |
+| `D-E`, also `D-PURGE-YEAR-BOUNDARY` | The reference subtracts two `YYDDD` ordinals as plain integers, so 31 December and 1 January read as 636 days apart; `PurgeJob` differences calendar dates instead, and its business date is a required parameter with no clock fallback |
+| `D-F`, also `D-PURGE-DELETE-GUARD` | One counter is tested twice in the reference, making its second condition unreachable |
+| `D-G`, also `D-PURGE-COUNTER-PERSISTENCE` | Four decrements the reference computes and never persists are persisted here |
+
+⚠ Refactoring Rationale: this subsection was headed *"The remaining registered divergences"*
+and carried FOUR rows, which read as the complete residue after §6.1–§6.4. It was not:
+`D-AUTH-SUMMARY-MONEY-DOMAIN` was live, shipped, asserted by
+`domain/PendingAuthSummaryMoneyDomainTest` and cited by identifier in
+`domain/PendingAuthSummary` and `service/AuthorizationRequestListener`, and it was absent
+here — and it was not the only one. A sweep of this module's own main sources for
+register-defined identifiers reports **25**, against the eight this section claimed between
+§6.1–§6.4 and its table:
+`grep -rhoE '\bD-([A-Z0-9][A-Z0-9-]{2,}|[1-9]|[A-Z])\b' src/main | sort -u`.
+
+Assumptions: the honest fix is BOTH halves — the named omission is added, and the claim of
+completeness is withdrawn. A hand-maintained exhaustive list of twenty-five entries in a
+module README is a second register that must agree with the first, and the drift this finding
+caught is what that costs; a selection that says it is a selection cannot be wrong in the one
+direction that matters, which is a reader concluding a divergence is unregistered because it
+is not written here. Two identifiers a reader will find in this module's source deserve a note
+because neither is in the register's §7 by design: `D-AUTH-REQUEST-WINDOW` was **withdrawn**
+once the migrated consumer reproduced the reference's own 501-request run, and
+`D-PURGE-BALANCE` names a **preserved** asymmetry rather than a difference — the reference
+never releases a reserved balance on expiry and neither does this service. Both are explained
+in the register at the point a searcher would look.
 
 ## 7. Security contract
 
@@ -887,8 +928,8 @@ accepted one.
 
 ## 9. Build, test, and the documentation gate
 
-<!-- test-inventory: 71 tests + 10 integration tests -->
-**81** test classes across ten subpackages: **71** matching `*Test`, run by Surefire, and
+<!-- test-inventory: 72 tests + 10 integration tests -->
+**82** test classes across ten subpackages: **72** matching `*Test`, run by Surefire, and
 **10** matching `*IT`, run by Failsafe against Testcontainers-backed PostgreSQL. Every test
 package carries a `package-info.java`, because the documentation gate audits test sources
 too.
@@ -904,7 +945,7 @@ which is the point: a census a reader trusts has to be one a test maintains.
 | `service` | 15 | 4 | The decision unit of work, the fraud-marking boundary, the outbox drain's publication lifecycle, and that a purge window rolls back as one |
 | `fixtures` | 11 | 1 | The fraud-domain fixtures against real columns |
 | `mapper` | 10 | — | |
-| `config` | 11 | — | |
+| `config` | 12 | — | |
 | `dto` | 9 | — | |
 | `domain` | 8 | — | |
 | `repository` | — | 5 | Composite keys, key and reply-code domains, parentage, keyset paging, the fraud index order, and the outbox claim |
@@ -916,7 +957,7 @@ which is the point: a census a reader trusts has to be one a test maintains.
 # WHAT: run every test in this module, unit and integration alike.
 # WHY : Assumptions: `verify` rather than `test`, because Failsafe binds to
 #       `integration-test` and `verify`. Refactoring Rationale: this page used to
-#       document `test` alone, which exercises 71 of the 81 classes and silently
+#       document `test` alone, which exercises 72 of the 82 classes and silently
 #       skips all TEN Testcontainers-backed classes — every assertion about the
 #       single-transaction decision, the outbox drain and the purge rollback, which
 #       are precisely the properties D-5 and D-6 exist for. A container runtime is
@@ -1136,11 +1177,53 @@ it does is decided by the arguments alone: `AuthorizationApplication.main` asks
 `--job=` it runs that one task and calls `System.exit` with its status instead of starting a
 server.
 
-| Job | Migrated from | Required arguments |
-|---|---|---|
-| `load-authorizations` | `PAUDBLOD.CBL` | — |
-| `unload-authorizations` | `PAUDBUNL.CBL`, `DBUNLDGS.CBL` | — |
-| `purge-authorizations` | `CBPAUP0C.cbl` | `--business-date=<YYYY-MM-DD>`, optionally `--expiry-days=<1..MAX>` |
+| Job | Migrated from | Required arguments | Optional arguments |
+|---|---|---|---|
+| `load-authorizations` | `PAUDBLOD.CBL` | `--root-extract=<location>`, `--child-extract=<location>` | — |
+| `unload-authorizations` | `PAUDBUNL.CBL`, `DBUNLDGS.CBL` | `--root-extract=<location>`, `--child-extract=<location>`, `--business-date=<YYYY-MM-DD>` | `--extract-form=prefixed\|sequential` |
+| `purge-authorizations` | `CBPAUP0C.cbl` | `--business-date=<YYYY-MM-DD>` | `--expiry-days=<1..MAX>`, `--checkpoint-frequency=<1..MAX>`, `--progress-log-frequency=<1..MAX>` |
+
+A `<location>` is either `s3://bucket/key` or a filesystem path, which is the sentence
+`MaintenanceTaskRunner.usage()` closes with. Both extract arguments are **mandatory for both**
+the load and the unload job: `task/MaintenanceTaskRunner` reads each through `requiredValue`
+at L371–L372 for the load and L375–L376 for the unload, and `requiredValue` raises rather
+than defaulting, so an invocation without them exits non-zero having done nothing. The unload
+additionally requires `--business-date`, read through `requiredDate`, because the date selects
+the generation prefix the extract is written under.
+
+Assumptions: the two option names are the same for both jobs but their **direction is
+opposite**, and knowing which is which is the difference between reading an extract and
+overwriting it. `LoadAuthorizationsTask` opens both locations with `ExtractStore.openForRead`,
+so for the load they are **sources that must already exist**; `UnloadAuthorizationsTask` opens
+both with `ExtractStore.openForWrite`, so for the unload they are **destinations that get
+written**. Pointing an unload at the locations a load reads from is therefore a way to destroy
+the input, which is why the examples below use distinct names for the two.
+
+⚠ Refactoring Rationale: this table showed **—** in the required column for load and unload,
+and the examples below omitted both arguments, so every command a reader could copy from this
+section failed on the first thing it did. The two jobs are the ones an operator reaches for
+least often and therefore the ones most likely to be run straight from a README, and the
+failure is not self-explanatory from the table — it is only self-explanatory from the usage
+text the failure prints. Both required arguments are stated here and in every example, and
+the optional column is added rather than folding options into a prose aside, because the
+purge row already carried its option inside the required cell and that is what made the
+distinction unreadable in the first place.
+
+⚠ Assumptions: the optional column is exhaustive per row and is transcribed from
+`MaintenanceTaskRunner.usage()` rather than from the option constants, because a constant
+exists for every option but the usage text is where required and optional are distinguished.
+`--extract-form` is optional and defaults to `UnloadService.DEFAULT_FORM` (`prefixed`), which
+the exporter owns and publishes; the three purge options are read through `optionalCount` and
+are absent from the parameter map when omitted rather than present with a default written in.
+
+⚠ The export requires `--business-date` and it is not decoration. The orchestrator keys **both**
+destinations by that date — `authorization/extract/dt=<businessDate>/run=<execution>/` — and the
+state machine's own guard checks only the ten-character shape `????-??-??`, which admits
+`abcd-ef-gh` and the impossible `2022-02-30` alike. `MaintenanceTaskRunner.requiredDate` (L469)
+parses it before the application context starts and `UnloadAuthorizationsTask` parses it again
+before either destination is opened, so an unparseable date refuses the run instead of landing an
+extract under a prefix no later run can find by date. The two locations are still the caller's,
+because the export a load reads back is not always the one this machine produced.
 
 Alternatives Considered: two exit paths in one class is the accepted cost, and both
 alternatives were worse. A second bootable artifact would double the images to build, scan
@@ -1155,16 +1238,30 @@ every replica at once and leave the run no exit status for an orchestrator to br
 #       PARM and the reason a nightly chain can be restarted at all.
 # WHY : Trade-offs: `--expiry-days` is optional and defaults to 5; see below for why zero is
 #       refused rather than honoured.
+# WHY : Assumptions: the two extract locations are MANDATORY for load and unload and are shown
+#       on every invocation. `MaintenanceTaskRunner` reads both through `requiredValue`, which
+#       raises rather than defaulting, so omitting either exits non-zero having done nothing —
+#       and a reader copying a command from a README has no reason to expect that. A
+#       `<location>` is `s3://bucket/key` or a filesystem path; the filesystem forms below are
+#       written under `target/` so a copied command cannot write outside the build directory.
 set -a
 . ./.env.authorization-service.local
 set +a
 
 java -jar services/authorization-service/target/authorization-service.jar \
-    --job=load-authorizations
+    --job=load-authorizations \
+    --root-extract=s3://carddemo-datasets-dev/authorization/extract/roots.dat \
+    --child-extract=s3://carddemo-datasets-dev/authorization/extract/children.dat
 
 java -jar services/authorization-service/target/authorization-service.jar \
-    --job=unload-authorizations
+    --job=unload-authorizations --business-date=2022-07-18 \
+    --root-extract=s3://carddemo-datasets-dev/authorization/extract/dt=2022-07-18/roots.dat \
+    --child-extract=s3://carddemo-datasets-dev/authorization/extract/dt=2022-07-18/children.dat
 
+# WHY : Trade-offs: `--extract-form` is omitted here and therefore takes the exporter's own
+#       published default rather than a value copied into this file, which is the same reason
+#       the runner leaves it out of its parameter map when the operator omits it. Pass
+#       `--extract-form=prefixed` or `--extract-form=sequential` to select it explicitly.
 java -jar services/authorization-service/target/authorization-service.jar \
     --job=purge-authorizations --business-date=2022-07-18 --expiry-days=5
 ```
@@ -1438,4 +1535,3 @@ forbids.
 <sub>Apache-2.0 · This module is additive. The COBOL baseline under <code>app/**</code>
 and the reference suite under <code>tests/**</code> are read, cited and never
 modified.</sub>
-

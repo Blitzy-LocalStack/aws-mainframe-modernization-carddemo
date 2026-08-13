@@ -21,13 +21,15 @@
  * </pre>
  *
  * <ul>
- *   <li>{@code CardMapperTest} across 17 cases -- the verification-value suppression, the masking of the
+ *   <li>{@code CardMapperTest} across 19 cases -- the verification-value suppression, the masking of the
  *       primary account number on every ordinary response, the whole-number disclosure on the one
  *       administrative route, the removal of the record's trailing padding, the two identifiers
- *       travelling as digit strings with their leading zeros intact, and the three cases holding the
+ *       travelling as digit strings with their leading zeros intact, and the five cases holding the
  *       listing's behaviour when a stored key lies outside the published card-number domain: the page is
  *       served with that row omitted, a single-card read still refuses, and the record of the omission
- *       names the account and no part of the key.</li>
+ *       names neither the account, a measurement of the key nor the key itself, reports the row's own
+ *       position within the page it came from, and reports an absent correlation identity as a token
+ *       rather than as a null.</li>
  *   <li>{@code CardExpiryParityTest} across 4 cases -- what an expiry edit does to the stored day. The
  *       reference edits a month and a year and never a day, and composes a day into the stored value
  *       without consulting a calendar, so the target's true date column cannot hold the impossible

@@ -16,6 +16,7 @@ import com.carddemo.transaction.repository.TransactionRepository;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
+import java.util.Locale;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
@@ -801,7 +802,7 @@ public class BillPaymentService {
             throw new IllegalStateException(BillPaymentMapper.MESSAGE_TRANSACTION_LOOKUP_FAILED);
         }
 
-        return String.format("%0" + BillPaymentMapper.IDENTIFIER_WIDTH + "d", allocated);
+        return String.format(Locale.ROOT, "%0" + BillPaymentMapper.IDENTIFIER_WIDTH + "d", allocated);
     }
 
     /**

@@ -975,7 +975,43 @@ public final class DateEditValidator {
         public String aggregateFlagCodes() {
             return String.valueOf(new char[] {year.code(), month.code(), day.code()});
         }
-    }
+    
+        /**
+         * Renders the three verdicts and the message, with the per-field list reduced to its size.
+         *
+         * <p>Purpose. Nothing here is protected -- a date edit reports verdicts over a year, a month and a
+         * day, and its message is one of the reference sentences -- so this renderer exists for the
+         * collection reason alone: the per-field error list is as long as the number of components that
+         * failed, and each entry renders a label and a sentence, which made the generated form the longest
+         * part of any line that carried one.</p>
+         *
+         * <p>Assumptions: the three verdicts and the input-error switch are kept in full, because they are
+         * the result. A date edit is read to learn WHICH component was refused, and the per-field list
+         * carries no verdict the three components do not already state; its size is enough to show that
+         * the list and the verdicts agree.</p>
+         *
+         * <p>Trade-offs: the optional language-environment result is reported as present or absent rather
+         * than rendered. It is the reference date-service reply, whose own components are a return code
+         * and a feedback token; reporting its presence answers whether the service was consulted, which is
+         * the question a caller of this validator actually asks of it.</p>
+         *
+         * @return a rendering naming the field label, the three component verdicts, the input-error
+         *     switch, the message, the number of per-field errors and whether a language-environment
+         *     result is present; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "DateEditResult[fieldLabel=" + this.fieldLabel
+                    + ", year=" + this.year
+                    + ", month=" + this.month
+                    + ", day=" + this.day
+                    + ", inputError=" + this.inputError
+                    + ", message=" + this.message
+                    + ", fieldErrors=" + this.fieldErrors.size() + " entries"
+                    + ", languageEnvironment=" + (this.languageEnvironment.isPresent() ? "present"
+                            : "absent") + ']';
+        }
+}
 
     /**
      * The mutable state one edit accumulates: the three markers, the caller-owned switch, the latched

@@ -646,9 +646,18 @@ spring:
   #   and baseline-on-migrate -- decide what happens when the schema is not
   #   in the state expected, and both refuse to paper over it, so each
   #   records its own consequence rather than leaving a reader to infer it
-  #   from the default; (3) this is the only module in the reactor applying
-  #   TWO migrations, and the second one dominates startup cost, which is a
-  #   fact two artifacts outside this file are sized around.
+  #   from the default; (3) this is the only module in the reactor whose
+  #   migrations carry a reference-DATA SEED -- V2__seed_reference.sql is the
+  #   only migration in the reactor holding INSERT statements, six of them --
+  #   and that seed dominates startup cost, which is a fact two artifacts
+  #   outside this file are sized around. ⚠️ Refactoring Rationale: this read
+  #   "the only module in the reactor applying TWO migrations", which was
+  #   false -- three modules carry two, two carry three, one carries five --
+  #   and it was also the wrong fact to rest the sizing on, since a second
+  #   migration that alters a column costs nothing like one that loads the
+  #   transaction types, the transaction categories, the mandatory DEFAULT
+  #   disclosure group and the three lookup tables. The claim is restated in
+  #   a form a directory listing settles, so it cannot drift as schemas do.
   #   -----------------------------------------------------------------------------
   flyway:
 

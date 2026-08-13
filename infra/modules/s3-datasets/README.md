@@ -4,12 +4,28 @@
 > bucket that is versioned, encrypted with the caller's S3 customer-managed KMS
 > key, fully blocked from public access, and denied plaintext transport. It
 > declares the prefix and lifecycle contracts for ten generation-dataset
-> families plus two non-generation statement artifacts, retains five same-key
-> noncurrent versions per prefix by default, invokes a caller-owned function to
-> retain the five newest logical generation prefixes, and records dataset object
-> reads and writes in a separate versioned CloudTrail audit bucket. Together the
-> two retention layers replace the ten baseline
+> families, three non-generation reporting artifacts and one source-extract
+> prefix, retains five same-key
+> noncurrent versions per prefix by default, publishes the retention count and the
+> bucket name that logical generation cleanup is driven from, and records dataset
+> object reads and writes in a separate versioned CloudTrail audit bucket.
+> Together the two retention layers replace the ten baseline
 > `DEFINE GENERATIONDATAGROUP ... LIMIT(5) SCRATCH` contracts.
+>
+> Refactoring Rationale: this paragraph previously said the module "invokes a
+> caller-owned function to retain the five newest logical generation prefixes",
+> which contradicts both the *Exceptions / errors* note below and
+> [What this module deliberately does not own](#what-this-module-deliberately-does-not-own).
+> It invokes nothing. The `object_created_lambda_arn` input, the
+> `aws_lambda_permission` and the `aws_s3_bucket_notification` that once wired that
+> hook were removed, because an `aws_s3_bucket_notification` is a WHOLE-BUCKET
+> resource and a reusable module declaring one claims the bucket's only
+> notification slot for every consumer. **The environment root owns the
+> invocation** — `infra/envs/dev/main.tf` and `infra/envs/prod/main.tf` declare the
+> permission and the notification themselves over `module.s3_datasets.bucket_name`
+> — and the pruning itself is performed by data-migration's staging writer
+> (`prune_generations` in `loaders/s3_stage.py`). This module's share is the
+> bucket, the prefixes, the lifecycle rules and the outputs those two read.
 >
 > **Source of truth.** The generation inventory comes from the REFERENCE-only
 > definitions at `app/jcl/DEFGDGB.jcl:L25-L57`,
@@ -22,10 +38,19 @@
 > versioned S3 prefixes. The four `.tf` files beside this README are
 > authoritative for the module's implemented resources, inputs, and outputs.
 >
-> **Parameters.** The generated Inputs table is the typed input contract. Only
-> `environment` and `kms_key_arn` are required; the two inventory maps have closed
-> default key sets, and the retention, transition, logging, destruction, naming
-> and tag controls have validated defaults.
+> **Parameters.** The generated Inputs table is the typed input contract. **Three
+> inputs are required: `environment`, `kms_key_arn` and `s3_gateway_endpoint_id`.**
+> The two inventory maps have closed default key sets, and the retention,
+> transition, logging, destruction, naming and tag controls have validated
+> defaults.
+>
+> Refactoring Rationale: this note previously said "Only `environment` and
+> `kms_key_arn` are required", and the usage example below omitted the third input
+> accordingly. `s3_gateway_endpoint_id` was added later and declares no default, so
+> a root following the documented example would fail at plan with "No value for
+> required variable" — the one class of documentation error that costs a reader an
+> apply rather than a re-read. The count is stated as a number here so a fourth
+> required input cannot be added without this sentence becoming visibly wrong.
 >
 > **Return values.** The generated Outputs table is authoritative. It publishes
 > the data-path values for the dataset bucket, the generation and statement
@@ -47,10 +72,19 @@
 > **This is not the Terraform remote-state bucket.** `infra/bootstrap` alone
 > owns the state bucket and DynamoDB lock table and is applied separately before
 > an environment root uses its backend. Both buckets are versioned, encrypted,
-> and publicly blocked, but their retention policies are deliberately inverse:
-> the bootstrap bucket declares no noncurrent-version expiration because prior
-> state is recovery material, while this module bounds recoverable dataset
-> revisions and logical generations.
+> and publicly blocked, but their retention policies are deliberately
+> **asymmetric — both finite, differently bounded**. The bootstrap bucket keeps the
+> newest twenty state versions regardless of age and expires anything beyond that
+> count only once it is at least 365 days old (`infra/bootstrap/main.tf`,
+> `noncurrent_version_expiration` on the state bucket, defaults from
+> `state_noncurrent_versions_to_retain` and `state_version_retention_days`),
+> because prior state is recovery material. This module is narrower and has a
+> second layer: five same-key noncurrent versions at a one-day age gate, so the
+> rule acts as a count cap, plus logical generation cleanup over the `dt=`/`gen=`
+> prefixes themselves. Refactoring Rationale: this warning previously said the
+> bootstrap bucket "declares no noncurrent-version expiration", which is false and
+> false in the dangerous direction — it would let a reader rely on a year-old state
+> version without checking that a horizon exists.
 
 Terraform has no docstring construct, so this README carries the module-level
 purpose, lineage, alternatives and trade-offs while the typed variables, output
@@ -184,8 +218,8 @@ its retention-function configuration aligned with
 output republishes the module value for verification.
 
 Trade-offs: the dataset bucket has one prefix-scoped lifecycle rule for each of
-the ten generation families and each of the two statement artifacts, plus one
-bucket-wide multipart housekeeping rule. This is more configuration than one
+the ten generation families, each of the three reporting artifacts and the
+source-extract prefix, plus one bucket-wide multipart housekeeping rule. This is more configuration than one
 bucket-wide retention rule, but it preserves an auditable link from every
 `gdg-<family>` rule to its baseline base and permits a family-specific
 `noncurrent_versions` override without changing prefix topology. All ten
@@ -227,24 +261,43 @@ say so. Note that [`infra/bootstrap`](../../bootstrap/) declares a separate
 variable of the same name for its own state-access audit bucket; that one is
 untouched and is a different bucket with a different owner.
 
-## Two non-generation statement artifacts
+## Three non-generation reporting artifacts
 
-`app/jcl/CREASTMT.JCL` produces two plain sequential datasets that receive S3
-locations but do not join the ten-family inventory:
+The baseline produces plain sequential report and statement datasets that
+receive S3 locations but do not join the ten-family inventory. Each map entry
+carries its prefix **literally**, transcribed from
+`services/reporting-service/src/main/resources/application.yml`, because the
+prefix a service writes under is not derivable from a key this module invents:
 
-| Map key | Baseline dataset | Delete and write evidence | Record format |
-|---|---|---|---|
-| `statement-text` | `AWS.M2.CARDDEMO.STATEMNT.PS` | Deleted at `CREASTMT.JCL:L72-L75`; written at L87-L91 | `LRECL=80`, `BLKSIZE=8000`, `RECFM=FB` at L89 |
-| `statement-html` | `AWS.M2.CARDDEMO.STATEMNT.HTML` | Deleted at `CREASTMT.JCL:L67-L71`; written at L92-L96 | `LRECL=100`, `BLKSIZE=800`, `RECFM=FB` at L94 |
+| Map key | Prefix | Baseline dataset | Delete and write evidence | Record format |
+|---|---|---|---|---|
+| `statements` | `statements/` | `AWS.M2.CARDDEMO.STATEMNT.PS` and `.HTML`, written as `statements.txt` and `statements.html` | Deleted at `CREASTMT.JCL:L67-L75`; written at L87-L96 | `LRECL=80`/`BLKSIZE=8000` at L89 and `LRECL=100`/`BLKSIZE=800` at L94, both `RECFM=FB` |
+| `transaction-detail-report` | `reports/transaction-detail/` | `AWS.M2.CARDDEMO.TRANREPT`, request-scoped copy | Written by `CBTRN03C` at `TRANREPT.jcl:L80` | `LRECL=133`, `RECFM=FB` at L79 |
+| `category-balance-report` | `reports/category-balance/` | `AWS.M2.CARDDEMO.TCATBALF.REPT`, written as `category-balance.txt` | Deleted at `PRTCATBL.jcl:L21-L25`; written at L52-L63 | `LRECL=40`, `RECFM=FB` at L62 |
 
 These are **not generation families**. An exhaustive repository search for
 `DEFINE GENERATIONDATAGROUP` finds exactly four files:
 `app/jcl/DEFGDGB.jcl`, `app/jcl/DEFGDGD.jcl`,
 `app/jcl/DALYREJS.jcl`, and `app/jcl/REPTFILE.jcl`. Those files contain eleven
-definitions over ten distinct bases, and none defines either statement
-dataset. The separate `non_generation_prefixes` and `non_generation_uris`
-outputs preserve that distinction for the statement-producing batch state and
-for any consumer that counts generation families.
+definitions over ten distinct bases, and none defines a statement dataset or
+`TCATBALF.REPT`. The separate `non_generation_prefixes` and `non_generation_uris`
+outputs preserve that distinction for the report- and statement-producing batch
+states and for any consumer that counts generation families.
+
+The transaction detail report appears here **and** as the `tranrept` generation
+family, and that is not a double count. The reference writes it to a numbered
+base — `TRANREPT(+1)` at `app/jcl/TRANREPT.jcl:L80` — and the nightly
+publication writes the same bytes to both keys in one generation pass: the
+generation coordinate carries the `LIMIT(5)` analogue, and the request-scoped
+key here is what a range-addressed request and the runbooks resolve. The
+reasoning is recorded at `ReportArtifactPublisher.publishDaily`.
+
+Refactoring Rationale: this section listed two `statement-*` keys whose prefixes
+were **derived** as `<domain>/<key>/`, producing `reporting/statement-text/` and
+`reporting/statement-html/`. The reporting service writes neither, so every
+`seq-` rule governed an empty prefix while the three prefixes that do hold
+objects had no rule, and both outputs published locations no consumer could
+resolve. The keys and prefixes above are what the workload writes.
 
 Trade-offs: the baseline deletes each statement dataset and writes it fresh.
 Bucket versioning expresses a rewrite as a new current version while retaining
@@ -252,6 +305,35 @@ the replaced version for recovery, so no separate target delete step is needed.
 Because versioning is bucket-wide, the two prefixes still need
 noncurrent-version rules to prevent unbounded same-key history; those `seq-`
 rules are ordinary version hygiene, not the `LIMIT(5) SCRATCH` analogue.
+
+## One source-extract prefix
+
+The nightly `StageSeedDatasets` branches READ their inputs from this bucket as
+well as writing generations into it. `source_extract_prefix` is where they read
+from, defaulting to `migration/source/EBCDIC/`, and it is published as both
+`source_extract_prefix` and `source_extract_uri`. The consumer is
+`infra/modules/step-functions-batch`, whose `dataset_source_extract_prefix` input
+the environment roots wire from this output; the producer is the operator
+`aws s3 sync` in
+[data-migration.md](../../../docs/runbooks/data-migration.md).
+
+It is **neither** a generation family **nor** a statement artifact, and it is
+declared as its own variable rather than as a third entry in
+`non_generation_prefixes` for the reason that map exists: both of its keys are
+datasets this stack WRITES, whereas this prefix holds datasets the stack only
+READS. Folding it in would have given it a `seq-` lifecycle rule alongside two
+outputs, implying it is another rewritten artifact.
+
+Alternatives Considered: a separate bucket for the extracts. Rejected because it
+would double the KMS key policy, the TLS-only bucket policy, the public-access
+block and the audit trail to gain a boundary the prefix-scoped IAM pattern
+already draws — and because the read grant the batch and data-migration task
+roles already hold over this bucket then had to be duplicated for a second one.
+
+Its lifecycle rule is `src-source-extracts`, the fourteenth prefixed rule on the
+bucket. The `src-` marker distinguishes it from the ten `gdg-` rules and the three
+`seq-` rules at a glance in a plan diff, which matters because its retention
+means a third thing again: how many superseded UPLOADS of one extract are kept.
 
 ## Observed `REPTFILE.jcl` variant
 
@@ -307,9 +389,21 @@ roots own backend and provider configuration and call the same module source:
 module "s3_datasets" {
   source = "../../modules/s3-datasets"
 
+  # WHAT: the three REQUIRED inputs come first, so a copied example cannot omit
+  #       one and fail at plan with "No value for required variable".
+  environment = var.environment
+  kms_key_arn = module.kms.s3_key_arn
+
+  # WHY : Assumptions: the gateway endpoint identifier is required rather than
+  #       optional because it is what turns the bucket's network boundary from a
+  #       comment into a wired control -- the bucket policy confines dataset reads
+  #       and writes to requests arriving through this VPC's S3 gateway endpoint.
+  #       An optional input here would leave a root that forgot it with a bucket
+  #       reachable from anywhere the credential is, which is the state the
+  #       condition exists to remove.
+  s3_gateway_endpoint_id = module.network.s3_gateway_endpoint_id
+
   name_prefix            = var.name_prefix
-  environment            = var.environment
-  kms_key_arn            = module.kms.s3_key_arn
   access_log_bucket_name = module.observability.access_log_bucket_name
   force_destroy          = !var.deletion_protection
 }
@@ -351,7 +445,7 @@ per prefix rule.
 
 ## Outputs and consumers
 
-The first seven rows are the data-path return contract required by the batch and
+The first nine rows are the data-path return contract required by the batch and
 migration design. The final three rows document the audit resources added by
 the authored module.
 
@@ -361,8 +455,10 @@ the authored module.
 | `bucket_arn` | Bucket-level IAM resource ARN | Environment-root policies for retention Lambda, reporting, batch, and migration tasks; the KMS module's exact S3 encryption context |
 | `dataset_prefixes` | Ten bare `<domain>/<dataset>/` prefixes | Batch and ETL IAM scoping plus `data-migration/src/carddemo_migration/loaders/s3_stage.py` prefix operations |
 | `dataset_uris` | Ten fully qualified family URIs | Batch container overrides replacing generation-oriented `DD DSN=` locations |
-| `non_generation_prefixes` | Two bare statement prefixes | Statement-generation IAM and prefix operations |
-| `non_generation_uris` | Two fully qualified statement URIs | The statement-producing batch state's text and HTML output overrides |
+| `non_generation_prefixes` | Three bare reporting-artifact prefixes | Report- and statement-generation IAM scoping in both environment roots, and prefix operations |
+| `non_generation_uris` | Three fully qualified reporting-artifact URIs | The report- and statement-producing batch states' output overrides |
+| `source_extract_prefix` | Bare prefix the nightly refresh READS extracts from | `infra/modules/step-functions-batch` through the roots' `dataset_source_extract_prefix`; IAM read scoping |
+| `source_extract_uri` | The same prefix fully qualified | The operator `aws s3 ls` verification in the data-migration runbook |
 | `noncurrent_version_retention` | Module-level same-key retention count | Retention-function configuration checks, runbooks, and compliance review; per-family overrides remain visible in `dataset_families` |
 | `audit_bucket_name` | CloudTrail delivery-bucket name | Environment aggregate outputs, evidence export, and teardown operations |
 | `audit_bucket_arn` | Audit bucket's IAM resource ARN | The environment root supplies it to the KMS module's exact bucket-context policy wiring |
@@ -462,7 +558,7 @@ the dataset bucket's access-logging check fires, the resolution is to supply
   [the removal recorded above](#what-this-module-deliberately-does-not-own) in
   the same file — the `audit_log_retention_days` input that drove both
   expirations was withdrawn because the module had no basis for the seven-year
-  figure it defaulted to. Of the two statements the finite one was the dangerous
+  figure it defaulted to. Of the two claims the finite one was the dangerous
   one to leave standing: a reviewer reading the caveats section is reading it to
   learn what the module does *not* guarantee, so an unbounded retention described
   there as finite is the one place the gap would not be noticed.
@@ -509,7 +605,7 @@ the dataset bucket's access-logging check fires, the resolution is to supply
 - [Code documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md) —
   Rule 1's polyglot documentation contract.
 - [Data migration README](../../../data-migration/README.md) — independently
-  confirms ten generation families and keeps the two statement artifacts
+  confirms ten generation families and keeps the three reporting artifacts
   separate.
 
 ## Generated Terraform reference
@@ -571,10 +667,11 @@ the markers; use terraform-docs to regenerate after an HCL contract change.
 | <a name="input_dataset_families"></a> [dataset\_families](#input\_dataset\_families) | Generation-dataset families to provision a prefix and a noncurrent-version lifecycle rule for, keyed by the S3-safe family name main.tf uses as the dataset path segment. Each value carries: domain, the bounded context owning the data, which becomes the leading path segment; description, recording the baseline generation-data-group base the family replaces and the JCL line defining it; and noncurrent\_versions, an optional per-family override of noncurrent\_version\_retention that is left unset on every entry in the default. | <pre>map(object({<br/>    domain              = string<br/>    description         = string<br/>    noncurrent_versions = optional(number)<br/>  }))</pre> | <pre>{<br/>  "dalyrejs": {<br/>    "description": "Daily transaction reject-stream generations, carrying the reject record the posting run writes for each of the four documented reject reasons. Replaces GDG base AWS.M2.CARDDEMO.DALYREJS named at app/jcl/DALYREJS.jcl:L25 inside the DEFINE opened at L24, with LIMIT(5) at L26 and SCRATCH at L27.",<br/>    "domain": "ledger"<br/>  },<br/>  "discgrp-bkup": {<br/>    "description": "Disclosure-group reference backup generations, the interest-rate table the interest run reads. Replaces GDG base AWS.M2.CARDDEMO.DISCGRP.BKUP defined at app/jcl/DEFGDGD.jcl:L74 with LIMIT(5) at L75 and SCRATCH at L76; first generation loaded as (+1) at app/jcl/DEFGDGD.jcl:L86 at LRECL=50.",<br/>    "domain": "reference"<br/>  },<br/>  "systran": {<br/>    "description": "System-generated transaction generations, the interest and fee transactions the interest run emits. Replaces GDG base AWS.M2.CARDDEMO.SYSTRAN defined at app/jcl/DEFGDGB.jcl:L49 with LIMIT(5) at L50 and SCRATCH at L51; read back as (0) by app/jcl/COMBTRAN.jcl:L26.",<br/>    "domain": "ledger"<br/>  },<br/>  "tcatbalf-bkup": {<br/>    "description": "Transaction-category-balance backup generations. Replaces GDG base AWS.M2.CARDDEMO.TCATBALF.BKUP defined at app/jcl/DEFGDGB.jcl:L43 with LIMIT(5) at L44 and SCRATCH at L45.",<br/>    "domain": "ledger"<br/>  },<br/>  "trancatg-bkup": {<br/>    "description": "Transaction-category reference backup generations. Replaces GDG base AWS.M2.CARDDEMO.TRANCATG.PS.BKUP defined at app/jcl/DEFGDGD.jcl:L51 with LIMIT(5) at L52 and SCRATCH at L53; first generation loaded as (+1) at app/jcl/DEFGDGD.jcl:L63 at LRECL=60.",<br/>    "domain": "reference"<br/>  },<br/>  "tranrept": {<br/>    "description": "Transaction report generations, the 133-column fixed-width output. Replaces GDG base AWS.M2.CARDDEMO.TRANREPT defined at app/jcl/DEFGDGB.jcl:L37 with LIMIT(5) at L38 and SCRATCH at L39; written as (+1) by app/jcl/TRANREPT.jcl:L80 at LRECL=133. A second, conflicting definition of the same base exists at app/jcl/REPTFILE.jcl:L25-L28 with LIMIT(10) and no SCRATCH; the LIMIT(5) definition is the one applied.",<br/>    "domain": "reporting"<br/>  },<br/>  "transact-bkup": {<br/>    "description": "Transaction master backup generations. Replaces GDG base AWS.M2.CARDDEMO.TRANSACT.BKUP defined at app/jcl/DEFGDGB.jcl:L25 with LIMIT(5) at L26 and SCRATCH at L27; written as (+1) by app/jcl/TRANBKP.jcl:L33 at LRECL=350 and read back as (0) by app/jcl/COMBTRAN.jcl:L24.",<br/>    "domain": "ledger"<br/>  },<br/>  "transact-combined": {<br/>    "description": "Combined transaction generations, the merge of the transaction backup and the system transactions. Replaces GDG base AWS.M2.CARDDEMO.TRANSACT.COMBINED defined at app/jcl/DEFGDGB.jcl:L55 with LIMIT(5) at L56 and SCRATCH at L57; written as (+1) by app/jcl/COMBTRAN.jcl:L37.",<br/>    "domain": "ledger"<br/>  },<br/>  "transact-daly": {<br/>    "description": "Daily transaction generations staged for posting. Replaces GDG base AWS.M2.CARDDEMO.TRANSACT.DALY defined at app/jcl/DEFGDGB.jcl:L31 with LIMIT(5) at L32 and SCRATCH at L33; written as (+1) by app/jcl/TRANREPT.jcl:L55.",<br/>    "domain": "ledger"<br/>  },<br/>  "trantype-bkup": {<br/>    "description": "Transaction-type reference backup generations. Replaces GDG base AWS.M2.CARDDEMO.TRANTYPE.BKUP defined at app/jcl/DEFGDGD.jcl:L28 with LIMIT(5) at L29 and SCRATCH at L30; first generation loaded as (+1) at app/jcl/DEFGDGD.jcl:L40 at LRECL=60.",<br/>    "domain": "reference"<br/>  }<br/>}</pre> | no |
 | <a name="input_force_destroy"></a> [force\_destroy](#input\_force\_destroy) | Whether Terraform may delete this bucket while it still holds objects, including noncurrent versions. False makes a destroy of a non-empty bucket fail rather than discard its contents. | `bool` | `false` | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Leading token of the bucket name, which main.tf composes as <name\_prefix>-datasets-<environment>-<account-id>-<region>. This is what distinguishes the CardDemo dataset bucket from every other bucket in the account, and it is also the stem the module derives its resource names and tags from. | `string` | `"carddemo"` | no |
-| <a name="input_non_generation_prefixes"></a> [non\_generation\_prefixes](#input\_non\_generation\_prefixes) | Prefixes for baseline datasets that are NOT generation data groups, keyed by the S3-safe name main.tf uses as the dataset path segment. Each value carries a domain, the owning bounded context, and a description recording the baseline dataset and the JCL line that writes it. Held separately from dataset\_families so these can never be counted as additional generation families. | <pre>map(object({<br/>    domain      = string<br/>    description = string<br/>  }))</pre> | <pre>{<br/>  "statement-html": {<br/>    "description": "HTML customer statements. Replaces sequential dataset AWS.M2.CARDDEMO.STATEMNT.HTML, deleted by the IEFBR14 step at app/jcl/CREASTMT.JCL:L71 and rewritten by CBSTM03A at L96 with DCB=(LRECL=100,BLKSIZE=800,RECFM=FB) declared at L94. Not a generation data group: no GENERATIONDATAGROUP base for it exists in the baseline.",<br/>    "domain": "reporting"<br/>  },<br/>  "statement-text": {<br/>    "description": "Plain-text customer statements. Replaces sequential dataset AWS.M2.CARDDEMO.STATEMNT.PS, deleted by the IEFBR14 step at app/jcl/CREASTMT.JCL:L75 and rewritten by CBSTM03A at L91 with DCB=(LRECL=80,BLKSIZE=8000,RECFM=FB) declared at L89. Not a generation data group: no GENERATIONDATAGROUP base for it exists in the baseline.",<br/>    "domain": "reporting"<br/>  }<br/>}</pre> | no |
+| <a name="input_non_generation_prefixes"></a> [non\_generation\_prefixes](#input\_non\_generation\_prefixes) | Prefixes for reporting artifacts that are NOT generation data groups, keyed by the S3-safe artifact name. Each value carries the literal key prefix the reporting service writes under, the domain, the owning bounded context, and a description recording the baseline dataset and the JCL line that writes it. Held separately from dataset\_families so these can never be counted as additional generation families. | <pre>map(object({<br/>    prefix      = string<br/>    domain      = string<br/>    description = string<br/>  }))</pre> | <pre>{<br/>  "category-balance-report": {<br/>    "description": "The category-balance report, written as category-balance.txt. Corresponds to the sorted 40-byte output the DFSORT step at app/jcl/PRTCATBL.jcl:L52-L63 writes to AWS.M2.CARDDEMO.TCATBALF.REPT. Not a generation data group: an exhaustive search of the baseline for DEFINE GENERATIONDATAGROUP matches four files and none of them defines a base for it, so it is a fixed-key artifact like the statements.",<br/>    "domain": "reporting",<br/>    "prefix": "reports/category-balance/"<br/>  },<br/>  "statements": {<br/>    "description": "Plain-text and HTML customer statements, written as statements.txt and statements.html under one prefix. Replaces sequential datasets AWS.M2.CARDDEMO.STATEMNT.PS and AWS.M2.CARDDEMO.STATEMNT.HTML, deleted by the IEFBR14 steps at app/jcl/CREASTMT.JCL:L71 and L75 and rewritten by CBSTM03A at L91 with DCB=(LRECL=80,BLKSIZE=8000,RECFM=FB) and at L96 with DCB=(LRECL=100,BLKSIZE=800,RECFM=FB). Neither is a generation data group: no GENERATIONDATAGROUP base for either exists in the baseline.",<br/>    "domain": "reporting",<br/>    "prefix": "statements/"<br/>  },<br/>  "transaction-detail-report": {<br/>    "description": "The request-scoped transaction detail report, keyed by run date, report type and both range bounds. Corresponds to the 133-column output CBTRN03C writes at app/jcl/TRANREPT.jcl:L80. That output also has a generation base -- provisioned as the tranrept generation family -- and the nightly run publishes to BOTH: this prefix is what a range-addressed request and the runbooks resolve, the generation prefix is what carries the LIMIT(5) analogue.",<br/>    "domain": "reporting",<br/>    "prefix": "reports/transaction-detail/"<br/>  }<br/>}</pre> | no |
 | <a name="input_noncurrent_version_retention"></a> [noncurrent\_version\_retention](#input\_noncurrent\_version\_retention) | Default retention count shared by two mechanisms: data-migration's staging writer keeps this many logical dt=/gen= generation prefixes per family, reproducing LIMIT(5) SCRATCH; S3 lifecycle also keeps this many newer noncurrent versions of any one object key as repeat-write recovery. Distinct gen= prefixes are not noncurrent versions of each other. | `number` | `5` | no |
 | <a name="input_noncurrent_version_transition_days"></a> [noncurrent\_version\_transition\_days](#input\_noncurrent\_version\_transition\_days) | Age in days at which a noncurrent version moves to the storage class named by noncurrent\_version\_transition\_storage\_class. Null disables the transition entirely, leaving noncurrent versions in the class they were written to until they expire. | `number` | `null` | no |
 | <a name="input_noncurrent_version_transition_storage_class"></a> [noncurrent\_version\_transition\_storage\_class](#input\_noncurrent\_version\_transition\_storage\_class) | Storage class a noncurrent version transitions into, read only when noncurrent\_version\_transition\_days is non-null. Ignored entirely while that value is null. | `string` | `"STANDARD_IA"` | no |
+| <a name="input_source_extract_prefix"></a> [source\_extract\_prefix](#input\_source\_extract\_prefix) | Key prefix inside the dataset bucket holding the exported baseline extracts the data-migration refresh READS. Populating it is an operator action -- docs/runbooks/data-migration.md syncs app/data/ here -- and the refresh joins each dataset's registered source file name to this prefix. This is the only prefix in the bucket that is an input rather than an output, so it carries no generation convention and no LIMIT(5) analogue; its lifecycle rule is ordinary version hygiene for a re-synced corrected extract. | `string` | `"migration/source/EBCDIC/"` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Additional tags merged onto the resources this module creates, over and above whatever the calling root's provider-level default\_tags already applies. Empty by default, so the module contributes no tags of its own unless a caller asks for them. | `map(string)` | `{}` | no |
 
 ### Outputs
@@ -587,8 +684,10 @@ the markers; use terraform-docs to regenerate after an HCL contract change.
 | <a name="output_bucket_name"></a> [bucket\_name](#output\_bucket\_name) | Name of the versioned dataset bucket, for the callers that must be given it rather than hard-code it: infra/envs/dev/main.tf and infra/envs/prod/main.tf write it into Parameter Store, infra/modules/step-functions-batch passes it to each Fargate batch task as a container override, and data-migration/src/carddemo\_migration/loaders/s3\_stage.py reads it to stage dataset generations. This is the application dataset bucket, not the Terraform state bucket that infra/bootstrap/outputs.tf publishes as state\_bucket\_name. |
 | <a name="output_dataset_prefixes"></a> [dataset\_prefixes](#output\_dataset\_prefixes) | Key prefix per generation-dataset family: one entry for each of the ten families, keyed exactly as var.dataset\_families is keyed and valued as the <domain>/<dataset>/ prefix that family's generations live under. Read by infra/modules/step-functions-batch for its per-state container overrides, by data-migration/src/carddemo\_migration/loaders/s3\_stage.py, and by the IAM policies that scope a task role to one family's prefix. Supplies the <domain>/<dataset>/ portion only; the dt= and gen= segments of a generation key are chosen per run by the writer. |
 | <a name="output_dataset_uris"></a> [dataset\_uris](#output\_dataset\_uris) | Fully-qualified s3:// URI per generation-dataset family: the same ten keys as dataset\_prefixes, each resolved against the created bucket. This is the form infra/modules/step-functions-batch puts in a Fargate container override in place of a JCL DD DSN= statement, whereas dataset\_prefixes carries the bare-prefix form that an IAM resource pattern and a boto3 Prefix= argument need. Addresses the family, not a generation: a writer appends its own dt= and gen= segments. |
-| <a name="output_non_generation_prefixes"></a> [non\_generation\_prefixes](#output\_non\_generation\_prefixes) | Key prefix per non-generation dataset -- the two sequential statement artifacts, plain text and HTML -- keyed exactly as var.non\_generation\_prefixes is keyed. Read by the GenerateStatements batch state, which writes both statements to S3. Deliberately separate from dataset\_prefixes: neither artifact has a generation-data-group base in the baseline, so counting them among the generation families would report twelve where variables.tf, docs/architecture/batch-orchestration.md and data-migration/README.md all publish ten. |
-| <a name="output_non_generation_uris"></a> [non\_generation\_uris](#output\_non\_generation\_uris) | Fully-qualified s3:// URI per non-generation dataset: the same two keys as non\_generation\_prefixes, each resolved against the created bucket, so the GenerateStatements batch state receives its plain-text and HTML output locations as container overrides in the same form the generation-writing states receive theirs. |
+| <a name="output_non_generation_prefixes"></a> [non\_generation\_prefixes](#output\_non\_generation\_prefixes) | Key prefix per non-generation reporting artifact -- the shared statements prefix carrying the plain-text and HTML statements, the request-scoped transaction detail report and the category-balance report -- keyed exactly as var.non\_generation\_prefixes is keyed and valued as the literal prefix the reporting service writes under. Read by the GenerateStatements and GenerateReports batch states and by the IAM policies that scope the reporting task role. Deliberately separate from dataset\_prefixes: not one artifact has a generation-data-group base in the baseline, so counting them among the generation families would report thirteen where variables.tf, docs/architecture/batch-orchestration.md and data-migration/README.md all publish ten. |
+| <a name="output_non_generation_uris"></a> [non\_generation\_uris](#output\_non\_generation\_uris) | Fully-qualified s3:// URI per non-generation reporting artifact: the same three keys as non\_generation\_prefixes, each resolved against the created bucket, so the GenerateStatements and GenerateReports batch states receive their output locations as container overrides in the same form the generation-writing states receive theirs. |
 | <a name="output_noncurrent_version_retention"></a> [noncurrent\_version\_retention](#output\_noncurrent\_version\_retention) | Effective number of noncurrent object versions the module retains per prefix, republished so a runbook, a verification query or a compliance review can confirm the baseline's LIMIT(5) SCRATCH generation limit is still being reproduced without reading the module's HCL. Reflects the module-level value only: a per-family override supplied through a dataset\_families entry's noncurrent\_versions member is not folded in. |
 | <a name="output_object_access_trail_arn"></a> [object\_access\_trail\_arn](#output\_object\_access\_trail\_arn) | ARN of the CloudTrail trail whose advanced selector audits object-level access to the CardDemo dataset bucket. |
+| <a name="output_source_extract_prefix"></a> [source\_extract\_prefix](#output\_source\_extract\_prefix) | Key prefix inside the dataset bucket that the exported baseline extracts are read FROM. Passed to the batch chain's seed-refresh state, which gives it to the data-migration container as --extract-prefix. Populating it is an operator action documented in docs/runbooks/data-migration.md. Not one of the ten generation families and not one of the three reporting-artifact prefixes: it is an input, so it has no generation convention and no LIMIT(5) analogue. |
+| <a name="output_source_extract_uri"></a> [source\_extract\_uri](#output\_source\_extract\_uri) | Fully-qualified s3:// URI of the source-extract prefix, for the operator sync documented in docs/runbooks/data-migration.md. |
 <!-- END_TF_DOCS -->

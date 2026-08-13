@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -177,6 +178,16 @@ class AuthorizationRequestListenerTest {
      * lax matcher would not notice.</p>
      */
     private static final BigDecimal CEILING = PendingAuthSummary.MONEY_MAX_MAGNITUDE;
+
+    /**
+     * The counter bound every counting statement is now given, alongside the money bound.
+     *
+     * <p>Assumptions: read from the entity's published constant rather than written as a literal, for the
+     * same reason {@link #CEILING} is -- the bound the statements saturate at and the bound the schema
+     * checks have to be one value, and a literal here could agree with a changed constant while the column
+     * refused the result.</p>
+     */
+    private static final int COUNT_CEILING = PendingAuthSummary.COUNTER_MAX;
 
     /**
      * The window size these tests configure, small enough to close several windows cheaply.
@@ -664,8 +675,8 @@ class AuthorizationRequestListenerTest {
         //       asserting the declined one was. The two arms write different columns, and a decline that
         //       advanced the approved total would overstate the credit an account has committed -- which
         //       is exactly the confusion the two separate statements exist to prevent.
-        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"), CEILING);
-        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class));
+        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"), CEILING, COUNT_CEILING);
+        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class), anyInt());
     }
 
     /**
@@ -1287,8 +1298,8 @@ class AuthorizationRequestListenerTest {
         //       because the same test first drove an APPROVED request through the listener, so a decline
         //       that reached the approved statement would be invisible to a per-arm assertion made only
         //       once.
-        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("6000.00"), CEILING);
-        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class));
+        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("6000.00"), CEILING, COUNT_CEILING);
+        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class), anyInt());
     }
 
     /**
@@ -1467,8 +1478,8 @@ class AuthorizationRequestListenerTest {
         this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
 
         verify(this.summaries, never()).insertSummaryIfAbsent(any(PendingAuthSummary.class));
-        verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"), CEILING);
-        verify(this.summaries, never()).addDeclinedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class));
+        verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"), CEILING, COUNT_CEILING);
+        verify(this.summaries, never()).addDeclinedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class), anyInt());
         verify(this.summaries).refreshStoredLimits(ACCOUNT_ID, new BigDecimal("5000.00"),
                 new BigDecimal("500.00"));
         verify(this.summaries, never()).save(any(PendingAuthSummary.class));
@@ -1522,14 +1533,14 @@ class AuthorizationRequestListenerTest {
         stored.refreshLimits(new BigDecimal("1000000000.00"), new BigDecimal("9999999999.99"));
         when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(stored));
         when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class),
-                any(BigDecimal.class))).thenReturn(1);
+                any(BigDecimal.class), anyInt())).thenReturn(1);
 
         this.listener.onRequest(
                 messageFor(requestFor(Money.of("100.99"), "TXN000000000009"), ALLOWED_REPLY_QUEUE));
 
         verify(this.summaries).refreshStoredLimits(ACCOUNT_ID, CEILING, CEILING);
         verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"),
-                CEILING);
+                CEILING, COUNT_CEILING);
     }
 
     /**
@@ -1581,6 +1592,106 @@ class AuthorizationRequestListenerTest {
     }
 
     /**
+     * An account at the counter ceiling is still answered, and the ceiling reaches the statement.
+     *
+     * <p>⚠️ Purpose: this is the outage the counter clamp exists to remove, asserted from the path that
+     * suffered it. The stored counters are {@code SMALLINT} bounded by
+     * {@code ck_pending_auth_summary_counts} to ±9999, derived under rule T1 from
+     * {@code PIC S9(04) COMP} at {@code app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy} L27 and L28.
+     * The ten-thousandth authorization on an account used to violate that constraint, which rolled the
+     * message's whole unit of work back -- so the requester received NO reply of any kind, the queue
+     * redelivered, and after five receives the request dead-lettered. The account had stopped being
+     * answerable, permanently, and no operator would find a decline because there was none. The reference
+     * does not stop: {@code cbl/COPAUA0C.cbl} L815 adds with no size clause and carries on. The divergence
+     * is registered as {@code D-SUMMARY-COUNTER-SATURATION}.</p>
+     *
+     * <p>⚠️ Assumptions: the property asserted is that the published CEILING is passed to the statement,
+     * not that the stored value came back clamped. The clamp is a {@code case} expression the engine
+     * evaluates, so at this boundary the ceiling argument is the whole of what the listener contributes --
+     * and the earlier defect was precisely that the policy lived in the aggregate while the statements
+     * that do the writing carried no bound at all. {@code PendingAuthSummaryRepositoryIT} asserts the
+     * clamp itself against a real engine; asserting a clamped value here would be asserting the mock.</p>
+     *
+     * <p>Assumptions: the reply is asserted to exist, because "the account is answerable again" is the
+     * outcome that matters and a clamp that admitted the write while dropping the reply would satisfy an
+     * assertion on the counters alone.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an account at the four-digit counter ceiling is still answered and the ceiling is passed")
+    void anAccountAtTheCounterCeilingIsStillAnswered() {
+        givenResolvableCard();
+        PendingAuthSummary atCeiling = summaryWithRoom();
+        assignCounters(atCeiling, PendingAuthSummary.COUNTER_MAX, 0);
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(atCeiling));
+
+        this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
+
+        verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"), CEILING,
+                PendingAuthSummary.COUNTER_MAX);
+        verify(this.outbox).save(any(AuthReplyOutbox.class));
+        verify(this.details).save(any(PendingAuthDetail.class));
+    }
+
+    /**
+     * A counter narrowing on the decision path is reported, naming the account and the member.
+     *
+     * <p>⚠️ Purpose: saturation loses information, and the whole basis on which that loss was accepted over
+     * the reference's truncation is that it is REPORTED at the moment it happens. A clamp that silently
+     * held the counter at its bound would be no more auditable than truncation, so the report is the half
+     * of the policy that makes it defensible and it is asserted rather than assumed.</p>
+     *
+     * <p>Assumptions: the line is asserted to carry BOTH the value that was requested and the value that
+     * will be stored, because an operator reconciling a count against the detail table needs to know how
+     * far past the bound the account went, and a line naming only the bound tells them nothing they could
+     * not read from the schema.</p>
+     *
+     * <p>Assumptions: the DECLINED arm is the one driven here even though the approved arm shares the
+     * reporter. The reporter takes the counter accessor as a parameter, so a defect that passed the wrong
+     * accessor would report the approved counter's distance while the declined counter saturated -- and
+     * only a case that saturates one arm while leaving the other in domain can detect it. The approved
+     * counter is left at zero for exactly that reason.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a counter narrowing on the decision path names the account, the member and both values")
+    void aCounterNarrowingOnTheDecisionPathIsReported() {
+        givenResolvableCard();
+        PendingAuthSummary atCeiling = summaryWithRoom();
+        assignCounters(atCeiling, 0, PendingAuthSummary.COUNTER_MAX);
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(atCeiling));
+        Logger listenerLogger =
+                (Logger) LoggerFactory.getLogger(AuthorizationRequestListener.class);
+        ListAppender<ILoggingEvent> captured = new ListAppender<>();
+        captured.start();
+        listenerLogger.addAppender(captured);
+        Level previousLevel = listenerLogger.getLevel();
+        listenerLogger.setLevel(Level.WARN);
+        try {
+            this.listener.onRequest(
+                    messageFor(requestFor(Money.of("6000.00")), ALLOWED_REPLY_QUEUE));
+
+            assertThat(captured.list.stream().map(ILoggingEvent::getFormattedMessage).toList())
+                    .as("a saturation nobody is told about is indistinguishable from the truncation "
+                            + "this policy was chosen over")
+                    .anyMatch(line -> line.contains("event=auth.summary.counter-narrowed")
+                            && line.contains("accountId=" + ACCOUNT_ID)
+                            && line.contains("field=declinedAuthCount")
+                            && line.contains("requested=" + (PendingAuthSummary.COUNTER_MAX + 1))
+                            && line.contains("stored=" + PendingAuthSummary.COUNTER_MAX));
+            assertThat(captured.list.stream().map(ILoggingEvent::getFormattedMessage).toList())
+                    .as("the arm that is still in domain must not be reported, or every decision on a "
+                            + "saturated account would name both members")
+                    .noneMatch(line -> line.contains("event=auth.summary.counter-narrowed")
+                            && line.contains("field=approvedAuthCount"));
+        } finally {
+            listenerLogger.setLevel(previousLevel);
+            listenerLogger.detachAppender(captured);
+        }
+    }
+    /**
      * An approval the account's limit no longer admits is SUPERSEDED by a decline, everywhere it is reported.
      *
      * <p>Purpose: this is the credit-integrity property the guarded reservation exists for, asserted at the
@@ -1619,13 +1730,13 @@ class AuthorizationRequestListenerTest {
         // WHY : Assumptions: the summary read above has ample room, so the decision service PROPOSES an
         //       approval. That is what makes this case about the reservation rather than about the decision:
         //       a fixture without room would decline before the statement ever ran.
-        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class)))
+        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class), anyInt()))
                 .thenReturn(0);
 
         this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
 
-        verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"), CEILING);
-        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"), CEILING);
+        verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"), CEILING, COUNT_CEILING);
+        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"), CEILING, COUNT_CEILING);
 
         ArgumentCaptor<PendingAuthDetail> superseded = ArgumentCaptor.forClass(PendingAuthDetail.class);
         verify(this.details).save(superseded.capture());
@@ -1669,7 +1780,7 @@ class AuthorizationRequestListenerTest {
         givenResolvableCard();
         when(this.accounts.findAccount(ACCOUNT_ID)).thenReturn(Optional.empty());
         when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
-        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class)))
+        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class), anyInt()))
                 .thenReturn(0);
 
         this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
@@ -1708,7 +1819,7 @@ class AuthorizationRequestListenerTest {
         this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
 
         verify(this.summaries).insertSummaryIfAbsent(any(PendingAuthSummary.class));
-        verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"), CEILING);
+        verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"), CEILING, COUNT_CEILING);
         verify(this.outbox).save(any(AuthReplyOutbox.class));
     }
 
@@ -1750,9 +1861,9 @@ class AuthorizationRequestListenerTest {
         //       into a decline, which is a decided outcome rather than a fault. The refusal therefore has
         //       to come from the decline's contribution, which is the statement that addresses the row
         //       whatever the decision turned out to be.
-        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class)))
+        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class), anyInt()))
                 .thenReturn(0);
-        when(this.summaries.addDeclinedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class)))
+        when(this.summaries.addDeclinedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class), anyInt()))
                 .thenReturn(0);
 
         IllegalStateException refused = assertThrows(IllegalStateException.class,
@@ -1795,9 +1906,9 @@ class AuthorizationRequestListenerTest {
         //       engine re-evaluates the credit check against the row as it stands -- so a zero from it is
         //       not "no such row" but "the headroom went", and the case that drives that answer stubs it
         //       to zero explicitly rather than relying on this default.
-        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class)))
+        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class), anyInt()))
                 .thenReturn(1);
-        when(this.summaries.addDeclinedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class))).thenReturn(1);
+        when(this.summaries.addDeclinedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class), anyInt())).thenReturn(1);
     }
 
     /**
@@ -1812,6 +1923,49 @@ class AuthorizationRequestListenerTest {
         //       and two copies of the same three stubs would drift the moment one of the account values
         //       changed. The no-argument form is kept because most cases have no interest in which card.
         givenResolvableCard(CARD_NUM);
+    }
+
+    /**
+     * Places a summary's two counters at stated values, so a case can start at a domain boundary.
+     *
+     * <p>Assumptions: the counters are set reflectively because the aggregate exposes no way to place
+     * them -- they are advanced one at a time by the arms that record a decision, and a boundary case
+     * would otherwise have to record nine thousand nine hundred and ninety-nine authorizations to reach
+     * the state it is about. Alternatives Considered: {@code PendingAuthSummary.rehydrated}, which does
+     * take counters; rejected here because it also demands every money member and the status array, so a
+     * case using it would state fifteen values to vary one and would stop resembling the
+     * {@code summaryWithRoom} fixture the sibling cases share.</p>
+     *
+     * @param summary the summary to adjust; must not be {@code null}
+     * @param approved the approved count to place on it, as an {@code int}
+     * @param declined the declined count to place on it, as an {@code int}
+     * @throws IllegalStateException if either field cannot be reached, which would mean the aggregate's
+     *     counters had been renamed and this helper had not been updated with them
+     */
+    private static void assignCounters(PendingAuthSummary summary, int approved, int declined) {
+        assignCounter(summary, "approvedAuthCount", approved);
+        assignCounter(summary, "declinedAuthCount", declined);
+    }
+
+    /**
+     * Places one named counter of a summary at a stated value.
+     *
+     * @param summary the summary to adjust; must not be {@code null}
+     * @param field the declared field name of the counter; must not be {@code null}
+     * @param value the value to place on it, as an {@code int}
+     * @throws IllegalStateException if the field cannot be reached, which would mean the aggregate's
+     *     counter had been renamed and this helper had not been updated with it
+     */
+    private static void assignCounter(PendingAuthSummary summary, String field, int value) {
+        try {
+            java.lang.reflect.Field declared = PendingAuthSummary.class.getDeclaredField(field);
+            declared.setAccessible(true);
+            declared.set(summary, Short.valueOf((short) value));
+        } catch (ReflectiveOperationException unreachable) {
+            throw new IllegalStateException(
+                    "PendingAuthSummary." + field + " is no longer reachable, so this helper is stale",
+                    unreachable);
+        }
     }
 
     /**
@@ -2458,7 +2612,7 @@ class AuthorizationRequestListenerTest {
         //       whole token is observable twice over: on the row it was decided from and in the total it
         //       moved.
         verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, saved.getValue()
-                .getTransactionAmount(), CEILING);
+                .getTransactionAmount(), CEILING, COUNT_CEILING);
 
         clearInvocationsKeepingStubs();
         when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
@@ -2529,7 +2683,8 @@ class AuthorizationRequestListenerTest {
         assertEquals("1000.10", saved.getValue().getTransactionAmount().toPlainString());
 
         ArgumentCaptor<BigDecimal> accumulated = ArgumentCaptor.forClass(BigDecimal.class);
-        verify(this.summaries).reserveApprovedAuthorization(anyLong(), accumulated.capture(), any(BigDecimal.class));
+        verify(this.summaries).reserveApprovedAuthorization(anyLong(), accumulated.capture(),
+                any(BigDecimal.class), anyInt());
         assertEquals(Money.SCALE, accumulated.getValue().scale());
         assertEquals("1000.10", accumulated.getValue().toPlainString());
 
@@ -2591,8 +2746,8 @@ class AuthorizationRequestListenerTest {
         ArgumentCaptor<PendingAuthDetail> approved = ArgumentCaptor.forClass(PendingAuthDetail.class);
         verify(this.details).save(approved.capture());
         verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, approved.getValue()
-                .getApprovedAmount(), CEILING);
-        verify(this.summaries, never()).addDeclinedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class));
+                .getApprovedAmount(), CEILING, COUNT_CEILING);
+        verify(this.summaries, never()).addDeclinedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class), anyInt());
 
         clearInvocationsKeepingStubs();
         when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
@@ -2604,14 +2759,14 @@ class AuthorizationRequestListenerTest {
         verify(this.details).save(declined.capture());
         assertEquals(0, BigDecimal.ZERO.compareTo(declined.getValue().getApprovedAmount()),
                 "a decline approves nothing, so its approved amount is the literal zero of L689");
-        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("7000.00"), CEILING);
+        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("7000.00"), CEILING, COUNT_CEILING);
         // WHY : Assumptions: the declined total takes the amount the requester ASKED for, which on a
         //       decline is not the amount the row records as approved. Asserting the two are different is
         //       what makes the asymmetry observable rather than merely described.
         assertThat(new BigDecimal("7000.00"))
                 .as("the amount the declined total accumulates is not the amount the row approved")
                 .isNotEqualByComparingTo(declined.getValue().getApprovedAmount());
-        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class));
+        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class), anyInt());
     }
 
     /**
@@ -2673,8 +2828,8 @@ class AuthorizationRequestListenerTest {
         this.listener.onRequest(
                 messageFor(requestFor(Money.of("200.99"), "TXN000000000002"), ALLOWED_REPLY_QUEUE));
 
-        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("200.99"), CEILING);
-        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class));
+        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("200.99"), CEILING, COUNT_CEILING);
+        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class), anyInt());
     }
 
     /**

@@ -41,14 +41,16 @@ import org.junit.jupiter.api.Test;
  * set of ownership roots, with a prohibition list that no longer names the constructs it claims to, or
  * without ever having been shown to fail.
  *
- * <p>The five gate families are named A1 through A5 throughout this class and in the failure output,
+ * <p>The six gate families are named A1 through A6 throughout this class and in the failure output,
  * so a continuous integration log identifies which boundary was crossed without anyone having to read
  * the source. A1 keeps a {@code ..domain..} package clear of AWS SDK, Spring Web and Jakarta Servlet
  * types. A2 forbids one bounded context from reaching into another's domain model. A3 forbids binary
  * floating point ANYWHERE under the analysed root, which is the whole of the money path and everything
  * beside it. A4 requires every security-chain configuration to install the shared refusal renderers,
  * so a 401 and a 403 carry the problem shape the published contracts declare. A5 forbids any CardDemo
- * class from depending on a retry or resilience library.</p>
+ * class from depending on a retry or resilience library. A6 forbids the locale-less
+ * {@code String.format} overload, whose default-locale digits would corrupt every identifier, key and
+ * fixed-width field this reactor renders through it.</p>
  *
  * <p>Refactoring Rationale: A3's scope is the whole analysed root and not the money package alone,
  * because a rule confined to that package could not see the failure it was written to prevent. The
@@ -100,8 +102,8 @@ import org.junit.jupiter.api.Test;
  * the import found nothing rather than that there was nothing to find. The non-vacuity guard below
  * covers the same failure from the other direction, for the graph as a whole.</p>
  *
- * <p>Assumptions: A4 and A5 need no such tolerance and are given none, because their subject set is
- * every production class under the analysed root. That set is non-empty in every module -- the
+ * <p>Assumptions: A4, A5 and A6 need no such tolerance and are given none, because their subject set
+ * is every production class under the analysed root. That set is non-empty in every module -- the
  * non-vacuity guard below fails the build if it is not -- so neither rule can report success by
  * having examined nothing. What A4 can legitimately find nothing OF is a money-named member, and
  * that is a property of the module rather than of the import, which is why its vocabulary is guarded
@@ -568,6 +570,46 @@ class LayeringRulesTest {
                     + " decision behind it");
 
     /**
+     * Rule A6: no production class calls {@code String.format} without naming a locale.
+     *
+     * <p>Purpose: {@code String.format(String, Object...)} formats with the JVM's DEFAULT locale, and
+     * integral decimal and floating-point conversions are LOCALISED -- so a task started under a locale
+     * whose numbering system is not Latin renders its own digits. Measured on this toolchain,
+     * {@code String.format("%011d", 123L)} yields {@code 00000000123} under {@code Locale.ROOT} but
+     * eleven Devanagari characters under {@code hi-IN-u-nu-deva} and eleven Arabic-Indic characters
+     * under {@code ar-SA-u-nu-arab}. This reactor renders identifiers, keys and fixed-width fields
+     * through that method, so the failure is not cosmetic: the values become ones no comparison can
+     * match and no codec can decode.</p>
+     *
+     * <p>Refactoring Rationale: the review found ONE such call and a sweep of every module's main
+     * sources found TEN. That ratio is the whole argument for a rule rather than ten fixes: the defect
+     * is invisible in review because the expression looks complete, and invisible in test because a
+     * build runner's default locale is Latin, so nothing but a structural prohibition catches the
+     * eleventh.</p>
+     *
+     * <p>Assumptions: the rule targets the two-argument overload by SIGNATURE, which is what makes it
+     * exact rather than textual -- {@code format(Locale, String, Object[])} is a different method and is
+     * not matched, so the rule says "pass a locale" and not "do not format".</p>
+     *
+     * <p>Assumptions: the rule carries NO exemptions, and the four {@code %04X} call sites that were
+     * never defective -- hex conversions are not localised, verified on this toolchain -- were brought
+     * into line rather than exempted. An allow-list would have to be maintained, and the one entry
+     * somebody adds to it "just for this hex call" is indistinguishable from the one they add for a
+     * decimal call.</p>
+     */
+    private static final ArchRule NO_PRODUCTION_CLASS_FORMATS_WITHOUT_A_LOCALE = noClasses()
+            .that()
+            .resideInAPackage(ANALYSED_ROOT + "..")
+            .should()
+            .callMethod(String.class, "format", String.class, Object[].class)
+            .as("A6: no class under " + ANALYSED_ROOT
+                    + " should call String.format(String, Object...) without a locale")
+            .because("that overload formats with the JVM's default locale, so a non-Latin numbering"
+                    + " system substitutes its own digits into identifiers, keys and fixed-width fields"
+                    + " -- and every test still passes, because a build runner's default locale is"
+                    + " Latin; pass Locale.ROOT explicitly");
+
+    /**
      * Imports the production classes of whichever module is executing this gate.
      *
      * <p>Assumptions: two exclusions are applied and neither one covers the other. The predefined
@@ -891,6 +933,25 @@ class LayeringRulesTest {
     @DisplayName("A5: no CardDemo class depends on Spring Retry or Resilience4j")
     void noCardDemoClassUsesAResilienceLibrary() {
         NO_CARDDEMO_CLASS_USES_A_RESILIENCE_LIBRARY.check(PRODUCTION_CLASSES);
+    }
+
+    /**
+     * Checks rule A6, that no production class formats without naming a locale.
+     *
+     * <p>Assumptions: this runs over the same imported production graph as A1 to A5, so the subject is
+     * whichever module's classes were imported, and the non-vacuity guard above is what proves the
+     * graph was read at all.</p>
+     *
+     * <p>Assumptions: no negative fixture accompanies this rule, unlike A3. The rule was DEMONSTRATED
+     * to fail on real code rather than on a fixture: it was authored while ten production call sites
+     * still used the locale-less overload, and it reported them. A fixture calling the overload would
+     * additionally have to live outside this gate's own excluded package to be seen, which would mean
+     * shipping a production class whose only purpose is to be rejected.</p>
+     */
+    @Test
+    @DisplayName("A6: no CardDemo class calls String.format without a locale")
+    void noProductionClassFormatsWithoutALocale() {
+        NO_PRODUCTION_CLASS_FORMATS_WITHOUT_A_LOCALE.check(PRODUCTION_CLASSES);
     }
 
     /**

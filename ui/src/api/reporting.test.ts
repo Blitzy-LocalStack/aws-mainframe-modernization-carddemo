@@ -20,9 +20,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getApiClient } from './client';
 import {
+  collectArtifact,
+  collectReportArtifact,
   generateStatement,
   listStatementTransactions,
   listTransactionReportLines,
+  readReportExecution,
   readTransactionReportTotals,
   submitTransactionReport,
 } from './reporting';
@@ -45,6 +48,11 @@ interface DispatchedRequest {
   url: string;
   params: Record<string, string>;
   body: unknown;
+  // Assumptions: the requested response type is recorded because two operations return a stored
+  //   document and BOTH must arrive undecoded. A client that let the transport parse those bytes --
+  //   the default is a JSON parse -- would corrupt the very artifact the golden-master comparison
+  //   checks byte for byte, and nothing else in this file could detect that.
+  responseType: string;
 }
 
 let dispatched: DispatchedRequest[] = [];
@@ -89,6 +97,7 @@ async function captureAdapter(config: AxiosRequestConfig): Promise<AxiosResponse
     //   compare structures instead of comparing formatted text, which would fail on key order and
     //   on whitespace that neither this module nor the contract has any opinion about.
     body: parseBody(config.data),
+    responseType: config.responseType ?? '',
   });
   return Promise.resolve({
     data: nextBody,
@@ -132,8 +141,46 @@ function onlyRequest(): DispatchedRequest {
 }
 
 /**
+ * The plain-text statement location in the form the contract publishes it, version prefix included.
+ *
+ * Assumptions: taken from `reporting-api.yaml`'s own example for `plainTextUri` rather than composed
+ * here, so the fixture below and the collect case agree with the document instead of with each other.
+ */
+const PLAIN_TEXT_ARTIFACT_LOCATION = '/api/v1/reports/statements/artifacts/0oL2fQ8xVn4tKpR7wZbY1s';
+
+/** The markup statement location, from the same document's example for `htmlUri`. */
+const HTML_ARTIFACT_LOCATION = '/api/v1/reports/statements/artifacts/9tB4mE7kXw2pQzA5nR8vLj';
+
+/** One execution name, shaped as the reporting service mints them from a run's start instant. */
+const EXECUTION_NAME = 'carddemo-transaction-report-2022-07-18T22-10-31Z';
+
+/**
+ * The body a run-status read answers with, carrying only the member these assertions read.
+ *
+ * Assumptions: partial on purpose. What this file fixes is the target and the request shape, so the
+ * answer carries the one member the case asserts on; the full shape is pinned server-side by the
+ * contract and its own tests, and restating it here would be a second statement of one fact.
+ */
+const RUN_STATUS_BODY = { executionName: EXECUTION_NAME, status: 'SUCCEEDED' };
+
+/**
+ * Stand-in for a stored document's bytes.
+ *
+ * Assumptions: a plain string rather than a Blob, because nothing here asserts on the payload -- the
+ * assertions are that the request asked for the bytes undecoded and addressed the right target.
+ */
+const STORED_DOCUMENT_BYTES = 'CARDDEMO STATEMENT ARTIFACT';
+
+/**
  * Returns a statement body whose card number is masked, as the contract declares it.
- * @returns {Record<string, unknown>} One statement summary with both rendering URIs.
+ *
+ * Refactoring Rationale: the two locations were `s3://carddemo-datasets-dev/...` object keys. The
+ * contract no longer publishes that form and no caller of it could open one -- the dataset bucket
+ * admits only the VPC endpoint -- so `reporting-api.yaml` now declares `ArtifactLocation` as a
+ * fifty-nine-character path beneath `/api/v1/reports/statements/artifacts/`. The fixture carries that
+ * form, and the collect case below takes its location FROM this answer rather than from a literal,
+ * which is what keeps the fixture, the client and the document tied to one another.
+ * @returns {Record<string, unknown>} One statement summary with both rendering locations.
  */
 function maskedStatement(): Record<string, unknown> {
   return {
@@ -142,9 +189,11 @@ function maskedStatement(): Record<string, unknown> {
     customerName: 'PARITY CUSTOMER',
     totalAmount: '1234.56',
     transactionCount: 2,
-    plainTextUri: 's3://carddemo-datasets-dev/statements/dt=2022-07-18/gen=0001/stmt.txt',
-    htmlUri: 's3://carddemo-datasets-dev/statements/dt=2022-07-18/gen=0001/stmt.html',
+    plainTextUri: PLAIN_TEXT_ARTIFACT_LOCATION,
+    htmlUri: HTML_ARTIFACT_LOCATION,
     generatedAt: '2022-07-18 22:10:31.000000',
+    firstRecord: 1,
+    recordCount: 2,
   };
 }
 
@@ -168,12 +217,17 @@ async function submitsToThePublishedReportPath(): Promise<void> {
  * from both the 200 and the 201, and that schema nests the handle under `submission` beside a boolean and
  * a sentence. A fixture that reproduces the client's own mistake cannot detect it, so the shape is
  * single-sourced here and taken from the document.
- * @returns {Record<string, unknown>} The 201 body: the flag, the composed sentence, and the nested
+ *
+ * Refactoring Rationale: the discriminator is `outcome` and was the boolean `submitted`. Two of the
+ * three published turns answer 200, so a boolean beside a status cannot tell a declined confirmation
+ * from one not yet answered -- which is exactly the confusion the client made when it read the status
+ * alone.
+ * @returns {Record<string, unknown>} The 201 body: the outcome, the composed sentence, and the nested
  *   handle.
  */
 function startedSubmissionBody(): Record<string, unknown> {
   return {
-    submitted: true,
+    outcome: 'STARTED',
     message: 'Monthly report submitted for printing ...',
     submission: {
       executionArn: 'arn:aws:states:us-east-1:000000000000:execution:carddemo-report:1',
@@ -218,20 +272,58 @@ async function readsAStartedExecutionFromTheCreatedStatus(): Promise<void> {
  *
  * Refactoring Rationale: the stubbed body carried a report name and both range bounds and the assertions
  * read them back, which described a body the service has never emitted -- the published 200 carries
- * `submitted`, `message` and `submission` and nothing else. The absent sentence is asserted as NULL
+ * `outcome`, `message` and `submission` and nothing else. The absent sentence is asserted as NULL
  * rather than left unasserted, because the reference writes nothing on this branch at
  * `app/cbl/CORPT00C.cbl` L480 to L483 and an invented sentence was removed from the handler for that
  * reason; asserting null here is what keeps one from being reintroduced.
+ *
+ * Refactoring Rationale: the body now carries `outcome: 'DECLINED'` where it carried
+ * `submitted: false`, and the case reads that member rather than the status. It shares HTTP 200 with
+ * the unanswered turn below, so a status-driven reading cannot separate the two -- which is what the
+ * sibling case proves by failing when the reading is restored.
  */
 async function readsADeclinedConfirmationFromTheOkStatus(): Promise<void> {
   nextStatus = HTTP_OK;
-  nextBody = { submitted: false, message: null, submission: null };
+  nextBody = { outcome: 'DECLINED', message: null, submission: null };
   const outcome = await submitTransactionReport({ monthly: 'X', confirm: 'N' });
   expect(outcome.outcome).toBe('DECLINED');
   if (outcome.outcome !== 'DECLINED') {
     throw new Error('the ok status must be read as a declined confirmation');
   }
   expect(outcome.message).toBeNull();
+}
+
+/**
+ * Asserts an UNANSWERED confirmation is read as its own outcome carrying the reference's prompt.
+ *
+ * Purpose: this case is the one a status-driven reading cannot pass. It shares HTTP 200 with the
+ * declined turn above and differs only in the `outcome` member and the sentence beside it, so a client
+ * that inferred the outcome from the status labelled this turn a cancellation and discarded the prompt
+ * naming the report -- which `app/cbl/CORPT00C.cbl` L464 to L474 composes and re-displays rather than
+ * treating as a fault.
+ *
+ * Assumptions: the prompt is asserted by value here only because the fixture on the line above is the
+ * one that supplies it; the sentence itself is assembled server-side from two verbatim reference
+ * fragments and this module relays it untouched, so nothing about its wording is fixed by this file.
+ *
+ * Measured: restoring the status-driven reading -- `if (response.status !== HTTP_CREATED) return
+ * { outcome: 'DECLINED', message: null }` -- fails exactly this case with `expected 'DECLINED' to be
+ * 'UNANSWERED'`, while all twelve sibling cases keep passing. That division is the defect a review
+ * found in this module, reproduced and then measured out of it.
+ */
+async function readsAnUnansweredConfirmationFromTheOkStatus(): Promise<void> {
+  nextStatus = HTTP_OK;
+  nextBody = {
+    outcome: 'UNANSWERED',
+    message: 'Please confirm to print the Monthly report...',
+    submission: null,
+  };
+  const outcome = await submitTransactionReport({ monthly: 'X' });
+  expect(outcome.outcome).toBe('UNANSWERED');
+  if (outcome.outcome !== 'UNANSWERED') {
+    throw new Error('an unanswered confirmation must not be read as a cancellation');
+  }
+  expect(outcome.message).toBe('Please confirm to print the Monthly report...');
 }
 
 /**
@@ -248,6 +340,29 @@ async function sendsTheRangeAndOmitsTheDirectionWithoutACursor(): Promise<void> 
   expect(request.method).toBe('get');
   expect(request.url).toBe('/reports/transaction-report/lines');
   expect(request.params).toEqual({ startDate: '2022-07-01', endDate: '2022-07-31' });
+}
+
+/**
+ * Asserts a direction supplied without a cursor is refused locally and never dispatched.
+ *
+ * Assumptions: ⚠️ this case is new because the behaviour changed. The client used to DROP a direction that
+ * arrived without a cursor and answer the opening window, which is the combination every contract refuses
+ * with a 400 keyed on the direction -- so a caller asking to move received the same lines back under a
+ * different request and could not tell. `keysetPagingMembers` in `./client` now raises it for all seven
+ * clients, and both halves are asserted here: that the call rejects, and that nothing reached the
+ * transport, since asserting only the rejection would also pass against a client that let the service
+ * refuse it.
+ * @returns {Promise<void>} Resolves once both refusals and the empty dispatch log have been observed.
+ */
+async function refusesADirectionWithNoCursor(): Promise<void> {
+  await expect(
+    listTransactionReportLines({
+      startDate: '2022-07-01',
+      endDate: '2022-07-31',
+      direction: 'previous',
+    }),
+  ).rejects.toThrow(RangeError);
+  expect(dispatched, 'no request may be dispatched for a refused pair').toHaveLength(0);
 }
 
 /** Asserts a supplied cursor is sent under the published parameter name with its direction. */
@@ -370,7 +485,7 @@ async function refusesAnUnmaskedCardNumberInAnyTransactionRow(): Promise<void> {
 /**
  * Asserts every path this module composes begins with the gateway-published prefix.
  *
- * Assumptions: this is asserted across all five operations together rather than left implicit in the
+ * Assumptions: this is asserted across all eight operations together rather than left implicit in the
  * per-operation assertions, because the property is about the whole module: the gateway publishes
  * only `ANY /api/v1/reports` and `ANY /api/v1/reports/{proxy+}` for this service, so a path this
  * module composed outside that prefix would be answered by the gateway's own 404 with no integration
@@ -394,10 +509,108 @@ async function composesEveryPathUnderTheReportsPrefix(): Promise<void> {
   nextBody = { items: [], transactionCount: 0, truncated: false };
   await listStatementTransactions({ cardNumber: CARD_NUMBER });
 
-  expect(dispatched).toHaveLength(5);
+  nextBody = RUN_STATUS_BODY;
+  await readReportExecution(EXECUTION_NAME);
+
+  nextBody = STORED_DOCUMENT_BYTES;
+  await collectReportArtifact('monthly', '2022-07-01', '2022-07-31');
+  await collectArtifact(PLAIN_TEXT_ARTIFACT_LOCATION);
+
+  expect(dispatched).toHaveLength(8);
   for (const request of dispatched) {
     expect(request.url.startsWith('/reports')).toBe(true);
   }
+}
+
+/**
+ * Asserts a run's status is read from the execution path, addressed by the run's NAME.
+ *
+ * Assumptions: the name is sent as the only path value and no handle is composed here. The contract
+ * takes a name and composes the state-machine handle server-side, so a client that assembled one
+ * would be asserting which machine ran the report -- a deployment fact it does not hold.
+ */
+async function readsARunStatusFromThePublishedExecutionPath(): Promise<void> {
+  nextStatus = HTTP_OK;
+  nextBody = RUN_STATUS_BODY;
+  const status = await readReportExecution(EXECUTION_NAME);
+  const request = onlyRequest();
+  expect(request.method).toBe('get');
+  expect(request.url).toBe(`/reports/executions/${EXECUTION_NAME}`);
+  expect(status.executionName).toBe(EXECUTION_NAME);
+}
+
+/**
+ * Asserts the report document is collected by its coordinates, undecoded.
+ *
+ * Assumptions: the three coordinates travel as query parameters exactly as given, because this
+ * document is addressed by the range it covers rather than by an opaque selector -- a report names no
+ * account, so there is nothing in those coordinates to withhold from a target.
+ */
+async function collectsTheReportDocumentFromItsCoordinates(): Promise<void> {
+  nextStatus = HTTP_OK;
+  nextBody = STORED_DOCUMENT_BYTES;
+  await collectReportArtifact('monthly', '2022-07-01', '2022-07-31');
+  const request = onlyRequest();
+  expect(request.method).toBe('get');
+  expect(request.url).toBe('/reports/transaction-report/artifact');
+  expect(request.params).toEqual({
+    type: 'monthly',
+    startDate: '2022-07-01',
+    endDate: '2022-07-31',
+  });
+  expect(request.responseType).toBe('blob');
+}
+
+/**
+ * Asserts a statement document is collected from the location its own answer reported.
+ *
+ * Purpose: this is the case a client that confused the two path forms cannot pass. A statement answer
+ * publishes its locations WITH the version prefix -- `ArtifactLocation` in `reporting-api.yaml` is
+ * fifty-nine characters beginning `/api/v1/reports/statements/artifacts/` -- while the target
+ * dispatched for it must omit that prefix, because a build's base URL already ends in it. The location
+ * asserted here is therefore taken from the answer, and the target from the request.
+ *
+ * Measured: validating the caller's location against the request-path form instead -- the shape
+ * `requestPath` returns, with the prefix removed -- fails exactly three of this file's seventeen
+ * cases. This one and the whole-module case raise `A statement artifact location must be one this
+ * contract publishes`, because no location the service returns has that shape; and `refuses a location
+ * no answer could have carried` inverts, reporting `promise resolved "{}" instead of rejecting`,
+ * because the wrong form is then the accepted one. That three-way division is the defect this case was
+ * written against, and no other case in the file moves.
+ */
+async function collectsAStatementDocumentFromItsAnswer(): Promise<void> {
+  nextStatus = HTTP_OK;
+  nextBody = maskedStatement();
+  const statement = await generateStatement({ cardNumber: CARD_NUMBER });
+  if (statement.plainTextUri === null) {
+    throw new Error('the fixture must report a stored plain-text artifact');
+  }
+
+  // Assumptions: the recorded dispatches are cleared so the collect request is the one under
+  //   assertion. The statement request that produced the location is asserted by its own case above,
+  //   and reading this one out of a two-element list would assert its position rather than its target.
+  dispatched = [];
+  nextBody = STORED_DOCUMENT_BYTES;
+  await collectArtifact(statement.plainTextUri);
+  const request = onlyRequest();
+  expect(request.method).toBe('get');
+  expect(request.url).toBe('/reports/statements/artifacts/0oL2fQ8xVn4tKpR7wZbY1s');
+  expect(request.responseType).toBe('blob');
+}
+
+/**
+ * Asserts a location no statement answer could have carried is refused without being dispatched.
+ *
+ * Assumptions: the rejected value is the request-path form of a REAL location -- the same selector
+ * with the version prefix removed. It is the closest wrong value there is, and refusing it is what
+ * pins the client to the form the contract publishes rather than to any string ending in a
+ * selector-shaped token. A caller only ever holds `plainTextUri` or `htmlUri`, and both carry the
+ * prefix.
+ */
+async function refusesALocationNoAnswerCouldHaveCarried(): Promise<void> {
+  const withoutPrefix = PLAIN_TEXT_ARTIFACT_LOCATION.replace('/api/v1', '');
+  await expect(collectArtifact(withoutPrefix)).rejects.toBeInstanceOf(RangeError);
+  expect(dispatched).toHaveLength(0);
 }
 
 /** Groups the assertions that fix this module's agreement with the reporting contract. */
@@ -411,9 +624,14 @@ function reportingClientContract(): void {
   );
   it('reads a declined confirmation from the ok status', readsADeclinedConfirmationFromTheOkStatus);
   it(
+    'reads an unanswered confirmation from the ok status',
+    readsAnUnansweredConfirmationFromTheOkStatus,
+  );
+  it(
     'sends the required range and omits the direction without a cursor',
     sendsTheRangeAndOmitsTheDirectionWithoutACursor,
   );
+  it('refuses a direction with no cursor', refusesADirectionWithNoCursor);
   it(
     'sends the cursor under the published parameter name',
     sendsTheCursorUnderThePublishedParameterName,
@@ -433,6 +651,16 @@ function reportingClientContract(): void {
     'refuses an unmasked card number in any transaction row',
     refusesAnUnmaskedCardNumberInAnyTransactionRow,
   );
+  it(
+    'reads a run status from the published execution path',
+    readsARunStatusFromThePublishedExecutionPath,
+  );
+  it(
+    'collects the report document from its coordinates',
+    collectsTheReportDocumentFromItsCoordinates,
+  );
+  it('collects a statement document from its answer', collectsAStatementDocumentFromItsAnswer);
+  it('refuses a location no answer could have carried', refusesALocationNoAnswerCouldHaveCarried);
   it('composes every path under the reports prefix', composesEveryPathUnderTheReportsPrefix);
 }
 

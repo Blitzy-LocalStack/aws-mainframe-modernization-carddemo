@@ -1399,7 +1399,7 @@ that could not be given both is not listed.
   rejects exist. `TRANBKP.jcl` L51 is unrelated: it is a job-local gate after that
   job's own delete/redefine sequence. The explicit target status handoff and warn
   edge are owned by
-  [`batch-orchestration.md`](batch-orchestration.md#the-state-4-status-handoff-is-explicit);
+  [`batch-orchestration.md`](batch-orchestration.md#the-state-5-status-handoff-is-explicit);
   what belongs here is that the count has to be a first-class series, because an
   alarm on it is the difference between "some rejects, as every run has" and "this
   run rejected an input file's worth".
@@ -1499,7 +1499,15 @@ action it triggers. The threshold column quotes the **authored input default** i
 
 Assumptions: thirteen `aws_cloudwatch_metric_alarm` resources in
 `infra/modules/observability/main.tf` back this catalog, and every quoted input has a
-consumer among them, which is why each row cites the line that reads it. The
+consumer among them, which is why each row cites the line that reads it. Three further
+alarms are declared OUTSIDE that module, by
+`infra/modules/step-functions-batch/main.tf`, and they are listed at the end of this
+catalog. Refactoring Rationale: they belong beside the rules and the queue they watch
+rather than in the observability module, because their dimensions are that module's own
+rule names and its own queue name -- carrying those across a module boundary would mean
+the root threading four names in so a second module could alarm on them. They publish
+to the same topic through `var.notification_topic_arn`, so the notification surface is
+still one topic per environment. The
 notification path is authored alongside them: every alarm below sends both its alarm
 and its OK transition to the module's SNS topic. What is stated once in the caveats at
 the top of this document rather than repeated per row is that **none of this has been
@@ -1522,6 +1530,22 @@ applied**, so no alarm has evaluated a datapoint or fired.
 | **Distribution server errors** | Server-error rate at the CloudFront distribution (`main.tf` L1786) | `cloudfront_5xx_error_rate_threshold_percent` = **5** (L621) | Is the static delivery path failing, as distinct from the API path | Compare the origin bucket's access log before redeploying the built assets. Created only when a distribution identifier is supplied **and** the provider region is us-east-1, because CloudFront publishes distribution metrics to us-east-1 alone; both environment roots pass `module.cloudfront_spa.distribution_id` and both set that region, so both create it. A rate rather than a count because a static application's request volume varies by orders of magnitude across the day |
 | Rotation failure — **no alarm instance in either shipped root** | Invocation errors reported by a credential-rotation function (`main.tf` L1533) | — | Did a scheduled rotation fail and leave the secret on its previous version | Inspect that function's log stream and re-run the rotation before a task placement presents a credential the database no longer accepts. This family is iterated over `rotation_lambda_function_names`, and both environment roots leave that input at its empty default because **no credential-rotation function is provisioned anywhere in this package** — `infra/modules/secrets` implements none and neither root supplies one, so the family creates zero alarms as delivered. It is authored so that a root which later brings a function alarms on it by extending a list rather than by editing a module; naming a function that does not exist would instead leave an alarm permanently in `INSUFFICIENT_DATA`. Database-credential replacement is operator-initiated and scripted — see the procedure in [`../runbooks/deploy.md`](../runbooks/deploy.md) |
 
+The three alarms authored by `infra/modules/step-functions-batch/main.tf`, which guard
+the release of the online-write quiesce bracket from outside a terminated execution:
+
+| Alarm | Condition | Authored default | Question it answers | Action it triggers |
+|---|---|---|---|---|
+| **Release delivery failed** | `AWS/Events FailedInvocations` above zero on either bracket-release rule, one alarm per rule | threshold **0**, one 300-second period | Could EventBridge not invoke the resume function | Read the flag and the lease item, and release by hand if both show a bracket still engaged. Missing data is **not** breaching, because a healthy rule publishes this metric only on failure |
+| **Release function errors** | `AWS/Lambda Errors` above zero on the resume function | threshold **0**, one 300-second period | Can the bracket be released at all | Read the function's log for the failing edge — an SSM write, a lease claim, or a refused terminality check. A REFUSED release is not an error and does not reach this alarm; it returns successfully with `refused=` naming the fact that was missing |
+| **Release dead letters** | `AWS/SQS ApproximateNumberOfMessagesVisible` above zero on the bracket-release dead-letter queue | threshold **0**, one 300-second period | Which execution's bracket was never released | Read the message body for the execution name, confirm its tasks have stopped, then release and purge. Trade-offs: the queue has no consumer, so this stays in ALARM until an operator purges it — an alarm that cleared itself while the message remained would report the problem gone |
+
+Refactoring Rationale: none of these three existed, and their absence was the reason a
+failed release was silent. The finalizer rule retried for an hour and then discarded the
+event with nothing recording the attempt, so a bracket left engaged by a lost invocation
+was discoverable only by an operator noticing that online services were read-only. The
+three signals are independent — a delivery that never landed, an invocation that raised,
+and a delivery abandoned after every retry — so alarming on one would have left two
+silent.
 
 Two configuration inputs govern how quickly any of these speaks:
 `alarm_evaluation_periods` defaults to **2** (L520) and `alarm_period_seconds` to
@@ -1651,7 +1675,7 @@ explicit: a run at or below 4 lets the job succeed and a run at or above 8 fails
   when rejects exist. `TRANBKP.jcl` L42/L45/L51 is a separate, job-local
   delete/redefine sequence and is not evidence for posting semantics. The target
   status handoff is specified in
-  [`batch-orchestration.md`](batch-orchestration.md#the-state-4-status-handoff-is-explicit);
+  [`batch-orchestration.md`](batch-orchestration.md#the-state-5-status-handoff-is-explicit);
   the observability consequence is that pass, warn, fail and fatal remain distinct
   values rather than being collapsed to a boolean.
 

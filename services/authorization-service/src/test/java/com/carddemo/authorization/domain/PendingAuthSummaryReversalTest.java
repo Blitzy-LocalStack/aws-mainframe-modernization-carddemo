@@ -1,7 +1,6 @@
 package com.carddemo.authorization.domain;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 import java.math.BigDecimal;
 import org.junit.jupiter.api.DisplayName;
@@ -138,29 +137,109 @@ class PendingAuthSummaryReversalTest {
     }
 
     /**
-     * A reversal that would leave the four-digit domain is refused and the summary is left unchanged.
+     * A reversal that would leave the four-digit domain saturates at the bound instead of raising.
      *
-     * <p>Assumptions: the bound is the PICTURE's -9999 and not the halfword's -32768, for the same reason
-     * the increment's bound is 9999 and not 32767 -- the schema's check constraint enforces the narrower
-     * range, so a value outside it would be refused by the column at flush time with no field named.</p>
+     * <p>⚠️ Refactoring Rationale: this case asserted a REFUSAL -- {@code IllegalStateException} naming
+     * "approvedAuthCount would reach -10000" -- and it was inverted because the refusal was the defect,
+     * not the contract. On the purge path a raise abends the sweep mid-table, so the rows already deleted
+     * stay deleted and the ones behind them do not, leaving the extract in a state neither the reference
+     * nor a rerun can reconstruct. {@code cbl/CBPAUP0C.cbl} L288 subtracts with no size clause and no
+     * floor test, so the reference never stops here. The policy is now saturation at
+     * {@link PendingAuthSummary#COUNTER_MIN}, reported by the writer that knows the account.</p>
      *
-     * <p>Assumptions: the summary is asserted UNCHANGED after the refusal, because a partially applied
-     * reversal -- total moved, counter refused -- would leave the row internally inconsistent, which is
-     * worse than the refusal it was trying to report.</p>
+     * <p>Assumptions: the counter rests EXACTLY at the bound rather than wrapping. That is the property
+     * worth asserting, because the arithmetic is performed in {@code int} and a cast applied to the
+     * subtraction's result would wrap -9999 - 1 to a positive value with no diagnostic -- a wrapped
+     * counter reads as a plausible total, where one resting at the bound is recognisable as saturated.</p>
+     *
+     * <p>Assumptions: the AMOUNT is asserted to move even though the counter could not. The two members
+     * are independent columns with independent domains, and the money member has its own saturation
+     * argued on {@code MONEY_MAX_MAGNITUDE}; refusing the amount because the counter saturated would
+     * discard a subtraction the reference performed. The divergence is registered as
+     * {@code D-SUMMARY-COUNTER-SATURATION}.</p>
      */
     @Test
-    @DisplayName("a reversal below the four-digit minimum is refused and changes nothing")
-    void aReversalBelowThePictureMinimumIsRefused() {
+    @DisplayName("a reversal below the four-digit minimum saturates at the bound and still moves the total")
+    void aReversalBelowThePictureMinimumSaturates() {
         PendingAuthSummary summary = PendingAuthSummary.rehydrated(ACCOUNT_ID, CUSTOMER_ID, null,
                 null, null, null, null, null, ZERO, ZERO, ZERO, ZERO,
-                Short.valueOf((short) -9999), Short.valueOf((short) 0), ZERO, ZERO);
+                Short.valueOf((short) -9999), Short.valueOf((short) 0), new BigDecimal("500.00"),
+                ZERO);
 
-        assertThatExceptionOfType(IllegalStateException.class)
-                .isThrownBy(() -> summary.reverseApproved(ZERO))
-                .withMessageContaining("approvedAuthCount would reach -10000")
-                .withMessageContaining("PIC S9(04) COMP");
+        summary.reverseApproved(new BigDecimal("125.00"));
 
-        assertThat(summary.getApprovedAuthCount()).isEqualTo((short) -9999);
-        assertThat(summary.getApprovedAuthAmount()).isEqualByComparingTo(ZERO);
+        assertThat(summary.getApprovedAuthCount())
+                .as("the counter rests at the bound rather than wrapping to a positive value")
+                .isEqualTo((short) PendingAuthSummary.COUNTER_MIN);
+        assertThat(summary.getApprovedAuthAmount())
+                .as("the money member has its own domain and its subtraction is unaffected")
+                .isEqualByComparingTo(new BigDecimal("375.00"));
+    }
+
+    /**
+     * The declined counter saturates at the same bound, and the two members narrow independently.
+     *
+     * <p>Assumptions: both arms are asserted because the saturation lives in one shared helper and a
+     * change that reached only the approved arm would leave the declined arm raising -- which is exactly
+     * the shape of the defect this pair replaces, where the aggregate's policy and the statements that
+     * write it disagreed. Asserting one arm would not detect it.</p>
+     *
+     * <p>Assumptions: the classifier {@link PendingAuthSummary#exceedsCounterDomain(int)} is asserted
+     * directly alongside the arm, because the writers report narrowing by consulting it rather than by
+     * comparing before and after; a classifier that disagreed with the narrowing would silence the report
+     * while the value still moved, and no assertion on the summary alone would show it.</p>
+     */
+    @Test
+    @DisplayName("the declined counter saturates at the same bound and the classifier agrees")
+    void theDeclinedCounterSaturatesAtTheSameBound() {
+        PendingAuthSummary summary = PendingAuthSummary.rehydrated(ACCOUNT_ID, CUSTOMER_ID, null,
+                null, null, null, null, null, ZERO, ZERO, ZERO, ZERO,
+                Short.valueOf((short) 0), Short.valueOf((short) -9999), ZERO,
+                new BigDecimal("90.00"));
+
+        summary.reverseDeclined(new BigDecimal("40.00"));
+
+        assertThat(summary.getDeclinedAuthCount()).isEqualTo((short) PendingAuthSummary.COUNTER_MIN);
+        assertThat(summary.getDeclinedAuthAmount()).isEqualByComparingTo(new BigDecimal("50.00"));
+        assertThat(summary.getApprovedAuthCount())
+                .as("the other arm is untouched by this arm's saturation")
+                .isEqualTo((short) 0);
+
+        assertThat(PendingAuthSummary.exceedsCounterDomain(PendingAuthSummary.COUNTER_MIN - 1))
+                .as("the classifier the writers consult recognises the value that was narrowed")
+                .isTrue();
+        assertThat(PendingAuthSummary.exceedsCounterDomain(PendingAuthSummary.COUNTER_MIN)).isFalse();
+        assertThat(PendingAuthSummary.narrowedCounterToStoredDomain(PendingAuthSummary.COUNTER_MIN - 1))
+                .isEqualTo(Short.valueOf((short) PendingAuthSummary.COUNTER_MIN));
+    }
+
+    /**
+     * The increment saturates at the four-digit maximum rather than refusing the authorization.
+     *
+     * <p>⚠️ Purpose: this is the outage the saturation policy exists to remove, asserted from the domain
+     * side. An account that has recorded 9999 approvals used to raise on the ten-thousandth, which rolled
+     * the whole message back, redelivered it, and dead-lettered it after five receives -- so the account
+     * stopped being answerable permanently. Here the tenth-thousandth approval is RECORDED: the counter
+     * rests at {@link PendingAuthSummary#COUNTER_MAX} and the decision proceeds.</p>
+     *
+     * <p>Assumptions: the approved TOTAL is asserted to advance in the same call, because the outage was
+     * not "the counter stopped counting" but "the authorization was not answered at all"; a policy that
+     * saturated the counter and skipped the total would leave the row's two members describing different
+     * sets of authorizations.</p>
+     */
+    @Test
+    @DisplayName("the approved counter saturates at the four-digit maximum and still records the amount")
+    void theApprovedCounterSaturatesAtTheMaximum() {
+        PendingAuthSummary summary = PendingAuthSummary.rehydrated(ACCOUNT_ID, CUSTOMER_ID, null,
+                null, null, null, null, null, ZERO, ZERO, ZERO, ZERO,
+                Short.valueOf((short) 9999), Short.valueOf((short) 0), new BigDecimal("100.00"),
+                ZERO);
+
+        summary.recordApproved(new BigDecimal("25.00"));
+
+        assertThat(summary.getApprovedAuthCount())
+                .as("the ten-thousandth approval is recorded, not refused")
+                .isEqualTo((short) PendingAuthSummary.COUNTER_MAX);
+        assertThat(summary.getApprovedAuthAmount()).isEqualByComparingTo(new BigDecimal("125.00"));
     }
 }

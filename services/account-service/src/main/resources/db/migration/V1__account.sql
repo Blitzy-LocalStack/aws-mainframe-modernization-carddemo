@@ -93,8 +93,10 @@
 --     account_id. It carries no version column, for the reason recorded on
 --     the table.
 --   - Primary keys pk_accounts, pk_customers and pk_card_xref.
---   - Check constraints ck_accounts_active_status and
---     ck_customers_pri_card_holder_ind.
+--   - Check constraint ck_accounts_active_status. Refactoring Rationale: a
+--     second check, ck_customers_pri_card_holder_ind, closing
+--     customers.pri_card_holder_ind at 'Y' and 'N', is deliberately ABSENT and
+--     was removed; the reason is recorded on that column.
 --   - Non-unique index idx_card_xref_account_id on card_xref.account_id.
 --
 --   Deliberately absent, each for a reason recorded at the point it would
@@ -580,8 +582,33 @@ CREATE TABLE account.customers (
     eft_account_id              CHAR(10)        NOT NULL,
 
     -- WHY : Assumptions: PIC X(01) (app/cpy/CVCUS01Y.cpy:21), a single
-    --       character with the closed domain the constraint at the foot of
-    --       this table declares.
+    --       character and NO closed domain. The record copybook declares the
+    --       picture and attaches no 88-level value set to this field -- there
+    --       is not one such level anywhere in CUSTOMER-RECORD -- so the
+    --       storage layer admits any one character, exactly as the VSAM
+    --       cluster this table replaces does.
+    -- WHY : Refactoring Rationale: this column carried
+    --       CHECK (pri_card_holder_ind IN ('Y','N')) and the constraint is
+    --       removed. Its justification was an 88-level -- FLG-PRI-CARDHOLDER-
+    --       ISVALID VALUES 'Y','N' at app/cbl/COACTUPC.cbl:350 -- that is
+    --       declared on WS-EDIT-PRI-CARDHOLDER, a WORKING-STORAGE EDIT FLAG
+    --       in one online program, and not on the record field. The plan's
+    --       transformation rule T1 makes the copybook normative and its
+    --       section 0.4.1.3 turns an 88-level value set into a check
+    --       constraint; neither licenses a domain the record layout does not
+    --       state. The other half of the justification was that all fifty
+    --       seeded records carry 'Y', which is evidence about one extract and
+    --       not about the domain.
+    -- WHY : Assumptions: the Y-or-N rule is REAL and is preserved where the
+    --       reference puts it -- in the online edit path. 1220-EDIT-YESNO at
+    --       app/cbl/COACTUPC.cbl:1856-1894 refuses anything but Y or N with
+    --       'must be Y or N.' and is reached for this field at :1659-1662;
+    --       the migrated form is AccountUpdateService.editYesNo, applied to
+    --       this field on every update. So a submission still cannot set a
+    --       third character, while a bulk load of a record the baseline's
+    --       file would hold is no longer refused by the database -- which is
+    --       the failure this constraint could produce and the reference
+    --       cannot.
     pri_card_holder_ind         CHAR(1)         NOT NULL,
 
     -- WHY : Assumptions: SMALLINT, because CUST-FICO-CREDIT-SCORE is
@@ -625,17 +652,13 @@ CREATE TABLE account.customers (
     --       it names no field, no program reads it, and re-emitting a
     --       fixed-length record is the codec's job rather than this table's.
 
-    CONSTRAINT pk_customers PRIMARY KEY (customer_id),
+    CONSTRAINT pk_customers PRIMARY KEY (customer_id)
 
-    -- WHY : Assumptions: the domain is closed at exactly two values, as
-    --       FLG-PRI-CARDHOLDER-ISVALID declares with VALUES 'Y', 'N' at
-    --       app/cbl/COACTUPC.cbl:350. All fifty seed records carry 'Y', so
-    --       the constraint admits the extract unchanged. Declared in the
-    --       schema rather than in the service for the reason recorded on
-    --       ck_accounts_active_status: the ETL loads this table directly and
-    --       never executes application code.
-    CONSTRAINT ck_customers_pri_card_holder_ind
-        CHECK (pri_card_holder_ind IN ('Y', 'N'))
+    -- WHY : Assumptions: this table declares NO check constraint. The one it
+    --       used to carry, on pri_card_holder_ind, is removed for the reason
+    --       recorded on that column: the record copybook states a picture and
+    --       no value set, so a closed domain here would be a rule the
+    --       reference's own storage does not impose.
 );
 
 CREATE TABLE account.card_xref (

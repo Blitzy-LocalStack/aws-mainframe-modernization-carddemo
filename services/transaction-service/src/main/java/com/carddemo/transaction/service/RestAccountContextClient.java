@@ -1,6 +1,7 @@
 package com.carddemo.transaction.service;
 
 import com.carddemo.common.security.ApprovedOriginPolicy;
+import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.security.InternalServiceToken;
 import java.net.http.HttpClient;
 import java.time.Duration;
@@ -83,11 +84,19 @@ public class RestAccountContextClient implements AccountContextClient {
     public static final String PATH_CARD_XREF_BY_ACCOUNT = "/api/v1/card-xrefs/lookup-by-account";
 
     /**
-     * The address prefix of the cross-reference family, which the cross-reference read scope authorises.
+     * The address prefix of the cross-reference family, which the cross-reference read scope authorises
+     * EXCEPT at {@link #PATH_CARD_XREF_BY_ACCOUNT}, whose disclosure carries its own scope.
      *
      * <p>Assumptions: the prefix is DERIVED from the path constant above rather than written again, by
      * removing the final segment. Writing it as a literal would let the two drift, and the symptom of a
      * drift is a refusal on one operation while every other one keeps working.</p>
+     *
+     * <p>Refactoring Rationale: the prefix no longer decides the scope for every address beneath it. The
+     * account-keyed read answers with an unmasked primary account number where its two siblings answer with
+     * none, so the callee moved it onto {@code SCOPE_CARD_XREF_RESOLVE_CARD_NUMBER} and
+     * {@link #scopeFor(String)} tests that exact address before consulting this prefix. The prefix is kept
+     * for the siblings rather than replaced by two equality tests, because it is what keeps a THIRD
+     * cross-reference address from silently minting nothing -- an unrecognised address raises there.</p>
      *
      * <p>Refactoring Rationale: there is ONE prefix here where there were two. The account family's prefix
      * and the two addresses under it -- an account master read and a balance-reducing payment -- have been
@@ -233,6 +242,23 @@ public class RestAccountContextClient implements AccountContextClient {
      * @throws IllegalStateException if the path is not one this client addresses
      */
     private static String scopeFor(String path) {
+        // WHY : Purpose: the account-keyed read is matched on its EXACT address, ahead of the family
+        //   prefix, because it is the one address in the family that answers with an unmasked primary
+        //   account number -- this client writes that value into its ledger row as the row's key. The
+        //   callee authorises it with a scope of its own, granted to this context alone, so a credential
+        //   minted for the card-keyed lookup can no longer provoke that disclosure.
+        // WHY : Assumptions: the exact-address test is stated FIRST and the prefix test second, which is a
+        //   correctness requirement rather than a style: the prefix accepts this address too, so with the
+        //   order reversed every request would carry the wider scope and the callee would refuse this one
+        //   -- the split would be inert in one direction and breaking in the other.
+        // WHY : Alternatives Considered: deriving a second prefix so both branches read alike. Rejected
+        //   because there is no prefix that separates one sibling address from another beneath a shared
+        //   parent, so a derived one would either match both or match nothing; equality is the only
+        //   expression of "this address and not its siblings", and it names the constant rather than a
+        //   fragment of it.
+        if (PATH_CARD_XREF_BY_ACCOUNT.equals(path)) {
+            return InternalServiceToken.SCOPE_CARD_XREF_RESOLVE_CARD_NUMBER;
+        }
         if (path.startsWith(CARD_XREF_PATH_PREFIX)) {
             return InternalServiceToken.SCOPE_CARD_XREF_READ;
         }
@@ -343,7 +369,27 @@ public class RestAccountContextClient implements AccountContextClient {
             //       screen contract on this side is an eleven-character field.
             return new CardXref(String.valueOf(this.accountId), requestedCardNumber);
         }
-    }
+    
+        /**
+         * Renders neither identifier, matching the sibling wire shape in this same class.
+         *
+         * <p>Purpose. Both components are identifiers {@code docs/architecture/observability.md} L1093 to
+         * L1112 withholds, and they are the whole record. This is the CARD-keyed wire shape; the
+         * account-keyed one beside it renders a masked card number because the card number is the value
+         * that operation exists to return, and the two renderings differ for exactly that reason and no
+         * other.</p>
+         *
+         * <p>Assumptions: a binding fault on this shape names the type before any mapping runs, so this
+         * rendering is reached earlier than the seam record's and has to be safe on its own rather than
+         * relying on the mapping to narrow anything.</p>
+         *
+         * @return a rendering naming the type with both identifiers withheld; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "CardXrefView[identifiers=[REDACTED]]";
+        }
+}
 
     /**
      * The account context's account-keyed cross-reference answer, declared in full.
@@ -370,6 +416,29 @@ public class RestAccountContextClient implements AccountContextClient {
          */
         private CardXref toCardXref() {
             return new CardXref(String.valueOf(this.accountId), this.cardNumber);
+        }
+
+        /**
+         * Renders this wire shape for a log line or a diagnostic, disclosing neither the whole card number
+         * nor either identifier.
+         *
+         * <p>Purpose. This is the ONE inbound shape on this seam that carries an unmasked primary account
+         * number, and a record's generated rendering prints every component -- so the override matters more
+         * here than on any other type in this file. The reachable path is not hypothetical: the strict
+         * deserialiser this client configures fails a body whose shape changed, and a conversion failure is
+         * reported with the partially bound value in scope, so the generated form would put a whole card
+         * number into the diagnostic for a contract mismatch.</p>
+         *
+         * <p>Trade-offs: the card number is rendered masked through the shared masker and both identifiers
+         * are omitted, matching the rendering the account context's own response record carries for the same
+         * three columns. Agreeing with it rather than choosing independently is the point: one value read
+         * over one seam should not be abbreviated to two different depths at its two ends.</p>
+         *
+         * @return a single-line rendering naming the type and the masked card number, never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "CardXrefByAccountView[cardNumber=" + CardNumberMasker.mask(this.cardNumber) + ']';
         }
     }
 }

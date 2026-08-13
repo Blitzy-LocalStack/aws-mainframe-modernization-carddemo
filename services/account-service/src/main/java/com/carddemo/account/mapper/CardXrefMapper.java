@@ -2,6 +2,8 @@ package com.carddemo.account.mapper;
 
 import com.carddemo.account.domain.CardXref;
 import com.carddemo.account.dto.CardXrefResponse;
+import com.carddemo.common.security.CardNumberMasker;
+import com.carddemo.common.security.MaskedCardNumber;
 import java.util.List;
 import java.util.Objects;
 import org.springframework.stereotype.Component;
@@ -161,17 +163,39 @@ public class CardXrefMapper {
     //       service. Fewer digits would leave a caller unable to recognise a row it already holds, and
     //       more would begin reconstructing a value that app/cpy/CVACT03Y.cpy L5 declares as a whole
     //       sixteen-character primary account number.
-    private static final int DISCLOSED_SUFFIX_LENGTH = 4;
+    // WHY : Refactoring Rationale: the count is now READ FROM the shared masker rather than written here,
+    //       so this class cannot come to disclose a different number of digits from the one the shared
+    //       renderer discloses. It is kept as a named constant of this class because the refusal message
+    //       below reports it, and a message quoting a foreign constant's value without naming the rule it
+    //       comes from would leave a reader unable to find the rule.
+    private static final int DISCLOSED_SUFFIX_LENGTH = CardNumberMasker.VISIBLE_TAIL_LENGTH;
 
     /**
-     * Holds the marker a masked primary account number is prefixed with, standing for the withheld digits.
+     * Holds the exact width a masked primary account number is published at, sixteen characters.
      */
-    // WHY : Assumptions: the marker is a fixed four-character string and is deliberately NOT sized from
-    //       the sixteen-character field width. Padding it to twelve characters would let a caller
-    //       recover the original width by measuring the result, and the published contract on
-    //       CardXrefResponse promises the last four digits rather than a positional rendering of the
-    //       whole field, so a width-preserving mask would over-promise.
-    private static final String MASK_MARKER = "****";
+    // WHY : ⚠️ Refactoring Rationale: this replaces a four-character MASK_MARKER constant that this class
+    //       prefixed onto the last four digits, producing an EIGHT-character value such as ****1111. That
+    //       was wrong three times over, and each way was independently observable. The published contract
+    //       for cardNumberMasked in openapi/account-api.yaml carries the example ************1111 and says
+    //       the field's "length is preserved so the rendering still aligns in a fixed-pitch column", so
+    //       the document described a value this class never produced. The browser client refuses what this
+    //       class did produce: requireMaskedCardNumber in ui/src/api/accounts.ts tests every row against
+    //       /^[*]{12}[0-9]{4}$/u and throws a RangeError otherwise, so the end-user cross-reference page
+    //       failed on every populated response. And com.carddemo.common.security.CardNumberMasker exists
+    //       precisely to hold this rule once -- its own charter records that "one site rendered a masked
+    //       number as a fixed four-character prefix followed by the tail, which is shorter than the number
+    //       it stands for, while the published contract renders it at the number's own width", and names
+    //       delegation as the remedy. This class was that site.
+    // WHY : Assumptions: the withdrawn constant's rationale is recorded rather than deleted, because it
+    //       was an argument and not an oversight: it held that padding to twelve characters "would let a
+    //       caller recover the original width by measuring the result". That objection does not survive
+    //       contact with the rest of the contract -- the width is published as maxLength on the very
+    //       member being masked, is declared in the schema of every sibling context, and is stated in the
+    //       reference layout as XREF-CARD-NUM PIC X(16) at L5 of app/cpy/CVACT03Y.cpy, so measuring the
+    //       result reveals nothing that is not already written down. Against that, a short rendering is
+    //       indistinguishable from a truncated value, which is the ambiguity the shared class was
+    //       introduced to remove.
+    private static final int PUBLISHED_MASKED_LENGTH = MaskedCardNumber.MASKED_LENGTH;
 
     /**
      * Holds the declared digit width of the customer identifier, nine.
@@ -323,7 +347,8 @@ public class CardXrefMapper {
     }
 
     /**
-     * Renders a primary account number as the withholding marker followed by its last four digits.
+     * Renders a primary account number as twelve mask characters followed by its last four digits, the
+     * exact form {@code MaskedCardNumber.DOMAIN} publishes.
      *
      * <p>Assumptions: trailing blanks are stripped before the suffix is taken, and this is the reason the
      * method cannot simply take the final four characters. The column behind this value is a fixed-width
@@ -344,11 +369,12 @@ public class CardXrefMapper {
      *
      * @param cardNumber the stored primary account number of type {@link java.lang.String}, expected to
      *     be the sixteen characters that {@code XREF-CARD-NUM} declares; must not be {@code null}
-     * @return the masked rendering of type {@link java.lang.String}, the marker followed by the last four
-     *     digits, never {@code null}
-     * @throws IllegalStateException if {@code cardNumber} is {@code null}, or if it holds fewer than four
-     *     characters once trailing blanks are removed, because publishing a shorter value would disclose
-     *     digits without identifying the row and publishing the marker alone would hide a broken column
+     * @return the masked rendering of type {@link java.lang.String}, twelve mask characters followed by the
+     *     last four digits, matching {@code MaskedCardNumber.DOMAIN} exactly, never {@code null}
+     * @throws IllegalStateException if {@code cardNumber} is {@code null}, or if it does not hold exactly
+     *     the declared sixteen characters once trailing blanks are removed, because a rendering of any
+     *     other width would not satisfy the pattern the published contract declares and the browser client
+     *     enforces
      */
     private static String maskToLastFourDigits(String cardNumber) {
         if (cardNumber == null) {
@@ -356,13 +382,29 @@ public class CardXrefMapper {
                     + " declared NOT NULL in the schema and nullable = false on the entity");
         }
         String digits = cardNumber.stripTrailing();
-        if (digits.length() < DISCLOSED_SUFFIX_LENGTH) {
+        // WHY : ⚠️ Refactoring Rationale: the guard admits ONLY the declared width, where it previously
+        //   admitted anything of at least four characters. The looser guard was consistent with a mask
+        //   that grew and shrank with its input; it is not consistent with a published pattern of exactly
+        //   twelve mask characters and four digits, because a fifteen-character row would then be rendered
+        //   as eleven mask characters and four digits -- a value the contract refuses and the browser
+        //   client rejects with a RangeError naming nothing useful. Refusing here reports the broken column
+        //   at the row that holds it. Trade-offs: a row shorter than the reference's fixed width now fails
+        //   the read instead of being published in a shape no consumer accepts, which is a visibly wrong
+        //   answer traded for a silently wrong one.
+        if (digits.length() != PUBLISHED_MASKED_LENGTH) {
             throw new IllegalStateException("cardNum holds " + digits.length()
-                    + " characters once padding is removed, which cannot yield the "
-                    + DISCLOSED_SUFFIX_LENGTH + " disclosed digits the published contract declares;"
-                    + " the baseline field is a fixed sixteen characters wide");
+                    + " characters once padding is removed, and the published contract declares exactly "
+                    + PUBLISHED_MASKED_LENGTH + " -- " + DISCLOSED_SUFFIX_LENGTH + " disclosed digits"
+                    + " behind a mask of the remaining positions; the baseline field is a fixed sixteen"
+                    + " characters wide per XREF-CARD-NUM PIC X(16) at app/cpy/CVACT03Y.cpy L5");
         }
-        return MASK_MARKER + digits.substring(digits.length() - DISCLOSED_SUFFIX_LENGTH);
+        // WHY : Assumptions: the rendering is delegated to the shared masker rather than assembled here,
+        //   so this context cannot disagree with the card context, the authorization context or the
+        //   diagnostic renderers about how much of a card number is disclosed. The masker keeps its input's
+        //   width and replaces every position but the last four, so a value of the declared width yields
+        //   exactly the twelve-and-four form MaskedCardNumber.DOMAIN publishes -- which is why the guard
+        //   above pins the width rather than this line pinning the output.
+        return CardNumberMasker.mask(digits);
     }
 
     /**

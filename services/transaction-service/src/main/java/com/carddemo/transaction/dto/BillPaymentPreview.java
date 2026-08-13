@@ -149,4 +149,36 @@ public record BillPaymentPreview(
     public static BillPaymentPreview cleared(String accountId) {
         return new BillPaymentPreview(accountId, null, PAYMENT_WITHHELD, null);
     }
+
+    /**
+     * Renders this preview WITHOUT the account it previews or the balance it quotes.
+     *
+     * <p>Purpose. Two of the four components are prohibited from a diagnostic rendering by
+     * {@code docs/architecture/observability.md} L1093 to L1112: the account identifier by name, and the
+     * payable balance as a monetary amount belonging to an identified account. The compiler-generated
+     * rendering would print both, and a preview reaches a log on the ORDINARY path rather than an
+     * exceptional one -- it is the body of a successful turn -- so the exposure would not be confined to
+     * failures.</p>
+     *
+     * <p>Assumptions: the two are omitted rather than abbreviated, which is that rule's first clause.
+     * Abbreviating a balance is masking, and masking has one owner per bounded context in its
+     * {@code mapper} package; a second rule written here would give one value two renderings and make
+     * neither authoritative.</p>
+     *
+     * <p>Trade-offs: what remains is the pair that says WHICH TURN this was -- the discriminator fixed to
+     * false on this shape, and the sentence the turn carried. Both are safe for a different reason each:
+     * the discriminator is a bounded status, and the sentence is one of three message constants carried
+     * character for character from {@code CCARD-RETURN-MSG} rather than data about the account. The cost
+     * is that an operator cannot see from a log line which account was previewed or what it owed, and it
+     * is paid down by the correlation identifier {@code com.carddemo.common.web.CorrelationIdFilter}
+     * publishes on every request-scoped line, which ties this body to the request that produced it.</p>
+     *
+     * @return a rendering carrying the paid discriminator and the return message, with the account
+     *     identifier and the payable balance omitted entirely; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "BillPaymentPreview[paid=" + this.paid
+                + ", returnMessage=" + this.returnMessage + ']';
+    }
 }

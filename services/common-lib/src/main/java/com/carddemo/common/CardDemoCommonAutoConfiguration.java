@@ -18,6 +18,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
+import org.springframework.boot.jackson.autoconfigure.JsonMapperBuilderCustomizer;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -28,6 +29,9 @@ import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 import software.amazon.awssdk.services.ssm.SsmClient;
 import tools.jackson.databind.JacksonModule;
+import tools.jackson.databind.cfg.CoercionAction;
+import tools.jackson.databind.cfg.CoercionInputShape;
+import tools.jackson.databind.type.LogicalType;
 
 /**
  * Registers the shared kernel's cross-cutting components in every service that puts this module on
@@ -269,6 +273,59 @@ public class CardDemoCommonAutoConfiguration {
         //   this implementation, so a future replacement would change a signature that a consumer
         //   may have injected by type.
         return new MoneyModule();
+    }
+
+    /**
+     * Refuses a non-textual scalar wherever a published contract declares a character field.
+     *
+     * <p>⚠️ Refactoring Rationale: this customiser existed in ONE service and the leniency it closes is
+     * the reader's default in every service. Every scalar member of every request body this migration
+     * publishes is declared {@code type: string}, because each stands for a fixed-width CHARACTER field
+     * on a reference map -- an eleven-character account scope, a sealed selector, a paging direction, a
+     * one-character action code, an optimistic-concurrency version. The reader's default is to accept a
+     * JSON NUMBER for such a member and convert it, and the conversion is what makes the acceptance
+     * undetectable: the number that arrives renders as exactly the digits the pattern constraint expects,
+     * so validation passes and nothing reports that the caller sent a shape the contract refuses. The
+     * measured case on the service that found it: {@code {"accountId":10000000101}} was answered 200 for
+     * account 20000000001. A float reaching an integer version member truncates the same way, which on an
+     * optimistic update means a version the contract rejects can authorise a write.</p>
+     *
+     * <p>⚠️ Assumptions: the refusal names the TEXTUAL target family and the three scalar input shapes
+     * that are not text -- integer, floating point and boolean. It is deliberately NOT a blanket
+     * withdrawal of scalar coercion, because coercion in the OPPOSITE direction is load-bearing here:
+     * money crosses every boundary as a JSON string and is read into a {@code BigDecimal}, which is a
+     * string-shaped input to a numeric target. The asymmetry is the point -- text may be read as a
+     * number, a number may not be read as text.</p>
+     *
+     * <p>⚠️ Assumptions: an array, an object and a null reaching a textual member are left to the
+     * reader's own handling. The first two already fail as shape mismatches, and a null is a legitimate
+     * absent value for optional members such as a paging cursor, so refusing it here would turn "no
+     * cursor supplied" into a malformed body.</p>
+     *
+     * <p>Alternatives Considered: {@code spring.jackson.mapper.allow-coercion-of-scalars: false}, which
+     * is one property and needs no bean. Rejected because it is symmetric, so it would take the money
+     * path down with it. Also considered: leaving the leniency and relying on the pattern constraint.
+     * Rejected because the constraint sees the CONVERTED value, so it cannot tell a conforming string
+     * from a number that converted into one, which is the whole defect. Trade-offs: a client that has
+     * been sending a bare number for a declared string member now receives 400 where it previously
+     * received an answer -- the intended effect of enforcing a published domain, and the same trade the
+     * shared {@code fail-on-unknown-properties} default makes for an undeclared member.</p>
+     *
+     * @return the customiser the framework applies to the mapper it builds for the web layer, never
+     *     {@code null}
+     */
+    @Bean
+    @ConditionalOnClass(JsonMapperBuilderCustomizer.class)
+    public JsonMapperBuilderCustomizer carddemoRefuseNonTextualScalarsForTextTargets() {
+        // Assumptions: the bean is the FRAMEWORK's builder-customiser type rather than a mapper this
+        //   method constructs, so it is applied to the same mapper the web layer builds. A separate
+        //   mapper would be configured correctly and read nothing, because the request converter would
+        //   keep using the framework's.
+        return builder -> builder.withCoercionConfig(LogicalType.Textual, config -> {
+            config.setCoercion(CoercionInputShape.Integer, CoercionAction.Fail);
+            config.setCoercion(CoercionInputShape.Float, CoercionAction.Fail);
+            config.setCoercion(CoercionInputShape.Boolean, CoercionAction.Fail);
+        });
     }
 
     /**

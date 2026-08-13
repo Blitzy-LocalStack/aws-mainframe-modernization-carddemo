@@ -415,6 +415,10 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
         "500":
           description: >-
             The browse failed. The aggregate message is "Unable to lookup
@@ -499,6 +503,9 @@ paths:
             reports the normalised amount the submission would be captured at and
             the prompt "Confirm to add this transaction..." verbatim from
             app/cbl/COTRN02C.cbl L178.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
           content:
             application/json:
               schema:
@@ -548,6 +555,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
         # WHY : Refactoring Rationale: two CICS conditions collapse into this one
         #       status because the baseline itself gave them one outcome.
         #       app/cbl/COTRN02C.cbl L735 (WHEN DFHRESP(DUPKEY)) and L736 (WHEN
@@ -569,6 +580,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
         "500":
           description: >-
             The write, or one of the lookups preceding it, failed for a reason the
@@ -723,6 +738,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
         "409":
           description: >-
             The assigned identifier already exists. The aggregate message is
@@ -736,6 +755,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
         "500":
           description: >-
             The copy, one of the lookups preceding it, or the write failed for a
@@ -831,6 +854,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
         # WHY : Assumptions: the lookup-failure sentence exists in TWO cases across
         #       these four programs and stays two constants, never one. The
         #       capitalised "Unable to lookup Transaction..." is emitted by
@@ -1037,6 +1064,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
         "409":
           description: >-
             The account state refuses the payment. The aggregate message is "You
@@ -1050,6 +1081,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
         "500":
           description: >-
             The payment failed after validation. The aggregate message is one of
@@ -1176,8 +1211,18 @@ components:
         identity is echoed and logged. The refusal carries the shared problem body
         and the response correlation header, the same as any other 400, and it names
         the rule it applied without ever repeating the value it refused.
+      # WHY : Measured: the shared CorrelationId schema admits the EMPTY string, because
+      #       ApiError normalises an absent identity to "" at L619 and every problem
+      #       document carries the member, so the schema a BODY member names has to admit
+      #       it. A REQUEST header must not: conformsWithin in CorrelationIdFilter
+      #       declines an empty value and the filter then answers 400. This parameter
+      #       therefore narrows the shared schema by one facet instead of restating its
+      #       alphabet and width, which would be a second statement of both. Omitting the
+      #       header entirely stays valid -- that is governed by required above.
       schema:
-        $ref: "#/components/schemas/CorrelationId"
+        allOf:
+          - $ref: "#/components/schemas/CorrelationId"
+          - minLength: 1
 
   # WHY : Assumptions: the response header is declared once here rather than at
   #       each response, because a header re-typed at every response is one that
@@ -1266,6 +1311,94 @@ components:
           schema:
             $ref: "#/components/schemas/ApiError"
 
+
+    # WHY : Refactoring Rationale: the transport refusals below were UNDECLARED while the shared
+    #       advice in services/common-lib produces every one of them, so each was reachable on
+    #       every operation of this contract with no published shape. A client had no branch for
+    #       them: ui/src/api/client.ts could only treat each as an unrecognised body. Declaring
+    #       them here and handling them there are two halves of one correction, and declaring one
+    #       half alone would have documented a response no caller could recognise.
+    # WHY : Assumptions: each carries the same ApiError shape as every other refusal of this
+    #       contract, with its own machine code -- CARDDEMO-0405, CARDDEMO-0406 and
+    #       CARDDEMO-0415. A distinct code per condition is what lets a client branch without
+    #       reading the sentence, which is the same reason the 400 and the 401 do not share one.
+    # WHY : Assumptions: the body is declared application/json because that is what the shared
+    #       advice writes -- it returns a plain ApiError record and this build registers no
+    #       problem+json converter -- and because the 406 arm pins MediaType.APPLICATION_JSON
+    #       explicitly, which is the single call that lets a body be produced at all for a caller
+    #       whose Accept header matched nothing.
+    MethodNotAllowed:
+      description: >-
+        The route addressed does not publish the method the request named. The response
+        carries an Allow header naming the methods it does publish, which is where a client
+        reads them; the body does not repeat that list, so the two cannot disagree.
+
+
+        Assumptions: this has no reference counterpart. A 3270 terminal cannot address a
+        transaction with a verb the program did not define, so no reference literal or
+        condition name corresponds to this outcome. It exists because a target route is
+        addressed by callers this system does not control.
+      headers:
+        X-Correlation-Id:
+          $ref: "#/components/headers/XCorrelationId"
+        Allow:
+          description: >-
+            The methods the addressed route publishes, joined with a comma and a space.
+            Composed from the methods the framework's handler mapping reports, which are
+            server-authored; the method the caller USED is echoed nowhere. It is omitted
+            rather than sent empty when the framework reported no supported set, because an
+            empty Allow states that the route supports no method at all, which would be a
+            different and false claim.
+          required: false
+          schema:
+            type: string
+            example: "GET, PUT"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+    UnsupportedMediaType:
+      description: >-
+        The request carried a body in a media type this route does not accept, or carried a
+        body with no Content-Type at all. Every operation of this contract that accepts a
+        body accepts application/json and nothing else.
+
+
+        The body carries no fieldErrors entry and cannot: the refusal is raised before any
+        member has been parsed, so there is no bound object to have fields. That is why this
+        is a distinct code from CARDDEMO-0400 rather than a 400 with an empty array, which a
+        caller could not tell from a body it had mis-spelled.
+      headers:
+        X-Correlation-Id:
+          $ref: "#/components/headers/XCorrelationId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
+    NotAcceptable:
+      description: >-
+        The request's Accept header names no media type this service can produce. The shared
+        advice answers with JSON and nothing else.
+
+
+        Assumptions: the body of this response is itself application/json, which is a type
+        the caller has just said it will not accept. That is deliberate. The alternative is
+        an empty 406, which carries neither the machine code nor the correlation identifier
+        a support enquiry needs and tells the caller nothing about which header to change.
+        The content type is set explicitly by the shared advice for a second reason recorded
+        there: a body left to content negotiation would be negotiated against the same
+        Accept header that already matched nothing, and the request would then be forwarded
+        to the container error path, which this service publishes no route for.
+      headers:
+        X-Correlation-Id:
+          $ref: "#/components/headers/XCorrelationId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+
   # WHY : Assumptions: there is deliberately NO shared InternalServerError entry
   #       here, and its absence is a decision rather than an omission. The four
   #       entries above are shared precisely because their meaning does not vary
@@ -1308,6 +1441,55 @@ components:
   #       operations -- and nothing recorded why it was unreferenced. An orphan
   #       whose purpose is written down is documentation; an orphan with no stated
   #       purpose is drift, and only the second kind was removed.
+
+    # WHY : Refactoring Rationale: a SECOND definition of MethodNotAllowed, NotAcceptable and
+    #   UnsupportedMediaType stood here and all three are withdrawn. They were a whole earlier
+    #   generation of the same three components, merged alongside the surviving generation, and a
+    #   duplicate mapping key is the most deceptive shape this can take: YAML resolves a repeated
+    #   key to the LAST definition, so one of every pair was dead text that still read as the
+    #   contract, and no schema-shaped test could tell -- both copies were well formed and both
+    #   carried the correlation header. The survivors are the generation that states the Allow
+    #   header's composition rule with an example and attributes the pinned content type to the
+    #   shared advice rather than to a per-service handler; the withdrawn copies said only that
+    #   Allow is 'comma separated'. Detected with a duplicate-key-aware composer, because
+    #   yaml.safe_load hides the condition by construction.
+    PayloadTooLarge:
+      description: >-
+        The request body exceeds the byte ceiling this service accepts, and
+        carries the machine code CARDDEMO-0413. The ceiling is 65536 bytes unless
+        the deployment names another under carddemo.web.max-request-body-bytes,
+        and it is enforced by a servlet filter ordered ahead of the security
+        chain rather than by a handler -- which is why it applies to every
+        operation that accepts a body and why the refusal reaches a caller that
+        presented no token at all.
+
+
+        Assumptions: the body of this response carries no fieldErrors entry and
+        cannot. The refusal is raised before any member is parsed, so there is no
+        bound object to have fields; the message names the ceiling and the size
+        the request declared, which is what distinguishes a misconfigured client
+        from a deliberate flood.
+
+
+        Assumptions: a body that declares no length is not refused for that alone.
+        It is read up to the ceiling and refused only if it exceeds it, and the
+        bytes already read are forwarded to the handler when it does not, so a
+        chunked request within the bound is served normally. For that case the
+        message states that the body declares no length and exceeds the bound,
+        because the exact size is the one thing that was never learned.
+
+
+        Assumptions: this response carries the correlation identifier like every
+        other, and that is a property of filter ORDER rather than of this filter.
+        The correlation filter is registered one position ahead of it and has
+        already put the identifier on the response before the body is written.
+      headers:
+        X-Correlation-Id:
+          $ref: "#/components/headers/XCorrelationId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
   schemas:
 
     # -------------------------------------------------------------------------
@@ -1712,18 +1894,6 @@ components:
             The signed amount, at the full precision the record declares rather
             than the narrower precision the screen's edited field renders.
 
-    # WHY : Assumptions: SEVEN members, mirroring
-    #       services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java
-    #       L210 to L217 component for component, because that record is what the
-    #       service serialises and this document has to describe what the service
-    #       actually sends. It carries no annotation altering a property name, so
-    #       each component name below is the component name there. An earlier
-    #       plan for that record had four members -- items, firstKey, lastKey and
-    #       hasNext -- and describing four here would leave the contract silent
-    #       about three members every response carries. The browser client's own
-    #       interface at ui/src/api/cards.ts L28 to L33 declares only those four,
-    #       which stays correct because a client reading a subset of a JSON
-    #       object is unaffected by the members it ignores.
     # WHY : Trade-offs: there is no member naming how many rows a full page holds
     #       and none naming an absolute page ordinal. app/cbl/COTRN00C.cbl L65
     #       declares CDEMO-CT00-PAGE-NUM PIC 9(08) and the baseline does maintain
@@ -1974,6 +2144,12 @@ components:
         screen displays, plus the message line that screen carries. The thirteen
         are the thirteen MOVE statements at app/cbl/COTRN01C.cbl L178 to L190,
         counted in the source and confirmed to be exactly thirteen.
+      # WHY : Refactoring Rationale: every property below is REQUIRED, including the nullable
+      #       ones, and that is a correction rather than a tightening. carddemo-common-defaults.yml
+      #       pins default-property-inclusion to always, so every record component is written on
+      #       every response and a nullable member arrives as null, NEVER absent. Publishing such
+      #       a member as optional described an omission this service cannot produce, and generated
+      #       a type that was optional AND nullable -- two states for one fact.
       required:
         - transactionId
         - typeCode
@@ -1988,6 +2164,7 @@ components:
         - cardNumber
         - originTimestamp
         - processTimestamp
+        - returnMessage
       additionalProperties: false
       properties:
         transactionId:
@@ -2394,7 +2571,13 @@ components:
         nothing was written. It mirrors the baseline turn at app/cbl/COTRN02C.cbl
         L166 to L181, which validates the submission, normalises the amount and
         then asks for a confirmation without writing.
-      required: [amount, written]
+      # WHY : Refactoring Rationale: every property below is REQUIRED, including the nullable
+      #       ones, and that is a correction rather than a tightening. carddemo-common-defaults.yml
+      #       pins default-property-inclusion to always, so every record component is written on
+      #       every response and a nullable member arrives as null, NEVER absent. Publishing such
+      #       a member as optional described an omission this service cannot produce, and generated
+      #       a type that was optional AND nullable -- two states for one fact.
+      required: [amount, written, returnMessage]
       additionalProperties: false
       properties:
         amount:
@@ -2649,7 +2832,13 @@ components:
         balance without posting; the nothing-to-pay advisory at L200 to L204; and
         the declined confirmation at L178 to L181, which clears the screen and
         reports neither a balance nor a sentence.
-      required: [accountId, paid]
+      # WHY : Refactoring Rationale: every property below is REQUIRED, including the nullable
+      #       ones, and that is a correction rather than a tightening. carddemo-common-defaults.yml
+      #       pins default-property-inclusion to always, so every record component is written on
+      #       every response and a nullable member arrives as null, NEVER absent. Publishing such
+      #       a member as optional described an omission this service cannot produce, and generated
+      #       a type that was optional AND nullable -- two states for one fact.
+      required: [accountId, payableBalance, paid, returnMessage]
       additionalProperties: false
       properties:
         accountId:
@@ -2660,12 +2849,20 @@ components:
             every one of the three turns including the declined one, which reads
             nothing and so can echo only what it was sent.
         payableBalance:
-          allOf:
+          # WHY : Refactoring Rationale: oneOf with an explicit null branch rather than a bare
+          #       allOf reference, because BillPaymentPreview.cleared at
+          #       dto/BillPaymentPreview.java L150 constructs this component as null and the
+          #       pinned inclusion policy then writes it as null. The bare reference resolves to
+          #       AccountBalance, which is type: string with a two-fractional-digit pattern, so
+          #       the document promised a decimal string on a turn that answers null -- a strict
+          #       client generated from it would reject the declined turn outright.
+          oneOf:
             - $ref: "#/components/schemas/AccountBalance"
+            - type: "null"
           description: >-
             The balance that a confirmed request would pay in full. The baseline
             moves the same value to its display field at app/cbl/COBIL00C.cbl L193
-            to L194. Absent on the declined turn alone, which clears the screen at
+            to L194. Null on the declined turn alone, which clears the screen at
             L180 without reaching the account read at L343.
         paid:
           type: boolean
@@ -2681,7 +2878,7 @@ components:
             The prompt inviting the caller to confirm, verbatim
             "Confirm to make a bill payment..." from app/cbl/COBIL00C.cbl L237,
             or the refusal "You have nothing to pay..." from L198 when the
-            balance is not positive. Absent on the declined turn, which sets its
+            balance is not positive. Null on the declined turn, which sets its
             error flag at L181 as a control-flow short-circuit and moves no
             sentence into the message field.
 
@@ -2720,7 +2917,13 @@ components:
         the balance that was paid. The baseline pays the balance in full, so the
         balance reported here is both the figure the screen displays and the amount
         the transaction carries.
-      required: [transactionId, accountId, currentBalance, paid]
+      # WHY : Refactoring Rationale: every property below is REQUIRED, including the nullable
+      #       ones, and that is a correction rather than a tightening. carddemo-common-defaults.yml
+      #       pins default-property-inclusion to always, so every record component is written on
+      #       every response and a nullable member arrives as null, NEVER absent. Publishing such
+      #       a member as optional described an omission this service cannot produce, and generated
+      #       a type that was optional AND nullable -- two states for one fact.
+      required: [transactionId, accountId, currentBalance, paid, returnMessage]
       additionalProperties: false
       properties:
         transactionId:
@@ -2815,8 +3018,23 @@ components:
       # WHY : Alternatives Considered: suppressing the two keys when null, with an inclusion setting, so
       #       the omission became true. Rejected because the aggregate sentence is the reference's own
       #       75-character message field and a client renders the band from it unconditionally, so a
-      #       key that comes and goes moves that decision into every client; and because the services
-      #       set `default-property-inclusion: always`, which the money contract depends on.
+      #       key that comes and goes moves that decision into every client; and because
+      #       always-inclusion is PINNED for every service in
+      #       services/common-lib/src/main/resources/carddemo-common-defaults.yml, which the
+      #       money contract SEPARATELY depends on -- a money member with no value must be
+      #       present and null rather than absent, because absent reads as "no balance" where
+      #       null reads as "no amount applies". That is a second consumer of the same pin and
+      #       NOT the reason these two keys are required here: the reason is the record shape
+      #       above, and this schema carries no monetary member at all. An earlier revision ran
+      #       the two together, which read as though a problem document's nullability followed
+      #       from a money rule.
+      # WHY : ⚠️ Refactoring Rationale: that last clause used to read "the services set
+      #       default-property-inclusion: always" and it named no place, which is how it came
+      #       to be inaccurate -- exactly one of the seven services actually set the key, and
+      #       the other six, this one included, rested a published contractual promise on the
+      #       serialiser's own default. The key is now set once in the shared defaults every
+      #       service imports, so the claim is true for all of them and is verifiable by
+      #       reading one file. The reasoning is unchanged; only its subject is now real.
       required: [code, secondaryCode, message, severity, subsystem, status, correlationId, path, timestamp, fieldErrors, abend]
       additionalProperties: false
       properties:
@@ -2844,6 +3062,15 @@ components:
             declares is recorded as ApiError.CODE_WIDTH for provenance and is not
             the bound on this member.
           maxLength: 13
+          # WHY : ⚠️ Refactoring Rationale: the bound is 22 and was 13. Thirteen is the width of
+          #       `code` above -- `CARDDEMO-` and four digits -- and this member is NOT drawn from that
+          #       vocabulary: it carries a subordinate condition name, and the widest the shared writer
+          #       can emit is 22, measured on CARD-LOCK-NOT-ACQUIRED and CARD-WRITE-NOT-APPLIED in
+          #       services/card-service/src/main/java/com/carddemo/card/api/CardController.java. This
+          #       service emits only the empty string today, so 13 was not violated here -- but one
+          #       generated client type reads a problem document from any of the seven services, and a
+          #       bound that differs between them is a type that differs between them. Bounding it at
+          #       the writer's own maximum is what makes the seven agree.
         secondaryCode:
           type: string
           description: >-
@@ -2852,7 +3079,7 @@ components:
             second code. It is bounded like code above, because it is drawn from the
             same vocabulary; the kernel normalises an absent value to the empty
             string rather than to null, so the bound is an upper bound only.
-          maxLength: 13
+          maxLength: 22
         message:
           allOf:
             - $ref: "#/components/schemas/ReturnMessage"

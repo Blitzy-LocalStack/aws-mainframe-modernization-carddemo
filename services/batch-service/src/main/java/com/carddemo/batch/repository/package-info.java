@@ -48,21 +48,22 @@
  *
  * <h2>The directory, measured rather than remembered</h2>
  *
- * <p>Eleven compilation units sit in this directory: this charter and the ten Spring Data interfaces
- * enumerated below, each marked LANDED against the directory beside it. The marker line is
- * re-measured on every build by
+ * <p>Twelve compilation units sit in this directory: this charter and the eleven Spring Data
+ * interfaces enumerated below, each marked LANDED against the directory beside it. The marker line
+ * is re-measured on every build by
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
- * so an eleventh interface arriving without an entry here fails the build:</p>
+ * so a twelfth interface arriving without an entry here fails the build:</p>
  *
  * <pre>
- * this directory: 11 java files = 10 classes + 1 charter
+ * this directory: 12 java files = 11 classes + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: this section carried a prose sentence and no marker line, and the prose
  * had twice been left behind by the directory. The marker is the mechanically re-measured form, so
- * the count can no longer drift silently; the figure it carries is the measured eleven rather than
+ * the count can no longer drift silently; the figure it carries is the measured twelve rather than
  * the eight the earlier roster closed at, because {@code CustomerRepository} and
- * {@code CardRepository} landed with the export job's customer and card phases.</p>
+ * {@code CardRepository} landed with the export job's customer and card phases and
+ * {@code DailyFeedWatermarkRepository} landed with the feed's consumed position.</p>
  *
  * <h2>Why data access is an interface here and was a file verb there</h2>
  *
@@ -99,9 +100,9 @@
  * both disciplines are visible in one place and neither is implied by a declaration made
  * elsewhere.</p>
  *
- * <h2>The ten interfaces, and what does not belong here</h2>
+ * <h2>The eleven interfaces, and what does not belong here</h2>
  *
- * <p>Ten interfaces belong here and no eleventh; with this charter that makes eleven compilation
+ * <p>Eleven interfaces belong here and no twelfth; with this charter that makes twelve compilation
  * units at the target. Each is listed with the schema-qualified table it reaches and the access
  * discipline that table is reached with, because the discipline is the part a caller cannot infer
  * from the name.</p>
@@ -113,8 +114,8 @@
  * {@code CardRepository} are therefore added as ordered read-only walks and appear in the roster
  * below.</p>
  *
- * <p>Refactoring Rationale: each entry states LANDED, and at this revision ALL TEN are, so the roster
- * and the directory now hold the same set. Two earlier revisions both understated it. The first marked
+ * <p>Refactoring Rationale: each entry states LANDED, and at this revision ALL ELEVEN are, so the
+ * roster and the directory now hold the same set. Two earlier revisions both understated it. The first marked
  * every entry PLANNED, including {@code BatchRunRepository} whose file was already present, so a reader
  * consulting the roster to learn whether the step ledger had an interface was told it did not. The second
  * corrected that to THREE and left five marked PLANNED, three of which -- the feed, the ledger and the
@@ -137,14 +138,17 @@
  * <p>Assumptions: the last two to arrive, {@code AccountRepository} and {@code CardXrefRepository}, came
  * with the jobs that read them rather than with a service, which is what the earlier revisions predicted:
  * the account master and the cross-reference are read by the posting job and by the interest accrual, and
- * neither is reached by any rule in {@code com.carddemo.batch.service}. Every one of the ten now has at
- * least one production caller, and each caller is a job or a service in this module rather than a
- * test.</p>
+ * neither is reached by any rule in {@code com.carddemo.batch.service}. Every one of the eleven now
+ * has at least one production caller, and each caller is a job or a service in this module rather
+ * than a test. Assumptions: the eleventh, {@code DailyFeedWatermarkRepository}, is the one whose
+ * caller is a SERVICE rather than a job -- {@code DailyFeedWatermarkService} owns the read and the
+ * advance, and the two jobs reach the row only through it.</p>
  *
  * <dl>
  *   <dt>{@code BatchRunRepository} into {@code batch.batch_run}</dt>
- *   <dd>LANDED. The <b>only</b> table this module owns, and the only entry here with no baseline
- *       record behind it. It is the durable step ledger, and it is the mechanism <i>intended</i> to
+ *   <dd>LANDED. The FIRST of the two tables this module owns -- the second being
+ *       {@code batch.daily_feed_watermark} at the end of this roster -- and one of the two entries
+ *       here with no baseline record behind it. It is the durable step ledger, and it is the mechanism <i>intended</i> to
  *       make a resumed step idempotent: a step that already recorded completion for a run is meant
  *       to become a no-op rather than repeating its writes. Assumptions: the uniqueness constraint
  *       that makes a row an idempotency key is {@code uq_batch_run_run_step} over the run and step
@@ -273,6 +277,30 @@
  *       ruling below, which extends this module no write privilege on {@code reference} at
  *       all.</dd>
  *
+ *   <dt>{@code DailyFeedWatermarkRepository} into {@code batch.daily_feed_watermark}</dt>
+ *   <dd>LANDED. Read plus write, and the SECOND table this module owns -- so the statement above
+ *       that {@code batch.batch_run} is "the only table this module owns" is now the statement that
+ *       it was the first. One row per feed, addressed by primary key in both directions, with the
+ *       read taking a pessimistic write lock so two overlapping consuming passes serialise.
+ *       <p>Refactoring Rationale: this interface exists because the posting pass had no way to tell
+ *       tonight's input from every night's. {@code app/jcl/POSTTRAN.jcl:30-31} supplies the feed as
+ *       the flat sequential dataset {@code AWS.M2.CARDDEMO.DALYTRAN.PS} and
+ *       {@code app/cbl/CBTRN02C.cbl:202-219} reads it to end of file -- and that dataset is REPLACED
+ *       between runs, so the whole file and tonight's transactions are the same set and the program
+ *       needs no cursor. The target's feed is a table that accumulates, because its rows are what the
+ *       three verification passes compare against, so a walk beginning at the first row re-posted
+ *       every earlier night on every later night: those amounts were added to account balances again
+ *       and a second posted row was inserted for each. Every one of those postings is individually
+ *       valid, so no reject was written and no return code changed.</p>
+ *       <p>Assumptions: it is the second entry here with no baseline record behind it, for the same
+ *       reason as the step ledger -- it is the durable form of something the reference stored
+ *       implicitly, in the lifecycle of a dataset rather than in a row. The divergence is registered
+ *       with the ledger's in {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+ *       <p>Assumptions: its owning migration is
+ *       {@code services/batch-service/src/main/resources/db/migration/V2__batch_feed_watermark.sql},
+ *       this module's second, so the schema ruling below is unaffected: the table is inside
+ *       {@code batch} and adds no cross-schema reach at all.</p></dd>
+ *
  * </dl>
  *
  * <p><b>What does not belong in this package.</b> No repository implementation class. No
@@ -333,7 +361,7 @@
  *
  * <h2>Why this package reaches four schemas it does not own</h2>
  *
- * <p>Nine of the ten interfaces target a table another bounded context owns. That is the single
+ * <p>Nine of the eleven interfaces target a table another bounded context owns. That is the single
  * most consequential fact about this package, so it is stated before any query detail rather than
  * after it: {@code ledger} belongs to {@code transaction-service}, {@code account} to
  * {@code account-service}, {@code card} to {@code card-service} and {@code reference} to
@@ -389,8 +417,8 @@
  * <p>Trade-offs: the grant is also the boundary that keeps the concession bounded, which is why it
  * is worth stating what it does not include. It carries no privilege on the {@code card},
  * {@code auth} or {@code authorization} schemas, and no write privilege on {@code reference}. The
- * ten interfaces above are therefore not merely the set that has been written; they are close to
- * the set that <b>could</b> be written, because an eleventh reaching an ungranted schema would fail at
+ * eleven interfaces above are therefore not merely the set that has been written; they are close to
+ * the set that <b>could</b> be written, because a twelfth reaching an ungranted schema would fail at
  * the database rather than compile and quietly widen the exception.</p>
  *
  * <h2>No native SQL: every query binds to a declared property name</h2>
@@ -525,7 +553,7 @@
  *
  * <h2>The two ordered-walk contracts this package defines</h2>
  *
- * <p>Four of the ten interfaces expose an ordered walk, and in every case the ordering is part of
+ * <p>Four of the eleven interfaces expose an ordered walk, and in every case the ordering is part of
  * the contract rather than a convenience. A walk in a different order still returns every row and
  * still produces output a comparison rejects, so each ordering is recorded here with the evidence
  * that settles it. Assumptions: the two added by the customer and card projections are the simplest

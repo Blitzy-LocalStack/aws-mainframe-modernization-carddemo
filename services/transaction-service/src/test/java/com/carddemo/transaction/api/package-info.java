@@ -9,7 +9,21 @@
  * {@code service} package and the queries behind them in the sibling {@code repository} package, so a
  * failure raised here points at the edge and nowhere else.
  *
- * <h2>The three test classes in this directory</h2>
+ * <h2>The four test classes in this directory</h2>
+ *
+ * <p>Four classes sit beside this charter and the set is closed. Re-measured from the directory rather
+ * than counted from the list below:
+ * {@code find src/test/java/com/carddemo/transaction/api -maxdepth 1 -name '*Test.java' | wc -l}
+ * reports four.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: this heading said THREE while the list below it enumerated FOUR, and the
+ * fourth entry opened by calling itself "a fourth class in a directory this charter describes as a
+ * closed set" -- so the charter contradicted itself twice in the space of one screen, once in the count
+ * and once in the framing. That is worse than either an undercount or an unlisted class alone: a reader
+ * cannot tell whether the fourth class is sanctioned or is the very thing the closed set forbids, and
+ * the honest answer -- that it is sanctioned, for reasons the entry itself gives at length -- was
+ * unreadable from the heading. The count is now the measured one and the entry no longer argues against
+ * its own presence.</p>
  *
  * <dl>
  *   <dt>{@code TransactionControllerTest}</dt>
@@ -30,14 +44,14 @@
  *   <dd>Holds the published contract and the delivered routes to each other in both directions, so a
  *       published operation with no route fails it and a delivered route with no published operation
  *       fails it too. It is named here because a charter that states a closed set while a file sits
- *       outside that set reads as governance over a directory it does not actually govern.</dd>
+ *       outside that set reads as governance over a directory it does not actually govern -- which is the
+ *       same reason the heading above counts FOUR classes rather than three.</dd>
  *
  *   <dt>{@code TransactionCaptureWireContractTest}</dt>
  *   <dd>Covers the two properties of the capture payload that exist ONLY at the wire: which combinations
  *       of the two key fields are admitted, and which lexical forms of the amount are.
- *       ⚠️ Refactoring Rationale: it is a fourth class in a directory this charter describes as a closed
- *       set, and the addition is deliberate rather than an oversight in the set. Both properties are
- *       unholdable anywhere else. A service test constructs its submission as a Java object, so a
+ *       Refactoring Rationale: it is the fourth member of the closed set above, admitted deliberately
+ *       rather than tolerated, because both properties are unholdable anywhere else. A service test constructs its submission as a Java object, so a
  *       class-level key constraint the framework applies to a DESERIALISED body is never triggered and
  *       every such test passes whatever the constraint says; and the characters a producer sent for the
  *       amount do not survive into the object at all, so a service test cannot tell {@code "1234.5"}

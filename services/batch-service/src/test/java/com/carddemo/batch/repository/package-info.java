@@ -246,8 +246,13 @@
  *       by-account finder must be deterministic -- ordered by card number ascending and bounded to one
  *       row -- and never a bare single-result finder, which would fail on data the declared contract
  *       admits.</li>
- *   <li>{@code PostingUnitOfWorkIT} across 5 cases -- the atomicity proof, and the account and
- *       transaction writes that only it performs. It owns the commit-and-rollback pair in the baseline
+ *   <li>{@code PostingUnitOfWorkIT} across 6 cases -- the atomicity proof, the account and
+ *       transaction writes that only it performs, and the daily-subset finder's ordering and window
+ *       against a real engine. That last case is here rather than beside the job that calls the finder
+ *       because a stubbed repository can model an ORDER BY but cannot evaluate one, and because the
+ *       window's upper bound is STRICT on a {@code TIMESTAMP(6)} -- a boundary only a real engine
+ *       decides. It seeds rows one microsecond outside each edge, which is the resolution the column
+ *       is declared at, so a comparison that admitted the following midnight is caught. It owns the commit-and-rollback pair in the baseline
  *       order established at L440 to L442, the account cycle accumulators that
  *       {@code app/cbl/CBTRN02C.cbl:545-551} maintains alongside the running balance, and the version
  *       ruling: a step that loses the optimistic-lock race FAILS THE STEP so the orchestrator retries

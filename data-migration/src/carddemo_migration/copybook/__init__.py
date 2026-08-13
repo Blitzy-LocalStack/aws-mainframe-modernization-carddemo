@@ -275,6 +275,16 @@ from carddemo_migration.copybook.packed import (
 )
 from carddemo_migration.copybook.timestamp import (
     ADMITTED_FORMS,
+    # Refactoring Rationale: ``ISO_FORM`` was added to this boundary when
+    # ``verify/checksum.py`` began admitting a driver-native ``datetime`` on the read-back
+    # side of a comparison. Rendering one back into the spelling the load direction writes
+    # needs the directive itself, and ``canonical`` beside it renders only a ``str``, so the
+    # alternative was a second copy of ``"%Y-%m-%d %H:%M:%S.%f"`` in the verification pass --
+    # a calendar spelling that could drift from the one every row was loaded through. It is
+    # ``ADMITTED_FORMS[0]``, and publishing it by NAME rather than leaving a caller to index
+    # that tuple is what keeps a future reordering of the two admitted forms from silently
+    # changing which spelling a verification renders.
+    ISO_FORM,
     canonical,
     is_admitted,
     is_unwritten,
@@ -314,6 +324,7 @@ __all__ = [
     "EbcdicFieldDecodeError",
     "EbcdicRecordLengthError",
     "FieldSpec",
+    "ISO_FORM",
     "Kind",
     "LAYOUTS",
     "LayoutError",

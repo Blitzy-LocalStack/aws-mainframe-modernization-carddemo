@@ -267,6 +267,16 @@ class AccountContextContractTest {
     private static final long ACCOUNT_ID = 12_345_678_901L;
 
     /**
+     * The published written form of {@link #ACCOUNT_ID}: digits only, at the declared width.
+     *
+     * <p>⚠️ Assumptions: the request schema declares its account identifier as TEXT rather than as an
+     * integer, so a request body carries these characters while the repository is keyed by the number
+     * above. Both forms are named here because the two sides of one lookup use one each, and a case that
+     * derived either from the other would stop measuring the agreement between them.</p>
+     */
+    private static final String ACCOUNT_KEY = "12345678901";
+
+    /**
      * The customer the fabricated card resolves to.
      */
     private static final long CUSTOMER_ID = 987_654_321L;
@@ -732,7 +742,7 @@ class AccountContextContractTest {
 
         CardXrefByAccountView view = new CardXrefController(
                 reads(crossReferences, mock(AccountRepository.class), mock(CustomerRepository.class)))
-                .lookupByAccount(new AccountLookupRequest(ACCOUNT_ID));
+                .lookupByAccount(new AccountLookupRequest(ACCOUNT_KEY));
 
         assertThat(view.accountId()).isEqualTo(ACCOUNT_ID);
         assertThat(view.customerId()).isEqualTo(CUSTOMER_ID);
@@ -765,7 +775,7 @@ class AccountContextContractTest {
 
         AccountContextView view = controllerOver(
                 reads(mock(CardXrefRepository.class), accounts, mock(CustomerRepository.class)))
-                .lookup(new AccountLookupRequest(ACCOUNT_ID));
+                .lookup(new AccountLookupRequest(ACCOUNT_KEY));
 
         String body = this.json.writeValueAsString(view);
         assertThat(this.json.readValue(body, JSON_OBJECT))
@@ -800,7 +810,7 @@ class AccountContextContractTest {
 
         String body = this.json.writeValueAsString(controllerOver(
                 reads(mock(CardXrefRepository.class), accounts, mock(CustomerRepository.class)))
-                .lookup(new AccountLookupRequest(ACCOUNT_ID)));
+                .lookup(new AccountLookupRequest(ACCOUNT_KEY)));
 
         assertThat(body)
                 .contains("\"currentBalance\":\"0.00\"")
@@ -859,7 +869,7 @@ class AccountContextContractTest {
         AccountController controller = controllerOver(
                 reads(mock(CardXrefRepository.class), accounts, mock(CustomerRepository.class)));
 
-        assertThatThrownBy(() -> controller.lookup(new AccountLookupRequest(ACCOUNT_ID)))
+        assertThatThrownBy(() -> controller.lookup(new AccountLookupRequest(ACCOUNT_KEY)))
                 .isInstanceOf(NoSuchElementException.class)
                 .hasMessageNotContaining(String.valueOf(ACCOUNT_ID))
                 .hasMessage("no account master row exists for the requested account");

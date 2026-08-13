@@ -38,4 +38,33 @@ import com.carddemo.common.money.Money;
  *     {@code null}
  */
 public record AccountContextView(Money creditLimit, Money cashCreditLimit, Money currentBalance) {
+
+    /** Rendered in place of the three amounts, so an absent field cannot be read as an empty one. */
+    private static final String WITHHELD = "[REDACTED]";
+
+    /**
+     * Renders this projection for a log line, carrying none of its three amounts.
+     *
+     * <p>Purpose. A record's compiler-generated rendering prints every component, and every component of
+     * this record is an amount: a credit limit, a cash credit limit and a posted balance. It reaches a log
+     * without anyone writing it there -- a message conversion failure names the object it could not write,
+     * and the shared advice renders the value it refused -- so the generated form would put an identified
+     * account's whole financial position into a diagnostic.</p>
+     *
+     * <p>Trade-offs: the three are withheld TOGETHER rather than one being kept as context. There is no
+     * reading on which a balance is safe to print and a limit is not, and the sibling projection this
+     * context already publishes reaches the same disposition for the same five-amount grouping, so the two
+     * agree rather than each deciding for itself. What is given up is any amount-shaped clue in a log line;
+     * what remains is the correlation identifier on every request-scoped line, which locates the event
+     * without naming a protected value.</p>
+     *
+     * <p>Assumptions: the token is a marker rather than an empty field, because an empty structured field
+     * cannot be told apart from one the emitter failed to populate.</p>
+     *
+     * @return a rendering naming the type and recording that its amounts were withheld, never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "AccountContextView[amounts=" + WITHHELD + ']';
+    }
 }

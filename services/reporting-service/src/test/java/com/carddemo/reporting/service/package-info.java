@@ -2,7 +2,7 @@
  * Tests for the reporting-service business layer, covering statement selection, boundedness,
  * artifact-metadata disclosure and the identity a submitted run is started under.
  *
- * <p>Purpose: the three services in this context sit between a request and a read that no test above
+ * <p>Purpose: the four services in this context sit between a request and a read that no test above
  * them can see. A controller test mocks the service, so it cannot tell a statement selected by its whole
  * card number from one selected by a display mask; a repository integration test parses the queries but
  * never chooses between them. The decisions that go wrong in this layer are decisions about WHICH row
@@ -19,6 +19,13 @@
  * first matching arm, and it refused an unanswered confirmation where the reference composes a prompt.
  * A mocked collaborator cannot contradict its author, which is why a service in this layer without a
  * case in this package is now treated as uncovered rather than as covered from above.</p>
+ *
+ * <p>Refactoring Rationale: the count moved from three to four with
+ * {@code CategoryBalanceReportService}, and {@code CategoryBalanceReportServiceTest} landed with it
+ * rather than after it, for the reason the paragraph above gives. What that case owns and no other
+ * case can see is the generation pass itself: one line per row in the order it was handed, the exact
+ * signed total it returns and never prints, the cursor closed on the failure path, and a sink failure
+ * stopping the run rather than yielding a short artifact reported as complete.</p>
  *
  * <p>Assumptions: the report request edge's own split is the same one in different clothes: its
  * orchestration client is mocked because the property under test is the ARGUMENT handed to it, which is

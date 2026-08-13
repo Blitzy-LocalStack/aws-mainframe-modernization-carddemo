@@ -64,7 +64,9 @@ from one that is right.
 from __future__ import annotations
 
 import enum
+import hashlib
 import pathlib
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -89,7 +91,9 @@ __all__ = [
     "NO_DATASET_LABEL",
     "REPORTING_SCHEMA",
     "ROW_COUNT_COLUMNS",
+    "ROW_COUNT_QUERY_DIGEST",
     "ROW_COUNT_QUERY_NAME",
+    "ROW_COUNT_QUERY_RELATIONS",
     "SEED_DATASET_BASELINES",
     "UNSEEDED_LAYOUT_NAME",
     "DatasetBaseline",
@@ -162,6 +166,71 @@ REPORTING_SCHEMA: Final[str] = "reporting"
 #   pass's contract with its SQL sibling, while the directory depends on where the distribution
 #   was unpacked and is therefore an argument a caller may override.
 ROW_COUNT_QUERY_NAME: Final[str] = "row_counts.sql"
+
+# WHY : Assumptions: the two relations the committed query is entitled to read are named here, so
+#   that "this text is the row-count query" becomes a checkable property of the TEXT rather than a
+#   claim about a filename. `sql/V3__verification_surfaces.sql` creates both as owner-created
+#   security-barrier views projecting counts only -- no key, no identifier, no row value -- and the
+#   reporting role holds SELECT on them and on no base table. The pair is a pair rather than one
+#   view because `carddemo_reporting_owner` holds no USAGE on the auth schema, so the users count
+#   must come from a second view that schema owns; a text reading anything else is either not this
+#   query or not entitled to run, and both are refusals rather than results.
+ROW_COUNT_QUERY_RELATIONS: Final[frozenset[str]] = frozenset(
+    {"reporting.v_verification_row_counts", "auth.v_verification_row_counts"}
+)
+
+# WHY : Assumptions: the committed query's IDENTITY is pinned, not just its shape. The shape checks
+#   establish that a text is a harmless read of the allow-listed views; they cannot establish that
+#   it is the report an operator believes is being run, and `--sql-root` exists precisely so a
+#   caller can say where the file is. Pinning the digest closes the remaining substitution: a
+#   well-formed, allow-listed text that is nevertheless not the shipped query is refused.
+# WHY : Trade-offs: the accepted cost is that editing `sql/verify/row_counts.sql` requires
+#   re-measuring this constant. That cost is bounded by a test which compares the pin against the
+#   shipped file and reports the measured digest in its failure, so an edit that forgets the pin
+#   fails immediately with the value to paste rather than at an operator's next verification run.
+#   Re-measure with `sha256sum data-migration/sql/verify/row_counts.sql`.
+ROW_COUNT_QUERY_DIGEST: Final[str] = (
+    "3ed794296878932c9385059fa4441f3132aaee966216830e7de9324269ba881d"
+)
+
+# WHY : Assumptions: the query executes under a statement timeout, set for its transaction only, and
+#   the value matches the money pass's own so an operator learns one number. Five minutes never
+#   bounds a healthy run -- the views aggregate eleven tables whose largest is the
+#   three-hundred-thousand-row transaction master, seconds of sequential scan on the smallest
+#   provisioned capacity -- what it bounds is a pass stuck behind a lock taken by the batch chain it
+#   is meant to gate, which then fails with a named timeout instead of holding the window open.
+_STATEMENT_TIMEOUT_MILLISECONDS: Final[int] = 300_000
+
+# WHY : Assumptions: read-only-ness is asserted by the SERVER for the transaction the query runs in,
+#   in addition to the role holding no write privilege. The two fail differently and that is why
+#   both are kept: the role is what makes writing impossible, and the transaction setting is what
+#   makes an ATTEMPT to write fail loudly on a cluster where the role was mis-provisioned. The
+#   spelling is `SET TRANSACTION` so the setting lasts exactly as long as the read it protects.
+_READ_ONLY_TRANSACTION_STATEMENT: Final[str] = "SET TRANSACTION READ ONLY"
+
+# WHY : Assumptions: only these two keywords may OPEN the query, and the pair is an allow-list
+#   rather than a list of refused verbs. A single statement beginning `SELECT` or `WITH` cannot
+#   modify data unless one of its own expressions does, which the relation check also catches,
+#   whereas enumerating write verbs leaves the set open-ended -- a statement type nobody listed
+#   would pass a deny-list and fail this allow-list.
+_READING_KEYWORDS: Final[frozenset[str]] = frozenset({"SELECT", "WITH"})
+
+# WHY : Assumptions: a relation is recognised after FROM or JOIN, optionally schema-qualified, over
+#   the COMMENT-STRIPPED text so the query's own prose cannot contribute a match. It is a shape
+#   check rather than a parse: the accepted cost is that a sub-select's FROM is treated like a
+#   top-level one, which is the safe direction because every relation anywhere must be accounted
+#   for.
+_RELATION_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?i)\b(?:from|join)\s+([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)?)"
+)
+
+# WHY : Assumptions: a common table expression is recognised by its `<name> [(columns)] AS (` form
+#   after the opening WITH or a comma, which is how the shipped query declares `expected` and
+#   `actual`. Recognising them is what lets the relation check insist on the allow-listed views
+#   without rejecting the query's own inline vocabulary.
+_CTE_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?i)(?:\bwith\b|,)\s*([a-z_][a-z0-9_]*)\s*(?:\([^)]*\))?\s+as\s*\("
+)
 
 
 class RowCountVerificationError(RuntimeError):
@@ -298,32 +367,18 @@ class RowCountVerdict(enum.Enum):
         """
         return self is not RowCountVerdict.NO_BASELINE
 
-    @property
-    def verified(self) -> bool:
-        """Report whether this verdict is acceptable in a passing verification run.
-
-        Parameters
-        ----------
-        None
-            Reads the member.
-
-        Returns
-        -------
-        bool
-            True for :attr:`MATCH` and :attr:`NO_BASELINE`; False only for :attr:`MISMATCH`.
-
-        Raises
-        ------
-        None
-            Reading a member cannot fail.
-        """
-        # WHY : Assumptions: NO_BASELINE is a PASSING state, and this is the single place that
-        #   decision is expressed. `ledger.transactions` is filled by the posting job from
-        #   `ledger.daily_transactions`, so zero rows immediately after the ETL is the correct
-        #   state; treating the absence of a baseline as a failure would make every correct fresh
-        #   load report a defect, and an operator who learns to ignore one line of a report has
-        #   learned to ignore the report.
-        return self is not RowCountVerdict.MISMATCH
+    # WHY : Refactoring Rationale: this enumeration published a `verified` property returning True
+    #   for MATCH and NO_BASELINE and False only for MISMATCH, and it is REMOVED rather than
+    #   corrected. A member knows which of the three outcomes it is and knows nothing about how many
+    #   rows the table holds, so "NO_BASELINE is acceptable" could only be expressed here
+    #   unconditionally -- and it is not unconditional. The one line reaching this verdict is
+    #   `ledger.transactions`, which the ETL leaves EMPTY because the posting job fills it, so a
+    #   nonzero count there is stale data from an earlier cutover attempt, a load pointed at the
+    #   wrong table, or a posting run that started before verification. Every one of those was
+    #   certified as a pass. The rule now lives on :class:`RowCountRow`, which holds the count it
+    #   needs. Removing the property rather than leaving it is deliberate: a published name that
+    #   answers a question it cannot answer correctly is how the same defect returns by another
+    #   caller.
 
 
 @dataclass(frozen=True)
@@ -347,6 +402,13 @@ class DatasetBaseline:
         it -- for example ``ACCOUNT``.
     expected_rows : int
         How many records the committed seed dataset holds.
+
+    Returns
+    -------
+    None
+        Construction binds the three declared values. The inapplicability is stated rather than
+        left silent, so a reader can tell a value object with no return from a docstring that
+        forgot to document one.
 
     Raises
     ------
@@ -593,6 +655,12 @@ class RowCountComparison:
     target_rows : int
         Rows present in the target table.
 
+    Returns
+    -------
+    None
+        Construction binds the four compared values; the verdict is derived by :attr:`matched`
+        and :attr:`difference` rather than stored, so the two cannot disagree.
+
     Raises
     ------
     None
@@ -742,7 +810,16 @@ def count_target_rows(connection: Any, schema: str, table: str) -> int:
             f"counting {schema}.{table} returned no row at all; a COUNT always returns one, so"
             " the connection is not behaving as a database connection"
         )
-    return int(row[0])
+    # WHY : Refactoring Rationale: the value is validated by the same exact-whole-number rule the
+    #   whole-migration report parser uses, where this coerced with `int(row[0])`. That coercion
+    #   accepted every representation a count must not arrive as: `True` counted as one row, `2.9`
+    #   truncated to two, `Decimal("2.5")` truncated to two, and the text `"2"` parsed as two -- so
+    #   a driver or a double substituting any of them produced a count this pass then compared
+    #   against the extract and reported as agreement or disagreement with equal confidence. Beyond
+    #   2**53 a float cannot represent a bigint exactly either, which is the failure that would
+    #   arrive silently on a large table. Reusing the validator also keeps the two count paths --
+    #   this one and the report's -- refusing the same set for the same stated reason.
+    return _require_whole_number(row[0], "count", f"{schema}.{table}")
 
 
 def compare_counts(
@@ -792,6 +869,21 @@ def compare_counts(
 #   form would show up as a diff an operator has to read before dismissing.
 _ABSENT: Final[str] = "n/a"
 _NOT_COMPARABLE: Final[str] = "not comparable"
+
+# WHY : Assumptions: the expectation a baseline-free line IS held to is named as a constant, and the
+#   wording matches `money_parity._EXPECTED_EMPTY` deliberately so the two reports an operator reads
+#   in the same run speak one vocabulary. A dataset that ships no seed extract must leave its target
+#   empty, so the report states which expectation was applied rather than only that no comparison
+#   was possible -- the earlier bare `(not comparable)` rendered a correctly-empty table and one
+#   holding unaccounted rows identically, while only the first of the two passes.
+_EXPECTED_EMPTY: Final[str] = "expected empty:"
+
+# WHY : Assumptions: the summary counts the lines that FAILED rather than the lines that mismatched,
+#   because the two stopped being the same set when the expected-empty rule arrived: a baseline-free
+#   line can now fail without any baseline to have disagreed with. Labelling that count "mismatched"
+#   would name a comparison that never happened, and an operator reconciling "1 mismatched" against
+#   a report whose only failing line reads `NO_BASELINE` would be reading a contradiction.
+_FAILING: Final[str] = "failing"
 
 
 def _require_whole_number(value: object, column: str, dataset: str) -> int:
@@ -869,6 +961,12 @@ class RowCountRow:
         difference is defined against an absent baseline.
     status : str
         The verdict token: one of ``MATCH``, ``MISMATCH`` or ``NO_BASELINE``.
+
+    Returns
+    -------
+    None
+        Construction binds the six projected values, having validated them against one another.
+        The verdict, the comparability and the pass are all derived from them rather than stored.
 
     Raises
     ------
@@ -1002,14 +1100,27 @@ class RowCountRow:
         Returns
         -------
         bool
-            True unless the verdict is :attr:`RowCountVerdict.MISMATCH`.
+            True when the baseline and the count agreed, and -- for the one line with no baseline --
+            when the target table is EXACTLY EMPTY. False for a disagreement, and false for a
+            baseline-free line whose table nevertheless holds rows.
 
         Raises
         ------
         None
-            Reading a validated token cannot fail.
+            Reducing a validated token and a validated count to one verdict cannot fail.
         """
-        return self.verdict.verified
+        # WHY : Refactoring Rationale: a NO_BASELINE line used to pass unconditionally, and this is
+        #   the expected-empty rule that replaces it. The state being checked is a real,
+        #   determinable one: no seed extract ships for the transaction master, so the ETL leaves
+        #   `ledger.transactions` empty, and a nonzero count is therefore evidence of exactly the
+        #   failures a verification run exists to catch -- rows left behind by an earlier attempt
+        #   into a table nothing in this package can empty (no role holds DELETE), a load pointed
+        #   at the wrong table, or a posting run that ran ahead of its gate. The shipped
+        #   `sql/verify/row_counts.sql` already documents the NULL baseline as "reported for
+        #   completeness"; what was missing was a rule that makes the completeness mean something.
+        if self.verdict is RowCountVerdict.NO_BASELINE:
+            return self.actual_rows == 0
+        return self.verdict is RowCountVerdict.MATCH
 
     def describe(self) -> str:
         """Render this line as one deterministic, privacy-safe string.
@@ -1048,7 +1159,15 @@ class RowCountRow:
         )
         if self.comparable:
             return line
-        return f"{line} ({_NOT_COMPARABLE})"
+        # WHY : Refactoring Rationale: a baseline-free line's note now states the verdict reached
+        #   over it, where it read only `(not comparable)`. That described the COMPARISON accurately
+        #   and the OUTCOME misleadingly, because the line is no longer waved through: a target with
+        #   no seed extract must be empty, so the reader is told which expectation was applied and
+        #   whether it held, instead of having to infer a pass from the absence of a baseline.
+        return (
+            f"{line} ({_NOT_COMPARABLE}; {_EXPECTED_EMPTY}"
+            f" {'held' if self.verified else 'VIOLATED'})"
+        )
 
 
 def parse_row_count_rows(rows: Iterable[Sequence[object]]) -> tuple[RowCountRow, ...]:
@@ -1220,6 +1339,12 @@ class RowCountReport:
     rows : tuple[RowCountRow, ...]
         The report's lines, in the order the query returned them.
 
+    Returns
+    -------
+    None
+        Construction binds the already-validated lines. The single binary verdict is derived by
+        :attr:`verified` rather than stored, so it cannot fall out of step with the lines.
+
     Raises
     ------
     None
@@ -1231,7 +1356,7 @@ class RowCountReport:
 
     @property
     def mismatches(self) -> tuple[RowCountRow, ...]:
-        """Return the lines whose baseline and actual count disagree.
+        """Return the lines that do not pass.
 
         Parameters
         ----------
@@ -1241,7 +1366,8 @@ class RowCountReport:
         Returns
         -------
         tuple[RowCountRow, ...]
-            The mismatching lines, in report order. Empty when the load verifies.
+            The failing lines, in report order: a line whose baseline and count disagreed, and a
+            baseline-free line whose target holds rows it should not. Empty when the load verifies.
 
         Raises
         ------
@@ -1342,7 +1468,12 @@ class RowCountReport:
         for row in self.rows:
             expected = _ABSENT if row.expected_rows is None else str(row.expected_rows)
             delta = _ABSENT if row.delta is None else f"{row.delta:+d}"
-            note = "" if row.comparable else f"  ({_NOT_COMPARABLE})"
+            note = (
+                ""
+                if row.comparable
+                else f"  ({_NOT_COMPARABLE}; {_EXPECTED_EMPTY} "
+                f"{'held' if row.verified else 'VIOLATED'})"
+            )
             lines.append(
                 f"  {row.status:<{status_width}}"
                 f"  {row.dataset:<{dataset_width}}"
@@ -1352,7 +1483,7 @@ class RowCountReport:
         matched = sum(1 for row in self.rows if row.verdict is RowCountVerdict.MATCH)
         lines.append(
             f"row count verification {'PASSED' if self.verified else 'FAILED'}:"
-            f" {matched} matched, {len(self.mismatches)} mismatched,"
+            f" {matched} matched, {len(self.mismatches)} {_FAILING},"
             f" {len(self.not_comparable)} {_NOT_COMPARABLE}"
         )
         return "\n".join(lines)
@@ -1544,9 +1675,12 @@ def read_row_count_query(path: pathlib.Path | None = None) -> str:
     #   write verbs was considered and rejected as the weaker guarantee: it would have to strip
     #   comments to avoid matching the file's own prose, and it would still only prove something
     #   about the text this module happened to read. What actually makes the pass incapable of
-    #   writing is the privilege boundary -- it connects as a role holding SELECT on one aggregate
-    #   view and nothing else, in a schema that owns no table -- which holds whatever text is
-    #   supplied. A backslash is refused because a psql meta-command is unusable through a driver
+    #   writing is the privilege boundary, which holds whatever text is supplied: the role it
+    #   connects as holds no privilege on any base table, no INSERT, UPDATE, DELETE or TRUNCATE
+    #   anywhere, and no CREATE even in the one schema it may read. Its whole grant is USAGE on
+    #   `reporting`, SELECT on nine views in it and EXECUTE on one read-only lookup function --
+    #   the topology is inventoried at the subpackage's own __init__. A backslash is refused
+    #   because a psql meta-command is unusable through a driver
     #   cursor; a placeholder is refused because this pass binds no parameter and one would raise
     #   from inside the driver instead; and a second statement is refused because a cursor's
     #   execute() exposes only the LAST result set, so a two-statement file would report a
@@ -1567,7 +1701,110 @@ def read_row_count_query(path: pathlib.Path | None = None) -> str:
             f"the row-count query at {resolved} holds {len(statements)} statements; a cursor"
             " exposes only the last result set, so all but one report would be lost"
         )
+    _require_harmless_query(resolved, executable)
+    _require_committed_query(resolved, text)
     return text
+
+
+def _require_committed_query(resolved: pathlib.Path, text: str) -> None:
+    """Establish that the text read is the committed query, by its digest.
+
+    Purpose
+    -------
+    Close the one substitution the shape checks cannot: a well-formed read of the allow-listed views
+    that is nevertheless not the report this pass publishes. The shape checks bound what a text may
+    DO; this bounds which text it may BE.
+
+    Parameters
+    ----------
+    resolved : pathlib.Path
+        The file the text came from, named in a refusal so an operator knows which artifact differs.
+    text : str
+        The file's contents exactly as read, digested verbatim -- comments included, because the
+        committed artifact is the whole file rather than its executable remainder.
+
+    Returns
+    -------
+    None
+        Returning is the pass; a mismatch raises.
+
+    Raises
+    ------
+    VerificationQueryError
+        If the digest of ``text`` is not :data:`ROW_COUNT_QUERY_DIGEST`.
+    """
+    # WHY : Assumptions: the WHOLE file is digested, comments and all, rather than the
+    #   comment-stripped remainder the shape checks read. The comments carry the query's own
+    #   rationale and its published column contract, so a revision that rewrote them while leaving
+    #   the SQL alone has changed the artifact an operator reads -- and the digest is the identity
+    #   of that artifact, not of its executable subset.
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    if digest != ROW_COUNT_QUERY_DIGEST:
+        # WHY : Trade-offs: the refusal reports both digests and no part of the text. Two hex
+        #   strings are enough to tell "this is a different file" from "this file was moved", and
+        #   quoting the text would put a query -- which may hold literals -- into a retained log.
+        raise VerificationQueryError(
+            f"the row-count query at {resolved} has digest {digest}, not the committed"
+            f" {ROW_COUNT_QUERY_DIGEST}; this pass executes the committed report and nothing else,"
+            " so a substituted file is refused even when it reads only the permitted views"
+        )
+
+
+def _require_harmless_query(resolved: pathlib.Path, executable: str) -> None:
+    """Establish that a query text can only read, and can only read the verification views.
+
+    Purpose
+    -------
+    Turn "this is the committed row-count query" from a statement about a filename into two
+    checkable properties of the text itself: it begins as a read, and every relation it names is
+    either one of the two allow-listed aggregate views or a common table expression it declares
+    inline.
+
+    Parameters
+    ----------
+    resolved : pathlib.Path
+        The file the text came from, named in a refusal so an operator knows which artifact to look
+        at. No part of the text is quoted.
+    executable : str
+        The text with its whole-line comments removed, as :func:`_executable_text` produces it.
+
+    Returns
+    -------
+    None
+        Returning is the pass; every refusal raises.
+
+    Raises
+    ------
+    VerificationQueryError
+        If the text does not begin with a reading keyword, or if it reads any relation other than
+        those in :data:`ROW_COUNT_QUERY_RELATIONS` and its own declared expressions.
+    """
+    # WHY : Refactoring Rationale: these two checks are ADDED because the three that preceded them
+    #   -- no meta-command, no bound parameter, one statement -- established that the text was
+    #   RUNNABLE through a cursor and established nothing about what it did. The privilege boundary
+    #   was the whole defence, and it is the right defence for a role provisioned as documented; it
+    #   is not a defence at all on a cluster where the role was mis-provisioned, and it says nothing
+    #   about whether the text is the report an operator believes is being run. The identical pair
+    #   of checks guards the money pass, so both verification queries are held to one rule.
+    leading = executable.strip().split(None, 1)[0].upper() if executable.strip() else ""
+    if leading not in _READING_KEYWORDS:
+        raise VerificationQueryError(
+            f"the row-count query at {resolved} begins with {leading or '(nothing)'!r} rather"
+            f" than {' or '.join(sorted(_READING_KEYWORDS))}; a verification pass executes a read"
+            " and nothing else, so a text beginning any other way is refused rather than run"
+        )
+    declared = {match.group(1).lower() for match in _CTE_PATTERN.finditer(executable)}
+    read = {match.group(1).lower() for match in _RELATION_PATTERN.finditer(executable)}
+    unexpected = sorted(read - declared - ROW_COUNT_QUERY_RELATIONS)
+    if unexpected:
+        # WHY : Trade-offs: the refusal names the RELATIONS it did not expect and quotes no other
+        #   part of the text. That is enough for an operator to see which artifact is wrong, and it
+        #   keeps a query holding a literal out of a log line that is retained.
+        raise VerificationQueryError(
+            f"the row-count query at {resolved} reads {unexpected}; this pass may read only"
+            f" {sorted(ROW_COUNT_QUERY_RELATIONS)} and the expressions the query declares itself,"
+            " so a text reading anything else is either not this query or not entitled to run"
+        )
 
 
 def reporting_role() -> str:
@@ -1636,9 +1873,13 @@ def _require_reporting_role(settings: AuroraConnectionSettings) -> AuroraConnect
     """
     # WHY : Assumptions: a verification pass must be structurally incapable of mutating what it
     #   verifies, and the role is what makes that true rather than the query text. The reporting
-    #   role holds SELECT on the two aggregate verification views and nothing else, and the schema
-    #   it owns holds no table at all, so a session on it cannot write a row anywhere even if
-    #   handed a statement that tried. Running this pass as the bootstrap principal would work and
+    #   role holds SELECT on nine views of one schema and EXECUTE on one read-only lookup
+    #   function, and it holds no privilege on a base table, no write privilege of any kind and no
+    #   CREATE, so a session on it cannot write a row anywhere even if handed a statement that
+    #   tried. The schema is NOT empty -- it owns nine views, one protected table and that function
+    #   -- and grounding the guarantee in absent privileges rather than in absent objects is what
+    #   keeps it true as relations are added. Running this pass as the bootstrap principal would
+    #   work and
     #   is exactly what is refused here: that principal holds row-level read access to every
     #   account balance, card number and national identifier in the system, so the ACT of verifying
     #   would itself be a disclosure.
@@ -1793,16 +2034,64 @@ def require_reporting_session(connection: Any) -> str:
     return text
 
 
-def fetch_row_count_rows(connection: Any, query: str) -> tuple[tuple[object, ...], ...]:
-    """Execute the row-count query exactly as given and return its result set untouched.
+def fetch_row_count_rows(
+    connection: Any, *, query_path: pathlib.Path | None = None
+) -> tuple[tuple[object, ...], ...]:
+    """Read the committed row-count query and execute it on a certified read-only session.
 
     Parameters
     ----------
     connection : Any
         An open database connection, supplied by the caller so a double can stand in. Its live
-        session is confirmed to be the reporting role before the query is executed.
+        session is confirmed to be the reporting role before anything is executed.
+    query_path : pathlib.Path | None
+        Where to read the committed query from. ``None`` resolves it through
+        :func:`row_count_query_path`. A PATH is accepted and query TEXT is not, so the statement
+        this pass executes is always the committed one.
+
+    Returns
+    -------
+    tuple[tuple[object, ...], ...]
+        The result set in the order the query returned it, each row as a tuple of column values.
+
+    Raises
+    ------
+    VerificationQueryError
+        If the query cannot be located or read, is not a single pure-SQL statement, or is not a
+        read of the allow-listed verification views.
+    RowCountVerificationError
+        If the connection's live session is not the reporting role.
+    ResultSetContractError
+        If the cursor yields no result set at all, which a ``SELECT`` always does and which
+        therefore means the object supplied is not behaving as a connection.
+    """
+    # WHY : Refactoring Rationale: this function used to accept query TEXT, and it is published --
+    #   so the one entry point an orchestration step reaches for could be handed a statement nobody
+    #   committed, executed on the session this pass had just certified as the sole authority
+    #   entitled to judge the load. The text parameter existed because the sql directory ships
+    #   BESIDE the package rather than inside it, so a caller running from a wheel needs a way to
+    #   say where the file is -- and a path says that exactly, without also saying what to run. The
+    #   injectable seam is retained privately, for the tests that must drive a substituted result
+    #   set, and is unreachable from the published surface.
+    return _row_count_rows(connection, read_row_count_query(query_path))
+
+
+def _row_count_rows(connection: Any, query: str) -> tuple[tuple[object, ...], ...]:
+    """Execute one already-validated query text on a certified read-only session.
+
+    Purpose
+    -------
+    Hold the execution discipline -- session check, read-only transaction, statement timeout, one
+    fetch -- in one place, and keep the text an argument so a test can drive a substituted result
+    set without that seam being reachable from the published surface.
+
+    Parameters
+    ----------
+    connection : Any
+        An open database connection, or the in-process double that stands in for one.
     query : str
-        The query text, executed verbatim. Nothing is appended, wrapped or interpolated.
+        Query text that has already passed :func:`read_row_count_query`, executed verbatim. Nothing
+        is appended, wrapped or interpolated.
 
     Returns
     -------
@@ -1814,15 +2103,12 @@ def fetch_row_count_rows(connection: Any, query: str) -> tuple[tuple[object, ...
     RowCountVerificationError
         If the connection's live session is not the reporting role.
     ResultSetContractError
-        If the cursor yields no result set at all, which a ``SELECT`` always does and which
-        therefore means the object supplied is not behaving as a connection.
+        If the cursor yields no result set at all.
     """
     # WHY : Assumptions: the session check is made HERE, at the one place in this module where a
-    #   supplied query is executed, rather than in verify_row_counts above it. This function is
-    #   published in __all__ and takes arbitrary query text, so a check placed only in the caller
-    #   would leave the more permissive entry point unguarded -- and that entry point is the one a
-    #   future orchestration step is most likely to reach for. One guard at the single execution
-    #   site cannot be bypassed by any published path.
+    #   query is executed, rather than in `verify_row_counts` above it. A check placed only in the
+    #   caller would leave every other path to this helper unguarded, and one guard at the single
+    #   execution site cannot be bypassed.
     require_reporting_session(connection)
     # WHY : Assumptions: the cursor may or may not be a context manager, so both shapes are
     #   handled. The driver's cursor is one and the in-process double used by this package's suite
@@ -1830,6 +2116,18 @@ def fetch_row_count_rows(connection: Any, query: str) -> tuple[tuple[object, ...
     candidate = connection.cursor()
     cursor = candidate.__enter__() if hasattr(candidate, "__enter__") else candidate
     try:
+        # WHY : Assumptions: both settings are issued as ORDINARY STATEMENTS on the same cursor,
+        #   before the query, so they apply to the transaction the query runs in. `SET TRANSACTION
+        #   READ ONLY` must be the first statement of a transaction, which it is because the driver
+        #   opens one implicitly on this first execute; `SET LOCAL statement_timeout` is
+        #   transaction-scoped for the same reason, so neither leaks into a later use of the
+        #   connection the way a session-level setting would.
+        # WHY : Trade-offs: the timeout is interpolated from a module constant rather than bound as
+        #   a parameter, because `SET` accepts no bound parameter. The value is an `int` constant
+        #   declared in this module and never caller supplied, so no text from outside this file
+        #   reaches the statement.
+        cursor.execute(_READ_ONLY_TRANSACTION_STATEMENT)
+        cursor.execute(f"SET LOCAL statement_timeout = {_STATEMENT_TIMEOUT_MILLISECONDS}")
         cursor.execute(query)
         fetched = cursor.fetchall()
     finally:
@@ -1846,7 +2144,6 @@ def fetch_row_count_rows(connection: Any, query: str) -> tuple[tuple[object, ...
 def verify_row_counts(
     connection: Any,
     *,
-    query: str | None = None,
     query_path: pathlib.Path | None = None,
 ) -> RowCountReport:
     """Run verification pass 1 over the whole migration and report every line of it.
@@ -1865,11 +2162,10 @@ def verify_row_counts(
         which :func:`fetch_row_count_rows` calls before executing anything. Supplied rather than
         opened here so that one connection can serve all three passes and so that the in-process
         double can stand in; :func:`open_reporting_connection` opens one.
-    query : str | None
-        The query text to execute. ``None`` reads it from disk through
-        :func:`read_row_count_query`. Supplied text is executed exactly as given.
     query_path : pathlib.Path | None
-        Where to read the query from when ``query`` is ``None``.
+        Where to read the committed query from. ``None`` resolves it through
+        :func:`row_count_query_path`. A path is accepted and query TEXT is not, so the statement
+        this pass executes is always the committed one -- see :func:`fetch_row_count_rows`.
 
     Returns
     -------
@@ -1880,16 +2176,17 @@ def verify_row_counts(
     Raises
     ------
     VerificationQueryError
-        If the query cannot be located or read, or is not a single pure-SQL statement.
+        If the query cannot be located or read, is not a single pure-SQL statement, or is not a
+        read of the allow-listed verification views.
     ResultSetContractError
         If the result set breaches the query's published contract.
     RowCountVerificationError
         If the connection's live session is not the reporting role, or if the one legitimately
         unbaselined target table can no longer be established.
     """
-    # WHY : Assumptions: the query text is read once and executed once. Splitting the read from the
-    #   execution is what makes the text injectable, and injectability is not a convenience here:
-    #   the sql directory ships beside the package rather than inside it, so a caller running from
-    #   an installed wheel has to supply either the text or the root.
-    text = read_row_count_query(query_path) if query is None else query
-    return verify_row_count_rows(fetch_row_count_rows(connection, text))
+    # WHY : Refactoring Rationale: the caller supplies a query PATH and can no longer supply query
+    #   TEXT. The text parameter existed for packaging -- the sql directory ships beside the package
+    #   rather than inside it -- and the ROOT already answers that question, so accepting text as
+    #   well only added a way to run an uncommitted statement under the one authority this pass
+    #   certifies. The money pass took the same correction, so both are held to one rule.
+    return verify_row_count_rows(fetch_row_count_rows(connection, query_path=query_path))

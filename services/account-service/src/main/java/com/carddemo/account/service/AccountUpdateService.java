@@ -1770,7 +1770,33 @@ public class AccountUpdateService {
             }
             return List.copyOf(distinct);
         }
-    }
+    
+        /**
+         * Renders the verdict and the message, with the per-field list reduced to its size.
+         *
+         * <p>Purpose. Nothing here is protected -- two switches, one reference sentence and a list of field
+         * verdicts -- so this renderer exists for the collection reason in
+         * {@code docs/architecture/observability.md} L1093 to L1112. The account update screen edits over a
+         * hundred fields, so a wholly invalid submission produces a field-error list long enough that the
+         * generated rendering was the longest line the service emits.</p>
+         *
+         * <p>Assumptions: the two switches print in full and are the verdict. Whether the edit found an
+         * input error and whether it found no changes at all are the two conditions the reference program
+         * branches on, and they are what a refused update is diagnosed from; the field list's size then says
+         * how much was wrong.</p>
+         *
+         * @return a rendering naming the two switches, the message and the number of field errors, with the
+         *     field errors themselves omitted; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "EditVerdict[inputError=" + this.inputError
+                    + ", noChangesFound=" + this.noChangesFound
+                    + ", message=" + this.message
+                    + ", fieldErrors=" + (this.fieldErrors == null ? "absent"
+                            : this.fieldErrors.size() + " entries") + ']';
+        }
+}
 
     /**
      * Accumulates the driver's outputs while it runs: the entry array and the first-wins sentence.

@@ -10,7 +10,7 @@
  * themselves are, which class owns which contract, and the handful of facts a reader needs before
  * opening any of them.
  *
- * The seven test classes the migration plan assigns to this package, and the unit each covers:
+ * The eight test classes assigned to this package, and the unit each covers:
  *
  * {@code CobolEditMaskTest} covers {@code CobolEditMask}: the edit-mask cases and the coexisting
  * numeric regimes, including all four zero renderings set out below.
@@ -33,11 +33,19 @@
  *
  * {@code ReportingDtoMapperTest} covers {@code ReportingDtoMapper}: the JSON boundary.
  *
+ * {@code CategoryBalanceLineLayoutTest} covers {@code CategoryBalanceLineLayout}: the 40-byte
+ * category-balance line, position by position, including the one-byte resolution registered as
+ * divergence {@code D-PRTCATBL-LRECL}. Refactoring Rationale: this entry made the assigned count
+ * eight, and the count read seven. The category-balance report is the one artifact in this package
+ * with no COBOL program behind it, so its layout carries the whole of a specification that exists
+ * only as two disagreeing JCL statements -- which is why it is tested as its own unit rather than
+ * from the service above it.
+ *
  * One further class sits in this package and is listed so that this inventory matches the
  * directory. {@code ReportingFixtureRecordTest} consumes the committed fixture records, resolving
  * each from the test classpath and decoding it against the production layout registry. Its subject
  * is the fixture corpus rather than a mapper contract, which is why it is named apart from the
- * seven above rather than counted among them.
+ * eight above rather than counted among them.
  *
  * The ownership boundary, which is the rule here most easily broken by a well-meant edit: each
  * byte-exact rule is asserted in exactly one class. Mask semantics belong to

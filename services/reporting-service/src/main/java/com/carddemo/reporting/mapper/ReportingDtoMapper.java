@@ -744,7 +744,34 @@ public final class ReportingDtoMapper {
             //       at app/cpy/CVTRA05Y.cpy L18. Neither becomes a JSON component: the former is
             //       emitted by the byte-exact report mapper and the latter is discarded here.
         }
-    }
+    
+        /**
+         * Renders the line's identity and classification, WITHOUT the account or the amount.
+         *
+         * <p>Purpose. The account identifier and the amount are withheld by
+         * {@code docs/architecture/observability.md} L1093 to L1112. This is the mapper's input shape for a
+         * report line, so it is stringified on the mapping path -- which runs once per line of every report
+         * -- and the published line response it becomes makes the same two omissions for the same
+         * reasons.</p>
+         *
+         * <p>Assumptions: the two reference descriptions are kept beside their codes. They are seeded
+         * reference text rather than anything a submitter authored, so they classify a line without
+         * describing a transaction.</p>
+         *
+         * @return a rendering naming the transaction identifier, the type and category codes with their
+         *     descriptions and the source, with the account identifier and the amount omitted; never
+         *     {@code null}
+         */
+        @Override
+        public String toString() {
+            return "ReportTransactionPayload[transactionId=" + this.transactionId
+                    + ", typeCode=" + this.typeCode
+                    + ", typeDescription=" + this.typeDescription
+                    + ", categoryCode=" + this.categoryCode
+                    + ", categoryDescription=" + this.categoryDescription
+                    + ", source=" + this.source + ']';
+        }
+}
 
     /**
      * Carries one statement-ordered transaction with exposure narrowed for JSON.
@@ -868,7 +895,40 @@ public final class ReportingDtoMapper {
             //       than blanked or masked. COSTM01.CPY declares no such member in its 350 bytes,
             //       so neither this constructor nor this record offers a parameter for one.
         }
-    }
+    
+        /**
+         * Renders the identity, the codes and the two timestamps, and nothing else.
+         *
+         * <p>Purpose. Seven of the thirteen components are withheld by
+         * {@code docs/architecture/observability.md} L1093 to L1112 or by the reasoning recorded for the
+         * published shapes: the card number, the amount, the description as submitter-authored free text,
+         * and the four merchant components as one unit. The generated rendering printed a card number
+         * beside a sum and a merchant, once per transaction on a statement.</p>
+         *
+         * <p>Assumptions: the card number is omitted rather than masked because this is a mapper input
+         * carrying the STORED sixteen digits, not the masked form the published statement carries. Masking
+         * here would put a second masking rule outside the mapper method that owns it in this context,
+         * which is what that rule's first clause forbids.</p>
+         *
+         * <p>Trade-offs: both timestamps are kept, which is more than the published shape keeps, and
+         * deliberately so: a statement's transactions are selected by processing date and ordered by
+         * origination, so a selection or ordering fault in this mapping is diagnosed from exactly those two
+         * values.</p>
+         *
+         * @return a rendering naming the transaction identifier, the type and category codes, the source and
+         *     the two timestamps, with the card number, the amount, the description and all four merchant
+         *     components omitted; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "StatementTransactionPayload[transactionId=" + this.transactionId
+                    + ", typeCode=" + this.typeCode
+                    + ", categoryCode=" + this.categoryCode
+                    + ", source=" + this.source
+                    + ", originatingTimestamp=" + this.originatingTimestamp
+                    + ", processingTimestamp=" + this.processingTimestamp + ']';
+        }
+}
 
     /**
      * Carries the identity and balance values that head a statement JSON response.
@@ -983,7 +1043,36 @@ public final class ReportingDtoMapper {
             //       joined identity rosters at app/cpy/CVACT03Y.cpy L5-L8 and
             //       app/cpy/CVCUS01Y.cpy L5-L23 declare no such member.
         }
-    }
+    
+        /**
+         * Renders NOTHING but the presence of its one optional member: all nine components are protected.
+         *
+         * <p>Purpose. This shape carries a primary account number, two identifiers, a name in three parts, a
+         * NATIONAL identifier, a government-issued identifier and a balance.
+         * {@code docs/architecture/observability.md} L1093 to L1112 withholds identifiers and amounts by
+         * name, and the two credential-grade identifiers are the values this migration encrypts at rest and
+         * masks in every response -- so a rendering that printed them would defeat, in one line, controls
+         * applied at the column and at the API boundary.</p>
+         *
+         * <p>Assumptions: the two credential identifiers get no presence flag either, unlike the middle
+         * name. Whether a customer has a stored national identifier is itself a fact about that customer,
+         * and the mapping does not branch on it, so a flag would disclose something while diagnosing
+         * nothing.</p>
+         *
+         * <p>Trade-offs: this rendering is close to contentless, and that is the correct outcome for a shape
+         * whose every component is protected. What locates a statement in a log is the correlation
+         * identifier on the same line and the run identifier the job carries, neither of which names a
+         * cardholder.</p>
+         *
+         * @return a rendering reporting whether the optional middle name is present, with all nine values
+         *     withheld; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "StatementSummaryPayload[middleNamePresent=" + (this.middleName != null)
+                    + ", personalData=[REDACTED]]";
+        }
+}
 
     /**
      * Carries one transaction-type reference value as JSON.

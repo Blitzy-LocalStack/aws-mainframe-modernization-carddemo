@@ -1938,6 +1938,111 @@ class ImportJobTest {
     }
 
     /**
+     * A truncated artefact fails the run hard and publishes nothing at all.
+     *
+     * <p>Pins the refusal at {@code ImportJob}'s read loop, which reads one record length at a time and
+     * treats a returned image shorter than that length -- and not empty -- as a truncated artefact
+     * rather than as an end-of-data marker. These artefacts are {@code RECFM=FB}, so their length is
+     * always a whole multiple of the record length; a remainder means bytes are missing.</p>
+     *
+     * <p>Assumptions: this branch has NO counterpart in the reference and is additive, so there is no
+     * committed expectation to compare against and the ruling is stated here in full. The reference
+     * reads a fixed-block dataset through record-level input, which cannot present a partial record at
+     * all, so the condition it guards against is one the migrated stream can reach and the baseline
+     * could not. It is registered as divergence {@code D-9}, and this case exists to hold that register
+     * entry to its word: the entry claims the job logs the short image with its offset, its remaining
+     * bytes and its expected bytes, raises before finalisation is reached, publishes none of the six
+     * artefacts and reports the hard-failure tier. Each of those four claims is asserted below, because
+     * a divergence the register describes and nothing verifies is a claim, not a guarantee.</p>
+     *
+     * <p>Refactoring Rationale: the refusal itself was already documented in the production body as a
+     * correction of an earlier shape that recorded the short image and broke out of the loop -- which
+     * let a run publish all six artefacts and report a clean tier from a source it had only partly read.
+     * Nothing asserted it. The gap is the worst shape a gap can take: the earlier, wrong behaviour and
+     * the corrected behaviour differ only in what happens AFTER the short image is noticed, so a
+     * regression to it would leave every other case in this file passing while producing six artefacts
+     * that look complete and are not.</p>
+     *
+     * <p>Assumptions: the artefact is a REAL export dataset cut short rather than a hand-built one, and
+     * the choice was forced by a first attempt that failed for the wrong reason. Two blank-filled
+     * records carrying real discriminators were refused by the record DECODER before the loop ever
+     * reached the remainder -- {@code EXP-CUST-SSN} is an unsigned numeric field and blanks are not
+     * digits -- so the run failed, the status assertion passed, and the case proved nothing about
+     * truncation. Truncating the export's own output is what puts two genuinely decodable records in
+     * front of the remainder, which is also the real-world shape of the condition: a well-formed
+     * artefact whose tail is missing.</p>
+     *
+     * <p>Assumptions: TWO whole records precede the remainder, so the failure is reached only after the
+     * loop has successfully processed records -- which is what makes the "no import artefact is
+     * published" half meaningful. A dataset consisting of nothing but a remainder would fail on its
+     * first read and would not distinguish a refusal from a job that could not read at all.</p>
+     *
+     * <p>Assumptions: FOUR distinct properties are asserted, because the resolution of this condition
+     * is a conjunction and each part fails differently. The run FAILS rather than warning -- reusing the
+     * warn tier would make a damaged input indistinguishable from a clean run that rejected rows.
+     * NOTHING is published -- the six accumulators are discarded with the failed run. The operator is
+     * TOLD, through the warning line, which is the one channel the discarded accumulators do not take
+     * with them. And no numeric result is recorded for the state machine, so no downstream choice
+     * predicate can read this run as clean.</p>
+     *
+     * <p>Assumptions: the durable failure ROW is not asserted here and its owner is named instead. The
+     * step ledger is a stub in this class, so what is observable here is that the refusal happens INSIDE
+     * the ledger-guarded body -- which is what routes it to the failure path -- while the path itself,
+     * that a raising body marks the row {@code HARD_FAILURE} through the independent writer and
+     * rethrows, is asserted by {@code com.carddemo.batch.service.BatchServicesTest}. Restating it here
+     * would put one ruling in two places and the copy here would be the weaker of the two.</p>
+     *
+     * @throws Exception if the framework's own execution path raises, which this case does not provoke
+     */
+    @Test
+    @DisplayName("fail hard on a truncated artefact, publishing no import artefact at all")
+    void aTruncatedArtefactFailsTheRunAndPublishesNothing() throws Exception {
+        int reclen = ExportRecordMapper.recordLayout().reclen();
+        int remainder = reclen / 2;
+        int wholeRecordBytes = 2 * reclen;
+        stubOneRowPerRecordType();
+        byte[] dataset = runTheExport();
+        assertThat(dataset.length)
+                .as("the export publishes one record per type, so there is a third record to cut")
+                .isGreaterThan(wholeRecordBytes + remainder);
+
+        byte[] truncated = Arrays.copyOf(dataset, wholeRecordBytes + remainder);
+        this.recorded.list.clear();
+        stubTheArtefactRead(truncated);
+
+        JobExecution execution = runTheImport();
+
+        assertThat(execution.getStatus())
+                .as("a truncated input is a hard failure and never a warning")
+                .isEqualTo(BatchStatus.FAILED);
+        assertThat(failureTextOf(execution))
+                .as("the refusal names the geometry, the offset and how much was readable")
+                .contains("the export artefact is truncated", reclen + "-byte records were expected",
+                        remainder + " bytes remain at offset " + wholeRecordBytes,
+                        "2 whole records were read",
+                        "no import artefact is published for a truncated input");
+        assertThat(this.published)
+                .as("the six accumulators are discarded with the failed run, so a consumer never sees"
+                        + " an artefact assembled from a partly read source")
+                .isEmpty();
+        assertThat(recordedMessages())
+                .as("the operator is told through the one channel the discarded accumulators do not"
+                        + " take with them")
+                .anySatisfy(message -> assertThat(message)
+                        .contains("event=batch.import.short-record",
+                                "offset=" + wholeRecordBytes,
+                                "remaining=" + remainder,
+                                "expected=" + reclen,
+                                "Truncated record at end of export artefact"));
+        assertThat(recordedReturnCodeOf(execution))
+                .as("no numeric result reaches the state machine, so no downstream choice predicate"
+                        + " can read this run as clean")
+                .isEqualTo(Integer.MIN_VALUE);
+        verify(this.stepLedger).runStep(eq(RUN_ID), eq(ImportJob.STEP_NAME),
+                eq(BatchJobName.IMPORT), any());
+    }
+
+    /**
      * The durable ledger is consulted once, keyed on the run identifier and this step's name.
      *
      * <p>Refactoring Rationale: the durable step ledger is a strict IMPROVEMENT over the baseline and
@@ -2142,9 +2247,19 @@ class ImportJobTest {
      * because a stream is consumed by its first reader and a case that imports twice would otherwise
      * see an empty artefact the second time.</p>
      *
-     * <p>Assumptions: the declared content length is set from the array's own length, because the
-     * import body reads it to refuse an artefact whose length is not a whole multiple of the record
-     * length. Leaving it unset would silently skip that check.</p>
+     * <p>Assumptions: the declared content length is set from the array's own length so that the
+     * response object this stub returns is internally consistent with the stream behind it, and for no
+     * other reason. It is NOT what drives the truncation refusal.</p>
+     *
+     * <p>Refactoring Rationale: this block previously said the import body "reads it to refuse an
+     * artefact whose length is not a whole multiple of the record length" and that leaving it unset
+     * "would silently skip that check". Both are false: {@code GetObjectResponse.contentLength} is read
+     * nowhere in {@code ImportJob}, and the refusal is driven by the STREAM -- the read loop calls
+     * {@code readNBytes} for one record length at a time and refuses the batch when the returned array
+     * is shorter than that length and not empty. The distinction is not academic. The claim as written
+     * described a check on a declared header, which a reader could have satisfied by trusting a length a
+     * caller supplied; what the job actually does is refuse on the bytes it received, which is the only
+     * form that survives a response whose declared length disagrees with its body.</p>
      *
      * @param dataset the bytes the read returns, possibly empty; must not be {@code null}
      */
@@ -2567,6 +2682,30 @@ class ImportJobTest {
     private static Object decodedField(byte[] record, String layoutName, String fieldName) {
         return FixedWidthCodec.decodeField(record,
                 CopybookLayout.layout(layoutName).field(fieldName), ARTEFACT_CHARSET);
+    }
+
+    /**
+     * Flattens every failure an execution recorded, with its causes, into one searchable string.
+     *
+     * <p>Assumptions: the CAUSE CHAIN is walked rather than only the top message read, because the
+     * framework wraps a tasklet's own exception before recording it -- so the message that names the
+     * offset and the remaining byte count sits on a cause. The self-referential guard is what stops a
+     * throwable whose cause is itself from looping here forever.</p>
+     *
+     * @param execution the finished execution whose recorded failures are wanted; must not be
+     *     {@code null}
+     * @return the concatenated failure messages, empty when the run recorded none; never {@code null}
+     */
+    private static String failureTextOf(JobExecution execution) {
+        StringBuilder text = new StringBuilder();
+        for (Throwable failure : execution.getAllFailureExceptions()) {
+            Throwable link = failure;
+            while (link != null) {
+                text.append(link.getMessage()).append(System.lineSeparator());
+                link = link.getCause() == link ? null : link.getCause();
+            }
+        }
+        return text.toString();
     }
 
     /**

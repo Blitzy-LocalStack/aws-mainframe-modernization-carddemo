@@ -1,5 +1,7 @@
 package com.carddemo.account.dto;
 
+import com.carddemo.common.security.CardNumberMasker;
+
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
@@ -59,4 +61,32 @@ public record CardXrefLookupRequest(
      * removed it by the time it calls.</p>
      */
     private static final String DIGITS_ONLY = "[0-9]+";
+
+    /**
+     * Renders this request for a log line, disclosing no more of the card number than a response may.
+     *
+     * <p>Purpose. This record is rendered precisely when it is most sensitive: a request record reaches a
+     * diagnostic BECAUSE the request failed, and its single component is a whole primary account number
+     * that the caller supplied. The compiler-generated rendering would print it in full, on the validation
+     * failure path, before any handler had run.</p>
+     *
+     * <p>Trade-offs: the value is masked through the shared masker rather than omitted, and the choice is
+     * deliberate on both counts. Masking keeps the one fragment the migration's disclosure rule allows
+     * everywhere -- the last four digits -- which is what makes a refusal traceable to the card that
+     * provoked it; delegating keeps this rendering identical to the one the mapping layer publishes and the
+     * ones the sibling contexts emit, rather than making this the second place a masking rule is
+     * written.</p>
+     *
+     * <p>Assumptions: no branch is written for an absent or short value even though this record binds
+     * caller-supplied input, where both are reachable before validation runs. The shared masker answers
+     * {@code null} for an absent value and masks a short one entirely, so neither can leak digits and
+     * neither can raise inside a log call -- which a rendering reached from a diagnostic path must never
+     * do.</p>
+     *
+     * @return a rendering naming the type and the masked card number, never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "CardXrefLookupRequest[cardNumber=" + CardNumberMasker.mask(this.cardNumber) + ']';
+    }
 }

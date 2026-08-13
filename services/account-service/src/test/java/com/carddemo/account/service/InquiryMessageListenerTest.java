@@ -24,6 +24,7 @@ import com.carddemo.account.repository.AccountRepository;
 import com.carddemo.account.repository.InquiryReplyLedger;
 import com.carddemo.common.codec.InquiryRequestCodec;
 import com.carddemo.common.messaging.MessageExpiry;
+import com.carddemo.common.messaging.MessagingCorrelationId;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
@@ -98,6 +99,25 @@ class InquiryMessageListenerTest {
      * The account the control request resolves to.
      */
     private static final long ACCOUNT_ID = 12_345_678_901L;
+
+    /**
+     * A broker-assigned delivery identifier, in the shape the queue service assigns.
+     */
+    private static final String BROKER_MESSAGE_ID = "9f0b1c2d-3e4f-5a6b-7c8d-9e0f1a2b3c4d";
+
+    /**
+     * A second broker-assigned delivery identifier, for the two-request cases.
+     */
+    private static final String SECOND_BROKER_MESSAGE_ID = "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d";
+
+    /**
+     * The declared width of the durable ledger's key column.
+     *
+     * <p>Assumptions: this restates {@code request_key VARCHAR(128)} from
+     * {@code V2__account_inquiry_reply_ledger.sql} as a literal, because the schema is not reachable from a
+     * unit test. It is the ceiling the intake bound is asserted against below.</p>
+     */
+    private static final int LEDGER_KEY_COLUMN_WIDTH = 128;
 
     /**
      * The substituted account repository.
@@ -700,5 +720,192 @@ class InquiryMessageListenerTest {
             captured.stop();
             listenerLogger.setLevel(previousLevel);
         }
+    }
+
+    /**
+     * Verifies the durable claim is keyed on the identity the BROKER assigned, not on a producer attribute.
+     *
+     * <p>Purpose: this is the property finding 26 of the code review asks for. The broker identifier is the
+     * only value on a delivery that is both stable across redeliveries and unique per accepted send, so it is
+     * the only sound duplicate-suppression key. The case supplies a producer attribute AND a correlation
+     * identifier alongside it, both different from the broker value, so a fallback silently taking precedence
+     * again would fail here rather than in production.</p>
+     *
+     * <p>Assumptions: the header name is read from the class under test, which derives it from the framework's
+     * own {@code SqsHeaders.MessageSystemAttributes.MESSAGE_ID}. Writing the literal here instead would let a
+     * framework rename pass this case while the deployed consumer read an absent header.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the claim is keyed on the broker-assigned message identifier")
+    void theClaimIsKeyedOnTheBrokerMessageIdentifier() {
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+
+        this.listener.onRequest(message(request("INQA", "12345678901"), Map.of(
+                InquiryMessageListener.HEADER_BROKER_MESSAGE_ID, BROKER_MESSAGE_ID,
+                InquiryMessageListener.ATTRIBUTE_MESSAGE_ID, "producer-supplied-1",
+                InquiryMessageListener.ATTRIBUTE_CORRELATION_ID, "reused-correlation")));
+
+        verify(this.ledger).claim(eq(BROKER_MESSAGE_ID), anyString(), anyString(),
+                eq("reused-correlation"), eq("producer-supplied-1"), any(LocalDateTime.class));
+        verify(this.ledger).markSent(eq(BROKER_MESSAGE_ID), any(LocalDateTime.class));
+    }
+
+    /**
+     * Verifies the unconverted broker header is used when the system-attribute header is absent.
+     *
+     * <p>Assumptions: both headers are broker-assigned, and which of the two carries the value depends on
+     * whether the framework is configured to republish the identifier as a UUID. Reading only one would make
+     * the durable key depend on a framework setting, so the second source is asserted rather than assumed.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the unconverted broker header is used when the system attribute is absent")
+    void theRawBrokerHeaderIsUsedWhenTheSystemAttributeIsAbsent() {
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+
+        this.listener.onRequest(message(request("INQA", "12345678901"), Map.of(
+                InquiryMessageListener.HEADER_BROKER_RAW_MESSAGE_ID, BROKER_MESSAGE_ID,
+                InquiryMessageListener.ATTRIBUTE_MESSAGE_ID, "producer-supplied-1")));
+
+        verify(this.ledger).claim(eq(BROKER_MESSAGE_ID), anyString(), anyString(), any(), any(),
+                any(LocalDateTime.class));
+    }
+
+    /**
+     * Verifies two distinct requests sharing one correlation identifier are keyed apart.
+     *
+     * <p>Purpose: this is the failure the earlier keying produced, asserted directly. A requester is entitled
+     * to reuse one correlation identifier across several questions; under the earlier rule the second
+     * question's claim collided with the first's row and the requester received the earlier answer. Two
+     * deliveries carrying one correlation identifier and two broker identifiers must claim two different
+     * keys.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("two requests reusing one correlation identifier claim two different keys")
+    void twoRequestsReusingOneCorrelationIdentifierAreKeyedApart() {
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+        String reusedCorrelation = "one-correlation-for-many-questions";
+
+        this.listener.onRequest(message(request("INQA", "12345678901"), Map.of(
+                InquiryMessageListener.HEADER_BROKER_MESSAGE_ID, BROKER_MESSAGE_ID,
+                InquiryMessageListener.ATTRIBUTE_CORRELATION_ID, reusedCorrelation)));
+        this.listener.onRequest(message(request("INQA", "12345678901"), Map.of(
+                InquiryMessageListener.HEADER_BROKER_MESSAGE_ID, SECOND_BROKER_MESSAGE_ID,
+                InquiryMessageListener.ATTRIBUTE_CORRELATION_ID, reusedCorrelation)));
+
+        ArgumentCaptor<String> keys = ArgumentCaptor.forClass(String.class);
+        verify(this.ledger, times(2)).claim(keys.capture(), anyString(), anyString(), any(), any(),
+                any(LocalDateTime.class));
+        assertThat(keys.getAllValues())
+                .as("a reused correlation identifier must not make a second question a redelivery")
+                .containsExactly(BROKER_MESSAGE_ID, SECOND_BROKER_MESSAGE_ID)
+                .doesNotHaveDuplicates();
+    }
+
+    /**
+     * Verifies an over-long producer identity is neither recorded nor echoed, and the request is still answered.
+     *
+     * <p>Purpose: this is the property finding 44 of the code review asks for. An unbounded producer value used
+     * to reach a {@code VARCHAR(128)} column and an outbound message attribute, so the insert or the send
+     * raised, the request was redelivered, and the requester ended up with no reply and its request on the
+     * dead-letter queue. The bound is applied at intake instead: the value is treated as absent, the business
+     * answer still goes out, and a controlled protocol diagnostic goes to the error sink.</p>
+     *
+     * <p>Assumptions: the length used is one character beyond the shared queue-identity bound rather than an
+     * arbitrary large number, so the case pins the boundary the rule states rather than a value comfortably
+     * past it.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an over-long producer identity is refused at intake and the request is still answered")
+    void anOverLongProducerIdentityIsRefusedAtIntake() {
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+        String overLong = "x".repeat(MessagingCorrelationId.MAX_LENGTH + 1);
+
+        this.listener.onRequest(message(request("INQA", "12345678901"), Map.of(
+                InquiryMessageListener.HEADER_BROKER_MESSAGE_ID, BROKER_MESSAGE_ID,
+                InquiryMessageListener.ATTRIBUTE_CORRELATION_ID, overLong)));
+
+        verify(this.ledger).claim(eq(BROKER_MESSAGE_ID), anyString(), anyString(), eq(null), eq(null),
+                any(LocalDateTime.class));
+
+        ArgumentCaptor<SendMessageRequest> sends = ArgumentCaptor.forClass(SendMessageRequest.class);
+        verify(this.sqs, times(2)).sendMessage(sends.capture());
+        assertThat(sends.getAllValues())
+                .as("one controlled diagnostic to the error sink and one business reply to the requester")
+                .extracting(SendMessageRequest::queueUrl)
+                .containsExactly(ERROR_URL, REPLY_URL);
+        assertThat(sends.getAllValues())
+                .allSatisfy(sent -> assertThat(sent.messageAttributes().values())
+                        .as("no message may carry the refused value")
+                        .noneMatch(attribute -> overLong.equals(attribute.stringValue())));
+        assertThat(sends.getAllValues().get(0).messageBody())
+                .as("the diagnostic names the attribute and its length and never its bytes")
+                .contains("identity-refused")
+                .contains(InquiryMessageListener.ATTRIBUTE_CORRELATION_ID)
+                .contains(String.valueOf(MessagingCorrelationId.MAX_LENGTH + 1))
+                .doesNotContain(overLong);
+        assertThat(this.captured.list)
+                .extracting(ILoggingEvent::getFormattedMessage)
+                .anyMatch(recorded -> recorded.startsWith("event=account.inquiry.identity-refused"))
+                .noneMatch(recorded -> recorded.contains(overLong));
+    }
+
+    /**
+     * Verifies a control-character-bearing producer identity is refused the same way an over-long one is.
+     *
+     * <p>Assumptions: a value that carries a line terminator is the other half of what the shared rule
+     * excludes, and it is the half that matters for anything the value is written into -- a log record, a
+     * diagnostic buffer or a message attribute the queue service itself rejects. Both halves are asserted so a
+     * future narrowing of the rule to length alone fails here.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a control-character-bearing producer identity is refused at intake")
+    void aControlCharacterProducerIdentityIsRefusedAtIntake() {
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+        String withTerminator = "corr\nid";
+
+        this.listener.onRequest(message(request("INQA", "12345678901"), Map.of(
+                InquiryMessageListener.HEADER_BROKER_MESSAGE_ID, BROKER_MESSAGE_ID,
+                InquiryMessageListener.ATTRIBUTE_MESSAGE_ID, withTerminator)));
+
+        verify(this.ledger).claim(eq(BROKER_MESSAGE_ID), anyString(), anyString(), eq(""), eq(null),
+                any(LocalDateTime.class));
+        ArgumentCaptor<SendMessageRequest> sends = ArgumentCaptor.forClass(SendMessageRequest.class);
+        verify(this.sqs, times(2)).sendMessage(sends.capture());
+        assertThat(sends.getAllValues().get(1).messageAttributes())
+                .as("the reply must not carry an attribute the queue service would reject")
+                .doesNotContainKey(InquiryMessageListener.ATTRIBUTE_MESSAGE_ID);
+    }
+
+    /**
+     * Verifies the intake bound cannot exceed the durable column the accepted value is written into.
+     *
+     * <p>Assumptions: the column is {@code request_key VARCHAR(128)} in
+     * {@code V2__account_inquiry_reply_ledger.sql}, and the intake rule bounds an accepted identity at
+     * {@link MessagingCorrelationId#MAX_LENGTH}. The relationship between the two is what makes an accepted
+     * value storable by construction rather than by inspection, so it is asserted: widening the shared bound
+     * past the column width fails here instead of on an insert in production.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the intake bound fits the durable ledger key column")
+    void theIntakeBoundFitsTheLedgerKeyColumn() {
+        assertThat(MessagingCorrelationId.MAX_LENGTH)
+                .as("an identity admitted at intake must fit request_key VARCHAR(%d)",
+                        LEDGER_KEY_COLUMN_WIDTH)
+                .isLessThanOrEqualTo(LEDGER_KEY_COLUMN_WIDTH);
+        assertThat(BROKER_MESSAGE_ID.length())
+                .as("a broker identifier must fit the same column")
+                .isLessThanOrEqualTo(LEDGER_KEY_COLUMN_WIDTH);
     }
 }

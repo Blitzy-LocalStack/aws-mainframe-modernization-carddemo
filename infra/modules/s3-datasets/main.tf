@@ -5,9 +5,10 @@
 #   The substance of the `s3-datasets` module: ONE versioned,
 #   customer-managed-key-encrypted, publicly inaccessible S3 bucket carrying a
 #   TLS-only bucket policy, plus prefix-scoped lifecycle rules for the TEN
-#   generation-dataset families the baseline defines and the TWO non-generation
-#   statement artifacts -- twelve prefix-scoped rules, and one further
-#   bucket-wide housekeeping rule that carries no retention action.
+#   generation-dataset families the baseline defines, the THREE non-generation
+#   reporting artifacts and the ONE source-extract input prefix -- fourteen
+#   prefix-scoped rules, and one further bucket-wide housekeeping rule that
+#   carries no retention action.
 #
 #   What it reproduces, and by what mechanism. The baseline expresses dataset
 #   generations through IDCAMS: `DEFINE GENERATIONDATAGROUP ... LIMIT(5)
@@ -43,7 +44,7 @@
 #   No `output` is declared here; outputs.tf owns the module's return surface
 #   and reads from this file. What it consumes is `aws_s3_bucket.datasets` --
 #   its `id`, `arn` and `bucket` attributes -- together with
-#   `local.all_dataset_prefixes`, the twelve-entry map of family key to
+#   `local.all_dataset_prefixes`, the thirteen-entry map of family key to
 #   `<domain>/<dataset>/` prefix that a batch state or an ETL loader needs in
 #   order to address a generation. Renaming either the resource or that local
 #   breaks outputs.tf, and adding a resource makes the generated Resources
@@ -73,7 +74,7 @@
 #     count-based one. Rejected -- LIMIT(5) counts generations, it does not age
 #     them. Recorded in full on the lifecycle configuration.
 #   - Trade-offs: one prefix-scoped rule per family rather than a single
-#     bucket-wide rule, accepting twelve rules to gain per-family retention and
+#     bucket-wide rule, accepting fourteen rules to gain per-family retention and
 #     an auditable prefix filter per baseline generation base.
 #   - Assumptions: the prefix TOPOLOGY is identical in every environment and
 #     only retention and transition values differ, which is the contract
@@ -92,15 +93,43 @@
 # and aiming one at the other would put application datasets and Terraform
 # state in a single blast radius.
 #
-# Note the deliberate INVERSE on retention, which is the sharpest distinction
+# Note the deliberate ASYMMETRY on retention, which is the sharpest distinction
 # between the two and the one most likely to be "helpfully" consolidated away.
-# infra/bootstrap declares NO noncurrent-version expiration at all, because
-# every prior version of a state file is recovery material and pruning it
-# destroys the only record of the infrastructure that version described. This
-# module is the opposite: logical generation cleanup keeps the newest five
-# dt=/gen= prefixes and physically removes older prefixes, while lifecycle
-# bounds repeat-write versions within the retained prefixes. Identical resource
-# types, opposite retention policies, both correct for what they hold.
+# Both retentions are FINITE; what differs is how wide, how it is bounded, and
+# how many layers there are.
+#
+#   infra/bootstrap  ONE layer. Its lifecycle rule declares
+#                    `noncurrent_version_expiration` with
+#                    `newer_noncurrent_versions = var.state_noncurrent_versions_to_retain`
+#                    (default 20) and `noncurrent_days = var.state_version_retention_days`
+#                    (default 365) -- so the newest twenty versions of a state
+#                    file are retained regardless of age, and a version beyond
+#                    that count still survives until it is at least a year old.
+#                    Wide and age-gated, because every prior version of a state
+#                    file is recovery material and is the only record of the
+#                    infrastructure that version described.
+#
+#   this module      TWO layers, and they operate on different things. Logical
+#                    generation cleanup -- performed by data-migration's staging
+#                    writer, not by anything declared here -- keeps the newest
+#                    five dt=/gen= PREFIXES and physically removes older
+#                    prefixes, reproducing LIMIT(5) SCRATCH. Separately, the
+#                    lifecycle rules below bound repeat writes of the SAME key
+#                    inside a retained prefix at `newer_noncurrent_versions = 5`
+#                    with `noncurrent_days = 1`, the smallest age the service
+#                    accepts, so that rule behaves as a count cap rather than as
+#                    an age policy.
+#
+# Refactoring Rationale: this paragraph previously read "infra/bootstrap declares
+# NO noncurrent-version expiration at all". That was measurably false --
+# infra/bootstrap/main.tf declares the rule quoted above, and bootstrap's own
+# comment beside it already says "state history is finite but deliberately wider
+# than dataset generation history". The false version was the more dangerous
+# reading of the two: an operator who believed state versions never expired would
+# not think to check the horizon before relying on a year-old version, and would
+# not notice that raising the dataset retention here has no bearing on it.
+# Identical resource types, deliberately different retention policies, both
+# correct for what they hold.
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
@@ -110,15 +139,46 @@
 #
 #   s3://<bucket>/<domain>/<dataset>/dt=YYYY-MM-DD/gen=NNNN/
 #
-# The two relative-generation forms map onto that convention directly: `(+1)`, a
-# NEW generation, becomes a new gen=NNNN prefix and a new current object version,
-# and `(0)`, the CURRENT generation, becomes the current object version. The
-# per-job citations are tabulated in README.md. app/jcl/COMBTRAN.jcl is the
+# The two relative-generation forms map onto that convention as LOGICAL PREFIX
+# operations, and object versioning is a separate mechanism that plays no part in
+# either:
+#
+#   `(+1)`  a NEW generation. The staging writer ALLOCATES a new gen=NNNN logical
+#           prefix -- `reserve_generation` in data-migration's
+#           loaders/s3_stage.py reserves the next number as a conditional create
+#           keyed by execution, family and business date -- and the object is
+#           written under it.
+#   `(0)`   the CURRENT generation. The reader RESOLVES the newest existing
+#           logical prefix for that family -- `latest_generation` /
+#           `current_generation` in the same module -- and reads the object under
+#           it.
+#
+# WHY : Assumptions: object versioning is stated here as what it is NOT, because
+#       the two are easy to conflate and the conflation is load-bearing. Each
+#       generation is written under a DISTINCT key, so S3 cannot see generation
+#       six as a version of generation five, and no lifecycle rule can express
+#       LIMIT(5) over generations. Versioning protects a REWRITE of one key --
+#       the same generation staged twice by a retry -- and that is the only thing
+#       the `noncurrent_version_expiration` rules below bound. Generation
+#       identity is carried entirely by the prefix.
+#
+# Refactoring Rationale: this paragraph previously said `(+1)` "becomes a new
+# gen=NNNN prefix and a new current object version" and `(0)` "becomes the
+# current object version", and read the COMBTRAN.jcl sequence as "a read of two
+# current versions, a write creating a third, and a read of what that write just
+# made current". That described object-version creation and selection, which is a
+# different mechanism from the one that implements generations, and it implied
+# generation retention could be expressed as version retention -- the exact
+# consolidation the lifecycle rules below and the staging writer exist as two
+# separate layers to prevent.
+#
+# The per-job citations are tabulated in README.md. app/jcl/COMBTRAN.jcl is the
 # cleanest single proof that both forms are one mechanism rather than two: in ONE
-# job it reads two backups as current, sorts them into a new generation, then reads
-# that same new generation back. Under versioning the same sequence is a read of
-# two current versions, a write creating a third, and a read of what that write
-# just made current -- no bookkeeping in between.
+# job it reads two backups as `(0)`, sorts them into a `(+1)`, then reads that
+# same new generation back. In prefix terms that is two resolutions of the newest
+# prefix, one allocation of a new prefix, and one read under the prefix just
+# allocated -- three prefix operations, and no object rewritten, so nothing in
+# the sequence creates a noncurrent version at all.
 #
 # Alternatives Considered: creating one zero-byte `aws_s3_object` per prefix so
 # the "directories" visibly exist, which is what an operator used to catalogued
@@ -253,24 +313,37 @@ locals {
     key => "${family.domain}/${key}/"
   }
 
-  # Assumptions: these two are held apart from the ten deliberately and are not
-  # an eleventh and twelfth generation family. Neither statement artifact has a
-  # GENERATIONDATAGROUP base anywhere in the baseline -- an exhaustive search
-  # for that keyword matches only app/jcl/DEFGDGB.jcl, app/jcl/DEFGDGD.jcl,
-  # app/jcl/DALYREJS.jcl and app/jcl/REPTFILE.jcl, and none of them defines a
-  # statement base. Both are plain sequential datasets, deleted and rewritten
-  # each run: app/jcl/CREASTMT.JCL:L71 deletes STATEMNT.HTML and L75 deletes
-  # STATEMNT.PS before CBSTM03A writes both fresh. Merging them into
-  # dataset_families would raise the generation count to twelve and put this
+  # Assumptions: these three are held apart from the ten deliberately and are
+  # not an eleventh, twelfth and thirteenth generation family. Not one of them
+  # has a GENERATIONDATAGROUP base anywhere in the baseline -- an exhaustive
+  # search for that keyword matches only app/jcl/DEFGDGB.jcl,
+  # app/jcl/DEFGDGD.jcl, app/jcl/DALYREJS.jcl and app/jcl/REPTFILE.jcl, and none
+  # of them defines a base for a statement or for the category-balance report.
+  # All three are plain sequential datasets, deleted and rewritten each run:
+  # app/jcl/CREASTMT.JCL:L71 deletes STATEMNT.HTML and L75 deletes STATEMNT.PS
+  # before CBSTM03A writes both fresh, and app/jcl/PRTCATBL.jcl:L21-L25 deletes
+  # TCATBALF.REPT before its sort rewrites it. Merging them into
+  # dataset_families would raise the generation count to thirteen and put this
   # module out of step with the ten that variables.tf asserts and that
   # docs/architecture/batch-orchestration.md and data-migration/README.md
   # publish independently.
+  #
+  # Refactoring Rationale: each prefix is READ from its entry and used to be
+  # composed as "<domain>/<key>/". That composition produced
+  # `reporting/statement-text/` and `reporting/statement-html/`, which the
+  # reporting service does not write -- it publishes under `statements/`,
+  # `reports/transaction-detail/` and `reports/category-balance/` -- so every
+  # `seq-` rule below governed a prefix that held no objects while the prefixes
+  # that did hold objects had no rule, and `non_generation_uris` published
+  # locations no consumer could resolve. The prefix a service chooses is not
+  # derivable from a key this module invents, so variables.tf transcribes it and
+  # this expression reads it.
   non_generation_dataset_prefixes = {
     for key, entry in var.non_generation_prefixes :
-    key => "${entry.domain}/${key}/"
+    key => entry.prefix
   }
 
-  # Assumptions: this merged twelve-entry map is THE single source of truth for
+  # Assumptions: this merged thirteen-entry map is THE single source of truth for
   # every prefix in the module. outputs.tf publishes it, so a consumer resolves
   # any prefix -- generation or sequential -- through one lookup without needing
   # to know which inventory a dataset came from; and every lifecycle filter
@@ -283,13 +356,13 @@ locals {
   # diverge under a later edit.
   # The two component maps stay separate above because the distinction between
   # them governs which retention RATIONALE applies -- ten reproduce LIMIT(5),
-  # two are ordinary version hygiene -- and that distinction is what the `gdg-`
+  # three are ordinary version hygiene -- and that distinction is what the `gdg-`
   # and `seq-` rule identifiers preserve. They are joined only here, where it no
   # longer matters which inventory a key came from.
   # Assumptions: the two key sets are disjoint, so the merge cannot lose an
   # entry to a collision. variables.tf pins both exactly -- ten named
-  # generation families and the two named statement prefixes -- and no name
-  # appears in both, so the twelve keys here are always twelve.
+  # generation families and the three named reporting artifacts -- and no name
+  # appears in both, so the thirteen keys here are always thirteen.
   all_dataset_prefixes = merge(local.dataset_prefixes, local.non_generation_dataset_prefixes)
 
   # Assumptions: S3 REQUIRES an age gate on a noncurrent-version expiry -- on
@@ -343,9 +416,12 @@ resource "aws_s3_bucket" "datasets" {
 
 # Two capabilities a reviewer may expect on a bucket holding the only copy of a
 # backup history are deliberately absent, and both absences are recorded here
-# rather than left to be rediscovered. Neither is expressed as a scanner
-# exemption: the gates in this tree are satisfied by construction, so where a
-# check is declined the reason is written as prose and the check stays visible.
+# rather than left to be rediscovered. NEITHER OF THESE TWO is expressed as a
+# scanner exemption -- each is declined in prose, with the check left visible so
+# it keeps reporting. That is a statement about these two absences and not about
+# the file: `aws_s3_bucket.audit` and `aws_cloudtrail.dataset_object_access` each
+# carry one justified Checkov skip, both counted by the bounded-exceptions step
+# in .github/workflows/infra-ci.yml.
 #
 # Trade-offs: NO CROSS-REGION REPLICATION. It is the obvious protection for
 # data whose loss is unrecoverable, and it is declined because AAP section 0.2.2
@@ -433,7 +509,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "datasets" {
     # Trade-offs: an S3 Bucket Key lets S3 derive one data key per bucket and
     # day and reuse it across objects, instead of issuing a KMS Decrypt or
     # GenerateDataKey call for EVERY object read and written. The batch chain
-    # writes and re-reads many objects per generation across twelve prefixes,
+    # writes and re-reads many objects per generation across fourteen prefixes,
     # so the per-object call pattern is exactly the shape that multiplies KMS
     # request volume -- and KMS requests are both billed per call and subject
     # to a per-region rate quota that a large export can approach. The accepted
@@ -692,7 +768,7 @@ resource "aws_s3_bucket_policy" "datasets" {
 #    in `local.noncurrent_expiration_min_age_days` as an eligibility gate.
 #
 #   - Trade-offs: one prefix-scoped rule per family rather than a single
-#    bucket-wide rule. The cost is twelve rules where one would have compiled,
+#    bucket-wide rule. The cost is fourteen rules where one would have compiled,
 #    and it is accepted deliberately for two reasons. Per-family retention
 #    becomes overridable for one environment through the optional
 #    `noncurrent_versions` member without touching the prefix topology -- which
@@ -799,22 +875,24 @@ resource "aws_s3_bucket_lifecycle_configuration" "datasets" {
     }
   }
 
-  # The two non-generation statement artifacts.
+  # The three non-generation reporting artifacts.
   #
   # Assumptions: THIS RETENTION IS ORDINARY VERSION HYGIENE AND IS NOT THE
-  # LIMIT(5) SCRATCH ANALOGUE. Neither statement dataset has a
-  # GENERATIONDATAGROUP base anywhere in the baseline -- both are plain
-  # sequential datasets that app/jcl/CREASTMT.JCL deletes and rewrites each run,
-  # HTML at L71 and plain text at L75. They acquire noncurrent versions only
-  # because versioning is a BUCKET-WIDE setting that cannot be scoped to a
-  # prefix, so a rule is needed to stop those versions accumulating. Reading
-  # these two as generation families would invent a generation contract the
-  # baseline never had for them, and would make the family count twelve.
+  # LIMIT(5) SCRATCH ANALOGUE. Not one of these three datasets has a
+  # GENERATIONDATAGROUP base anywhere in the baseline -- all three are plain
+  # sequential datasets their job deletes and rewrites each run:
+  # app/jcl/CREASTMT.JCL deletes the HTML statement at L71 and the plain-text
+  # one at L75, and app/jcl/PRTCATBL.jcl deletes TCATBALF.REPT at L21-L25. They
+  # acquire noncurrent versions only because versioning is a BUCKET-WIDE setting
+  # that cannot be scoped to a prefix, so a rule is needed to stop those
+  # versions accumulating. Reading these three as generation families would
+  # invent a generation contract the baseline never had for them, and would make
+  # the family count thirteen.
   # Trade-offs: they share the module-wide retention count rather than carrying
   # a separate variable, so the bucket has one retention story instead of two.
   # The accepted imprecision is that a number chosen to mean "five generations"
-  # also governs two datasets that have no generations; the alternative -- a
-  # thirteenth variable read by exactly two rules -- buys nothing, because the
+  # also governs three datasets that have no generations; the alternative -- a
+  # retention variable of their own, read by exactly three rules -- buys nothing, because the
   # baseline retained ZERO previous copies of these files (it deleted them
   # outright), so any positive number here is already strictly more recoverable
   # than the baseline and none is more faithful than another.
@@ -853,22 +931,78 @@ resource "aws_s3_bucket_lifecycle_configuration" "datasets" {
     }
   }
 
+  # The source-extract prefix -- the one prefix in this bucket that is an INPUT.
+  #
+  # Refactoring Rationale: this rule exists because the prefix it governs did not.
+  # The nightly seed-refresh state read its extracts from a filesystem path
+  # (/mnt/carddemo-extracts) that nothing in this stack provisions, so every one of
+  # its ten branches failed on an absent file. The extracts were already being put
+  # in S3 -- docs/runbooks/data-migration.md syncs app/data/ into this bucket -- so
+  # the fix names that destination here and the refresh reads it. Once the prefix is
+  # part of the module's inventory it needs the same version hygiene every other
+  # prefix has, for the same reason: versioning is bucket-wide and cannot be scoped,
+  # so re-syncing a corrected extract leaves the previous one as a noncurrent
+  # version that would otherwise accumulate without bound.
+  #
+  # Assumptions: THIS IS NOT A GENERATION FAMILY and its retention is NOT the
+  # LIMIT(5) SCRATCH analogue. The prefix holds no dt=/gen= structure at all: it is
+  # a flat directory of exported datasets, read once per refresh and written only by
+  # an operator sync. The rule is identified `src-` rather than `gdg-` or `seq-` so
+  # that the three different retention CONTRACTS in this configuration remain
+  # distinguishable in a plan diff and in the console -- ten reproduce a baseline
+  # generation limit, two are hygiene over rewritten outputs, and this one is
+  # hygiene over a re-uploaded input.
+  #
+  # Trade-offs: it shares var.noncurrent_version_retention rather than carrying its
+  # own count, on the same reasoning the two statement rules do: one retention story
+  # per bucket. The imprecision accepted is that a number chosen to mean "five
+  # generations" also bounds how many superseded uploads of one extract are kept.
+  # The baseline kept ZERO -- an operator re-transmitting a dataset overwrote it --
+  # so any positive number is already strictly more recoverable, and no particular
+  # number is more faithful than another.
+  rule {
+    id     = "src-source-extracts"
+    status = "Enabled"
+
+    filter {
+      prefix = var.source_extract_prefix
+    }
+
+    noncurrent_version_expiration {
+      newer_noncurrent_versions = var.noncurrent_version_retention
+      noncurrent_days           = local.noncurrent_expiration_min_age_days
+    }
+
+    dynamic "noncurrent_version_transition" {
+      for_each = var.noncurrent_version_transition_days == null ? [] : [var.noncurrent_version_transition_days]
+
+      content {
+        noncurrent_days = noncurrent_version_transition.value
+        storage_class   = var.noncurrent_version_transition_storage_class
+      }
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = var.abort_incomplete_multipart_upload_days
+    }
+  }
+
   # One bucket-wide housekeeping rule, and the ONLY rule here that is not scoped
   # to a dataset prefix.
   #
   # Assumptions: an incomplete multipart upload can be initiated against ANY
-  # key, including one that matches none of the twelve dataset prefixes above --
+  # key, including one that matches none of the thirteen dataset prefixes above --
   # a mistyped prefix, an ad-hoc staging path used during an investigation, or a
   # key written by a future consumer before its prefix is added to the
   # inventory. A prefix-scoped abort rule only reclaims parts whose key matches
   # its prefix, so parts left anywhere else would be stored and billed
-  # indefinitely while remaining invisible as objects. The twelve rules above
+  # indefinitely while remaining invisible as objects. The fourteen rules above
   # therefore cannot on their own make the guarantee their own abort comment
   # claims; this rule is what completes it.
   #
   # Trade-offs: this deliberately overlaps the per-family abort blocks rather
   # than replacing them. Both specify the same number of days, so for a key
-  # under one of the twelve prefixes the two agree and the outcome is identical
+  # under one of the fourteen prefixes the two agree and the outcome is identical
   # -- there is no conflict to resolve. The redundancy is accepted because the
   # per-family block states the policy where the generations it protects are
   # declared, which is where a reader looking at one family will find it, while
@@ -881,7 +1015,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "datasets" {
   # bucket-wide scope safe here. Every rule that expires or transitions a
   # version stays prefix-scoped, because a bucket-wide retention rule would
   # apply one retention policy to every dataset at once and erase the per-family
-  # control the twelve rules exist to provide. Aborting an incomplete upload
+  # control the fourteen rules exist to provide. Aborting an incomplete upload
   # deletes no object version, so it cannot affect generation retention.
   #
   # Assumptions: `prefix = ""` is the documented way to match every object while
@@ -924,9 +1058,21 @@ resource "aws_s3_bucket_logging" "datasets" {
   # environment roots are expected to supply a target and leaving this null in
   # dev or prod is not the intended end state. If the scanner flags this bucket,
   # THE FIX IS TO PASS A TARGET FROM THE ROOT -- never an inline suppression.
-  # The gates in this tree are satisfied by construction rather than by
-  # exemption, and a suppression comment here would convert a real finding into
-  # a permanent blind spot.
+  # ACCESS LOGGING specifically carries no exemption anywhere in this module, and
+  # a suppression comment here would convert a real finding into a permanent
+  # blind spot: after the suppression, a bucket with no log target is
+  # indistinguishable from one whose root forgot to supply one.
+  # Refactoring Rationale: this note previously generalised to "the gates in this
+  # tree are satisfied by construction rather than by exemption", which the same
+  # file contradicts twice. `aws_s3_bucket.audit` carries
+  # `#checkov:skip=CKV_AWS_145` because the dedicated CloudTrail delivery bucket
+  # uses SSE-S3 rather than the financial dataset CMK, and
+  # `aws_cloudtrail.dataset_object_access` carries `#checkov:skip=CKV_AWS_35` for
+  # the same reason -- both justified at the resource, and both COUNTED by the
+  # assertion step in .github/workflows/infra-ci.yml, so neither can be added or
+  # removed silently. The claim is therefore scoped to the check it is actually
+  # about, because an overstated "no exemptions anywhere" invites a reader to
+  # treat the two real ones as undocumented drift.
   count = var.access_log_bucket_name == null ? 0 : 1
 
   bucket = aws_s3_bucket.datasets.id

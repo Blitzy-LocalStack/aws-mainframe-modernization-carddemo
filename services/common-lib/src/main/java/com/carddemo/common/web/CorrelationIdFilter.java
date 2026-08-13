@@ -440,8 +440,12 @@ public final class CorrelationIdFilter implements Filter {
      * the refusal body is the same {@link ApiError} shape the shared advice produces. Answering a
      * refusal with a different media type from every other error would make one client branch on the
      * status to know how to parse the body.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: read from {@link ApiError#MEDIA_TYPE} rather than restated, for the
+     * reason recorded on that constant: one authority is what lets a contract test hold a published
+     * declaration to the value the emitter actually writes.</p>
      */
-    private static final String PROBLEM_MEDIA_TYPE = "application/json";
+    private static final String PROBLEM_MEDIA_TYPE = ApiError.MEDIA_TYPE;
 
     /**
      * The writer that renders the refusal body.
@@ -928,7 +932,7 @@ public final class CorrelationIdFilter implements Filter {
      */
     private static String pathOf(HttpServletRequest request) {
         return request == null ? null
-                : CardNumberMasker.maskEmbeddedCardNumbers(request.getRequestURI());
+                : CardNumberMasker.maskEmbeddedIdentifiers(request.getRequestURI());
     }
 
     /**

@@ -13,6 +13,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.carddemo.auth.domain.IdentitySyncTask;
 import com.carddemo.auth.domain.User;
 import com.carddemo.auth.dto.CreateUserRequest;
@@ -29,6 +33,7 @@ import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
 import java.nio.charset.StandardCharsets;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -38,6 +43,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Optional;
@@ -49,6 +55,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.dao.QueryTimeoutException;
@@ -134,6 +141,15 @@ class UserServiceTest {
     //   own constant fails these cases instead of moving silently with them.
     private static final int PAGE_SIZE = 10;
 
+    // Assumptions: the two SQL states are stated by value here rather than read from the service, so a
+    //   change to the service's own classification fails these cases instead of moving silently with them.
+    //   Both are PostgreSQL's, which is the engine ADR-003 selects: 23505 is the unique violation the
+    //   conflict is keyed on, and 22001 is the string-data-right-truncation a value too wide for its column
+    //   reports -- the case that used to be answered with the identifier's conflict sentence.
+    private static final String SQL_STATE_UNIQUE_VIOLATION = "23505";
+
+    private static final String SQL_STATE_VALUE_TOO_WIDE = "22001";
+
     /** The subject every substituted provisioning call mints, stated by value so a row binds to it. */
     private static final UUID SUBJECT_MINTED =
             UUID.fromString("11111111-2222-3333-4444-555555555555");
@@ -184,7 +200,12 @@ class UserServiceTest {
         sealer = new CursorToken(CURSOR_KEY, Duration.ofMinutes(5));
         ledger = inMemoryLedger();
         PlatformTransactionManager transactions = mock(PlatformTransactionManager.class);
-        IdentitySyncService identitySync = new IdentitySyncService(ledger, provisioning,
+        // WHY pass the SAME user-row substitute the service under test writes through: the reconciler
+        //   decides whether a withdrawal is still owed by probing for the row, so sharing one substitute
+        //   is what lets a case arrange "the insert landed" or "it did not" once and have both halves
+        //   agree. Two separate substitutes would let the reconciler act on a row state the service
+        //   never produced, and every guard-lifecycle assertion below would be vacuous.
+        IdentitySyncService identitySync = new IdentitySyncService(ledger, provisioning, users,
                 Clock.fixed(Instant.parse("2022-07-18T03:00:00Z"), ZoneOffset.UTC), transactions);
         // Assumptions: the mapper is the REAL one rather than a substitute, because it is where the
         //   stored padding is stripped, and the unchanged-body comparison below depends on comparing
@@ -471,6 +492,134 @@ class UserServiceTest {
     }
 
     /**
+     * A submitted identifier that EXPANDS under the fold is refused before any side effect.
+     *
+     * <p>⚠️ Purpose: this is the regression case for the expansion defect. Java's upper-case mapping is not
+     * length-preserving -- the sharp s folds to two characters -- so a value the request record admitted at
+     * eight characters could canonicalise to as many as sixteen. The record and the path variable both
+     * bound the SUBMITTED value, so nothing checked the canonical one: the expanded key was probed for,
+     * handed to the identity provider, and refused only afterwards by the {@code CHAR(8)} column. The
+     * compensation that unwound the provider account then reported the integrity failure as a
+     * duplicate-key conflict, so the caller was told an identifier already existed when no such row had
+     * ever been written -- and a provider account had been created and withdrawn along the way.</p>
+     *
+     * <p>⚠️ Assumptions: the value source is chosen so that every case is admitted by the record and
+     * refused by the service. Four sharp characters submit as four and canonicalise to eight, which is at
+     * the bound and must be ADMITTED -- so that case is deliberately absent from this source and covered
+     * by the case below; five submit as five and canonicalise to ten, which is the narrowest failing case
+     * and the one an off-by-one width check would let through.</p>
+     *
+     * <p>⚠️ Assumptions: the two stores are asserted to have NO interaction, which is the whole substance
+     * of the correction. The refusal existed before, at the column; what did not exist was a refusal that
+     * came BEFORE the duplicate probe and the provider call. A case asserting only the exception would
+     * pass against the defect.</p>
+     *
+     * @param submitted an identifier of at most eight characters whose canonical form is wider, supplied
+     *     by the value source
+     * @throws ClientInputException always, raised by the service's canonical width check and captured by
+     *     the assertion below
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"\u00df\u00df\u00df\u00df\u00df", "A\u00df\u00df\u00df\u00df",
+        "\u00df\u00df\u00df\u00df\u00df\u00df\u00df\u00df", "AB\u00df\u00df\u00df\u00dfCD"})
+    @DisplayName("an identifier that expands under the fold is refused before the provider is called")
+    void anIdentifierThatExpandsUnderTheFoldIsRefusedBeforeAnySideEffect(String submitted) {
+        assertThat(submitted.length())
+                .as("every case must be admitted by the record's own bound, or the case would be "
+                        + "asserting the record rather than the service")
+                .isLessThanOrEqualTo(8);
+        assertThat(submitted.toUpperCase(java.util.Locale.ROOT).length())
+                .as("and must expand past it, which is the condition the service now detects")
+                .isGreaterThan(8);
+
+        assertThatThrownBy(() -> service.create(
+                        new CreateUserRequest("Ada", "Lovelace", submitted, "A")))
+                .isInstanceOf(ClientInputException.class)
+                .hasMessage("User ID must be at most 8 characters...")
+                .extracting(raised -> ((ClientInputException) raised).field())
+                .as("the refusal names the identifier, so a caller rendering the baseline's screen "
+                        + "homes the cursor to the field that was wrong")
+                .isEqualTo("userId");
+
+        verifyNoInteractions(users);
+        verifyNoInteractions(provisioning);
+    }
+
+    /**
+     * An identifier whose canonical form lands exactly ON the width bound is admitted.
+     *
+     * <p>Assumptions: this case exists so the width check cannot be satisfied by refusing everything that
+     * folds to a different length. Four sharp characters submit as four and canonicalise to eight, which
+     * is the declared width of {@code SEC-USR-ID PIC X(08)} -- so the value is storable and must be
+     * stored. A check written with {@code >=} rather than {@code >} would refuse it, which is the
+     * off-by-one an assertion on failing inputs alone cannot detect.</p>
+     *
+     * <p>Assumptions: the provider IS reached in this case, and that is the property asserted rather than
+     * the returned row. Reaching the provider is what distinguishes "admitted" from "refused later"; a
+     * service that admitted the value at the width check and then refused it somewhere else would still
+     * satisfy an assertion that no exception was thrown at this line.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an identifier whose canonical form is exactly eight characters is admitted")
+    void anIdentifierCanonicalisingToExactlyTheWidthIsAdmitted() {
+        String submitted = "\u00df\u00df\u00df\u00df";
+        assertThat(submitted.toUpperCase(java.util.Locale.ROOT))
+                .as("the canonical form is at the bound, not past it")
+                .hasSize(8)
+                .isEqualTo("SSSSSSSS");
+
+        when(provisioning.provision("SSSSSSSS", "Ada", "Lovelace", "A")).thenReturn(PROVISIONED);
+
+        service.create(new CreateUserRequest("Ada", "Lovelace", submitted, "A"));
+
+        verify(provisioning).provision("SSSSSSSS", "Ada", "Lovelace", "A");
+    }
+
+    /**
+     * An identifier carrying a character outside the invariant domain is refused before any side effect.
+     *
+     * <p>⚠️ Purpose: the domain check is what makes the service's definition of the key and the column's
+     * guard the SAME definition, and it is asserted here from the service side. The two folds -- Java's
+     * root locale and the engine's {@code upper()} -- agree only inside the invariant set, so a value
+     * outside it can satisfy one and violate the other; and a blank inside the identifier makes it
+     * unusable as one in the reference itself, which renders it {@code DELIMITED BY SPACE} at
+     * {@code app/cbl/COUSR01C.cbl} L256, {@code COUSR02C.cbl} L373 and {@code COUSR03C.cbl} L319.</p>
+     *
+     * <p>⚠️ Assumptions: this is a NARROWING of the reference, which validates the identifier's characters
+     * nowhere, and it is registered as {@code D-USER-ID-CANONICAL-DOMAIN}. The committed extract
+     * {@code app/data/EBCDIC/AWS.M2.CARDDEMO.USRSEC.PS} carries ten identifiers drawn from
+     * {@code [A-Z0-9]} alone, so nothing the parity oracle holds is refused -- which is why the narrowing
+     * is affordable.</p>
+     *
+     * <p>Assumptions: the state is asserted as the rejected-value one rather than the blank one, because
+     * the published contract turns that distinction into presentation and a caller draws the reference's
+     * asterisk marker for the blank state only. A supplied-but-inadmissible identifier is not an unfilled
+     * field.</p>
+     *
+     * @param submitted an identifier carrying one character outside the invariant printable domain,
+     *     supplied by the value source
+     * @throws ClientInputException always, raised by the service's domain check and captured by the
+     *     assertion below
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"US ER01", "USER\t01", "\u00c4SER001", "USER\u00a001"})
+    @DisplayName("an identifier outside the invariant character domain is refused before any side effect")
+    void anIdentifierOutsideTheInvariantDomainIsRefused(String submitted) {
+        assertThatThrownBy(() -> service.create(
+                        new CreateUserRequest("Ada", "Lovelace", submitted, "A")))
+                .isInstanceOf(ClientInputException.class)
+                .hasMessage("User ID must be printable characters without spaces...")
+                .extracting(raised -> ((ClientInputException) raised).state())
+                .as("a supplied-but-inadmissible identifier is a refused value, not an unfilled field")
+                .isEqualTo(FieldValidationFlag.NOT_OK);
+
+        verifyNoInteractions(users);
+        verifyNoInteractions(provisioning);
+    }
+
+    /**
      * Asserts the update path applies the same membership narrowing as the create path.
      *
      * @param submitted a single character outside the admitted pair, supplied by the value source
@@ -595,16 +744,85 @@ class UserServiceTest {
         when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
                 .thenReturn(PROVISIONED);
         when(users.insertUser(any(), any(), any(), any(), any()))
-                .thenThrow(new DataIntegrityViolationException("constraint refused the row"));
+                .thenThrow(uniquenessViolation());
 
         // Assumptions: the race and the probe are the SAME outcome to a caller, which is what keeps the
         //   count of conflict sentences at one. The probe answers the ordinary case in one indexed read;
         //   the constraint answers the interleaved case; both report the one sentence at
         //   app/cbl/COUSR01C.cbl line 263.
+        // Refactoring Rationale: the stubbed failure now carries the SQL STATE a store reports for a
+        //   uniqueness failure, where it used to be a bare translated exception with no cause at all. The
+        //   service classifies on that state, because the framework's translator maps a constraint
+        //   violation and a value-too-wide failure onto ONE exception class -- so a stub with no state
+        //   would exercise the fault arm and this case would assert the wrong outcome for the right
+        //   reason. The sibling case below pins the other side of the same classification.
         assertThatThrownBy(() -> service.create(
                         new CreateUserRequest("Ada", "Lovelace", "USER0042", "A")))
                 .isInstanceOf(UserService.DuplicateUserException.class)
                 .hasMessage("User ID already exist...");
+
+        verify(provisioning).withdraw("USER0042");
+    }
+
+    /**
+     * Asserts an integrity violation that is NOT a uniqueness failure reports the add sentence.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     *
+     * @throws IllegalStateException always, raised by the service when the insert is refused for a reason
+     *     that is not the identifier being taken, and captured by the assertion below
+     */
+    @Test
+    @DisplayName("an integrity violation that is not a duplicate reports the add sentence")
+    void anIntegrityViolationThatIsNotADuplicateReportsTheAddSentence() {
+        when(users.existsById("USER0042")).thenReturn(false);
+        when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
+                .thenReturn(PROVISIONED);
+        when(users.insertUser(any(), any(), any(), any(), any()))
+                .thenThrow(integrityViolation(SQL_STATE_VALUE_TOO_WIDE));
+
+        // Refactoring Rationale: this case exists because ONE catch arm answered every integrity
+        //   violation with the conflict sentence, and the sentence is about the identifier. The insert
+        //   reaches the same translated exception class for a value too wide for its column, for a refused
+        //   check constraint and for a missing required value -- none of which the caller fixes by
+        //   choosing another identifier. A caller told "User ID already exist..." for a twenty-one
+        //   character family name would retry under a different identifier and be refused again on every
+        //   one it tried, because the identifier was never the problem.
+        assertThatThrownBy(() -> service.create(
+                        new CreateUserRequest("Ada", "Lovelace", "USER0042", "A")))
+                .isExactlyInstanceOf(IllegalStateException.class)
+                .hasMessage("Unable to Add User...");
+
+        // Assumptions: the account is still withdrawn, because it was still provisioned. The
+        //   classification decides what the CALLER is told; it does not change what this request owes the
+        //   pool.
+        verify(provisioning).withdraw("USER0042");
+    }
+
+    /**
+     * Asserts an integrity violation carrying no SQL state at all is reported as a fault.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     *
+     * @throws IllegalStateException always, raised by the service and captured by the assertion below
+     */
+    @Test
+    @DisplayName("an integrity violation carrying no SQL state is reported as a fault")
+    void anIntegrityViolationCarryingNoSqlStateIsReportedAsAFault() {
+        when(users.existsById("USER0042")).thenReturn(false);
+        when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
+                .thenReturn(PROVISIONED);
+        when(users.insertUser(any(), any(), any(), any(), any()))
+                .thenThrow(new DataIntegrityViolationException("the store refused the row"));
+
+        // Assumptions: the DEFAULT direction of the classification is the fault and not the conflict, and
+        //   this case is what fixes it. A violation whose provenance the service cannot read says nothing
+        //   about uniqueness, so answering the conflict would tell a caller its identifier is taken on the
+        //   strength of a failure that never said so; the add sentence is true of every case.
+        assertThatThrownBy(() -> service.create(
+                        new CreateUserRequest("Ada", "Lovelace", "USER0042", "A")))
+                .isExactlyInstanceOf(IllegalStateException.class)
+                .hasMessage("Unable to Add User...");
 
         verify(provisioning).withdraw("USER0042");
     }
@@ -709,6 +927,246 @@ class UserServiceTest {
         //   because this case is about the KEY alone -- the remaining four are asserted by the create
         //   case above, and repeating them here would make this case fail for reasons it is not about.
         verify(users).insertUser(eq("USER0042"), any(), any(), any(), any());
+    }
+
+    /**
+     * Asserts an identifier whose folded form outgrows the key column is refused before either store.
+     *
+     * <p>The submitted value is eight characters of the German sharp s, which the root locale folds to
+     * sixteen characters of capital S. It therefore satisfies every constraint declared on the request
+     * body -- it is non-blank and eight characters long -- and cannot be stored in a CHAR(8) key.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     *
+     * @throws ClientInputException always, raised by the service's canonical derivation and captured by
+     *     the assertion below
+     */
+    @Test
+    @DisplayName("an identifier that folds past the key width is refused before anything is provisioned")
+    void anIdentifierThatFoldsPastTheKeyWidthIsRefused() {
+        // Refactoring Rationale: this case exists because case folding is NOT length-preserving and
+        //   nothing checked the length of what the fold produced. The request record's width constraint
+        //   measures the SUBMITTED value while the column stores the FOLDED one, so this body passed the
+        //   coarse gate, passed the ordered chain, folded to sixteen characters, PROVISIONED a pool
+        //   account under that sixteen-character username, and was then refused by the insert -- and
+        //   reported to the caller as "User ID already exist..." because one arm answered every integrity
+        //   violation. The three assertions below pin the three steps that must not be reached.
+        assertThatThrownBy(() -> service.create(
+                        new CreateUserRequest("Ada", "Lovelace", "ßßßßßßßß", "A")))
+                .isInstanceOf(ClientInputException.class)
+                .hasMessage("User ID must be at most 8 characters...");
+
+        // Assumptions: the probe is asserted as NOT REACHED as well as the provider, because the order the
+        //   defect made visible is what this case fixes: the derivation is validated ahead of both, so an
+        //   unstorable identifier costs one refusal rather than an indexed read and a provider round trip.
+        verify(users, never()).existsById(any());
+        verifyNoInteractions(provisioning);
+        verify(users, never()).insertUser(any(), any(), any(), any(), any());
+    }
+
+    /**
+     * Asserts the refusal of an over-long folded identifier is attributed to the identifier and rejected.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("the over-long folded identifier is attributed to the identifier as a rejected value")
+    void theOverLongFoldedIdentifierIsAttributedToTheIdentifier() {
+        // Assumptions: the flag is the supplied-and-rejected one rather than the blank one, and the
+        //   published contract turns that distinction into presentation -- a caller rendering the
+        //   baseline's own presentation draws the asterisk marker for the blank state only, and this
+        //   caller did supply something. The absent-identifier case beside it asserts the other flag, so
+        //   the two together pin that the derivation reports its two refusals differently.
+        assertThatThrownBy(() -> service.create(
+                        new CreateUserRequest("Ada", "Lovelace", "ßßßßßßßß", "A")))
+                .isInstanceOf(ClientInputException.class)
+                .satisfies(raised -> {
+                    ClientInputException refusal = (ClientInputException) raised;
+                    assertThat(refusal.field()).isEqualTo("userId");
+                    assertThat(refusal.state()).isEqualTo(FieldValidationFlag.NOT_OK);
+                });
+
+        assertThatThrownBy(() -> service.create(
+                        new CreateUserRequest("Ada", "Lovelace", "\t", "A")))
+                .isInstanceOf(ClientInputException.class)
+                .satisfies(raised -> {
+                    ClientInputException refusal = (ClientInputException) raised;
+                    assertThat(refusal.field()).isEqualTo("userId");
+                    assertThat(refusal.state()).isEqualTo(FieldValidationFlag.BLANK);
+                });
+    }
+
+    /**
+     * Asserts an identifier the trim consumes entirely is refused as an absent one, before either store.
+     *
+     * <p>The submitted value is a single tab. The emptiness test this service uses is the reference's own
+     * -- absent, empty, wholly spaces or wholly low values, because the reference compares its screen
+     * field against {@code SPACES OR LOW-VALUES} -- and a tab equals neither constant, so the ordered
+     * chain reads it as SUPPLIED while {@code String#trim} removes it.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     *
+     * @throws ClientInputException always, raised by the service's canonical derivation and captured by
+     *     the assertion below
+     */
+    @Test
+    @DisplayName("an identifier the trim consumes entirely is refused before anything is provisioned")
+    void anIdentifierTheTrimConsumesEntirelyIsRefused() {
+        // Refactoring Rationale: this case exists because the two emptiness tests disagree by design and
+        //   nothing reconciled them. The chain admits a tab and the trim removes it, so the derived key
+        //   was the EMPTY STRING -- which was then probed for, and provisioned as a pool account with an
+        //   empty username, before anything noticed. Refusing it names the identifier and carries the
+        //   reference's own sentence for an identifier that was never filled in, which is what an
+        //   identifier with nothing in it is.
+        assertThatThrownBy(() -> service.create(
+                        new CreateUserRequest("Ada", "Lovelace", "\t", "A")))
+                .isInstanceOf(ClientInputException.class)
+                .hasMessage("User ID can NOT be empty...");
+
+        verify(users, never()).existsById(any());
+        verifyNoInteractions(provisioning);
+    }
+
+    /**
+     * Asserts a read whose folded identifier cannot be a key is refused rather than reported absent.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     *
+     * @throws ClientInputException always, raised by the service's canonical derivation and captured by
+     *     the assertion below
+     */
+    @Test
+    @DisplayName("a read of an identifier that folds past the key width is refused, not reported absent")
+    void aReadOfAnIdentifierThatFoldsPastTheKeyWidthIsRefused() {
+        // Refactoring Rationale: this path used to fold and read with whatever came out, so a folded form
+        //   wider than the column matched no row and the read answered the reference's not-found sentence
+        //   with a 404. That answer asserts a well-formed identifier had no row, and invites a caller to
+        //   look for something the schema cannot hold; no row can ever carry this value.
+        assertThatThrownBy(() -> service.read("ßßßßßßßß"))
+                .isInstanceOf(ClientInputException.class)
+                .hasMessage("User ID must be at most 8 characters...");
+
+        // Assumptions: the store is not read at all, which is the observable half of the change -- the
+        //   previous arrangement issued a keyed read for a key no row could carry.
+        verify(users, never()).findById(any());
+    }
+
+    /**
+     * Asserts a create arms its compensating withdrawal BEFORE provisioning and settles it with the insert.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a create arms the withdrawal before provisioning and settles it with the insert")
+    void aCreateArmsTheWithdrawalBeforeProvisioningAndSettlesItWithTheInsert() {
+        when(users.existsById("USER0042")).thenReturn(false);
+        when(provisioning.provision("USER0042", "Ada", "Lovelace", "A")).thenReturn(PROVISIONED);
+        when(users.insertUser(any(), any(), any(), any(), any())).thenReturn(1);
+
+        service.create(new CreateUserRequest("Ada", "Lovelace", "USER0042", "A"));
+
+        // Refactoring Rationale: the ORDER is the assertion, and it is the whole of what this case adds.
+        //   The compensation used to be recorded from the insert's failure handlers, which covers a failed
+        //   insert and nothing else: a process death, an eviction or a rollback raised outside those
+        //   handlers left an account that can authenticate, holds no membership this context records,
+        //   permanently blocks a later create of the same identifier, and is named by no ledger row and no
+        //   log line. A ledger write that PRECEDES the provider call is what makes the ledger's pending
+        //   set a complete description of what the pool may owe.
+        InOrder ordered = inOrder(ledger, provisioning, users);
+        ordered.verify(ledger).save(any(IdentitySyncTask.class));
+        ordered.verify(provisioning).provision("USER0042", "Ada", "Lovelace", "A");
+        ordered.verify(users).insertUser(any(), any(), any(), any(), any());
+
+        // Assumptions: the armed row is SETTLED rather than left pending, so a successful create leaves
+        //   nothing owed. A pending withdrawal beside a committed row is the one state that must never
+        //   exist: any applier reaching it removes the account of a user that was just created.
+        assertThat(ledger.findByUserIdAndStatusOrderByTaskIdAsc("USER0042",
+                        IdentitySyncTask.STATUS_PENDING, Limit.of(5)))
+                .as("a committed create owes the pool nothing")
+                .isEmpty();
+        // Refactoring Rationale: the settle is asserted as CANCELLED carrying NO reason code, where this
+        //   case asserted ABANDONED with "create-committed". IdentitySyncTask.markCancelled nulls the code
+        //   and means never-owed, which is exactly what a committed create leaves; markAbandoned demands a
+        //   reason because it means an owed intention was given up. Asserting ABANDONED here also
+        //   contradicted aSuccessfulCreateClosesItsGuard, which asserts CANCELLED for this same
+        //   transition. The ordering assertion above is what this case adds and it is untouched.
+        assertThat(ledger.findByUserIdAndStatusOrderByTaskIdAsc("USER0042",
+                        IdentitySyncTask.STATUS_CANCELLED, Limit.of(5)))
+                .singleElement()
+                .satisfies(settled -> {
+                    assertThat(settled.getOperation()).isEqualTo(IdentitySyncTask.OPERATION_WITHDRAW);
+                    assertThat(settled.getLastFailureCode()).isNull();
+                });
+        verify(provisioning, never()).withdraw(any());
+    }
+
+    /**
+     * Asserts a pool duplicate VOIDS the armed withdrawal instead of applying it.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     *
+     * @throws UserService.DuplicateUserException always, raised by the service when the pool refuses the
+     *     username and captured by the assertion below
+     */
+    @Test
+    @DisplayName("a pool duplicate voids the armed withdrawal rather than applying it")
+    void aPoolDuplicateVoidsTheArmedWithdrawal() {
+        when(users.existsById("USER0042")).thenReturn(false);
+        when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
+                .thenThrow(UsernameExistsException.builder().message("username exists").build());
+
+        assertThatThrownBy(() -> service.create(
+                        new CreateUserRequest("Ada", "Lovelace", "USER0042", "A")))
+                .isInstanceOf(UserService.DuplicateUserException.class)
+                .hasMessage("User ID already exist...");
+
+        // Assumptions: this is the ONE outcome where the armed withdrawal must not be applied, and the
+        //   reason is that the provider refused to CREATE an account -- so this request holds none. The
+        //   account under that username belongs either to the caller that won an ordinary race, which is
+        //   about to write its row, or to an earlier interrupted create, whose OWN armed row the scheduled
+        //   pass owns. Applying here would destroy the first and duplicate the second.
+        verify(provisioning, never()).withdraw(any());
+        assertThat(ledger.findByUserIdAndStatusOrderByTaskIdAsc("USER0042",
+                        IdentitySyncTask.STATUS_PENDING, Limit.of(5)))
+                .as("a withdrawal for an account this request never created must not stay owed")
+                .isEmpty();
+        // Refactoring Rationale: the void is asserted as CANCELLED carrying no reason code, where this
+        //   case asserted ABANDONED with "pool-held-account". The provider refused to CREATE, so this
+        //   attempt owns no account and the guard was never owed -- which is what markCancelled records
+        //   and why it nulls the code. The reason is not lost to an operator: the arm raising this refusal
+        //   logs reason=duplicate-in-pool, and that token says which of the two paths closed the guard.
+        assertThat(ledger.findByUserIdAndStatusOrderByTaskIdAsc("USER0042",
+                        IdentitySyncTask.STATUS_CANCELLED, Limit.of(5)))
+                .singleElement()
+                .satisfies(settled -> assertThat(settled.getLastFailureCode()).isNull());
+    }
+
+    /**
+     * Asserts a provider fault applies the armed withdrawal, because the account may exist.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     *
+     * @throws IllegalStateException always, raised by the service when the provider cannot serve the call
+     *     and captured by the assertion below
+     */
+    @Test
+    @DisplayName("a provider fault applies the armed withdrawal rather than voiding it")
+    void aProviderFaultAppliesTheArmedWithdrawal() {
+        when(users.existsById("USER0042")).thenReturn(false);
+        when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
+                .thenThrow(InternalErrorException.builder().message("the pool is unavailable").build());
+
+        assertThatThrownBy(() -> service.create(
+                        new CreateUserRequest("Ada", "Lovelace", "USER0042", "A")))
+                .isExactlyInstanceOf(IllegalStateException.class)
+                .hasMessage("Unable to Add User...");
+
+        // Assumptions: the withdrawal is APPLIED and not voided, because a fault cannot tell a caller
+        //   whether the account was created -- a timeout is reported the same way whether the provider
+        //   acted or not. Withdrawal treats an absent account as success, so applying is safe when nothing
+        //   was created and necessary when something was; voiding would be a guess in the direction that
+        //   leaves an orphan.
+        verify(provisioning).withdraw("USER0042");
     }
 
     /**
@@ -1180,7 +1638,7 @@ class UserServiceTest {
         when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
                 .thenReturn(PROVISIONED);
         when(users.insertUser(any(), any(), any(), any(), any()))
-                .thenThrow(new DataIntegrityViolationException("constraint refused the row"));
+                .thenThrow(uniquenessViolation());
         doThrow(InternalErrorException.builder().message("the pool is unavailable").build())
                 .when(provisioning).withdraw("USER0042");
 
@@ -2088,6 +2546,12 @@ class UserServiceTest {
         //   app/cpy-bms/COUSR03.CPY line 84 -- and the longest sentence anywhere in the domain is the
         //   forward paging guard, well inside it. Every sentence therefore fitted whole and none was ever
         //   clipped, so no code path here truncates and none should be added.
+        // Assumptions: two entries below -- the identifier's width and domain sentences -- are authored by
+        //   this service rather than transcribed, because the reference could ask neither question of a
+        //   single-byte eight-position screen field. They are held to the same width for the same reason
+        //   the transcribed ones are: a client rendering this boundary in the reference's message field
+        //   must be able to show them whole, and a sentence that only fitted on a wider surface would be
+        //   clipped by the one presentation this domain has.
         int referenceMessageWidth = 78;
         List<String> everySentence = List.of(
                 "User ID can NOT be empty...",
@@ -2095,6 +2559,8 @@ class UserServiceTest {
                 "Last Name can NOT be empty...",
                 "User Type can NOT be empty...",
                 "User Type must be A or U...",
+                "User ID must be at most 8 characters...",
+                "User ID contains an unsupported character...",
                 "User ID already exist...",
                 "Unable to Add User...",
                 "User ID NOT found...",
@@ -2243,6 +2709,36 @@ class UserServiceTest {
     }
 
     /**
+     * Builds the failure a store raises when the row it was given is not unique.
+     *
+     * <p>Assumptions: the shape is a translated integrity violation whose CAUSE carries the SQL state,
+     * because that is the shape the stack actually produces and the service classifies on. The framework's
+     * translator maps the persistence provider's constraint type and its data type onto ONE exception
+     * class, so a stub without a state would be indistinguishable from a value-too-wide failure and would
+     * exercise the fault arm.</p>
+     *
+     * <p>Assumptions: the state is asserted against a live engine by the module's repository integration
+     * test rather than taken on trust here, which is what keeps this substitute honest: a stub is only
+     * evidence of the service's behaviour, never of the store's.</p>
+     *
+     * @return the failure to stub the insert with; never {@code null}
+     */
+    private static DataIntegrityViolationException uniquenessViolation() {
+        return integrityViolation(SQL_STATE_UNIQUE_VIOLATION);
+    }
+
+    /**
+     * Builds a translated integrity violation reporting one SQL state.
+     *
+     * @param sqlState the state the driver would have reported
+     * @return the failure to stub a write with; never {@code null}
+     */
+    private static DataIntegrityViolationException integrityViolation(String sqlState) {
+        return new DataIntegrityViolationException("the store refused the row",
+                new SQLException("the store refused the row", sqlState));
+    }
+
+    /**
      * Builds a run of consecutive rows starting from the first identifier.
      *
      * @param count how many rows to build
@@ -2301,6 +2797,57 @@ class UserServiceTest {
     }
 
     /**
+     * No line this service logs carries the identity key, on the refusal path or the success path.
+     *
+     * <p>⚠️ Purpose: eleven statements in this class named {@code userId}, so the defect was a property of
+     * the CLASS rather than of any one line, and a case asserting the absence on one path would leave the
+     * other ten free to regress. This drives both shapes an operator actually meets -- a create refused as
+     * a duplicate, and a create that succeeds -- and asserts the identifier appears on neither.
+     *
+     * <p>⚠️ Assumptions: the appender is attached to the service's own logger and the level is driven to
+     * {@code TRACE}, so a statement added later at any level is covered without this case being revisited.
+     * The level is restored in a {@code finally} because the logger is a process-wide singleton.
+     *
+     * <p>⚠️ Assumptions: both paths are asserted to have logged something before any absence is asserted,
+     * so the case cannot pass because nothing was emitted at all.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("no logged line carries the user identifier, refused or created")
+    void noLoggedLineCarriesTheUserIdentifier() {
+        Logger serviceLogger = (Logger) LoggerFactory.getLogger(UserService.class);
+        ListAppender<ILoggingEvent> captured = new ListAppender<>();
+        captured.start();
+        serviceLogger.addAppender(captured);
+        Level restored = serviceLogger.getLevel();
+        serviceLogger.setLevel(Level.TRACE);
+        try {
+            when(users.existsById("USER0001")).thenReturn(true);
+            assertThatThrownBy(() -> service.create(
+                            new CreateUserRequest("Ada", "Lovelace", "USER0001", "A")))
+                    .isInstanceOf(UserService.DuplicateUserException.class);
+
+            when(users.existsById("USER0042")).thenReturn(false);
+            when(provisioning.provision("USER0042", "Ada", "Lovelace", "A")).thenReturn(PROVISIONED);
+            when(users.insertUser(any(), any(), any(), any(), any())).thenReturn(1);
+            service.create(new CreateUserRequest("Ada", "Lovelace", "USER0042", "A"));
+
+            assertThat(captured.list)
+                    .as("both paths must have logged, or the absence below proves nothing")
+                    .hasSizeGreaterThanOrEqualTo(2);
+            assertThat(captured.list)
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .as("no line at any level may carry the identity table's own primary key")
+                    .noneMatch(line -> line.contains("USER0001"))
+                    .noneMatch(line -> line.contains("USER0042"));
+        } finally {
+            serviceLogger.setLevel(restored);
+            serviceLogger.detachAppender(captured);
+        }
+    }
+
+    /**
      * Lists the names of the public operations the service under test declares.
      *
      * @return the operation names, in no particular order and without duplicates
@@ -2331,5 +2878,306 @@ class UserServiceTest {
             named.add(component.getName());
         }
         return named;
+    }
+
+    /**
+     * Asserts the create path commits its compensation guard BEFORE it calls the provider.
+     *
+     * <p>⚠️ Assumptions: the ordering is the whole assertion, and it is asserted rather than assumed
+     * because the reverse order is what the guard exists to rule out. A guard written after the provider
+     * call would be absent for exactly the interval during which a process death leaves a pool account
+     * that can authenticate and that no row and no ledger entry names -- the state that made the
+     * identifier permanently unusable while nothing recorded why.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a create records its withdrawal guard before the provider is called at all")
+    void aCreateRecordsItsGuardBeforeCallingTheProvider() {
+        arrangeSuccessfulProvisioning();
+
+        service.create(new CreateUserRequest("Ada", "Lovelace", "USER0042", "A"));
+
+        InOrder ordered = inOrder(ledger, provisioning);
+        ordered.verify(ledger).save(any(IdentitySyncTask.class));
+        ordered.verify(provisioning).provision("USER0042", "Ada", "Lovelace", "A");
+    }
+
+    /**
+     * Asserts the guard is recorded as a claimed withdrawal, so no reconciliation drain can act on it.
+     *
+     * <p>⚠️ Assumptions: the recorded status is asserted to be CLAIMED and not PENDING, and the
+     * distinction is the reason the state exists. A pending guard is one the drain is entitled to apply,
+     * and applying it while this create is in flight would withdraw the account this create is about to
+     * bind its row to -- turning the control that prevents orphans into a cause of them.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("the guard is recorded claimed, naming a withdrawal of the identifier being created")
+    void theRecordedGuardIsAClaimedWithdrawal() {
+        arrangeSuccessfulProvisioning();
+        // Assumptions: the provider is made to fail so the create stops with the guard in the state it
+        //   was recorded in. Observing it after a SUCCESSFUL create would observe the CLOSED state
+        //   instead, because the closure is part of the insert -- which the case below asserts separately.
+        when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
+                .thenThrow(new NoSuchElementException("stop after the guard"));
+
+        assertThatThrownBy(() -> service.create(
+                new CreateUserRequest("Ada", "Lovelace", "USER0042", "A")))
+                .isInstanceOf(NoSuchElementException.class);
+
+        IdentitySyncTask guard = onlyLedgerRowOf(IdentitySyncTask.STATUS_CLAIMED);
+        assertThat(guard.getOperation())
+                .as("the guard names the compensating action, so applying it undoes the provisioning")
+                .isEqualTo(IdentitySyncTask.OPERATION_WITHDRAW);
+        assertThat(guard.getUserId())
+                .as("the guard names the identifier whose pool account would be left behind")
+                .isEqualTo("USER0042");
+    }
+
+    /**
+     * Asserts a guard that cannot be committed stops the create before the provider is reached.
+     *
+     * <p>⚠️ Trade-offs: refusing the create is strictly worse for the caller than proceeding -- a
+     * perfectly serviceable create is rejected because a bookkeeping row could not be written -- and it is
+     * still the correct direction. Proceeding would call the provider with no durable compensation, which
+     * is the unguarded behaviour this fix replaces, and it would do so while appearing guarded. A refused
+     * create leaves nothing behind; an unguarded one can leave an account nothing names.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     *
+     * @throws IllegalStateException always, raised by the guard recording and captured by the assertion
+     */
+    @Test
+    @DisplayName("a guard that cannot be recorded stops the create before anything is provisioned")
+    void aGuardThatCannotBeRecordedStopsTheCreate() {
+        when(users.existsById("USER0042")).thenReturn(false);
+        // Assumptions: stubbed with doThrow rather than when(...).thenThrow, because the ledger
+        //   substitute already answers save with a stored-row behaviour and the when(...) form would
+        //   invoke that behaviour with a null argument while stubbing.
+        doThrow(new QueryTimeoutException("guard not committed"))
+                .when(ledger).save(any(IdentitySyncTask.class));
+
+        assertThatThrownBy(() -> service.create(
+                new CreateUserRequest("Ada", "Lovelace", "USER0042", "A")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage(UserService.MESSAGE_UNABLE_TO_ADD);
+
+        verifyNoInteractions(provisioning);
+        verify(users, never()).insertUser(any(), any(), any(), any(), any());
+    }
+
+    /**
+     * Asserts a successful create closes its guard and leaves no row a drain could act on.
+     *
+     * <p>⚠️ Assumptions: the closure is asserted as a CANCELLED row rather than an APPLIED one, and the
+     * difference is not cosmetic. Applied means the withdrawal was carried out against the provider;
+     * cancelled means it was never owed. Recording a successful create's guard as applied would state in
+     * the operational record that an account this create just bound a row to had been withdrawn.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a successful create closes its guard, and closes it as never-owed rather than applied")
+    void aSuccessfulCreateClosesItsGuard() {
+        arrangeSuccessfulProvisioning();
+
+        service.create(new CreateUserRequest("Ada", "Lovelace", "USER0042", "A"));
+
+        assertThat(ledgerRowsOf(IdentitySyncTask.STATUS_CLAIMED))
+                .as("no claimed guard survives a create that finished, or a drain would never be able"
+                        + " to tell an in-flight create from an abandoned one")
+                .isEmpty();
+        assertThat(ledgerRowsOf(IdentitySyncTask.STATUS_PENDING))
+                .as("a create that wrote its row owes no withdrawal")
+                .isEmpty();
+        assertThat(onlyLedgerRowOf(IdentitySyncTask.STATUS_CANCELLED).getOperation())
+                .isEqualTo(IdentitySyncTask.OPERATION_WITHDRAW);
+        verify(provisioning, never()).withdraw(any());
+    }
+
+    /**
+     * Asserts the guard closure is issued after the insert, inside the transaction that carries it.
+     *
+     * <p>⚠️ Assumptions: what makes the closure safe is that it shares the insert's transaction, so the
+     * pair commits or rolls back together. This case can assert the ORDER but not the atomicity, because
+     * the transaction manager here is a substitute that commits nothing; the committed-together property
+     * is asserted by the container-backed repository test. Recorded so the order alone is not mistaken
+     * for the guarantee.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("the guard closure follows the insert rather than preceding it")
+    void theGuardClosureFollowsTheInsert() {
+        arrangeSuccessfulProvisioning();
+
+        service.create(new CreateUserRequest("Ada", "Lovelace", "USER0042", "A"));
+
+        InOrder ordered = inOrder(users, ledger);
+        ordered.verify(users).insertUser(any(), any(), any(), any(), any());
+        ordered.verify(ledger).save(any(IdentitySyncTask.class));
+    }
+
+    /**
+     * Asserts the pool's duplicate refusal cancels this create's guard instead of owing it.
+     *
+     * <p>⚠️ Assumptions: getting this direction wrong is the most damaging mistake available on this
+     * path. The refusal means the provider created NOTHING for this attempt, so the account under that
+     * username belongs to somebody else -- the concurrent create about to commit its row, or an earlier
+     * interrupted create whose own guard the reconciliation pass owns. Owing this guard would withdraw
+     * that account, converting a lost race into an outage for the caller that won it.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     *
+     * @throws UserService.DuplicateUserException always, raised by the service and captured below
+     */
+    @Test
+    @DisplayName("a pool duplicate cancels its own guard and withdraws nobody else's account")
+    void aPoolDuplicateCancelsItsGuard() {
+        when(users.existsById("USER0042")).thenReturn(false);
+        when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
+                .thenThrow(UsernameExistsException.builder().message("username exists").build());
+
+        assertThatThrownBy(() -> service.create(
+                new CreateUserRequest("Ada", "Lovelace", "USER0042", "A")))
+                .isInstanceOf(UserService.DuplicateUserException.class);
+
+        assertThat(onlyLedgerRowOf(IdentitySyncTask.STATUS_CANCELLED).getUserId())
+                .isEqualTo("USER0042");
+        assertThat(ledgerRowsOf(IdentitySyncTask.STATUS_PENDING))
+                .as("owing this guard would withdraw the winning caller's account")
+                .isEmpty();
+        verify(provisioning, never()).withdraw(any());
+    }
+
+    /**
+     * Asserts an ambiguous provider fault owes the guard and attempts the withdrawal at once.
+     *
+     * <p>⚠️ Trade-offs: a withdrawal is the safe direction to be wrong in here, and it is a real choice
+     * rather than an obvious one. The fault can arrive after the account was created, before it was, or
+     * with the request never having reached the provider -- and the three are indistinguishable. A
+     * withdrawal of an account that was never created is a no-op the provider absorbs; cancelling would
+     * strand an account that may exist, which is the orphan this whole mechanism exists to prevent.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     *
+     * @throws IllegalStateException always, raised by the service and captured by the assertion below
+     */
+    @Test
+    @DisplayName("an ambiguous provider fault owes the guard and attempts the withdrawal immediately")
+    void aProviderFaultOwesTheGuard() {
+        when(users.existsById("USER0042")).thenReturn(false);
+        when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
+                .thenThrow(InternalErrorException.builder().message("provider fault").build());
+
+        assertThatThrownBy(() -> service.create(
+                new CreateUserRequest("Ada", "Lovelace", "USER0042", "A")))
+                .isInstanceOf(IllegalStateException.class);
+
+        // Assumptions: the immediate attempt is asserted alongside the ledger transition because the two
+        //   answer different questions -- the attempt closes the window in the ordinary case where the
+        //   provider is healthy, and the ledger row is what closes it when the attempt itself fails.
+        verify(provisioning).withdraw("USER0042");
+        assertThat(ledgerRowsOf(IdentitySyncTask.STATUS_CLAIMED))
+                .as("a guard left claimed is one no drain would ever retry")
+                .isEmpty();
+    }
+
+    /**
+     * Asserts a failed insert reuses the guard it already committed rather than recording a second one.
+     *
+     * <p>⚠️ Refactoring Rationale: the earlier arrangement recorded a withdrawal intention at the moment
+     * the insert failed, which exists only if that code runs. Reusing the guard committed before the
+     * provider call is what survives a process death at the same point, and asserting the ledger holds
+     * ONE row is what stops the two mechanisms being reintroduced side by side -- which would leave a
+     * second pending withdrawal for an account the first had already withdrawn.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     *
+     * @throws UserService.DuplicateUserException always, raised by the service and captured below
+     */
+    @Test
+    @DisplayName("a failed insert reuses its committed guard rather than recording a second intention")
+    void aFailedInsertReusesItsGuard() {
+        arrangeSuccessfulProvisioning();
+        // Refactoring Rationale: the fixture is the file's own uniquenessViolation() rather than a bare
+        //   DataIntegrityViolationException. isUniquenessViolation walks the cause chain for a SQLException
+        //   carrying SQL state 23505 and correctly declines a translated violation with no cause, so the
+        //   bare fixture reached the generic store-failure arm and this case saw the add sentence instead
+        //   of the conflict. The classifier is right -- a value too wide for its column reaches the same
+        //   translated type and must not be answered "choose another identifier" -- so the fixture is what
+        //   was stale. What this case asserts is the guard REUSE below, which is unchanged.
+        when(users.insertUser(any(), any(), any(), any(), any())).thenThrow(uniquenessViolation());
+
+        assertThatThrownBy(() -> service.create(
+                new CreateUserRequest("Ada", "Lovelace", "USER0042", "A")))
+                .isInstanceOf(UserService.DuplicateUserException.class);
+
+        verify(provisioning).withdraw("USER0042");
+        assertThat(ledgerRowsOf(IdentitySyncTask.STATUS_CLAIMED)).isEmpty();
+        assertThat(allLedgerRows())
+                .as("one create leaves one guard, however it ended")
+                .hasSize(1);
+    }
+
+    /**
+     * Arranges the collaborators for a create that reaches its insert successfully.
+     *
+     * <p>Assumptions: gathered into one helper because six of the guard-lifecycle cases need exactly this
+     * arrangement and differ only in the failure they then inject. Repeating it per case invited the
+     * arrangements to drift apart, at which point the cases would no longer be comparable.</p>
+     */
+    private void arrangeSuccessfulProvisioning() {
+        when(users.existsById("USER0042")).thenReturn(false);
+        when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
+                .thenReturn(new ProvisionedIdentity(
+                        UUID.fromString("11111111-2222-3333-4444-555555555555"),
+                        PROVISIONED.credentialSecretName()));
+        when(users.insertUser(any(), any(), any(), any(), any())).thenReturn(1);
+    }
+
+    /**
+     * Yields the ledger rows carrying one status, in identifier order.
+     *
+     * @param status the status a row must carry to be yielded
+     * @return the matching rows; never {@code null}
+     */
+    private List<IdentitySyncTask> ledgerRowsOf(String status) {
+        return ledger.findByStatusOrderByTaskIdAsc(status, Limit.of(50));
+    }
+
+    /**
+     * Yields the single ledger row carrying one status, failing the case when there is not exactly one.
+     *
+     * <p>Assumptions: the count is asserted here rather than in each caller because "exactly one" is the
+     * property every guard-lifecycle case depends on -- a create that left two guards, or none, would
+     * otherwise satisfy an assertion written about the first row it happened to find.</p>
+     *
+     * @param status the status the row must carry
+     * @return the sole row carrying it; never {@code null}
+     */
+    private IdentitySyncTask onlyLedgerRowOf(String status) {
+        List<IdentitySyncTask> rows = ledgerRowsOf(status);
+        assertThat(rows)
+                .as("exactly one ledger row should carry status %s", status)
+                .hasSize(1);
+        return rows.get(0);
+    }
+
+    /**
+     * Yields every ledger row, whatever status it carries, so a count can be asserted.
+     *
+     * @return every stored row; never {@code null}
+     */
+    private List<IdentitySyncTask> allLedgerRows() {
+        List<IdentitySyncTask> everything = new ArrayList<>();
+        for (String status : List.of(IdentitySyncTask.STATUS_CLAIMED, IdentitySyncTask.STATUS_PENDING,
+                IdentitySyncTask.STATUS_APPLIED, IdentitySyncTask.STATUS_CANCELLED,
+                IdentitySyncTask.STATUS_ABANDONED)) {
+            everything.addAll(ledgerRowsOf(status));
+        }
+        return everything;
     }
 }

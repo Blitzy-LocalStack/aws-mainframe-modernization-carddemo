@@ -2,15 +2,27 @@
 -- data-migration/sql/V1__reporting_views.sql
 -- -----------------------------------------------------------------------------
 -- Purpose:
---   Create the four read-only relations the reporting bounded context reads, in
---   the `reporting` schema, owned by carddemo_reporting_owner. reporting-service
---   owns no table, no index and no relational object of its own; the role it
---   connects as holds USAGE on this schema and SELECT on the seven views named
---   here, and nothing else -- notably not on the one table this file creates.
---   Those seven views ARE that context's entire readable data surface, so the JPA
---   projections in
+--   Create the seven read-only views the reporting bounded context reads, plus the
+--   one protected table and the one lookup function they depend on, in the
+--   `reporting` schema, owned by carddemo_reporting_owner. reporting-service owns
+--   no table, no index and no relational object of its own; the role it connects
+--   as holds USAGE on this schema, SELECT on the seven views named here and
+--   EXECUTE on the function named below, and nothing else -- notably not on the
+--   one table this file creates. Those seven views ARE that context's entire
+--   readable data surface, so the JPA projections in
 --   services/reporting-service/src/main/java/com/carddemo/reporting/domain map
 --   one relation each and map nothing outside this file.
+--
+--   Refactoring Rationale: this header opened with "Create the four read-only
+--   relations" and then enumerated seven, which is a count left behind by the
+--   revision recorded three paragraphs below. It said four because four is what an
+--   earlier revision created. Correcting the opening sentence rather than the
+--   enumeration is deliberate: the enumeration is what a reader checks against the
+--   file, and the sentence is what a reader reads first and carries away.
+--   V3__verification_surfaces.sql adds two further views to this same schema, so
+--   the schema's whole population is nine views, this one table and this one
+--   function -- stated here because a reader auditing the reporting role's read
+--   surface arrives at this file and must not conclude the surface stops with it.
 --
 --   Relation                              Read by
 --   reporting.v_report_transactions       ReportTransactionView
@@ -618,7 +630,52 @@ ALTER VIEW reporting.v_card_xref OWNER TO carddemo_reporting_owner;
 
 
 -- -----------------------------------------------------------------------------
--- 8. reporting.resolve_card -- exact resolution of one whole card number.
+-- 8. reporting.v_transaction_category_balances -- the per-category balances the
+--    category-balance report prints.
+--
+-- Supports app/jcl/PRTCATBL.jcl, the sort-only job that produces
+-- AWS.M2.CARDDEMO.TCATBALF.REPT. That job carries no COBOL program: its STEP10R
+-- sorts the unloaded transaction-category-balance file on
+-- SORT FIELDS=(TRANCAT-ACCT-ID,A,TRANCAT-TYPE-CD,A,TRANCAT-CD,A) at line 52 and
+-- reformats each record with OUTREC FIELDS at lines 53-56. So the whole of what it
+-- needs from the master is the composite key and the balance.
+--
+-- WHY : Assumptions: the projection is EXACTLY four columns because the reference's
+--       OUTREC names exactly four fields. ledger.transaction_category_balances has
+--       no fifth column, so this is the whole table rather than a subset -- and
+--       saying so matters: a reader comparing this view against the six-column
+--       account projection above should not conclude a column was withheld here.
+-- WHY : Assumptions: no masking is applied and none is needed. The composite key
+--       is an account identifier, a two-character type code and a four-digit
+--       category code, and the fourth column is a balance. None is cardholder data,
+--       no card number is reachable from this relation at all, and all four are
+--       printed in full by the reference's own report.
+-- WHY : Alternatives Considered: joining reference.transaction_types and
+--       reference.transaction_categories so the report could print descriptions
+--       beside the codes. Rejected because the reference report prints CODES -- the
+--       40-byte line at DCB=(LRECL=40) has room for the key, the edited balance and
+--       nine trailing blanks and for nothing else -- so the join would fetch two
+--       descriptions per row that no band can render, and would widen this role's
+--       reach to two more relations for output it does not produce.
+CREATE VIEW reporting.v_transaction_category_balances
+    WITH (security_barrier = true) AS
+SELECT
+    tcb.account_id,
+    tcb.type_cd,
+    tcb.category_cd,
+    tcb.balance
+FROM ledger.transaction_category_balances AS tcb;
+
+COMMENT ON VIEW reporting.v_transaction_category_balances IS
+    'Composite transaction-category-balance key (account_id, type_cd, category_cd) and its '
+    'balance, from ledger.transaction_category_balances. Supports the category-balance report '
+    'app/jcl/PRTCATBL.jcl produces, whose OUTREC at lines 53-56 names exactly these four fields.';
+
+ALTER VIEW reporting.v_transaction_category_balances OWNER TO carddemo_reporting_owner;
+
+
+-- -----------------------------------------------------------------------------
+-- 9. reporting.resolve_card -- exact resolution of one whole card number.
 --
 -- The statement request path receives a whole primary account number from an
 -- authenticated caller and has to resolve exactly that card. Every relation above
@@ -703,9 +760,31 @@ GRANT EXECUTE ON FUNCTION reporting.resolve_card(character varying) TO carddemo_
 
 
 -- -----------------------------------------------------------------------------
--- Grants: SELECT on these seven relations, to the service login role, and nothing
--- else anywhere. The one TABLE this file creates is deliberately not among them;
--- its own revoke is stated where it is created.
+-- Grants: SELECT on these eight relations, to the service login role. The one TABLE
+-- this file creates is deliberately not among them; its own revoke is stated where
+-- it is created, and the EXECUTE on reporting.resolve_card above is the only other
+-- privilege this file grants that role.
+--
+-- WHY : Refactoring Rationale: this heading read "and nothing else anywhere", and that
+--       clause is withdrawn because it was false in two directions at once. It was
+--       already false of THIS file -- the EXECUTE granted immediately above is a
+--       privilege on this schema granted to the same role -- and it became false of the
+--       schema when V3__verification_surfaces.sql granted that role SELECT on
+--       reporting.v_verification_row_counts and reporting.v_verification_money_totals.
+--       The scope claim is narrowed to what THIS file grants, because a file cannot
+--       truthfully speak for grants a later migration makes, and a privilege inventory
+--       that overstates its own completeness is worse than one that states its bounds:
+--       a reader auditing the role would stop here.
+-- WHY : Assumptions: the count is EIGHT and is the number of GRANT SELECT statements
+--       below, not the number of views this file creates -- it creates eleven views and
+--       two tables, and the three views it does not grant are read only by the owner.
+--       Counting the grants is what makes this heading checkable against the statements
+--       beneath it rather than against the file's length.
+--
+-- Refactoring Rationale: the count read seven and is restated as eight with
+-- v_transaction_category_balances. That view landed with the category-balance report
+-- app/jcl/PRTCATBL.jcl produces, which had no target path at all -- the report state
+-- claimed lineage from that job while emitting only the transaction-detail report.
 --
 -- WHY : Assumptions: the grants name the seven views individually and never use
 --       GRANT ... ON ALL TABLES IN SCHEMA reporting. The two forms differ in
@@ -725,6 +804,7 @@ GRANT SELECT ON reporting.v_transaction_categories TO carddemo_reporting;
 GRANT SELECT ON reporting.v_accounts               TO carddemo_reporting;
 GRANT SELECT ON reporting.v_customers              TO carddemo_reporting;
 GRANT SELECT ON reporting.v_card_xref              TO carddemo_reporting;
+GRANT SELECT ON reporting.v_transaction_category_balances TO carddemo_reporting;
 
 -- WHY : Assumptions: no INSERT, UPDATE, DELETE or TRUNCATE is granted on any view
 --       above, and the absence is stated as a REVOKE rather than left implicit. A

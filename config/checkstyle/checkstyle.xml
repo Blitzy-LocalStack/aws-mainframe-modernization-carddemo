@@ -153,9 +153,15 @@ WHY (non-obvious design decisions):
     under services/. tests/README.md states the same principle for record
     layouts: "never duplicate a layout; keep it single-sourced from
     app/cpy/".
-  - Trade-offs: the module set is confined to the Javadoc family, one
-    comment-placement check and the two no-effect import checks named in
-    the Scope section. Adding naming, whitespace, import-ORDERING,
+  - Trade-offs: the module set is confined to the Javadoc family and one
+    comment-placement check. Refactoring Rationale: this sentence also
+    named two no-effect import checks from the Scope section, which
+    stopped being true when RedundantImport and UnusedImports were
+    WITHDRAWN. The Scope section above records that withdrawal and the
+    EXCLUDED MODULES section at the foot carries both entries, so this
+    line was the last place still describing them as configured, and a
+    reader who trusted it would have gone looking for two modules that
+    are not here. Adding naming, whitespace, import-ORDERING,
     line-length, metrics or header modules was considered and rejected,
     because the build would then fail on style noise that Rule 1 never
     asks about, and CONTRIBUTING.md asks for the opposite: "Modify the

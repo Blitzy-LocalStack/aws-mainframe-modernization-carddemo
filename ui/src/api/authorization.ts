@@ -111,7 +111,7 @@
  * here.
  */
 
-import { getApiClient, requestPath } from './client';
+import { getApiClient, keysetPagingMembers, requestPath } from './client';
 import type {
   ContractOperation,
   FraudMarkRequest,
@@ -261,7 +261,8 @@ const MASKED_CARD_NUMBER = /^[*]{12}[0-9]{4}$/u;
  * @returns {Promise<PendingAuthListResponse>} The account summary and one bounded page of rows, each
  *   row carrying a masked card number and its own sealed selector, together with the page envelope's
  *   cursor tokens and its forward-availability indicator.
- * @throws {RangeError} If a row arrives with an unmasked card number.
+ * @throws {RangeError} If a direction is supplied without a cursor, or if a row arrives with an
+ *   unmasked card number.
  * @throws {Error} If the request fails, normalised to `ApiRequestError` carrying an `ApiError`. This
  *   operation can answer 400 for a malformed scope, cursor or direction, 401, 403, 405, 415 and 500;
  *   it has no 404.
@@ -269,20 +270,27 @@ const MASKED_CARD_NUMBER = /^[*]{12}[0-9]{4}$/u;
 export async function listPendingAuthorizations(
   query: PendingAuthListQuery,
 ): Promise<PendingAuthListResponse> {
-  // WHY : Assumptions: the contract defines all four combinations of the two optional members and
-  //       refuses exactly one -- a direction sent with no cursor is a 400 keyed on the direction.
-  //       Assembling the body means a caller that supplies a direction without a cursor gets the
-  //       opening page, which is what the contract answers when neither is sent, rather than a
-  //       guaranteed refusal it can do nothing with. Forwarding the caller's object verbatim would
-  //       send that refused pair straight to the service.
+  // WHY : ⚠️ Refactoring Rationale: the contract defines all four combinations of the two optional
+  //       members and refuses exactly one -- a direction sent with no cursor is a 400 keyed on the
+  //       direction. This block used to answer that combination by DROPPING the direction, and the
+  //       comment that stood here defended it on the grounds that a caller gets the opening page
+  //       rather than "a guaranteed refusal it can do nothing with". That reasoning is withdrawn: what
+  //       a caller can do with a refusal is fix the request, whereas the opening page is a wrong answer
+  //       it cannot detect -- the rows simply do not move. It is also wrong about who is at fault: the
+  //       only way a direction arrives without a cursor is a caller defect -- a PF7 handler that forgot
+  //       to thread the `firstKey` through -- and dropping it hid that defect behind a plausible
+  //       answer, with no diagnostic anywhere connecting the two. `keysetPagingMembers` in `./client`
+  //       now raises it locally for all seven paged clients, which costs the caller no round trip and
+  //       names both inputs.
   // WHY : Trade-offs: the direction is stated explicitly whenever a cursor is present, even though
   //       the contract already defaults an absent direction to forward. The redundancy costs one
   //       member and makes every paging request say which way it moves, so a request replayed from a
   //       log is unambiguous without knowing the default.
   const body: Record<string, string> = { accountId: query.accountId };
-  if (query.cursor !== undefined) {
-    body.cursor = query.cursor;
-    body.direction = query.direction ?? 'next';
+  const paging = keysetPagingMembers(query.cursor, query.direction);
+  if (paging !== undefined) {
+    body.cursor = paging.cursor;
+    body.direction = paging.direction;
   }
 
   const response = await getApiClient().post<PendingAuthListResponse>(
@@ -421,6 +429,10 @@ export async function setAuthorizationFraudState(
  * error rather than a whole account number rendered into a table and a bug report. The rejected value
  * is described and never reproduced, for the same reason.
  * @param {string} cardNum - The rendering as the service sent it.
+ * @returns {void} Nothing; the function asserts. A returned value would invite a caller to use the
+ *   result in place of the checked one, and there is nothing to substitute -- the rendering is either
+ *   the masked form the service sent or a fault, and this function never produces a rendering of its
+ *   own.
  * @throws {RangeError} If the value is not the masked form.
  */
 function requireMaskedCardNumber(cardNum: string): void {

@@ -3,8 +3,15 @@
  *
  * <p><strong>Purpose.</strong> The types here read
  * {@code src/main/resources/openapi/authorization-api.yaml} from the CLASSPATH and assert that what it
- * declares is what the module's own compiled constants and security rules produce. Nothing here starts an
- * application context, opens a socket or reaches a datastore.
+ * declares is what the module's own compiled constants and security rules produce. Nothing here opens a
+ * socket or reaches a datastore.
+ *
+ * <p>⚠️ Refactoring Rationale: this paragraph also said that nothing here starts an application context,
+ * and one class now does. {@code SecurityChainDispatchTest} assembles a web context because the rule it
+ * covers matches the container's DISPATCHER TYPE rather than a path or an authority, and a dispatcher type
+ * is not something a decision object can be asked about -- only a dispatch can witness it. The claim is
+ * corrected rather than deleted, because the reason the rest of the package holds to it is unchanged and a
+ * reader needs to know which of the two shapes a new assertion belongs in.
  *
  * <p>Refactoring Rationale: the review that prompted this package found several statements in the contract
  * that no compiler could check and that had drifted from the code — a response bound narrower than the codes
@@ -28,12 +35,18 @@
  *
  * <p>Alternatives Considered: asserting the same rules through a servlet slice -- a request per route
  * against the built filter chain -- which is the stronger form because it binds the WIRING as well as
- * the decision. Not used here, and the reason is a property of this checkpoint rather than a
- * preference: no module in this repository stands up a web context for a security assertion, so
- * introducing the first one would make this package the only place a route's status code is asserted,
- * with no sibling to compare it against. Asserting the installed decision object keeps the assertion
- * uniform across the eight contexts, and {@code SecurityConfig.businessAccess()} is published
- * precisely so that object is addressable without a servlet container.
+ * the decision. Still not used for the AUTHORITY matrix, because asserting the installed decision object
+ * keeps that assertion uniform across the eight contexts and {@code SecurityConfig.businessAccess()} is
+ * published precisely so the object is addressable without a servlet container.
+ *
+ * <p>⚠️ Refactoring Rationale: the reason recorded here for not using a slice was that no module in this
+ * repository stood up a web context for a security assertion, so this package would have been the first
+ * with no sibling to compare against. That is no longer true -- {@code auth-service}'s
+ * {@code com.carddemo.auth.api.UserControllerTest} installs its deployed chain in front of a hand-wired
+ * web context and asserts route status codes against it -- and it was never a reason that could cover the
+ * DISPATCHER-TYPE rule, which no decision object can express. {@code SecurityChainDispatchTest} follows
+ * that sibling's shape deliberately, so the two remain comparable, and it is scoped to the one rule that
+ * requires a dispatch rather than being widened into a second copy of the authority matrix.
  *
  * <p>Trade-offs: exercising the manager returned by {@code businessAccess()} binds the DECISION but not
  * the line that wires it to the routes it guards, which remains visible in the chain builder. Note

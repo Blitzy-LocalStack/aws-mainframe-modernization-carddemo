@@ -481,6 +481,8 @@ paths:
           $ref: '#/components/responses/MethodNotAllowed'
         '406':
           $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
         '500':
@@ -585,6 +587,8 @@ paths:
           $ref: '#/components/responses/MethodNotAllowed'
         '406':
           $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
         '500':
@@ -727,6 +731,8 @@ paths:
           $ref: '#/components/responses/NotAcceptable'
         '409':
           $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
         '500':
@@ -988,8 +994,18 @@ components:
         identity is echoed and logged. The refusal carries the shared problem body
         and the response correlation header, the same as any other 400, and it names
         the rule it applied without ever repeating the value it refused.
+      # WHY : Measured: the shared CorrelationId schema admits the EMPTY string, because
+      #       ApiError normalises an absent identity to "" at L619 and every problem
+      #       document carries the member, so the schema a BODY member names has to admit
+      #       it. A REQUEST header must not: conformsWithin in CorrelationIdFilter
+      #       declines an empty value and the filter then answers 400. This parameter
+      #       therefore narrows the shared schema by one facet instead of restating its
+      #       alphabet and width, which would be a second statement of both. Omitting the
+      #       header entirely stays valid -- that is governed by required above.
       schema:
-        $ref: '#/components/schemas/CorrelationId'
+        allOf:
+          - $ref: '#/components/schemas/CorrelationId'
+          - minLength: 1
 
   # WHY : Assumptions: the response header is declared once here rather than
   #       spelled out at each response, because a header re-typed at every
@@ -1423,6 +1439,15 @@ components:
                     message: Record changed by some one else. Please review
                 abend: null
                 card:
+                  # WHY : Refactoring Rationale: the selector is present and it was
+                  #       omitted. CardDetailCore declares `key` REQUIRED, so this
+                  #       example was invalid against the very schema it illustrates
+                  #       -- and it is the member a client needs most from a conflict
+                  #       body, because a retry addresses the card by its selector.
+                  #       The value is the same synthetic non-redeemable selector the
+                  #       path parameter publishes as its own example, so the two
+                  #       cannot drift and neither is mistaken for a live token.
+                  key: fake-selector-example-not-a-real-sealed-value-0000000000000
                   displayCardNumber: '************0011'
                   accountId: '00000000011'
                   embossedName: JOHN Q PUBLIC
@@ -1469,6 +1494,44 @@ components:
                 fieldErrors: []
                 abend: null
                 card: null
+
+    PayloadTooLarge:
+      description: >-
+        The request body exceeds the byte ceiling this service accepts, and
+        carries the machine code CARDDEMO-0413. The ceiling is 65536 bytes unless
+        the deployment names another under carddemo.web.max-request-body-bytes,
+        and it is enforced by a servlet filter ordered ahead of the security
+        chain rather than by a handler -- which is why it applies to every
+        operation that accepts a body and why the refusal reaches a caller that
+        presented no token at all.
+
+
+        Assumptions: the body of this response carries no fieldErrors entry and
+        cannot. The refusal is raised before any member is parsed, so there is no
+        bound object to have fields; the message names the ceiling and the size
+        the request declared, which is what distinguishes a misconfigured client
+        from a deliberate flood.
+
+
+        Assumptions: a body that declares no length is not refused for that alone.
+        It is read up to the ceiling and refused only if it exceeds it, and the
+        bytes already read are forwarded to the handler when it does not, so a
+        chunked request within the bound is served normally. For that case the
+        message states that the body declares no length and exceeds the bound,
+        because the exact size is the one thing that was never learned.
+
+
+        Assumptions: this response carries the correlation identifier like every
+        other, and that is a property of filter ORDER rather than of this filter.
+        The correlation filter is registered one position ahead of it and has
+        already put the identifier on the response before the body is written.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
 
 
   schemas:
@@ -2407,16 +2470,6 @@ components:
         shared core plus the full primary account number. A caller holding only
         carddemo-user cannot reach the operation that returns it.
 
-    # WHY : Refactoring Rationale: this envelope declares FOUR members - items,
-    #       firstKey, lastKey and hasNext - where it previously declared seven.
-    #       The three withdrawn members were nextCursor, prevCursor and hasPrev.
-    #       The reduction was made because the shared PageResponse in
-    #       services/common-lib/src/main/java/com/carddemo/common/web declares
-    #       exactly these four and the migration plan specifies exactly these
-    #       four, so the additional three described a body no service would ever
-    #       send. It also removes a real hazard rather than merely tidying: three
-    #       of seven members were pairwise redundant on every ordinary page, and a
-    #       client had no way to know which of a coinciding pair to echo.
     # WHY : Assumptions: the two tokens are BOUNDARY POSITIONS, and that single
     #       reading replaces the earlier split between row identities and request
     #       positions. On an ordinary page each names a row the caller received -
@@ -2475,13 +2528,7 @@ components:
         one hundred and ninety-six noted at :250, the matching field width at
         :253, the seven-element table at :255 - and by the seven complete row
         groups of app/cpy-bms/COCRDLI.CPY. A client cannot vary it.
-      # WHY : Refactoring Rationale: all SEVEN members are required, and an
-      #       earlier revision required only three of them while declaring seven.
-      #       The four it left optional are the four the shared envelope always
-      #       emits: PageResponse.java has no member it omits, and a Jackson
-      #       serialisation of it carries every one, so the contract described a
-      #       body this service never sends and a generated client got four
-      # WHY : Refactoring Rationale: the envelope is the FOUR members the shared
+      # WHY : (1) Refactoring Rationale: the envelope is the FOUR members the shared
       #       response type declares -- items, firstKey, lastKey and hasNext, at
       #       services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java
       #       -- and every one of them is required. An earlier revision of this
@@ -2774,8 +2821,44 @@ components:
     #       correlation identifier is the intended route, tying this response to
     #       the operational record where such detail belongs.
     ApiError:
+      # WHY : (1) Refactoring Rationale: this schema is CLOSED to unknown members and it was open, alone
+      #       among the seven contracts of this migration. A failure body is what a client parses when
+      #       something has already gone wrong, so it is the last shape in which an undeclared member
+      #       should be able to appear -- and the prose on the core below already asserted the closure
+      #       ("a strict validator reading additionalProperties: false...") while the schema did not
+      #       declare it, which reads as a control rather than as its absence.
+      # WHY : (2) Alternatives Considered: adding `additionalProperties: false` directly to the member
+      #       list, which is what the other six contracts do. Rejected because it does not WORK here, and
+      #       the reason is specific to this document: CardConflictError composes this shape with `allOf`
+      #       and adds one member. Under JSON Schema 2020-12 each `allOf` branch is validated
+      #       independently, and `additionalProperties` sees only the `properties` of the schema declaring
+      #       it -- so a closed member list on the composed shape would reject the `card` member on the
+      #       branch that does not declare it, making every conflict body invalid. Splitting an OPEN core
+      #       from two CLOSED users is the only arrangement that closes both shapes and keeps the
+      #       composition satisfiable.
+      # WHY : (3) Assumptions: the closure keyword is `unevaluatedProperties` rather than
+      #       `additionalProperties`, because only the former is annotation-aware: it refuses members no
+      #       applicator evaluated, which is exactly "everything the core did not declare" here and
+      #       "everything neither branch declared" on the composed shape. This is the same idiom this
+      #       document already uses for CardDetailCore, CardDetail and AdminCardDetail, so the pattern is
+      #       one a reader of this file has already met rather than a second one introduced for errors.
+      allOf:
+        - $ref: '#/components/schemas/ApiErrorCore'
+      unevaluatedProperties: false
+      description: >-
+        The single failure shape every operation in this service returns, closed
+        to any member the core below does not declare. It is the core and nothing
+        else; the conflict status extends the same core with one further member
+        rather than extending this schema, for the reason recorded above.
+    ApiErrorCore:
       type: object
       description: >-
+        The member list of the failure shape, declared OPEN so that the two
+        closed users of it -- ApiError and CardConflictError -- can each close
+        themselves over their own evaluated members. It is not referenced by any
+        operation directly.
+
+
         The single failure shape every operation in this service returns, for
         every status. It carries two independent channels: one aggregate
         sentence for a person to read, latched to the first failure detected,
@@ -2795,8 +2878,23 @@ components:
       # WHY : Alternatives Considered: suppressing the two keys when null, with an inclusion setting, so
       #       the omission became true. Rejected because the aggregate sentence is the reference's own
       #       75-character message field and a client renders the band from it unconditionally, so a
-      #       key that comes and goes moves that decision into every client; and because the services
-      #       set `default-property-inclusion: always`, which the money contract depends on.
+      #       key that comes and goes moves that decision into every client; and because
+      #       always-inclusion is PINNED for every service in
+      #       services/common-lib/src/main/resources/carddemo-common-defaults.yml, which the
+      #       money contract SEPARATELY depends on -- a money member with no value must be
+      #       present and null rather than absent, because absent reads as "no balance" where
+      #       null reads as "no amount applies". That is a second consumer of the same pin and
+      #       NOT the reason these two keys are required here: the reason is the record shape
+      #       above, and this schema carries no monetary member at all. An earlier revision ran
+      #       the two together, which read as though a problem document's nullability followed
+      #       from a money rule.
+      # WHY : ⚠️ Refactoring Rationale: that last clause used to read "the services set
+      #       default-property-inclusion: always" and it named no place, which is how it came
+      #       to be inaccurate -- exactly one of the seven services actually set the key, and
+      #       the other six, this one included, rested a published contractual promise on the
+      #       serialiser's own default. The key is now set once in the shared defaults every
+      #       service imports, so the claim is true for all of them and is verifiable by
+      #       reading one file. The reasoning is unchanged; only its subject is now real.
       required:
         - code
         - secondaryCode
@@ -2812,6 +2910,7 @@ components:
       properties:
         code:
           type: string
+          maxLength: 13
           description: >-
             The stable machine-readable identifier of the failure, matched on by
             clients and by operational tooling and never reworded. This service
@@ -2822,6 +2921,15 @@ components:
           example: CARDDEMO-0409
         secondaryCode:
           type: string
+          # WHY : Assumptions: the bound is TWENTY-TWO and not the thirteen four
+          #       sibling contracts declare, because this document publishes the
+          #       longest subordinate codes in the migration:
+          #       CARD-LOCK-NOT-ACQUIRED and CARD-WRITE-NOT-APPLIED are each
+          #       exactly twenty-two characters. A bound of thirteen here would
+          #       have forbidden two of the three codes this very schema names as
+          #       the discriminator, so the document would have contradicted
+          #       itself rather than merely under-specifying.
+          maxLength: 22
           description: >-
             A subordinate identifier qualifying code, or the empty string when
             the failure has no second identifier. This is what discriminates the
@@ -2883,6 +2991,14 @@ components:
         status:
           type: integer
           format: int32
+          # WHY : Assumptions: the bounds are the HTTP failure range and are the
+          #       ones four sibling contracts already declare. This member exists
+          #       so that a body separated from its response envelope is still
+          #       self-describing, which is only true if the value cannot be a
+          #       status no failure carries; an unbounded integer let a body claim
+          #       200 while being a failure shape.
+          minimum: 400
+          maximum: 599
           description: >-
             The HTTP status this response carries, restated inside the body so
             that a payload which has been logged or archived away from its
@@ -2937,6 +3053,15 @@ components:
           example: /api/v1/cards/9f2c1b7a-4e58-42d1-9c3e-6a70b5d81e04
         timestamp:
           type: string
+          # WHY : Assumptions: the width and the shape are DECLARED, not merely
+          #       described. The value is produced by one shared formatter whose
+          #       output is exactly the twenty-six-character form of
+          #       'YYYY-MM-DD HH:MM:SS.mmmmmm', carried forward from the
+          #       reference's own timestamp fields, so a document that only
+          #       described it left a generated client free to accept anything and
+          #       a validator unable to reject a differently-formatted value.
+          maxLength: 26
+          pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}$'
           description: >-
             When the failure occurred, in the baseline-compatible
             twenty-six-character form of a date, a space and a time carrying
@@ -3008,8 +3133,14 @@ components:
     #       only that condition has a current representation to return - which
     #       is why it is optional and nullable rather than required.
     CardConflictError:
+      # WHY : Refactoring Rationale: the first branch references the OPEN core rather than the closed
+      #       ApiError, and the composition closes itself with `unevaluatedProperties: false`. Referencing
+      #       the closed shape would make every conflict body invalid: each `allOf` branch is validated
+      #       independently under JSON Schema 2020-12, so the closed branch would refuse the `card` member
+      #       the second branch declares. Closing HERE instead refuses any member neither branch declared,
+      #       which is the property the shape needs and the one the closed reference cannot give it.
       allOf:
-        - $ref: '#/components/schemas/ApiError'
+        - $ref: '#/components/schemas/ApiErrorCore'
         - type: object
           description: >-
             The card-service addition to the shared error shape for the
@@ -3040,11 +3171,12 @@ components:
                 carry it. Such a body carries every other member of this shape
                 and omits this one. A client must therefore treat an absent
                 member and a null member alike: re-read the card.
+      unevaluatedProperties: false
       description: >-
         The body of the conflict response: every member of the shared error
-        shape, referenced rather than restated, plus one optional card. It is
-        used by this status alone; the other four failures return the shared
-        shape unextended.
+        shape, referenced rather than restated, plus one optional card, and
+        closed to anything else. It is used by this status alone; the other four
+        failures return the shared shape unextended.
 
     # WHY : Refactoring Rationale: the schema is named FieldError, where it was
     #       previously named ApiFieldError. The Java record it mirrors is the
@@ -3053,12 +3185,17 @@ components:
     #       spelling was a third name for one shape - which is precisely how a
     #       generated client ends up with two classes for one entity and a reader
     #       ends up unsure whether they are the same thing.
-    # WHY : Refactoring Rationale: the entry is CLOSED to additional members.
-    #       Every other object schema in this document already refuses unknown
-    #       members and this one did not, which made it the one place a service
-    #       could add a field to a failure body without the contract noticing -
-    #       and a failure body is the last place an undeclared member should be
-    #       able to appear, because it is what a client parses when something has
+    # WHY : Refactoring Rationale: the entry is CLOSED to additional members. It
+    #       was the FIRST of the three failure shapes in this document to be
+    #       closed, and the note here used to claim that "every other object
+    #       schema in this document already refuses unknown members" -- which was
+    #       untrue of the two shapes that matter most beside it: the failure shape
+    #       itself and the abend detail nested in it were both open. All three are
+    #       closed now, so the claim holds; it is restated rather than left
+    #       standing because a note asserting a control that is absent reads as
+    #       evidence the control exists and removes the pressure to add it.
+    #       A failure body is the last place an undeclared member should be able
+    #       to appear, because it is what a client parses when something has
     #       already gone wrong.
     FieldError:
       type: object
@@ -3094,6 +3231,13 @@ components:
             a colour.
         message:
           type: string
+          # WHY : Assumptions: the floor is ONE character, matching four sibling
+          #       contracts. An entry exists only because a field was refused, so
+          #       an entry carrying no text is an entry that says nothing about
+          #       the field it names -- and a client rendering the empty string
+          #       beside a highlighted field shows a person an error with no
+          #       explanation.
+          minLength: 1
           maxLength: 75
           description: >-
             What is wrong with this field, carried verbatim from the baseline
@@ -3209,6 +3353,11 @@ components:
     #       correct.
     AbendDetail:
       type: object
+      # WHY : Refactoring Rationale: this schema is CLOSED to unknown members and it was open, alone with
+      #       the failure shape it sits inside and alone among the seven contracts of this migration.
+      #       Nothing composes it, so the plain member-list keyword is used here rather than the
+      #       annotation-aware one the failure shape needs.
+      additionalProperties: false
       description: >-
         The structured detail of an abnormal termination, carried inside
         ApiError when a failure was of that kind. Of the six failures this

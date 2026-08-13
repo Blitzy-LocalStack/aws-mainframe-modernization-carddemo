@@ -665,8 +665,8 @@ path that forgot to validate.
 Declared by
 [`src/main/resources/db/migration/V2__auth_identity_sync.sql`](src/main/resources/db/migration/V2__auth_identity_sync.sql).
 It is a durable intended-change ledger: one row per change owed to the managed
-user pool, written **in the same transaction** as the `auth.users` change that
-caused it and applied after that transaction commits.
+user pool. **Update and delete** write their row **in the same transaction** as the
+`auth.users` change that caused it and apply it after that transaction commits.
 
 `Alternatives Considered:` calling the pool inline, inside the same transaction as
 the row write. Rejected because the pool is a remote system that cannot enlist in
@@ -674,6 +674,36 @@ a database transaction: a failure after the call and before the commit leaves th
 pool changed and the table not, and a failure the other way leaves a user row with
 no identity behind it. The ledger makes the owed change durable at the moment it
 is decided, so the two converge without either being able to advance alone.
+
+**Create is the exception, and it is the reverse order.** `auth.users.cognito_sub`
+is `NOT NULL` and only the pool can mint the subject a row carries, so the account
+must exist *before* the row can be written at all — there is no "same transaction"
+for a create's intention to join. It therefore **arms** a `WITHDRAW` row in a
+committed transaction of its own *before* provisioning, and settles it inside the
+same transaction as the insert:
+
+| Create outcome | What happens to the armed row |
+|---|---|
+| The insert commits | Abandoned (`create-committed`) **inside the insert's transaction**, so a committed row and a live withdrawal intention never coexist. |
+| The pool already holds the username | Abandoned (`pool-held-account`) — this request provisioned nothing, and the account belongs either to the caller that won the race or to an earlier interrupted create whose *own* armed row the scheduled pass owns. |
+| The provider faults, or the insert is refused | Applied — the account is withdrawn now, and stays pending for the scheduled pass if the provider cannot be reached. |
+| The process dies between provisioning and the insert | Stays pending, which is the whole point: the orphaned account is named by a durable row rather than by nothing. |
+
+`Refactoring Rationale:` the compensation was previously recorded from the insert's
+failure handlers, which covers a failed insert and **nothing else** — a process
+death, an eviction or a rollback raised outside those handlers each left an account
+that can authenticate, holds no membership this context records, permanently blocks
+a later create of the same identifier, and appeared in no ledger and no log.
+
+`Assumptions:` two further properties follow from arming before the account exists,
+and both are enforced in `IdentitySyncService`. A withdrawal is **guarded** against
+a committed row that owns the account, because a stale withdrawal from a delete
+whose provider call was lost would otherwise destroy an account created afresh
+under the same identifier; and the scheduled pass **defers** a task younger than
+`COMPENSATION_GRACE` (30 seconds), because an armed row is visible to it while the
+create that armed it is still running. The create path's own compensation applies
+through a separate entry point that skips the guard, since it provisioned the
+account itself.
 
 ### 9.3 Migration, and the companion artifact that is easy to omit
 
@@ -909,7 +939,7 @@ untouched; none of them is fixed by this work either.
 | **The signed group claim replaces `CDEMO-USER-TYPE`** | The COMMAREA field was storage the client echoed back, so the client could in principle assert its own user type; a signature checked against the issuer's keys cannot be asserted — see [§8.3](#83-identity-and-why-the-group-claim-is-not-merely-a-port). |
 | **Full statelessness** | `CDEMO-PGM-CONTEXT`, the first-entry-versus-re-entry discriminator, **disappears entirely**: a handler that returns a field-error array has no turn count to remember. There are no sticky sessions and no server-side session store. This is what makes horizontally-scaled tasks behind a load balancer viable at all — any task can serve any request, so scaling out needs no session affinity and losing a task loses no user's place. |
 | **Navigation is client-side** | `EXEC CICS XCTL` between programs becomes a route change in the browser client. No server-side "next program" field exists in the target at all. |
-| **A durable identity-synchronisation ledger is added** | The pool cannot enlist in a database transaction, so the owed change is committed alongside the row and applied afterwards — see [§9.2](#92-authidentity_sync_task). The baseline had no equivalent because it had no second system to keep in step. |
+| **A durable identity-synchronisation ledger is added** | The pool cannot enlist in a database transaction, so the owed change is committed alongside the row and applied afterwards — or, for a create, *armed before* the account exists and settled with the insert — see [§9.2](#92-authidentity_sync_task). The baseline had no equivalent because it had no second system to keep in step. |
 
 ---
 

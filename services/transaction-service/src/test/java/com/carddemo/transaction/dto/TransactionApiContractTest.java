@@ -568,13 +568,16 @@ class TransactionApiContractTest {
     }
 
     /**
-     * Asserts that the page envelope declares and requires exactly the five members the shared
+     * Asserts that the page envelope declares and requires exactly the four members the shared
      * response type carries, so no generated client receives an accessor for a member no service
      * emits and no strict client rejects a valid response for a member no service sends.
      *
-     * <p>Assumptions: the four are read from the shared type rather than restated as a literal list
-     * where the type can be reached, because the whole defect this asserts against was a contract that
-     * named members the type does not declare.</p>
+     * <p>Assumptions: the four are {@code items}, {@code firstKey}, {@code lastKey} and
+     * {@code hasNext}, read from the shared type rather than restated as a literal list where the type
+     * can be reached, because the whole defect this asserts against was a contract that named members
+     * the type does not declare. Refactoring Rationale: the opening sentence said five while the next
+     * paragraph said four, so the two halves of one Javadoc contradicted each other; the arity is
+     * stated once now.</p>
      */
     @Test
     @DisplayName("the page envelope declares and requires exactly the shared envelope's four members")
@@ -616,10 +619,12 @@ class TransactionApiContractTest {
      * carry is a value a generated client waits for and never receives; a component the document does
      * not publish is a value a client discards.</p>
      *
-     * <p>Assumptions: the required set is the components minus the message, which is the one member the
-     * baseline can genuinely omit -- {@code CVCRD01Y} attaches a low-values sentinel to
-     * {@code CCARD-RETURN-MSG} alone. Deriving the expectation that way rather than restating four
-     * names keeps it correct if a component is added.</p>
+     * <p>Refactoring Rationale: the required set is EVERY component, where it was previously the
+     * components minus the message. {@code CVCRD01Y} does attach a low-values sentinel to
+     * {@code CCARD-RETURN-MSG} alone, so that member is the one whose VALUE can be absent -- but the
+     * pinned {@code default-property-inclusion} writes the member regardless, carrying null, and the
+     * published {@code ReturnMessage} union admits exactly that. Excluding it from required described an
+     * omission this service cannot produce.</p>
      */
     @Test
     @DisplayName("the posted-payment body publishes exactly the response record's members")
@@ -634,8 +639,8 @@ class TransactionApiContractTest {
                         + " receives, and the reverse is a value it discards")
                 .containsExactlyInAnyOrderElementsOf(components);
         assertThat(strings(posted, "required"))
-                .containsExactlyInAnyOrderElementsOf(
-                        components.stream().filter(name -> !"returnMessage".equals(name)).toList());
+                .as("every component is written on every response, so every one must be required")
+                .containsExactlyInAnyOrderElementsOf(components);
         assertThat(posted.get("additionalProperties")).isEqualTo(false);
         assertThat(mapping(mapping(posted, "properties"), "paid").get("const"))
                 .as("the discriminator's published constant must be the value the record's factory"
@@ -683,15 +688,17 @@ class TransactionApiContractTest {
     @Test
     @DisplayName("each preview body publishes exactly the preview record's members")
     void previewBodiesPublishExactlyThePreviewRecordMembers() {
-        assertPublishedShapeMatchesRecord("TransactionAddPreview",
-                TransactionAddPreview.class, "returnMessage");
-        // WHY : ⚠️ Assumptions: the payment preview has TWO optional members where the capture preview has
-        //       one, and the second is the money member. A declined confirmation reaches no account read
-        //       at all -- CLEAR-CURRENT-SCREEN at line 180 of app/cbl/COBIL00C.cbl blanks the display
-        //       fields -- so the withheld record carries no balance on that branch, and a contract that
-        //       required one would oblige this service to publish a figure it deliberately does not read.
-        assertPublishedShapeMatchesRecord("BillPaymentPreview",
-                BillPaymentPreview.class, "returnMessage", "payableBalance");
+        assertPublishedShapeMatchesRecord("TransactionAddPreview", TransactionAddPreview.class);
+        // WHY : Refactoring Rationale: NEITHER preview has an optional member, where this pair previously
+        //       claimed one and two. A declined confirmation does reach no account read at all --
+        //       CLEAR-CURRENT-SCREEN at line 180 of app/cbl/COBIL00C.cbl blanks the display fields -- so
+        //       BillPaymentPreview.cleared carries no balance and no sentence on that branch. But it
+        //       constructs both components as null rather than omitting them, and the pinned inclusion
+        //       policy writes both, so what the document owes is a NULLABLE required member, not an
+        //       optional one. payableBalance is published as a oneOf with an explicit null branch for
+        //       exactly that reason; before this correction it was optional AND non-nullable, promising a
+        //       decimal string on the one turn that answers null.
+        assertPublishedShapeMatchesRecord("BillPaymentPreview", BillPaymentPreview.class);
 
         assertThat(mapping(mapping(schema("TransactionAddPreview"), "properties"), "written")
                         .get("const"))
@@ -754,29 +761,35 @@ class TransactionApiContractTest {
     }
 
     /**
-     * Asserts that a published schema declares exactly one record's components, requires all but the
-     * named optional ones, and is closed.
+     * Asserts that a published schema declares exactly one record's components, requires EVERY one of
+     * them, and is closed.
+     *
+     * <p>Refactoring Rationale: this helper took a varargs list of components the schema was permitted to
+     * leave out of its required list, and that parameter was the defect rather than a feature. A record
+     * component is written on EVERY response, because carddemo-common-defaults.yml pins
+     * default-property-inclusion to always -- so a component that may hold no value is required AND
+     * nullable, and no component is ever absent. The exemption list described omissions this service
+     * cannot produce, and it was the mechanism by which three such members stayed published as optional
+     * through the review that found the class of defect elsewhere.</p>
      *
      * @param schemaName the published schema to read
      * @param record the record that implements it
-     * @param optional the component names the schema may leave out of its required list
      */
-    private void assertPublishedShapeMatchesRecord(String schemaName, Class<?> record,
-            String... optional) {
+    private void assertPublishedShapeMatchesRecord(String schemaName, Class<?> record) {
         Map<String, Object> published = schema(schemaName);
         List<String> components = Arrays.stream(record.getRecordComponents())
                 .map(RecordComponent::getName)
                 .toList();
-        List<String> optionalNames = List.of(optional);
 
         assertThat(mapping(published, "properties").keySet())
                 .as("%s must publish exactly the members %s carries", schemaName,
                         record.getSimpleName())
                 .containsExactlyInAnyOrderElementsOf(components);
         assertThat(strings(published, "required"))
-                .as("%s must require every member but %s", schemaName, optionalNames)
-                .containsExactlyInAnyOrderElementsOf(
-                        components.stream().filter(name -> !optionalNames.contains(name)).toList());
+                .as("%s must require every member it publishes: the inclusion policy writes every"
+                        + " component, so an unlisted one describes an omission that cannot happen",
+                        schemaName)
+                .containsExactlyInAnyOrderElementsOf(components);
         assertThat(published.get("additionalProperties"))
                 .as("%s must be closed, so a surplus property is a detectable failure", schemaName)
                 .isEqualTo(false);
@@ -1042,5 +1055,70 @@ class TransactionApiContractTest {
                 }
             }
         }
+    }
+
+    /**
+     * Asserts that every published operation declares the transport refusals this service can produce,
+     * and that each of the three has a shape a client can bind to.
+     *
+     * <p>⚠️ Refactoring Rationale: all three were reachable and UNDECLARED. The shared advice in
+     * {@code services/common-lib} answers a wrong method with 405, a body in the wrong media type with
+     * 415 and an unsatisfiable {@code Accept} header with 406, on every route of every service, and this
+     * contract declared none of them. A client generated from it had no branch for any of the three and a
+     * hand-written one, {@code ui/src/api/client.ts}, could only report each as an unrecognised body. The
+     * census is written as a loop rather than as a list of paths so that an operation added later is
+     * covered without this case being edited.</p>
+     *
+     * <p>Assumptions: the operation count is asserted so the loop cannot pass vacuously. A scanner that
+     * matched nothing -- because a path item gained a member, or because the document was restructured --
+     * would otherwise assert nothing at all while reading as though it had checked every route.</p>
+     */
+    @Test
+    @DisplayName("every operation declares the transport refusals the shared advice can produce")
+    void theTransportRefusalsAreDeclaredWhereTheyCanOccur() {
+        Map<String, Object> document = this.contract;
+        Map<String, Object> paths = mapping(document, "paths");
+        int operations = 0;
+
+        for (String path : paths.keySet()) {
+            Map<String, Object> methods = mapping(paths, path);
+            for (String method : methods.keySet()) {
+
+                // WHY : Assumptions: a path item carries members that are not operations -- a shared
+                //       description, a shared parameter list -- so an operation is identified by carrying
+                //       an operationId rather than by the key not being one of those. Naming the
+                //       exclusions instead would need amending every time a path item gained a member.
+                if (!(methods.get(method) instanceof Map)) {
+                    continue;
+                }
+                Map<String, Object> operation = mapping(methods, method);
+                if (!operation.containsKey("operationId")) {
+                    continue;
+                }
+                operations++;
+                Map<String, Object> responses = mapping(operation, "responses");
+                assertThat(responses)
+                        .as("%s %s must declare both refusals every route can produce", method, path)
+                        .containsKeys("405", "406");
+                if (operation.containsKey("requestBody")) {
+                    assertThat(responses)
+                            .as("%s %s accepts a body, so it can refuse the body's media type",
+                                    method, path)
+                            .containsKey("415");
+                }
+            }
+        }
+
+        assertThat(operations)
+                .as("the census is not vacuous; every published operation was examined")
+                .isEqualTo(5);
+
+        Map<String, Object> declared = mapping(mapping(document, "components"), "responses");
+        assertThat(declared)
+                .as("each refusal is declared once and referenced, so the three cannot drift apart")
+                .containsKeys("MethodNotAllowed", "NotAcceptable", "UnsupportedMediaType");
+        assertThat(mapping(mapping(declared, "MethodNotAllowed"), "headers"))
+                .as("a 405 names the methods the route does publish, which is what a client acts on")
+                .containsKey("Allow");
     }
 }

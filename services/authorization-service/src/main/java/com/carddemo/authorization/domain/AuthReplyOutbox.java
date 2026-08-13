@@ -236,6 +236,46 @@ public class AuthReplyOutbox {
     private LocalDateTime abandonedAt;
 
     /**
+     * The deadline the ACCEPTED send carried on the wire, recorded with the acceptance itself.
+     *
+     * <p>Assumptions: this is not {@link #expiresAt}. That column is the absolute instant the deciding
+     * transaction chose, and the interval between it and {@link #createdAt} is the WINDOW the requester
+     * asked for; the reference denominates its deadline as a duration counted from the put at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl:750}, so the publisher re-applies that
+     * window from the send it is making and records the result here. Refactoring Rationale: the computed
+     * value used to be stored nowhere at all, so the row could not say what deadline the requester was
+     * given -- and because a retry after an accepted send was suppressed by the queue and then marked
+     * published, the value the log reported was one that nothing had sent. Recording it with the
+     * acceptance makes the row's account of the send answerable from the row.</p>
+     */
+    @Column(name = "send_expires_at")
+    private LocalDateTime sendExpiresAt;
+
+    /**
+     * When the broker accepted a send of this reply, if it has.
+     *
+     * <p>Assumptions: this column is what distinguishes an ACCEPTED send from an unsent one, and it is
+     * deliberately separate from {@link #publishedAt}. The publication instant is written by a second
+     * transaction, so a fault between the two leaves a row that was sent and is not published -- and
+     * that row must be reconciled rather than sent again. A single column could not express the
+     * difference, and the pass would have to infer it from the queue.</p>
+     */
+    @Column(name = "sent_at")
+    private LocalDateTime sentAt;
+
+    /**
+     * The identity the broker returned for the accepted message, truncated to the column width.
+     */
+    @Column(name = "broker_message_id", length = 100)
+    private String brokerMessageId;
+
+    /**
+     * The first-in-first-out sequence number the broker returned, truncated to the column width.
+     */
+    @Column(name = "broker_sequence_number", length = 64)
+    private String brokerSequenceNumber;
+
+    /**
      * Why the last publication attempt failed, truncated to the column width.
      */
     @Column(name = "last_error", length = 256)
@@ -249,6 +289,22 @@ public class AuthReplyOutbox {
      * into a lost reply.</p>
      */
     private static final int LAST_ERROR_MAX_LENGTH = 256;
+
+    /**
+     * The width of {@link #brokerMessageId}, used to truncate rather than refuse an acceptance record.
+     *
+     * <p>Assumptions: truncation is the right failure mode here for a stronger reason than it is for a
+     * diagnostic. The acceptance record is what stops a second copy of one reply being enqueued, so a
+     * broker identity wider than the column must not be the reason that record is refused -- the row
+     * would then be sent again with no evidence of the first accept, which is the exact defect these
+     * columns exist to remove.</p>
+     */
+    private static final int BROKER_MESSAGE_ID_MAX_LENGTH = 100;
+
+    /**
+     * The width of {@link #brokerSequenceNumber}, truncated for the reason recorded on the identity.
+     */
+    private static final int BROKER_SEQUENCE_NUMBER_MAX_LENGTH = 64;
 
     /**
      * Creates an empty instance for the persistence provider to populate.
@@ -457,6 +513,118 @@ public class AuthReplyOutbox {
      */
     public boolean isExpiredAsOf(LocalDateTime asOf) {
         return this.expiresAt != null && !asOf.isBefore(this.expiresAt);
+    }
+
+    /**
+     * Returns the deadline stamped on the wire, or {@code null} when no send has stamped one yet.
+     *
+     * @return the stamped deadline, in coordinated universal time, or {@code null}
+     */
+    public LocalDateTime getSendExpiresAt() {
+        return this.sendExpiresAt;
+    }
+
+    /**
+     * Returns when the broker accepted a send of this reply, or {@code null} when none was accepted.
+     *
+     * @return the acceptance instant, in coordinated universal time, or {@code null}
+     */
+    public LocalDateTime getSentAt() {
+        return this.sentAt;
+    }
+
+    /**
+     * Returns the identity the broker gave the accepted message, or {@code null} when none was accepted.
+     *
+     * @return the broker's message identity, or {@code null}
+     */
+    public String getBrokerMessageId() {
+        return this.brokerMessageId;
+    }
+
+    /**
+     * Returns the sequence number the broker gave the accepted message, if it gave one.
+     *
+     * @return the broker's sequence number, or {@code null}
+     */
+    public String getBrokerSequenceNumber() {
+        return this.brokerSequenceNumber;
+    }
+
+    /**
+     * Reports whether the broker has already accepted a send of this reply.
+     *
+     * <p>Assumptions: this is the question a publishing pass asks BEFORE it sends. A row that answers
+     * {@code true} and carries no publication instant was sent and not recorded as published, so its
+     * next pass must reconcile it -- record the publication -- rather than send it again. Answering the
+     * question from the row is what makes that decision independent of the queue's deduplication
+     * window, which expires while the row does not.</p>
+     *
+     * @return {@code true} when an acceptance instant is recorded
+     */
+    public boolean isSendAccepted() {
+        return this.sentAt != null;
+    }
+
+    /**
+     * Records that the broker accepted a send, with the identities it answered with.
+     *
+     * <p>Assumptions: this is written in its OWN transaction, immediately after the broker answers and
+     * before the publication instant is recorded, and the ordering is the whole point. It shrinks the
+     * interval in which an accepted send is indistinguishable from an unsent one to a single statement,
+     * and after it commits a failure of any later step leaves a row that reconciles instead of
+     * re-sending.</p>
+     *
+     * <p>Assumptions: both identities are truncated rather than rejected, for the reason recorded on
+     * {@link #BROKER_MESSAGE_ID_MAX_LENGTH}. Assumptions: a blank identity is stored as {@code null}, so
+     * the check constraint pairing the identity with the acceptance instant is satisfied by absence
+     * rather than by an empty string that no query can distinguish from one.</p>
+     *
+     * <p>⚠️ Trade-offs: the stamped deadline recorded here is the one the ACCEPTED CALL carried, and
+     * there is one window in which that is not the deadline the requester will read. If a send is accepted
+     * and this write does not commit, the next pass sends again; inside the queue's five-minute
+     * deduplication window that second send is suppressed, so the message the broker delivers carries the
+     * FIRST call's deadline while this column then records the second's. The disagreement is bounded by
+     * the retry delay, is in the safe direction -- the delivered deadline is the earlier of the two -- and
+     * is the residue of a window that used to span the whole publication transition. Closing it entirely
+     * would need the send and this write to commit together across two resource managers, which is the
+     * two-phase commit this migration records as eliminated.</p>
+     *
+     * @param messageId the identity the broker gave the message; may be {@code null} or blank, in which
+     *     case no identity is recorded
+     * @param sequenceNumber the first-in-first-out sequence number the broker gave the message; may be
+     *     {@code null} or blank, in which case none is recorded
+     * @param stampedDeadline the deadline the accepted call put on the wire; {@code null} when the reply
+     *     carries no expiry at all
+     * @param acceptedAt the instant the broker answered, in coordinated universal time; must not be
+     *     {@code null}
+     */
+    public void recordSendAccepted(String messageId, String sequenceNumber,
+            LocalDateTime stampedDeadline, LocalDateTime acceptedAt) {
+        this.sentAt = acceptedAt;
+        this.sendExpiresAt = stampedDeadline;
+        this.brokerMessageId = truncated(messageId, BROKER_MESSAGE_ID_MAX_LENGTH);
+        // WHY : Assumptions: the sequence number is only stored when an identity is, because the check
+        //       constraint ck_auth_reply_outbox_broker_sequence subordinates one to the other. A broker
+        //       that answered with a sequence number and no message identity would otherwise fail the
+        //       write and undo the acceptance record this method exists to make durable.
+        this.brokerSequenceNumber = this.brokerMessageId == null
+                ? null
+                : truncated(sequenceNumber, BROKER_SEQUENCE_NUMBER_MAX_LENGTH);
+    }
+
+    /**
+     * Trims a value to a column width, mapping an absent or blank value to {@code null}.
+     *
+     * @param value the value to store; may be {@code null} or blank
+     * @param maxLength the column's width, of type {@code int}
+     * @return the value bounded to the width, or {@code null} when it carries nothing
+     */
+    private static String truncated(String value, int maxLength) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        return value.length() <= maxLength ? value : value.substring(0, maxLength);
     }
 
     /**

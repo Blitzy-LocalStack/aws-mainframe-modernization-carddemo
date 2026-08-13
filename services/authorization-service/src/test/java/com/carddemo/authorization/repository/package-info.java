@@ -10,7 +10,7 @@
  * domain each check constraint admits and refuses,
  * the fraud access path as the two separate catalogue objects it became here, the accept-and-refuse
  * behaviour of an upsert, and the look-ahead row a paging query is required to return. It declares
- * no type and holds no import, so nothing here runs; its whole effect is on what the four classes
+ * no type and holds no import, so nothing here runs; its whole effect is on what the five classes
  * beside it assert and, just as much, on what they leave to somebody else.
  *
  * <p>Five classes sit beside this charter, covering the four tables in the schema this context owns
@@ -48,15 +48,39 @@
  *       {@code ck_pending_auth_detail_auth_resp_reason}; that
  *       {@code fk_pending_auth_detail_summary} makes a detail row unreachable without its summary;
  *       and the look-ahead contract, because this is the only one of the four tables that pages.</li>
- *   <li>{@code AuthFraudUpserterIT} -- the fraud access path as <b>two</b> catalogue objects,
- *       {@code pk_auth_fraud} over {@code (card_num, auth_ts)} and the index
- *       {@code idx_auth_fraud_card_recent} over {@code (card_num ASC, auth_ts DESC)}, asserted
- *       against the live catalogue rather than against the migration text; and the two-column
- *       upsert exercised in both directions and under two writers reaching one row at once.
+ *   <li>{@code AuthFraudUpserterIT} -- the atomic fraud WRITE, in seven cases: the insert arm and
+ *       the update arm each reporting which one they took, the update arm preserving the other
+ *       twenty-four columns as a snapshot, and two concurrent first marks reaching one row at once
+ *       with one inserting and one updating. It additionally re-asserts {@code pk_auth_fraud} and
+ *       {@code idx_auth_fraud_card_recent} against the live catalogue, which is a deliberate overlap
+ *       with the class below and not a duplication to remove: this class exercises the statement whose
+ *       correctness DEPENDS on both objects, so a reader debugging a failed concurrent mark should not
+ *       have to open another file to learn what the write is racing on.
  *       Assumptions: this class is named for the WRITER it exercises rather than for a repository,
  *       because the fraud write is one native statement declared on {@code AuthFraudUpserter} and not
- *       a derived query, so a reader looking for an {@code AuthFraudRepositoryIT} beside this charter
- *       will not find one and is not missing a test.</li>
+ *       a derived query.</li>
+ *   <li>{@code AuthFraudRepositoryIT} -- the SCHEMA TRUTH of {@code auth_fraud}, in thirteen cases,
+ *       and the reason the fraud table has two classes where every other table here has one. It pins
+ *       that {@code pk_auth_fraud} is the composite {@code (card_num, auth_ts)} in that order; that
+ *       {@code idx_auth_fraud_card_recent} is a SECOND catalogue object over the same pair with the
+ *       second component DESCENDING; that the two are genuinely distinct rather than one object
+ *       wearing the wanted name; that the table carries exactly twenty-six columns and no check
+ *       constraint, with the catalogue query proving it could see one; that {@code auth_ts} is
+ *       {@code TIMESTAMP(6)} and a microsecond instant round-trips exactly; that
+ *       {@code merchant_name} is {@code VARCHAR(22)} and does not trim what it is given; both upsert
+ *       directions with their column counts; that {@code insertFraudRowIfAbsent} declines a taken key
+ *       without changing it; that the card-recent path answers newest first and only for the card
+ *       asked about; and that {@code currentDate()} returns the ENGINE's date rather than this
+ *       process's.
+ *       Refactoring Rationale: this entry was ABSENT from the roster while the paragraph above stated
+ *       the class had been written and that the roster enumerated it, and the entry above asserted a
+ *       reader would not find such a class and was not missing a test. All three statements were in
+ *       this one file and two of them were false. The omission mattered in the direction that hides
+ *       work rather than invents it -- {@code PackageCharterInventoryTest} holds every class NAMED
+ *       here to a file on disk, so a named-but-absent class fails the build, while a
+ *       present-but-unnamed one does not -- so thirteen cases including the descending-index
+ *       assertion the migration fixes as a preserved contract looked like coverage nobody had. The
+ *       roster is re-derived from the directory rather than appended to.</li>
  *   <li>{@code OutboxRepositoryIT} -- selection of publishable rows from
  *       {@code auth_reply_outbox}, their ordering, and idempotent marking. The two partial indexes
  *       {@code idx_auth_reply_outbox_unpublished} and {@code idx_auth_reply_outbox_group} fix what

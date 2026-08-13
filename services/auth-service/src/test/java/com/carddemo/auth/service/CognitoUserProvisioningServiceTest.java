@@ -11,6 +11,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.UUID;
 import java.util.function.Function;
@@ -81,6 +83,40 @@ class CognitoUserProvisioningServiceTest {
 
     /** The identifier under test, at the eight characters {@code SEC-USR-ID PIC X(08)} declares. */
     private static final String USER_ID = "TESTUSR1";
+
+    /**
+     * A quote-bearing identifier, admissible because the request boundary bounds width and not charset.
+     *
+     * <p>Assumptions: {@code CreateUserRequest} constrains {@code userId} by width and presence only --
+     * {@code @NotBlank}, {@code @Size(max = 8)} and an unanchored {@code @Schema(pattern = "\S")} facet
+     * that any one non-whitespace character satisfies -- and {@code UserService.foldedKey} only trims and
+     * upper-cases, so this value reaches the provisioning path unchanged. It is upper case already, so
+     * the test asserts the same bytes the service would receive from a create request.</p>
+     */
+    private static final String QUOTE_BEARING_USER_ID = "A\"B";
+
+    /**
+     * A backslash-terminated identifier, which is the harder of the two escapes.
+     *
+     * <p>Assumptions: a trailing backslash is worse than an interior quote under concatenation, because
+     * it escapes the very quote that CLOSES the member -- so the document does not merely gain a stray
+     * quote, it loses its structure from that point on.</p>
+     */
+    private static final String BACKSLASH_BEARING_USER_ID = "ABCDEFG\\";
+
+    /**
+     * An identifier shaped to inject a third member, at seven characters.
+     *
+     * <p>Assumptions: this is the value that makes the defect a SECURITY finding rather than a
+     * robustness one. Under concatenation it produced {@code {"username":"","X":"","password":"..."}} --
+     * valid JSON with three members, an EMPTY username, and a member name the payload's author never
+     * wrote. A collector parsing that document reads a credential it cannot attribute to anybody, and
+     * nothing in the pipeline had failed.</p>
+     */
+    private static final String INJECTION_SHAPED_USER_ID = "\",\"X\":\"";
+
+    /** Reads the published credential payload back; owned by the test, never the subject's writer. */
+    private static final ObjectMapper PAYLOAD_READER = new ObjectMapper();
 
     /** The given name under test, recorded as {@code given_name}. */
     private static final String FIRST_NAME = "Ada";
@@ -673,6 +709,101 @@ class CognitoUserProvisioningServiceTest {
         assertThat(published.getValue().description())
                 .as("a description is readable without decrypting the value, so it names no identity")
                 .doesNotContain(USER_ID);
+    }
+
+    /**
+     * Provisions one identity and returns the credential document that was published, parsed.
+     *
+     * <p>Assumptions: the document is PARSED rather than string-matched. A string assertion would have
+     * to spell the escaping the implementation happens to use, so it would pass for a scheme that
+     * escaped nothing as readily as for one that escaped correctly; parsing asserts the only property
+     * that matters to a collector, which is that the bytes are a JSON object carrying the value back
+     * unchanged.</p>
+     *
+     * @param userId the identifier to provision, already in the folded form the service receives
+     * @return the parsed payload of the single created entry, never {@code null}
+     * @throws Exception if the published value is not parseable JSON, which is itself the defect
+     */
+    private JsonNode publishedCredentialFor(String userId) throws Exception {
+        stubSuccessfulCreate();
+        this.service.provision(userId, FIRST_NAME, LAST_NAME,
+                CognitoUserProvisioningService.USER_TYPE_USER);
+
+        ArgumentCaptor<CreateSecretRequest> published =
+                ArgumentCaptor.forClass(CreateSecretRequest.class);
+        verify(this.secrets).createSecret(published.capture());
+        return PAYLOAD_READER.readTree(published.getValue().secretString());
+    }
+
+    /**
+     * Verifies a quote-bearing identifier is published as an escaped value rather than breaking the
+     * document.
+     *
+     * <p>Assumptions: the assertion is on the PARSED username, so it fails both for a document that
+     * cannot be parsed and for one that parses to a truncated identifier. Under the concatenation this
+     * replaced, {@code A"B} closed the username member after {@code A} and left {@code B} where a
+     * member name was expected, so the stored value was not JSON at all and the account's credential
+     * could not be collected.</p>
+     *
+     * @throws Exception if the published value is not parseable JSON
+     */
+    @Test
+    @DisplayName("a quote-bearing identifier is escaped, so the credential document still parses")
+    void aQuoteBearingIdentifierIsEscaped() throws Exception {
+        JsonNode payload = publishedCredentialFor(QUOTE_BEARING_USER_ID);
+
+        String generated = capturedCreate(AdminCreateUserRequest::temporaryPassword);
+        assertThat(payload.path("username").asText())
+                .as("the identifier must round-trip exactly, not merely survive")
+                .isEqualTo(QUOTE_BEARING_USER_ID);
+        assertThat(payload.path("password").asText()).isEqualTo(generated);
+    }
+
+    /**
+     * Verifies a backslash-terminated identifier is published as an escaped value.
+     *
+     * <p>Assumptions: this case is separate from the quote above because the two failed differently
+     * under concatenation. A trailing backslash escaped the closing quote of the username member, so
+     * the password's own member name and value were absorbed into the username's string -- the document
+     * then held one member whose value was a run of the remaining text, which is a shape a lenient
+     * parser can accept while returning the wrong credential.</p>
+     *
+     * @throws Exception if the published value is not parseable JSON
+     */
+    @Test
+    @DisplayName("a backslash-bearing identifier is escaped, so the password member survives")
+    void aBackslashBearingIdentifierIsEscaped() throws Exception {
+        JsonNode payload = publishedCredentialFor(BACKSLASH_BEARING_USER_ID);
+
+        String generated = capturedCreate(AdminCreateUserRequest::temporaryPassword);
+        assertThat(payload.path("username").asText()).isEqualTo(BACKSLASH_BEARING_USER_ID);
+        assertThat(payload.path("password").asText())
+                .as("the closing quote of the username must not have been escaped away")
+                .isEqualTo(generated);
+    }
+
+    /**
+     * Verifies an identifier shaped to inject a third member cannot add one.
+     *
+     * <p>Assumptions: the member COUNT is asserted, not only the two values, because that is the
+     * property injection defeats. This identifier produced valid three-member JSON under
+     * concatenation, so every assertion that only checked parseability or only read the two expected
+     * members would have passed while the document carried a member its author never wrote and an
+     * empty username.</p>
+     *
+     * @throws Exception if the published value is not parseable JSON
+     */
+    @Test
+    @DisplayName("an identifier shaped like a JSON fragment cannot add a member to the document")
+    void anInjectionShapedIdentifierCannotAddAMember() throws Exception {
+        JsonNode payload = publishedCredentialFor(INJECTION_SHAPED_USER_ID);
+
+        String generated = capturedCreate(AdminCreateUserRequest::temporaryPassword);
+        assertThat(payload.size())
+                .as("the document carries exactly the two members this service writes")
+                .isEqualTo(2);
+        assertThat(payload.path("username").asText()).isEqualTo(INJECTION_SHAPED_USER_ID);
+        assertThat(payload.path("password").asText()).isEqualTo(generated);
     }
 
     /**

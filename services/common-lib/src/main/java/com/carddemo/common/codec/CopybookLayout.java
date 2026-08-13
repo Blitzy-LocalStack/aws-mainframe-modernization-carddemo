@@ -1479,7 +1479,39 @@ public final class CopybookLayout {
             return new RecordSpec(derivedName, reclen, keyLength, keyOffset, replaced)
                     .validateGeometry();
         }
-    }
+    
+        /**
+         * Renders the record's geometry and the SIZE of its field list.
+         *
+         * <p>Purpose. The field list of a base master runs to dozens of entries, so the
+         * compiler-generated rendering emitted every offset, length and type of a whole layout in one
+         * line. Nothing in it is protected -- a layout is metadata about a copybook this migration does
+         * not alter -- so the concern here is the collection half of
+         * {@code docs/architecture/observability.md} L1093 to L1112: a rendering whose length is a
+         * function of the layout rather than of the type.</p>
+         *
+         * <p>Assumptions: the four geometry components print in full and are the whole point of the
+         * rendering. A layout fault presents as a record length or a key offset that disagrees with the
+         * copybook, and those four numbers beside the name are exactly what such a disagreement is
+         * checked against; the field count then says whether the list was truncated.</p>
+         *
+         * <p>Trade-offs: the individual field specifications are unreachable from a log line and must be
+         * read from the registry or from the accessor, which returns the list unmodified. That is the
+         * right direction for a static table read by every service: a reader debugging one field asks the
+         * registry for it rather than searching a line that printed all of them.</p>
+         *
+         * @return a rendering naming the layout, its record length, its key length and offset and the
+         *     number of fields, with the field specifications omitted; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "RecordSpec[name=" + this.name
+                    + ", reclen=" + this.reclen
+                    + ", keyLength=" + this.keyLength
+                    + ", keyOffset=" + this.keyOffset
+                    + ", fields=" + this.fields.size() + " entries]";
+        }
+}
 
     /**
      * Binds one registered layout to the two facts the registry knows about it beyond its geometry.

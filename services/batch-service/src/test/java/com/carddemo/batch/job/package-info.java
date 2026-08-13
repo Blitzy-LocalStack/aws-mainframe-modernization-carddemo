@@ -101,7 +101,11 @@
  * <h2>What this directory holds</h2>
  *
  * <pre>
- * this directory: 12 java files = 11 tests + 1 charter
+ * this directory: 14 java files = 12 tests + 1 integration test + 1 charter
+ *
+ * the twelve and the one are counted apart on purpose: the runner separates them, surefire
+ * taking the *Test names and failsafe the one *IT name, and the migration plan's per-service
+ * row for this module is a count of the first group
  * </pre>
  *
  * <ul>
@@ -111,40 +115,75 @@
  *   <li>{@code BatchJobRosterTest} across 5 cases -- the same agreement read from the classes
  *       themselves by reflection, plus distinctness of the registered names and of the durable
  *       ledger step names.</li>
- *   <li>{@code PostTransactionsJobTest} across 25 cases -- the posting job's step, its single
- *       transactional boundary and the reference order of the three writes inside it, its
- *       reject-count result in both the forms the orchestrator can read, the two counter lines it
- *       renders, the inverted downstream-run predicate, the two timestamps a posted row carries, and
- *       its generation handling. Nine of the 25 are one per committed expectation tree, so the class
- *       contributes 33 executed cases rather than 25.</li>
+ *   <li>{@code PostTransactionsJobTest} across 33 cases -- the posting job's step, the PER-RECORD
+ *       transactional boundary and the reference order of the three writes inside it, the isolation of
+ *       a failing record from the records committed before it, the boundary a rejected record's row is
+ *       written inside, its reject-count result in both the forms the orchestrator can read, the two
+ *       counter lines it renders, the inverted downstream-run predicate, the two timestamps a posted
+ *       row carries, its generation handling, the walk's continuation across the commit interval, the
+ *       three cases covering the durable feed watermark -- that a stored position moves the walk
+ *       start, that a consuming pass advances it, and that an empty feed leaves it untouched -- and
+ *       its byte-for-byte parity against all four output files of every committed expectation tree,
+ *       driven both from the parity oracle's trees and from THIS MODULE's own fixture images. THREE of
+ *       the 33 are parameterised one row per committed expectation tree, of which there are nine, so
+ *       the class contributes 57 executed cases rather than 33.</li>
  *   <li>{@code DatasetJobBodiesTest} across 14 cases and {@code GenerationStagingJobsTest} across 6
  *       -- what the dataset-writing jobs emit and the generation prefix they emit it under.</li>
- *   <li>{@code CalculateInterestJobTest} across 26 cases -- the interest job's registered name, its
+ *   <li>{@code CalculateInterestJobTest} across 27 cases -- the interest job's registered name, its
  *       business-date parameter contract, its numeric result, its control break, its corrected
- *       final-account flush, its generation allocation, its emitted output, its step record and its
- *       parity against the three committed interest expectations.</li>
- *   <li>{@code ImportJobTest} across 36 cases -- the export-to-import round trip that stands in for
+ *       final-account flush, its generation allocation, its emitted output, its step record, its
+ *       parity against the three committed interest expectations driven from THIS MODULE's own
+ *       fixture images, and the byte-for-byte identity of those images with the reference-only
+ *       derivation they were taken from. Three of the 27 are parameterised, so the class contributes
+ *       31 executed cases rather than 27.</li>
+ *   <li>{@code ImportJobTest} across 37 cases -- the export-to-import round trip that stands in for
  *       the golden that does not exist, the five-way record-type dispatch with its counted unknown
  *       arm, the six fixed-width outputs including the one no driver allocates, the pipe-delimited
- *       diagnostic record, and the four divergences the pair registers.</li>
- *   <li>{@code CombineTransactionsJobTest} across 20 cases -- the combine job's pipeline join, the
- *       byte-wise ordering its sort-utility driver declares, and the absence of a load-back into the
- *       relation it reads.</li>
- *   <li>{@code BackupTransactionsJobTest} across 21 cases -- the backup job's condition-code
+ *       diagnostic record, the refusal of a truncated artefact with nothing published, and the four
+ *       divergences the pair registers.</li>
+ *   <li>{@code CombineTransactionsJobTest} across 24 cases -- the combine job's pipeline join, the
+ *       byte-wise ordering its sort-utility driver declares -- asserted both as an emitted order and as
+ *       the DEPLOYED collation of the key column, which are separate claims because either can fail
+ *       without the other -- the column collation that DECIDES that ordering rather than the
+ *       container's default deciding it, the whole staged record measured against an image composed
+ *       from the copybook rather than from the layout registry, the artefact's independence of the two
+ *       input generations it names but never reads, the description pad each of the two row classes
+ *       carries in one stream, and the absence of a load-back into the relation it reads.</li>
+ *   <li>{@code BackupTransactionsJobTest} across 27 cases -- the backup job's condition-code
  *       inversion, the tolerated-not-found semantics of its removal step, the deliberate omission of
- *       its wipe-and-re-create pair, and the 350-byte form of the image it emits. Two of the
- *       twenty-one are parameterised, so the runner reports thirty-six executions; the figure stated
- *       here is the declared-case count this module's charter inventory measures, which counts
- *       annotated members rather than executions.</li>
+ *       its wipe-and-re-create pair, the 350-byte form of the image it emits, the per-row producer
+ *       padding that image carries, and the THREE generation families one step now stages: the full
+ *       copy, the card-ordered daily subset bounded to the business date by a half-open window, and the
+ *       50-byte category-balance unload. Two of the twenty-seven are parameterised, so the runner
+ *       reports forty-two executions; the figure stated here is the declared-case count this module's
+ *       charter inventory measures, which counts annotated members rather than executions.</li>
+ *   <li>{@code BackupTransactionsJobPersistenceTest} across 4 cases -- the same job's effect on the
+ *       RELATION rather than on its artefact, launched against a database container: every persisted
+ *       column of every row unchanged across a run, the staged artefact describing the rows the engine
+ *       holds, a redrive changing no row and emitting the same bytes, and an empty relation staging an
+ *       empty artefact. It exists because a repository double cannot show that a row survived; the
+ *       sibling class keeps the exhaustive interaction census, which is strict in the other
+ *       direction.</li>
  *   <li>{@code ExportJobTest} across 29 cases -- the export dataset's own SHAPE: the 500-byte record,
  *       every field of the 40-byte common prefix at its declared offset, the five 460-byte payload
  *       views, the single monotonic sequence number that spans them, the per-field codec routing one
  *       record with three storage regimes demands, the two attribution literals and their configured
  *       overrides, and the statement of divergence D-1.</li>
- *   <li>{@code PreflightDailyTransactionsJobTest} across 12 cases -- the pre-posting pass's read-only
+ *   <li>{@code PreflightDailyTransactionsJobTest} across 15 cases -- the pre-posting pass's read-only
  *       guarantee, proven by snapshotting four tables across a real run; the unreachability of the
  *       soft-warn tier; its three input outcomes and their two diagnostics; divergence {@code D-7};
- *       and the durable step row that makes a redriven state a no-op.</li>
+ *       the durable step row that makes a redriven state a no-op; the walk's continuation across the
+ *       commit interval into a second page; the initially empty feed; and the absence of the feed's
+ *       raw transaction identifier from every line the pass logs at any level, which is asserted with
+ *       the class driven to {@code DEBUG} so the per-record trace is covered too.</li>
+ *   <li>{@code PostTransactionsJobParityIT} across 3 cases, 11 executed -- the posting job's PARITY
+ *       against every committed expectation tree: one parameterised case per tree comparing all four
+ *       recorded artifacts and the aggregate return code after a real launch, one case asserting that
+ *       the two normalised spans hold exactly what the normalisation policy claims on both sides, and
+ *       one census case requiring the enumeration to match both the expectation root and this module's
+ *       fixture root. It is the only type here that runs the real job through the framework's own
+ *       job operator against a database container, and the only one comparing recorded bytes rather
+ *       than a value the case itself stated.</li>
  * </ul>
  *
  * <p>Refactoring Rationale: the census above is a MEASUREMENT of this directory and not a plan for
@@ -192,10 +231,12 @@
  * <p>Trade-offs: the combine case therefore OVERLAPS {@code DatasetJobBodiesTest} and
  * {@code GenerationStagingJobsTest} rather than replacing either, and the overlap is bounded
  * deliberately. Those two settle which calls the job makes, with which coordinates and in which order,
- * against test doubles; the combine case settles the three things a test double cannot show -- that
+ * against test doubles; the combine case settles the four things a test double cannot show -- that
  * the emitted order is the byte-wise order its driver declares rather than whatever collation the
- * column carries, that both upstream producers' rows reach one artefact, and that the run writes
- * nothing back. What is given up is that this directory holds cases that need a database engine, which
+ * column carries, that both upstream producers' rows reach one artefact exactly once each, that the run
+ * writes nothing back, and that each staged record equals a three-hundred-and-fifty-byte image composed
+ * from {@code app/cpy/CVTRA05Y.cpy} rather than decoded through the registry the encoder itself
+ * uses. What is given up is that this directory holds cases that need a database engine, which
  * are slower than every doubles-based case beside them and are the cases here that cannot run without
  * a container runtime; what is bought is that the ordering contract is checked against a real
  * comparison instead of against an arrangement the test itself chose.</p>
@@ -349,28 +390,43 @@
  *
  * <h3>The posting unit of work: the boundary is declared here</h3>
  *
- * <p>The posting pass commits a category-balance row, an account row and a transaction row together.
- * The reference performs the three writes in strict sequence at
- * {@code app/cbl/CBTRN02C.cbl:440-442} -- category balance, then account, then transaction -- and
- * the migrated job runs them inside one boundary that it, and only it, declares.</p>
+ * <p>The posting pass commits a category-balance row, an account row and a transaction row together,
+ * ONCE PER FEED RECORD. The reference performs the three writes in strict sequence at
+ * {@code app/cbl/CBTRN02C.cbl:440-442} -- category balance, then account, then transaction -- from a
+ * paragraph the read loop at {@code app/cbl/CBTRN02C.cbl:200-226} performs once per record, and the
+ * migrated job reproduces that extent: one transaction per record, spanning that record's decisions
+ * and its three writes and nothing beyond them.</p>
  *
  * <p>Assumptions: the boundary is declared by construction rather than by annotation, and an
  * assertion has to know which. {@code PostTransactionsJob} builds its tasklet with the caller's
- * transaction manager, so the whole pass runs inside a single transaction; it carries no
- * {@code Transactional} annotation, and a case looking for one would find nothing and could
+ * transaction manager and opens one transaction per record through a {@code TransactionTemplate} over
+ * it, declaring the tasklet itself {@code PROPAGATION_NOT_SUPPORTED} so the pass body holds none; it
+ * carries no {@code Transactional} annotation, and a case looking for one would find nothing and could
  * conclude, wrongly, that no boundary exists. The sibling service charter fixes the matching
  * invariant from the other side: NO method in the production service package is annotated
  * {@code Transactional}, precisely so that this one file remains the boundary's only owner. A
  * {@code ServiceTest} must therefore never assert a transaction boundary, and this package is where
  * the declaration is asserted.</p>
  *
- * <p>Trade-offs: what this package can assert about that boundary is its DECLARATION, not its
- * atomicity. With repositories supplied as test doubles there is no unit of work to break, so a
- * commit-and-rollback assertion here would pass whatever the real propagation was. The atomicity is
- * therefore proven where it is observable, by the integration case in
- * {@code com.carddemo.batch.repository} that drives the cross-schema writes against a real
- * database. Splitting the claim across two tiers costs a reader one extra file; asserting it in one
- * tier that cannot fail for the right reason would cost the check itself.</p>
+ * <p>Refactoring Rationale: the boundary was the STEP's until this revision, so one transaction
+ * spanned the whole feed and this charter recorded that as the design. It was wrong in three ways. A
+ * failure on the three-hundredth record discarded two hundred and ninety-nine correct postings the
+ * reference would have kept, because the reference commits each record as it goes. Every row the pass
+ * touched stayed locked for the length of the batch window. And the durable step ledger's promise
+ * that a redrive RESUMES rather than repeats cannot be kept by a pass-wide rollback. The migrated
+ * form is therefore MORE atomic than the reference within one record -- a failed account write undoes
+ * that record's other two writes, where {@code app/cbl/CBTRN02C.cbl:554-560} returns normally and
+ * leaves them -- and NO MORE atomic than the reference across records.</p>
+ *
+ * <p>Trade-offs: what this package can assert about that boundary is its EXTENT, not the durability
+ * of a commit. A recording transaction manager makes the begins, commits and rollbacks countable, and
+ * where in the record loop each falls is what distinguishes a per-record boundary from a pass-wide
+ * one -- so the extent is asserted here. Whether a rolled-back write actually left no row behind
+ * cannot be shown with repositories supplied as test doubles, and is therefore proven where it can
+ * fail for the right reason, by the integration case in {@code com.carddemo.batch.repository} that
+ * drives the cross-schema writes against a real database. Splitting the claim across two tiers costs
+ * a reader one extra file; asserting both halves in one tier that cannot fail for the right reason
+ * would cost the second check.</p>
  *
  * <h3>Golden-master parity, and the update path this tier does not have</h3>
  *
@@ -379,6 +435,23 @@
  * intentional difference as a divergence instead of absorbing it into the assertion. Where a
  * migrated result and a committed expectation disagree, the expectation is right and the assertion
  * is wrong.</p>
+ *
+ * <p>Assumptions: the INPUTS come from this module's own fixture tree on the test classpath and the
+ * EXPECTATIONS come from the parity oracle's committed trees, and the split is deliberate rather than
+ * incidental. An input is something this module drives itself with, so it belongs where the build
+ * packages it and where a corruption of it fails this module's own build; an expectation describes the
+ * REFERENCE, so it belongs to the oracle and is read from there read-only. Both parity classes now
+ * follow that split -- {@code PostTransactionsJobTest} for the nine posting scenarios and
+ * {@code CalculateInterestJobTest} for the three interest ones.</p>
+ *
+ * <p>Refactoring Rationale: both classes previously read their inputs from the oracle's fixture tree
+ * as well, which left this module's own committed fixture tree read by NOTHING -- documented, packaged
+ * into every build, and dead. Two byte-identical trees where only one is read is exactly the
+ * arrangement in which the unread one drifts, so redirecting the reads is paired with an explicit
+ * drift check: {@code CalculateInterestJobTest} asserts each of its twelve driving images is
+ * byte-identical to the oracle image it was derived from, with no normalisation on either side,
+ * because the sign overpunch, the line ending and the trailing newline are all byte-level
+ * contracts.</p>
  *
  * <p>Refactoring Rationale: no golden is ever regenerated from this package, and the asymmetry with
  * the oracle suite is deliberate rather than an omission. That suite ships a guarded update gate --
@@ -427,7 +500,7 @@
  * short-circuits 101 while 102 and 103 are two sequential unguarded blocks so that 103 overwrites
  * 102 and a transaction failing both is reported as 103; the reject description literals and the
  * rendering of the trailer that carries them; the category-balance create and update arms as two
- * separately reachable outcomes; the accrual arithmetic, meaning the truncating rounding mode, the
+ * separately reachable outcomes; the accrual arithmetic, meaning the half-up rounding mode, the
  * multiply-before-divide order, the reduction applied per category row, the {@code DEFAULT}
  * disclosure-group fallback and the zero-rate gate; and the retained-generation count with its
  * per-run memoisation. A case here that re-asserted any of them would create a second declaration
@@ -458,24 +531,34 @@
  *
  * <h2>Test style, and where inputs come from</h2>
  *
- * <p>Measured at this revision, the eleven types fall into three groups. FIVE build no Spring context
+ * <p>Measured at this revision, the twelve types fall into three groups. FIVE build no Spring context
  * at all -- {@code BatchJobRosterTest}, {@code CalculateInterestJobTest}, {@code DatasetJobBodiesTest},
  * {@code GenerationStagingJobsTest} and {@code PostTransactionsJobTest} -- constructing their subject
- * directly and supplying every collaborator as a test double. FOUR assemble a narrow context with a
+ * directly and supplying their collaborators themselves rather than through a container. Most of
+ * those collaborators are test doubles; the exception is deliberate and is
+ * {@code PostTransactionsJobTest}'s fixture-driven parity case, which wires the REAL
+ * {@code PostingValidationService} and {@code CategoryBalanceService} over map-backed repositories,
+ * because a mocked decision would make a parity comparison assert its own staging rather than the
+ * pass. FOUR assemble a narrow context with a
  * context runner in order to observe bean registration, which is the one thing a directly constructed
  * subject cannot show: {@code JobRegistrationCensusTest}, {@code BackupTransactionsJobTest},
- * {@code ExportJobTest} and {@code ImportJobTest}. TWO select the test profile and start a context
- * against a database container -- {@code CombineTransactionsJobTest} and
- * {@code PreflightDailyTransactionsJobTest}. No case contacts a queue emulator.</p>
+ * {@code ExportJobTest} and {@code ImportJobTest}. FOUR select the test profile and start a context
+ * against a database container -- {@code CombineTransactionsJobTest},
+ * {@code PreflightDailyTransactionsJobTest}, {@code BackupTransactionsJobPersistenceTest} and
+ * {@code PostTransactionsJobParityIT}. No case contacts a queue emulator.</p>
  *
- * <p>NINE of the eleven RUN their job; only {@code BatchJobRosterTest} and
+ * <p>ELEVEN of the thirteen RUN their job; only {@code BatchJobRosterTest} and
  * {@code JobRegistrationCensusTest} do not, because their subject is registration read by reflection
- * and by context assembly rather than execution. Eight of the nine run it over the framework's
+ * and by context assembly rather than execution. Nine of the eleven run it over the framework's
  * resourceless in-memory job repository, which is what puts the step lifecycle, the attached parameter
  * validator and the exit-status propagation from step to job under assertion without needing an
- * application. The ninth, {@code PreflightDailyTransactionsJobTest}, launches through the framework's
- * job-operator test support against the container database, because its subject is what the run did
- * NOT write.</p>
+ * application -- and that includes two of the container-backed cases, because a real relation and a
+ * real framework job repository are independent choices. The remaining two launch through a job
+ * operator against the container database, for two different reasons:
+ * {@code PreflightDailyTransactionsJobTest} launches through the framework's job-operator test support
+ * because its subject is what the run did NOT write, and {@code PostTransactionsJobParityIT} launches
+ * through the job operator itself over the framework's JDBC job repository -- created there by this
+ * module's own migration -- because its subject is the bytes a real run produced.</p>
  *
  * <p>Refactoring Rationale: this paragraph once stated that no case started a full application,
  * selected a profile, requested a database container or launched a job, and every one of those four
@@ -487,16 +570,24 @@
  * exception, because a count with an exception is what drifted -- it stayed readable while becoming
  * wrong, and naming every member makes the next divergence visible instead of plausible.</p>
  *
- * <p>Assumptions: the two container-backed cases are the ONLY two here that need a database engine,
- * and each is an exception on a stated ground rather than by preference. What the combine case settles
- * is the order the engine returns a sixteen-byte character column in, which the reference's sort
+ * <p>Assumptions: the four container-backed cases are the ONLY four here that need a database
+ * engine, and each is an exception on a stated ground rather than by preference. What the combine case
+ * settles is the order the engine returns a sixteen-byte character column in, which the reference's sort
  * utility declares as a byte-wise comparison at {@code app/jcl/COMBTRAN.jcl:28}; a repository test
  * double would return rows in whatever order the case itself arranged, so the assertion would restate
  * its own stub and hold under every collation. What the preflight case settles is that a run leaves
  * every table unchanged, and with repositories replaced by doubles there are no tables, so that
- * assertion would pass whatever the pass wrote. A case in this directory needing a container for any
- * OTHER reason is not covered by these two exceptions -- the persistence-subject cases belong to
- * {@code com.carddemo.batch.repository}, which is chartered for them.</p>
+ * assertion would pass whatever the pass wrote. What the backup persistence case settles is the same
+ * kind of claim for the one job whose reference driver DELETES and re-creates the cluster it copies:
+ * the omission of {@code app/jcl/TRANBKP.jcl:37-46} and {@code :51-60} is observable only as rows that
+ * are still there afterwards, and a double answers whatever it was told to answer. What the parity case
+ * settles is that a real posting run reproduces four recorded datasets byte for byte, and every one of
+ * those bytes comes from a row an engine stored: with doubles the accumulated balance, the
+ * created-versus-updated category row and the posted row would all be values the case itself handed
+ * back, so the comparison would be the harness agreeing with itself. A case in this directory needing a
+ * container for any OTHER reason is not covered by these four exceptions -- a case whose subject is a
+ * repository CONTRACT belongs to {@code com.carddemo.batch.repository}, which is chartered for them, and
+ * the ground admitted here is a JOB's effect on a relation, not the relation's own mapping.</p>
  *
  * <p>Assumptions: launching a job is available rather than forbidden, and the distinction matters
  * for whoever writes the next case. The module's test profile at

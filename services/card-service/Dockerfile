@@ -44,9 +44,27 @@
 #     - CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID
 #     - CARDDEMO_SECURITY_CVV_KEY_ID
 #     - CARDDEMO_SECURITY_CARD_SELECTOR_SIGNING_KEY
+#   That list is COMPLETE across application.yml and application-prod.yml, and its
+#   completeness is mechanically held rather than asserted: common-lib's
+#   RuntimeConfigurationContractTest re-derives the no-fallback placeholder set from
+#   those two files and fails the build if any member of it is absent from this file.
 #   CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD also declares no fallback, and is the
-#   one member of that class the deployment does NOT supply: the entry point mints
-#   it per task and exports it before the JVM starts.
+#   one member of that class the deployment does NOT supply: the entry point --
+#   config/docker/generate-listener-material.sh -- mints it per task and exports it
+#   before the JVM starts, so it is documented here as entrypoint-supplied rather
+#   than listed among the values a deployment passes.
+#
+#   One further variable is REQUIRED, is not a placeholder in either file, and so
+#   appears in neither class above:
+#     - CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY, the environment form of the property
+#       carddemo.pagination.cursor.signing-key, base64 over at least 32 bytes. The
+#       shared kernel publishes the keyset-cursor signer only when that property is
+#       set -- the bean carries @ConditionalOnProperty on it and the kernel defaults
+#       it nowhere, deliberately, so that no deployment can sign cursors with a key
+#       another deployment also holds. Omitting it does not silently degrade the card
+#       list's paging: it removes the bean, CardListService requires one, and the
+#       context then fails to start. It is listed apart from the placeholder class
+#       because grep-ing application.yml for it finds nothing.
 #
 #   Variables that are optional because their placeholder carries a default, and
 #   which are named here so that a reader can tell the two classes apart:

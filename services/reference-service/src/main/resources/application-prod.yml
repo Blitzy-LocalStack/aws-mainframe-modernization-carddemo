@@ -4,20 +4,50 @@
 # Purpose:
 #   The prod profile overlay for the CardDemo reference-data bounded context --
 #   module six of the nine in the com.carddemo:carddemo-services reactor, owner
-#   of the reference schema and its six tables, and the only module in the
-#   migration that carries two migrations. It is the paired half of
+#   of the reference schema and its six tables, and the only module whose
+#   migrations carry a reference-DATA SEED rather than schema alone.
+#
+#   ⚠️ Refactoring Rationale: that clause read "the only module in the migration
+#   that carries two migrations", and it was false in the plainest way -- three
+#   modules carry two, two carry three, one carries five and one carries one. The
+#   count was never the distinguishing fact anyway; the CONTENT is.
+#   V2__seed_reference.sql in this module's db/migration directory is the only
+#   migration in the whole reactor holding INSERT statements -- six of them, loading
+#   the transaction types, the transaction categories, the mandatory DEFAULT
+#   disclosure group and the three lookup tables -- and that is why this module's
+#   second migration dominates its startup cost, which is the fact the sizing below
+#   and in application.yml is actually reasoning from. Assumptions: the inventory
+#   moves as schemas evolve, so it is deliberately NOT restated here; the claim
+#   above is stated in a form that a directory listing settles.
+#
+#   It is the paired half of
 #   application-dev.yml in this same directory: the two files record ONE
 #   capacity decision twice, from the two ends of it, and reading either alone
 #   makes its numbers look arbitrary.
 #
-#   It overrides TWO values, and declares one key the base leaves at its
-#   library default. That is the whole of it, and the smallness is the design
-#   rather than an omission: application.yml beside it already states the
-#   deployed posture -- statement echo off, health detail withheld, the
-#   actuator surface at three endpoints, both migrations applied, the
-#   bind-parameter logger at WARN -- so this profile has almost nothing left to
-#   close. What it varies is one pool dimension and one endpoint's
-#   reachability. Every key below carries a value the base does not; a key that
+#   It declares exactly TWO leaf keys: it OVERRIDES one value the base already
+#   sets, and ADDS one key the base is silent about, which therefore stood at its
+#   library default until now. Refactoring Rationale: this sentence read "it
+#   overrides TWO values, and declares one key", which counts three changes where
+#   the file makes two -- the overridden value was being counted once as an
+#   override and again among the "two values". The distinction is not pedantry:
+#   an override is reverted by deleting the line here, and the base value returns,
+#   whereas deleting the added key returns the LIBRARY default rather than
+#   anything this repository states, so the two are undone with different
+#   confidence and a reader has to know which is which. Overstating the overlay by
+#   one key is not cosmetic in a file whose whole subject is what it does and does
+#   not change: a reader reconciling the count against the payload goes looking for
+#   a third key, and the closest candidate is one of the seven absences the closing
+#   block deliberately explains. The payload is and always was exactly
+#   spring.datasource.hikari.minimum-idle, which the base sets to 2 at
+#   application.yml:499 and this file raises to 5, and springdoc.swagger-ui.enabled,
+#   which the base does not set at all and this file switches off. That is the whole of it,
+#   and the smallness is the design rather than an omission: application.yml
+#   beside it already states the deployed posture -- statement echo off, health
+#   detail withheld, the actuator surface at three endpoints, both migrations
+#   applied, the bind-parameter logger at WARN -- so this profile has almost
+#   nothing left to close. What it varies is one pool dimension and one
+#   endpoint's reachability. Every key below carries a value the base does not; a key that
 #   merely repeated a base value would be noise and is absent rather than left
 #   to read as a decision.
 #
@@ -67,11 +97,19 @@
 #   that the base imports from common-lib. That merged result is the return value
 #   a docstring would describe, and the merge order is part of it -- a value
 #   stated here wins over the base, and every value NOT stated here is the base's.
-#   The difference this overlay makes to it is two values and one added key, on
-#   two of the axes the base permits a profile to vary: the connection pool holds
-#   a genuine warm floor instead of the base's minimal one, and the interactive
-#   API browser is switched off. Nothing here changes what the service does,
-#   which endpoints exist, who may reach them, or what any of them returns.
+#   The difference this overlay makes to it is ONE overridden value and ONE added
+#   key, on two of the axes the base permits a profile to vary: the connection
+#   pool holds a genuine warm floor instead of the base's minimal one -- the
+#   override, spring.datasource.hikari.minimum-idle raised from the base's 2 to 5
+#   -- and the interactive API browser is switched off, which is the addition,
+#   springdoc.swagger-ui.enabled, a key the base never states. Refactoring
+#   Rationale: this sentence read "two values and one added key", which is three
+#   changes and disagreed with the two keys the file actually declares and with
+#   the two-item list in the same sentence; the count and the list now agree, and
+#   both name the property they mean so a reader can check them against the YAML
+#   below without inferring which axis is which. Nothing here changes what the
+#   service does, which endpoints exist, who may reach them, or what any of them
+#   returns.
 #
 # Failure modes:
 #   No override here can abort startup on its own, and neither can it report

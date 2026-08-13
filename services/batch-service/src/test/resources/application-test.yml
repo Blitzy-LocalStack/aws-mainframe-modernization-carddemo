@@ -697,21 +697,27 @@ logging:
 #      fixture larger than it. Sizing that belongs to the fixture that a job
 #      test seeds, not to this profile, and stating it here as a property would
 #      create a second source of truth that can drift from the constant.
-#      Assumptions: one test in this module now LAUNCHES a job --
-#      PreflightDailyTransactionsJobTest starts the pre-posting pass against a
-#      database container under this profile -- and it deliberately seeds fewer
-#      rows than the constant, so its whole pass is one page and one
-#      transaction. No case therefore crosses a page boundary yet, and a
-#      property invented here still could not be checked against anything.
-#      Refactoring Rationale: this entry previously said no test launched a job
-#      at all and named the first one to do so as the one that would have to
-#      seed past the constant. The first half became false when that case
-#      landed and is corrected rather than left standing, because the entry's
+#      Assumptions: the boundary IS crossed, by two cases, and neither reads a
+#      property because there is none to read -- each sizes its own feed against
+#      the constant, which is what keeps the crossing provable from the code
+#      rather than from a value set here. PreflightDailyTransactionsJobTest
+#      launches the pre-posting pass against a database container UNDER THIS
+#      PROFILE with one row MORE than the constant, each row carrying its own
+#      card number, and asserts the cursor sequence and that the sequence of
+#      lookups equals the seeded rows in ingestion order. PostTransactionsJobTest
+#      seeds one record more than the constant against repository doubles and
+#      asserts the cursor sequence, the page sizes, one posting per record and the
+#      flush-and-clear pair per non-empty page.
+#      Assumptions: the other cases of both classes deliberately stay BELOW the
+#      constant, so their passes are one page and one transaction each and a
+#      per-record ruling is not entangled with a per-page one.
+#      Refactoring Rationale: this entry twice described a gap that had closed.
+#      It first said no test launched a job at all, and then -- after one did --
+#      that no case crossed a page boundary. Both are corrected against the
+#      cases as they now stand rather than left standing, because the entry's
 #      purpose is to tell a reader why an absent key is absent, and a reader who
-#      believed no job was ever launched here would conclude the page limit was
-#      unreachable rather than merely uncrossed. The second half still holds:
-#      crossing the boundary remains the job of whichever case first needs it,
-#      and it belongs to that case's fixture rather than to this profile.
+#      believed the page limit was never reached would conclude it was
+#      unreachable rather than covered elsewhere.
 #
 #   5. No default job name and no default business date.
 #      Assumptions: both arrive only as the command-line arguments

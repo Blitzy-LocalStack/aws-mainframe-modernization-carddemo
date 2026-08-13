@@ -121,22 +121,36 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>Alternatives Considered: extending {@code CrudRepository} or {@code JpaRepository}. Either
  * would inherit {@code save}, {@code saveAll}, {@code delete}, {@code deleteAll} and
  * {@code deleteById} onto the public surface of a type whose entire contract is that it has no write
- * path, and L562 of {@code data-migration/sql/V1__reporting_views.sql} records that no insert,
- * update, delete or truncate privilege exists on any of these relations -- so those five methods
- * would compile, appear in every completion list, and fail at the database. The marker base declares
- * nothing, so only the two methods below exist. </p>
+ * path, and {@code data-migration/sql/V1__reporting_views.sql} records that no insert, update,
+ * delete or truncate privilege exists on any of these relations: its closing
+ * {@code REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ... FROM carddemo_reporting}
+ * names all seven of them, and the only privilege conveyed to this module's login role is the
+ * {@code GRANT SELECT ON reporting.v_card_xref TO carddemo_reporting} beside it. So those five
+ * methods would compile, appear in every completion list, and fail at the database. The marker base
+ * declares nothing, so only the two methods below exist. </p>
  *
  * <h2>Reading across a schema boundary</h2>
  *
  * <p>Trade-offs: this context reads a relation it does not own, and the compromise is accepted
  * rather than worked around. The underlying cross-reference table belongs to the account context --
- * L528 of {@code data-migration/sql/V1__reporting_views.sql} names it as the schema-qualified
- * relation {@code account.card_xref} -- and the target design records this context's owned tables as
- * "(none)". What this module reads instead is the projection declared at L522 of that same file,
- * {@code reporting.v_card_xref}, standing behind the security barrier its L523 sets, assigned to the
- * no-login owner role at L535, with read privilege conveyed to this module's login role by name at
- * L560. Its L525 narrows the card number to twelve asterisks and the last four digits, cast to a
- * 16-character column, before this module ever sees it. </p>
+ * the {@code CREATE VIEW reporting.v_card_xref} statement of
+ * {@code data-migration/sql/V1__reporting_views.sql} selects {@code FROM account.card_xref AS x} --
+ * and the target design records this context's owned tables as "(none)". What this module reads
+ * instead is that projection, {@code reporting.v_card_xref}, standing behind the
+ * {@code WITH (security_barrier = true)} its declaration carries, assigned to the no-login owner
+ * role by {@code ALTER VIEW reporting.v_card_xref OWNER TO carddemo_reporting_owner}, with read
+ * privilege conveyed to this module's login role by name through
+ * {@code GRANT SELECT ON reporting.v_card_xref TO carddemo_reporting}. Its first select item,
+ * {@code ('************' || right(rtrim(x.card_num), 4))::character(16) AS card_num}, narrows the
+ * card number to twelve asterisks and the last four digits, cast to a 16-character column, before
+ * this module ever sees it. </p>
+ *
+ * <p>Refactoring Rationale: these citations name STATEMENTS and IDENTIFIERS where they previously
+ * named line numbers in that file. The numbers had gone stale -- they addressed a comment about the
+ * credit score, a comment about the reporting role's reach and an owner assignment on a different
+ * view -- and a stale citation is worse than none, because a reader who follows it and finds
+ * unrelated text cannot tell whether the claim or the pointer is wrong. A statement a reader can
+ * search for survives every edit above it. </p>
  *
  * <p>Trade-offs: cross-schema reach is therefore by database read privilege alone, <b>never by a
  * Maven dependency on a sibling service module</b>, and the only intra-reactor dependency this
@@ -209,11 +223,16 @@ public interface StatementCardXrefRepository extends Repository<CardXrefView, St
      * <p>Trade-offs: naming a number at all means no single value suits every relation, and what is
      * bought is that this one is checkable against a measurement. A row of this projection is the
      * 50-byte record {@code app/cpy/CVACT03Y.cpy} declares at L5 through L8, being 16 plus 9 plus 11
-     * plus 14, and L517 through L521 of {@code data-migration/sql/V1__reporting_views.sql} record
-     * that the relation carries one row per card, so a batch of this size holds on the order of
-     * thirteen kilobytes at once while keeping the number of round trips over a whole-relation walk
-     * low. A smaller value would cost more round trips over the same relation for no reduction that
-     * matters at this row width. </p>
+     * plus 14, and the relation carries one row per card: the
+     * {@code CREATE VIEW reporting.v_card_xref} statement of
+     * {@code data-migration/sql/V1__reporting_views.sql} selects
+     * {@code FROM account.card_xref AS x CROSS JOIN reporting.card_grouping_key AS k}, and that
+     * second relation is constrained to a single row by its
+     * {@code CONSTRAINT ck_card_grouping_key_singleton CHECK (singleton)} over a boolean primary
+     * key -- so the cross join multiplies the cross-reference by exactly one. A batch of this size
+     * therefore holds on the order of thirteen kilobytes at once while keeping the number of round
+     * trips over a whole-relation walk low. A smaller value would cost more round trips over the
+     * same relation for no reduction that matters at this row width. </p>
      *
      * <p>Assumptions: this is deliberately none of the three numbers the reference declares or
      * exhibits, and the distinction is the point rather than a detail. Those three are the declared
@@ -451,21 +470,47 @@ public interface StatementCardXrefRepository extends Repository<CardXrefView, St
      * behaviour. An outer join returns the row with null dimension components, which the caller
      * detects and reports as the abend the reference performs.</p>
      *
-     * <p>Assumptions: the chunk is positioned by a strict keyset continuation on the fingerprint,
-     * which is unique per card and is the second component of the ordering the cursor above declares.
-     * An offset would skip or repeat a card when a concurrent load inserts a cross-reference row into
-     * a chunk already read, and a statement run that skips a card produces no document for a
-     * cardholder with no record anywhere of the omission.</p>
+     * <p>Assumptions: the chunk is positioned by a strict keyset continuation and not by an offset. An
+     * offset would skip or repeat a card when a concurrent load inserts a cross-reference row into a
+     * chunk already read, and a statement run that skips a card produces no document for a cardholder
+     * with no record anywhere of the omission.</p>
      *
      * <p>Assumptions: the ordering is the masked rendering and then the fingerprint, matching the
-     * cursor above exactly, so the two access shapes over this relation walk cards in one order. The
-     * continuation compares the fingerprint alone, which is sound because the fingerprint is unique --
-     * it names the anchor card exactly, so no second component is needed to break a tie that cannot
-     * occur.</p>
+     * cursor above exactly, so the two access shapes over this relation walk cards in one order.</p>
      *
-     * @param afterFingerprint the fingerprint of the last card already produced, or the empty string to
-     *     start from the beginning, which sorts below every hexadecimal digest; must not be
+     * <p>Refactoring Rationale: the continuation is the WHOLE ordering tuple, where it compared the
+     * fingerprint alone. The claim that accompanied the single-component predicate was that the
+     * fingerprint is unique, so it "names the anchor card exactly" and no second component is needed.
+     * Uniqueness is the wrong property: what a keyset predicate has to reproduce is the ORDER, and
+     * fingerprint order is not (masked rendering, fingerprint) order. Under the single-component
+     * predicate every card whose fingerprint sorted below the anchor's while its masked rendering
+     * sorted above it was SKIPPED -- the sequence had not reached it and the predicate had already
+     * excluded it -- and every card whose fingerprint sorted above the anchor's while its masked
+     * rendering sorted below it was REPEATED in each subsequent chunk. Neither outcome is visible from
+     * the run: a skipped cardholder simply has no statement, and a repeated one has two. The tail-level
+     * collisions this depends on are ordinary rather than contrived, because the masked rendering is
+     * twelve constant asterisks and four digits, so any two cards sharing a tail collide.</p>
+     *
+     * <p>Alternatives Considered: ordering and paging solely by the fingerprint, which is the other
+     * shape that makes a single-component predicate sound. Rejected because the two-key sequence is
+     * the one this relation's traversal order is registered as -- the sibling cursor above declares
+     * it, both are documented as walking cards in one order, and the divergence from ordering on the
+     * whole card number that {@code app/jcl/CREASTMT.JCL} L53 declares is registered against that
+     * two-key form. Paging by digest order would emit cardholders in an order derived from a keyed
+     * hash, which is neither the reference's order nor reproducible across a rotation of the grouping
+     * key.</p>
+     *
+     * <p>Assumptions: the empty string is the start sentinel for BOTH components and works for both
+     * for the same reason -- it sorts below every non-empty value, so the disjunction's first arm
+     * admits every row on the opening call. The masked rendering is declared {@code NOT NULL}, so the
+     * comparison needs no null arm.</p>
+     *
+     * @param afterCardNum the masked card rendering of the last card already produced, or the empty
+     *     string to start from the beginning, which sorts below every rendering; must not be
      *     {@code null}
+     * @param afterFingerprint the fingerprint of the last card already produced, which breaks the tie
+     *     among the cards sharing that rendering, or the empty string to start from the beginning,
+     *     which sorts below every hexadecimal digest; must not be {@code null}
      * @param limit the greatest number of cards to return in this chunk
      * @return the heading rows for the next cards in order, at most {@code limit} of them, empty when
      *     the relation holds no further card; never {@code null}
@@ -492,13 +537,15 @@ public interface StatementCardXrefRepository extends Repository<CardXrefView, St
             from CardXrefView x
             left join CustomerView cu on cu.customerId = x.customerId
             left join AccountView a on a.accountId = x.accountId
-            where x.cardFingerprint > :afterFingerprint
+            where x.cardNum > :afterCardNum
+               or (x.cardNum = :afterCardNum and x.cardFingerprint > :afterFingerprint)
             order by x.cardNum asc, x.cardFingerprint asc
             limit :limit
             """)
     @QueryHints(@QueryHint(name = AvailableHints.HINT_READ_ONLY, value = "true"))
     @Transactional(readOnly = true)
     List<StatementHeadingRow> findHeadingChunk(
+            @Param("afterCardNum") String afterCardNum,
             @Param("afterFingerprint") String afterFingerprint,
             @Param("limit") int limit);
 

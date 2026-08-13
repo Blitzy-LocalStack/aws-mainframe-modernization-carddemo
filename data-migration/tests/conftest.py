@@ -71,7 +71,7 @@ import shutil
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
 import pytest
 
@@ -100,6 +100,7 @@ __all__ = [
     "FORBIDDEN_LOADER_STATEMENTS",
     "SENTINEL_ALPHABET",
     "SYNTHETIC_PASSWORD_FILL",
+    "FakeAuroraColumn",
     "FakeAuroraConnection",
     "FakeAuroraCopy",
     "FakeAuroraCursor",
@@ -1723,6 +1724,32 @@ class FakeAuroraCopy:
         self.closed = True
 
 
+class FakeAuroraColumn(NamedTuple):
+    """One column of a result set's description, as a cursor reports it.
+
+    Purpose
+    -------
+    Carry the two members of the driver's own column descriptor that anything in this
+    distribution reads -- the column's name and the OID of its PostgreSQL type -- so a test can
+    state what the server would say about a projection and a pass that renders values by their
+    declared type can be exercised without a server.
+
+    Assumptions: the real descriptor carries eight further members (display size, internal
+    size, precision, scale and so on). None is mirrored, because nothing here reads them, and a
+    double that carried fields no consumer uses would invite a test to assert on a value this
+    suite has no way to keep true to the driver.
+
+    Alternatives Considered: reporting the description as the plain ``(name, type_code, ...)``
+    tuples of the DB-API 2.0 specification, which is what ``psycopg2`` returned. Rejected
+    because the pinned driver reports objects with NAMED attributes and the package reads
+    ``column.type_code`` by name, so a positional tuple would make the double pass where the
+    driver fails.
+    """
+
+    name: str
+    type_code: int
+
+
 class FakeAuroraCursor:
     """Recorder standing in for a database cursor over :class:`FakeAuroraConnection`.
 
@@ -1758,8 +1785,24 @@ class FakeAuroraCursor:
         """
         self.connection = connection
         self.rows: list[tuple[object, ...]] = []
+        # WHY : Assumptions: the description starts as ``None`` and stays ``None`` for any
+        #   statement no test described, which is exactly what the driver reports for a statement
+        #   that produced no result set -- an ``INSERT``, a ``COPY``, a ``SET``. It is deliberately
+        #   NOT derived from the arranged rows: a projection's column types are a property of the
+        #   projection and not of the rows in it, so a real cursor reports them over an EMPTY table
+        #   too, and inferring them from values would make this double unable to describe the empty
+        #   result set that every "nothing was loaded" test arranges. A pass that needs the types
+        #   must therefore be told them by the test, through
+        #   :meth:`FakeAuroraDatabase.arrange_columns`, and a pass that is not told them sees the
+        #   same absence the driver reports rather than a guess this double invented.
+        self.description: tuple[FakeAuroraColumn, ...] | None = None
         self.rowcount = -1
         self.closed = False
+        # WHY : Assumptions: the requested batch SIZES are recorded, not just the rows returned,
+        #   because the size is what bounds a streaming reader's peak memory. A reader asking for
+        #   the whole result set in one batch would return identical rows and hold everything, so
+        #   the rows alone cannot tell a bounded read from an unbounded one.
+        self.batch_sizes: list[int] = []
 
     def execute(self, statement: str, params: Sequence[object] | None = None) -> FakeAuroraCursor:
         """Execute one statement, recording it and loading any arranged result set.
@@ -1799,6 +1842,11 @@ class FakeAuroraCursor:
         if arranged_failure is not None:
             raise arranged_failure
         self.rows = list(self.connection.database.rows_for(statement))
+        # WHY : Assumptions: the description is set from the arrangement on EVERY execute, so a
+        #   cursor reused for a second statement stops describing the first one's projection --
+        #   which is the driver's behaviour and the property a test asserting "the read-back was
+        #   refused because nothing described it" depends on.
+        self.description = self.connection.database.columns_for(statement)
         # WHY : Assumptions: an explicitly arranged affected-row count wins over the row count,
         #   so a statement that returns no rows can still report how many it affected. Without
         #   this, every INSERT reported zero and the loader's merge path could not be tested for
@@ -1827,6 +1875,40 @@ class FakeAuroraCursor:
             returning nothing is a legitimate outcome a verification pass has to handle.
         """
         return list(self.rows)
+
+    def fetchmany(self, size: int) -> list[tuple[object, ...]]:
+        """Return the next batch of the current result set, consuming it.
+
+        Parameters
+        ----------
+        size : int
+            Maximum number of rows to return. A non-positive size returns nothing, which is what
+            makes an accidental zero or negative batch size a visible empty read rather than a hang.
+
+        Returns
+        -------
+        list[tuple[object, ...]]
+            Up to ``size`` rows, in order. An empty list once the result set is exhausted, which is
+            the signal a streaming reader stops on.
+
+        Raises
+        ------
+        None
+            An unarranged statement yields no rows rather than an error, matching :meth:`fetchall`.
+        """
+        # WHY : Assumptions: the batch is CONSUMED from the pending result set rather than sliced
+        #   from a copy, so successive calls advance and the final call returns empty. A double that
+        #   answered the same first batch every time would make a streaming reader loop forever, and
+        #   one that answered everything on the first call would let a caller's batching regress to
+        #   a whole-result read with every test still passing.
+        # WHY : Assumptions: the cursor position lives in `self.rows`, which `execute` reloads, so a
+        #   re-executed statement starts again from the top exactly as a real cursor does.
+        self.batch_sizes.append(size)
+        if size <= 0:
+            return []
+        batch = self.rows[:size]
+        self.rows = self.rows[size:]
+        return batch
 
     def fetchone(self) -> tuple[object, ...] | None:
         """Return the first row of the current result set, or ``None`` when there is none.
@@ -2047,13 +2129,15 @@ class FakeAuroraConnection:
         self.rollbacks = 0
         self.closed = False
 
-    def cursor(self) -> FakeAuroraCursor:
-        """Return a new cursor over this connection.
+    def cursor(self, name: str | None = None) -> FakeAuroraCursor:
+        """Return a new cursor over this connection, server-side when a name is given.
 
         Parameters
         ----------
-        None
-            Operates on this connection.
+        name : str | None, optional
+            Server-side cursor name, as psycopg accepts. Recorded on
+            :attr:`FakeAuroraDatabase.cursor_names` so a test can assert a streaming read asked for
+            one; the double's behaviour is otherwise identical either way.
 
         Returns
         -------
@@ -2065,10 +2149,17 @@ class FakeAuroraConnection:
         FakeClientContractError
             If the connection has been closed.
         """
+        # WHY : Assumptions: the keyword is ACCEPTED rather than rejected, and that choice decides
+        #   which production path the suite exercises. The read-back asks for a named cursor and
+        #   falls back to an unnamed one on TypeError, so a double without this parameter would send
+        #   every test down the fallback -- leaving the server-side path, the one that actually
+        #   bounds memory against a real cluster, covered by nothing. Recording the name is what
+        #   lets a test assert the streaming request was made.
         if self.closed:
             raise FakeClientContractError("a cursor was opened on a closed connection")
         cursor = FakeAuroraCursor(self)
         self.database.cursors.append(cursor)
+        self.database.cursor_names.append(name)
         return cursor
 
     def transaction(self) -> FakeAuroraTransaction:
@@ -2239,6 +2330,60 @@ class FakeAuroraConnection:
         self.close()
 
 
+#: The projection shape of the bulk loader's same-key content-conflict probe.
+#:
+#: Assumptions: the marker is ``count(*) filter (``, which is unmistakably that probe and is
+#: produced nowhere else in this package. It is matched instead of the whole statement so that a
+#: change to the probe's join or its compared-column list does not have to be mirrored here.
+_CONFLICT_PROBE_MARKER: Final[str] = "count(*) filter ("
+
+
+def _default_aggregate_row(folded: str) -> tuple[tuple[object, ...], ...]:
+    """Answer an unarranged aggregate probe the way a server would, with exactly one row.
+
+    Purpose
+    -------
+    Model the one property of a bare aggregate that "no arrangement means no rows" contradicts: a
+    ``SELECT count(...)`` with no ``GROUP BY`` returns exactly one row on every server, even over
+    an empty table. The bulk loader's content-conflict probe depends on that and refuses a cursor
+    that answers nothing -- correctly, because a probe returning no row has established nothing
+    about whether the staged rows agree with the stored ones.
+
+    Parameters
+    ----------
+    folded : str
+        The casefolded statement text, already known to match no arrangement.
+
+    Returns
+    -------
+    tuple[tuple[object, ...], ...]
+        One row of zeros, of the probe's own arity, when the statement is the conflict probe.
+        Otherwise no rows at all, unchanged.
+
+    Raises
+    ------
+    None
+        Reading text cannot fail.
+
+    Notes
+    -----
+    Trade-offs: this default is deliberately narrowed to the conflict probe rather than applied to
+    every aggregate. The general property is real, but several tests in this suite assert that a
+    count which cannot be read is REFUSED, and they express "cannot be read" by arranging nothing
+    -- so answering every aggregate with zero would turn those refusals into silent passes. A test
+    that wants a different answer for the probe arranges one, and an arrangement is consulted
+    first.
+    """
+    if _CONFLICT_PROBE_MARKER not in folded:
+        return ()
+    # Assumptions: the arity is DERIVED from the statement -- one leading total plus one filtered
+    #   count per compared column -- rather than fixed, because it differs per target: one compared
+    #   column for the category-balance master and fifteen for the customer master. The loader
+    #   checks the arity it receives against the target's own column list, so a fixed arity here
+    #   would fail every load but one.
+    return ((0,) * folded.count("count("),)
+
+
 class FakeAuroraDatabase:
     """In-process double for the Aurora PostgreSQL client the loaders connect through.
 
@@ -2296,6 +2441,11 @@ class FakeAuroraDatabase:
         self.connections: list[FakeAuroraConnection] = []
         self.connection_params: list[Mapping[str, object]] = []
         self.cursors: list[FakeAuroraCursor] = []
+        # WHY : Assumptions: the cursor NAMES are recorded alongside the cursors, one entry per
+        #   open, `None` for an unnamed one. A named cursor is a server-side cursor, which is the
+        #   only shape that bounds memory on a real cluster, so a test asserting a streaming read
+        #   needs to see that a name was asked for -- the cursor object alone cannot say.
+        self.cursor_names: list[str | None] = []
         self.statements: list[tuple[str, tuple[object, ...] | None]] = []
         self.copy_statements: list[str] = []
         self.copied_rows: list[tuple[str, tuple[object, ...]]] = []
@@ -2312,6 +2462,14 @@ class FakeAuroraDatabase:
         # report zero, so a loader that inserted every row and one that inserted none would be
         # indistinguishable here.
         self._arranged_affected: list[tuple[str, int]] = []
+        # WHY : Refactoring Rationale: a result set's COLUMN DESCRIPTION is arranged in a third
+        #   list of its own, alongside the rows and the affected count, because it answers a third
+        #   question and is available when neither of the others is. The checksum comparison renders
+        #   both sides of a column through the type the SERVER reports for it, so a pass reading a
+        #   table back needs the description even when the table is empty -- and a double that could
+        #   only describe a projection it had rows for would have made the empty-table case, the one
+        #   every "nothing loaded" test arranges, impossible to exercise.
+        self._arranged_columns: list[tuple[str, tuple[FakeAuroraColumn, ...]]] = []
         # WHY : Assumptions: the four failure arrangements are kept in four separate lists rather
         #   than one, because they are consumed at four different points -- statement execution,
         #   copy-row writing, commit and rollback -- and a single list keyed on a fragment could
@@ -2446,6 +2604,88 @@ class FakeAuroraDatabase:
             for row in rows
         )
         self._arranged_rows.append((statement_fragment.casefold(), checked))
+
+    def arrange_columns(self, statement_fragment: str, columns: Sequence[tuple[str, int]]) -> None:
+        """Arrange the column description a later query containing a text fragment will report.
+
+        Purpose
+        -------
+        Let a test state what the server would say the columns of a projection ARE -- their names
+        and the OIDs of their PostgreSQL types -- so a pass that renders a value by its declared
+        type rather than by its runtime type can be exercised without a server.
+
+        Parameters
+        ----------
+        statement_fragment : str
+            Text that identifies the statement, matched case-insensitively as a substring, exactly
+            as :meth:`arrange_rows` matches.
+        columns : Sequence[tuple[str, int]]
+            One ``(column name, type OID)`` pair per projected column, in projection order.
+
+        Returns
+        -------
+        None
+            Records the arrangement; the most recently arranged matching fragment wins.
+
+        Raises
+        ------
+        FakeClientContractError
+            If the fragment is blank, if the description is empty, if a column name is blank, or
+            if a type OID is not a positive integer. An empty description is refused because the
+            driver expresses "no result set" as ``None`` and never as a zero-column one, so
+            arranging emptiness here would arrange a state no server produces.
+        """
+        if not statement_fragment.strip():
+            raise FakeClientContractError("a column-description fragment must be non-blank")
+        if not columns:
+            raise FakeClientContractError(
+                "a column description must name at least one column; a statement that produced no"
+                " result set is reported as no description at all, which is the unarranged default"
+            )
+        described: list[FakeAuroraColumn] = []
+        for name, type_code in columns:
+            if not name.strip():
+                raise FakeClientContractError("a described column must have a non-blank name")
+            # WHY : Assumptions: the OID is checked to be a positive int rather than merely an int,
+            #   because PostgreSQL type OIDs are positive and ``bool`` is an ``int`` subclass in
+            #   Python -- so an accidental ``True`` would otherwise be recorded as the OID of
+            #   ``bytea`` (17 is `bytea`; ``True`` is 1, and `bool`'s own OID is 16) and quietly
+            #   render a
+            #   column as binary.
+            if isinstance(type_code, bool) or not isinstance(type_code, int) or type_code <= 0:
+                raise FakeClientContractError(
+                    f"the described type of column {name!r} must be a positive PostgreSQL type OID,"
+                    f" but {type_code!r} was arranged"
+                )
+            described.append(FakeAuroraColumn(name=name, type_code=type_code))
+        self._arranged_columns.append((statement_fragment.casefold(), tuple(described)))
+
+    def columns_for(self, statement: str) -> tuple[FakeAuroraColumn, ...] | None:
+        """Return the column description arranged for a statement, or ``None`` when unarranged.
+
+        Parameters
+        ----------
+        statement : str
+            The SQL text being executed.
+
+        Returns
+        -------
+        tuple[FakeAuroraColumn, ...] | None
+            The description of the most recently arranged fragment contained in the statement, or
+            ``None`` when nothing matches -- which is the driver's own way of reporting that the
+            statement produced no result set, and is distinct from a description of no columns.
+
+        Raises
+        ------
+        None
+            An unmatched statement is described as ``None``, because a statement that returns no
+            result set must be expressible.
+        """
+        folded = statement.casefold()
+        for fragment, columns in reversed(self._arranged_columns):
+            if fragment in folded:
+                return columns
+        return None
 
     def arrange_affected_rows(self, statement_fragment: str, count: int) -> None:
         """Arrange the affected-row count a later statement containing a text fragment reports.
@@ -2737,7 +2977,7 @@ class FakeAuroraDatabase:
         for fragment, rows in reversed(self._arranged_rows):
             if fragment in folded:
                 return rows
-        return ()
+        return _default_aggregate_row(folded)
 
     def record_statement(self, statement: str, params: tuple[object, ...] | None) -> None:
         """Record one executed statement and its bound parameters.
@@ -3081,6 +3321,11 @@ class FakeObjectStore:
         self.page_size = page_size
         self.put_calls: list[Mapping[str, Any]] = []
         self.get_calls: list[Mapping[str, Any]] = []
+        # Assumptions: the head log is kept SEPARATE from the get log even though both are reads,
+        #   because the two answer different questions and a test asserting "the key was probed
+        #   before it was written" must not be satisfied by a claim read that happened to touch a
+        #   different key.
+        self.head_calls: list[Mapping[str, Any]] = []
         self.delete_calls: list[Mapping[str, Any]] = []
         self.list_calls: list[tuple[str, str, str]] = []
         # WHY : Assumptions: a stored version is a THREE-part record -- identifier, body and
@@ -3386,6 +3631,55 @@ class FakeObjectStore:
         # bytes would let a loader that forgot the ``read`` call pass here and fail against AWS.
         return {
             "Body": io.BytesIO(body),
+            "Metadata": dict(metadata),
+            "ContentLength": len(body),
+            "VersionId": version_id,
+        }
+
+    def head_object(self, **kwargs: Any) -> dict[str, Any]:
+        """Return one object's metadata and length without returning its body.
+
+        Purpose
+        -------
+        Serve the existence probe the staging loader issues before it writes a generation, so a
+        retry can tell "the same bytes are already there" from "different bytes are already there".
+
+        Parameters
+        ----------
+        **kwargs : Any
+            The head arguments: ``Bucket`` and ``Key``.
+
+        Returns
+        -------
+        dict[str, Any]
+            A response carrying the stored ``Metadata``, the ``ContentLength`` and the
+            ``VersionId`` of the newest version, and deliberately no ``Body``.
+
+        Raises
+        ------
+        FakeClientContractError
+            If ``Bucket`` or ``Key`` is absent.
+        FakeServiceError
+            If the key holds no live version, reported as ``404`` with HTTP 404 -- which the
+            loader must read as "nothing is staged there yet" rather than as a failure.
+        """
+        bucket = kwargs.get("Bucket")
+        key = kwargs.get("Key")
+        if not bucket or not key:
+            raise FakeClientContractError("a head_object call named no Bucket or no Key")
+        self.head_calls.append(MappingProxyType(dict(kwargs)))
+        held = self._objects.get((str(bucket), str(key)))
+        if not held:
+            # WHY : Assumptions: the code is `404` rather than `NoSuchKey`, which is what the real
+            #   service returns for a HEAD on a missing key -- HEAD carries no response body, so
+            #   there is nowhere for an error code to be reported and botocore synthesises the
+            #   status as the code. The loader admits both spellings for exactly this reason, and
+            #   modelling the HEAD-specific one here is what keeps that tolerance under test.
+            raise FakeServiceError("404", 404, f"no object is stored at {key!r}")
+        version_id, body, metadata = held[-1]
+        # WHY : Assumptions: NO `Body` is returned, deliberately. A HEAD response has none, so a
+        #   loader that read one would pass here and fail against AWS.
+        return {
             "Metadata": dict(metadata),
             "ContentLength": len(body),
             "VersionId": version_id,

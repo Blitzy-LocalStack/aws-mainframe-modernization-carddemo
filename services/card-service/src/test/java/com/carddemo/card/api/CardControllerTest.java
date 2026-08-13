@@ -61,6 +61,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockServletContext;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -420,12 +422,20 @@ class CardControllerTest {
     /**
      * The member names the administrative card detail publishes, in contract order.
      *
-     * <p>Assumptions: this differs from the masked set in exactly one name, the number member, and in
-     * nothing else. The wider authority widens what may be RENDERED of the card number and grants no
-     * additional member, so the verification value is as absent here as it is there.
+     * <p>Assumptions: this differs from the masked set by exactly one ADDED name, the disclosed number,
+     * and by nothing removed. The wider authority widens what may be RENDERED of the card number and grants
+     * no other member, so the verification value is as absent here as it is there.
+     *
+     * <p>Refactoring Rationale: this set omitted {@code displayCardNumber} and therefore asserted the
+     * defect rather than the contract. The published administrative schema is {@code CardDetailCore} plus
+     * one member with {@code unevaluatedProperties: false}, so it requires EIGHT names; the browser type
+     * declares the same eight through two levels of extension. This set named seven, so the one assertion
+     * that could have caught the omission was the one encoding it -- which is why the resolved schema is now
+     * compared against this record mechanically, in {@code CardApiContractGateTest}, rather than against a
+     * literal set a reader has to keep in step by hand.
      */
-    private static final Set<String> ADMIN_DETAIL_MEMBERS = Set.of("key", "cardNumber",
-            "accountId", "embossedName", "expirationDate", "activeStatus", "version");
+    private static final Set<String> ADMIN_DETAIL_MEMBERS = Set.of("key", "displayCardNumber",
+            "cardNumber", "accountId", "embossedName", "expirationDate", "activeStatus", "version");
 
     /**
      * The member names the shared page envelope publishes.
@@ -652,10 +662,15 @@ class CardControllerTest {
      * half below, because a route that answers one way for every caller proves nothing about a chain --
      * only observing BOTH outcomes on the SAME address shows that a rule ran.
      *
-     * <p>Assumptions: the disclosed member is asserted to equal the composed number in full, and the
-     * masked member is asserted ABSENT from this shape. A presence check on the number alone would be
-     * satisfied by a masked rendering too, so the case would pass against the regression it exists to
-     * catch.
+     * <p>Assumptions: the disclosed member is asserted to equal the composed number IN FULL, and the
+     * masked member is asserted to equal the masker's output over that same number. A presence check on the
+     * disclosed member alone would be satisfied by a masked rendering too, so it is compared by value; and
+     * asserting the masked member's value rather than merely its presence is what shows the two forms did
+     * not arrive in one another's place, which is the one mistake a record of two strings permits.
+     *
+     * <p>Refactoring Rationale: this case asserted the masked member ABSENT. That was the defect and not the
+     * contract: the resolved administrative schema requires it and the browser type declares it, so the
+     * assertion held the server to a shape neither of the two documents describing it agreed with.
      *
      * @throws Exception if the request cannot be performed
      */
@@ -669,7 +684,8 @@ class CardControllerTest {
                         .with(callerWithAuthority(JwtRoleConverter.ADMIN_AUTHORITY)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.cardNumber").value(cardNumber(1)))
-                .andExpect(jsonPath("$.displayCardNumber").doesNotExist());
+                .andExpect(jsonPath("$.displayCardNumber")
+                        .value(CardNumberMasker.mask(cardNumber(1))));
     }
 
     /**
@@ -1460,6 +1476,179 @@ class CardControllerTest {
     }
 
     /**
+     * Each conflict condition carries the subordinate code the contract publishes for it.
+     *
+     * <p>Purpose: the {@code Conflict} response of {@code src/main/resources/openapi/card-api.yaml} states
+     * that three distinct conditions reach this status, that they are never merged, and that "Each carries
+     * its own subordinate code"; its three examples publish the three values. Every 409 this route sent
+     * carried the empty subordinate code instead, because the shared renderer emits none and this
+     * controller copied what it emitted -- so the one member the document names as the discriminator was
+     * the one member that could not discriminate.
+     *
+     * <p>Assumptions: the two conditions the document publishes no value for are asserted to carry the
+     * EMPTY code rather than omitted from this case. A code minted for them would be a value no schema of
+     * this service admits, and asserting the empty string is what records that the absence is a decision
+     * about this contract rather than a gap in the switch.
+     *
+     * <p>Assumptions: the expected values are read from the controller's own constants rather than written
+     * as literals here, so this case cannot pass by restating a typo. That the constants are the
+     * document's values is asserted separately, and mechanically, in {@code CardApiContractGateTest}.
+     *
+     * @param raised the condition the substituted edit service reports for this run
+     * @param expectedCode the subordinate code that condition must publish
+     * @throws Exception if the request cannot be performed
+     */
+    @ParameterizedTest(name = "{0} publishes subordinate code \"{1}\"")
+    @MethodSource("conflictSubordinateCodes")
+    @DisplayName("each conflict condition publishes its own subordinate code")
+    void eachConflictConditionPublishesItsOwnSubordinateCode(RecordConflictException.Kind raised,
+            String expectedCode) throws Exception {
+        when(writes.update(anyString(), any(CardUpdateRequest.class)))
+                .thenThrow(new RecordConflictException(raised));
+
+        mockMvc.perform(put(CardController.CARD_PATH, selectorFor(1))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(submittedEdit(STORED_VERSION))
+                        .with(callerWithAuthority(JwtRoleConverter.USER_AUTHORITY)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value(ApiError.CODE_CONFLICT))
+                .andExpect(jsonPath("$.secondaryCode").value(expectedCode));
+    }
+
+    /**
+     * The three published conditions are three distinct codes, so none stands in for another.
+     *
+     * <p>Purpose: the sentences were already asserted distinct; the codes are what a client branches on,
+     * and three constants that happened to hold one value would satisfy every case above while leaving the
+     * document's discriminator useless. This asserts the property the document actually promises.</p>
+     */
+    @Test
+    @DisplayName("the three published subordinate codes are three distinct values")
+    void theThreePublishedSubordinateCodesAreDistinct() {
+        assertThat(Set.of(CardController.CONFLICT_CODE_DATA_CHANGED,
+                        CardController.CONFLICT_CODE_LOCK_NOT_ACQUIRED,
+                        CardController.CONFLICT_CODE_WRITE_NOT_APPLIED))
+                .as("the contract names three conditions and says the code distinguishes them")
+                .hasSize(3)
+                .noneMatch(String::isEmpty);
+    }
+
+    /**
+     * A write the provider refuses answers with the rewrite-failure condition, in full.
+     *
+     * <p>Purpose: this is the condition the contract spells "the write itself did not succeed" and
+     * publishes as {@code CARD-WRITE-NOT-APPLIED}. Before this case there was no path to it at all: a
+     * provider optimistic-lock failure is not the contention type this controller claims, so the shared
+     * advice answered it -- with the empty subordinate code, with no {@code card} member, and with the
+     * sentence belonging to the DIFFERENT condition this service detects itself before it writes. A third
+     * of the published conflict contract was unreachable and a caller was told the wrong thing about which
+     * of two states it was in.
+     *
+     * <p>Assumptions: every member of the body is asserted rather than sampled, because the defect was a
+     * body that looked right in the members a spot-check would have read -- the status and the code were
+     * already correct. The two members that vary per request, the correlation identity and the timestamp,
+     * are asserted present rather than equal to a value; pinning either would assert the clock rather than
+     * the contract.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a provider optimistic-lock failure answers the rewrite-failure condition in full")
+    void aProviderOptimisticLockFailureAnswersTheRewriteFailureCondition() throws Exception {
+        when(writes.update(anyString(), any(CardUpdateRequest.class)))
+                .thenThrow(new OptimisticLockingFailureException("row version moved on"));
+
+        MvcResult answered = mockMvc.perform(put(CardController.CARD_PATH, selectorFor(1))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(submittedEdit(STORED_VERSION))
+                        .with(callerWithAuthority(JwtRoleConverter.USER_AUTHORITY)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value(ApiError.CODE_CONFLICT))
+                .andExpect(jsonPath("$.secondaryCode")
+                        .value(CardController.CONFLICT_CODE_WRITE_NOT_APPLIED))
+                .andExpect(jsonPath("$.message").value(CardUpdateService.MESSAGE_UPDATE_FAILED))
+                .andExpect(jsonPath("$.severity").value(ApiError.Severity.WARNING.name()))
+                .andExpect(jsonPath("$.subsystem").value(ApiError.Subsystem.RELATIONAL.name()))
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(jsonPath("$.correlationId").exists())
+                .andExpect(jsonPath("$.timestamp").exists())
+                .andExpect(jsonPath("$.fieldErrors").isEmpty())
+                .andExpect(jsonPath("$.abend").doesNotExist())
+                .andReturn();
+
+        // WHY : Assumptions: the card member is checked against the SERIALISED body, because a path
+        //       expression cannot separate a member that is present and null from one that is absent, and
+        //       the contract's example for this condition shows it present and null.
+        // WHY : Assumptions: the provider's own message is asserted ABSENT from the whole body. A
+        //       persistence failure names tables, columns and sometimes values, none of which a caller has
+        //       any business receiving, and the shared renderer's sentence is what belongs there instead.
+        assertThat(answered.getResponse().getContentAsString())
+                .contains("\"card\":null")
+                .doesNotContain("row version moved on");
+    }
+
+    /**
+     * A row the provider cannot take for update answers the lock-acquisition condition, in full.
+     *
+     * <p>Purpose: the second of the two store-detected conditions, published as
+     * {@code CARD-LOCK-NOT-ACQUIRED}. It reached a caller with the right sentence and the empty
+     * subordinate code, and without the {@code card} member the contract declares on every body of this
+     * status.
+     *
+     * <p>Assumptions: the sentence asserted is this context's own constant, and it is additionally
+     * asserted to differ from the rewrite-failure sentence, so the two store-detected conditions cannot
+     * collapse into one answer with two names.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a provider pessimistic-lock failure answers the lock-acquisition condition in full")
+    void aProviderPessimisticLockFailureAnswersTheLockAcquisitionCondition() throws Exception {
+        when(writes.update(anyString(), any(CardUpdateRequest.class)))
+                .thenThrow(new PessimisticLockingFailureException("row is held elsewhere"));
+
+        MvcResult answered = mockMvc.perform(put(CardController.CARD_PATH, selectorFor(1))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(submittedEdit(STORED_VERSION))
+                        .with(callerWithAuthority(JwtRoleConverter.USER_AUTHORITY)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value(ApiError.CODE_CONFLICT))
+                .andExpect(jsonPath("$.secondaryCode")
+                        .value(CardController.CONFLICT_CODE_LOCK_NOT_ACQUIRED))
+                .andExpect(jsonPath("$.message").value(CardUpdateService.MESSAGE_COULD_NOT_LOCK))
+                .andExpect(jsonPath("$.subsystem").value(ApiError.Subsystem.RELATIONAL.name()))
+                .andExpect(jsonPath("$.status").value(409))
+                .andExpect(jsonPath("$.fieldErrors").isEmpty())
+                .andExpect(jsonPath("$.abend").doesNotExist())
+                .andReturn();
+
+        assertThat(answered.getResponse().getContentAsString())
+                .contains("\"card\":null")
+                .doesNotContain("row is held elsewhere");
+        assertThat(CardUpdateService.MESSAGE_COULD_NOT_LOCK)
+                .isNotEqualTo(CardUpdateService.MESSAGE_UPDATE_FAILED);
+    }
+
+    /**
+     * Supplies each contention condition with the subordinate code this contract publishes for it.
+     *
+     * <p>Assumptions: all FOUR constants of the shared enumeration appear, not only the two this context
+     * can raise, so a condition whose code was added to the document later is covered by the case from the
+     * day the switch gains an arm rather than from the day someone remembers to widen a list.</p>
+     *
+     * @return one argument pair per condition; never {@code null}
+     */
+    private static Stream<Arguments> conflictSubordinateCodes() {
+        return Stream.of(
+                Arguments.of(RecordConflictException.Kind.STALE_VERSION,
+                        CardController.CONFLICT_CODE_DATA_CHANGED),
+                Arguments.of(RecordConflictException.Kind.LOCK_UNAVAILABLE,
+                        CardController.CONFLICT_CODE_LOCK_NOT_ACQUIRED),
+                Arguments.of(RecordConflictException.Kind.REFERENCED_ROW, ApiError.NO_SECONDARY_CODE),
+                Arguments.of(RecordConflictException.Kind.DUPLICATE_KEY, ApiError.NO_SECONDARY_CODE));
+    }
+
+    /**
      * Supplies the three conflict conditions the shared advice recognises with their sentences.
      *
      * <p>Assumptions: the expected sentences are read from the advice's own published constants rather
@@ -1572,16 +1761,22 @@ class CardControllerTest {
     /**
      * Builds the administrative detail of one fixture row, carrying the number in full.
      *
-     * <p>Assumptions: this shape carries the number UNMASKED and carries no additional member for doing
-     * so, which is what the two member-set cases above assert. It is a separate type from the masked
-     * detail so the ordinary routes cannot reach the disclosure through any argument a caller supplies.
+     * <p>Assumptions: this shape carries the number UNMASKED as one ADDITIONAL member beside the masked
+     * rendering every other card shape carries, which is what the two member-set cases above assert. It is
+     * a separate type from the masked detail so the ordinary routes cannot reach the disclosure through any
+     * argument a caller supplies.
+     *
+     * <p>Assumptions: the masked component is produced by the shared masker over the same number rather
+     * than written as a literal, so the fixture cannot drift from the rendering the mapper publishes and the
+     * record's own compact constructor admits.
      *
      * @param index the row's one-based ordinal
      * @return the administrative detail; never {@code null}
      */
     private static AdminCardDetail administrativeDetail(int index) {
-        return new AdminCardDetail(selectorFor(index), cardNumber(index), ACCOUNT_ID, EMBOSSED_NAME,
-                EXPIRATION_DATE, "Y", STORED_VERSION);
+        return new AdminCardDetail(selectorFor(index), CardNumberMasker.mask(cardNumber(index)),
+                ACCOUNT_ID, EMBOSSED_NAME, EXPIRATION_DATE, "Y", STORED_VERSION,
+                cardNumber(index));
     }
 
     /**

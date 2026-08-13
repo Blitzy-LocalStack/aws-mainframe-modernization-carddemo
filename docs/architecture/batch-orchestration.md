@@ -71,7 +71,7 @@
 > reader can repeat it. Where a narrative figure and a measured figure could
 > differ, the measured one is recorded.
 >
-> **Delivers, and who consumes it.** It delivers the eleven-state mapping with
+> **Delivers, and who consumes it.** It delivers the twelve-state mapping with
 > the JCL each state replaces, the inversion rule for condition codes, the ten
 > generation-dataset families and their retention equivalence, the restart design,
 > and the register of baseline artifacts observed while reading the batch tier. Its
@@ -153,7 +153,7 @@ where each is stated, under the same four category names.
   families is in circulation, the repository contains **ten**, and only a citation
   per family makes the difference visible instead of arguable. A line number is
   also the only form of evidence a reader can check without a mainframe.
-- Alternatives Considered: the eleven states are presented **twice**, as a table
+- Alternatives Considered: the twelve states are presented **twice**, as a table
   and as a Mermaid flow. Presenting only the table was rejected because the
   failure edges are the part most easily got wrong and a table cannot show that
   the reject-count branch rejoins the success path while a caught error does not.
@@ -197,8 +197,8 @@ task-invoking state passes `--job=` and `--business-date=` as its `Command`
 override and the dataset bucket name as an environment entry, exactly as the
 table below specifies.
 
-`infra/modules/step-functions-batch/main.tf` is authored and declares all eleven
-states, and both environment roots instantiate it. The table and diagram in this
+`infra/modules/step-functions-batch/main.tf` is authored and declares all twelve
+work states, and both environment roots instantiate it. The table and diagram in this
 section therefore describe the authored resource graph; they still do not describe
 a *deployed* state machine, because applying the package to a live account is an
 operator action outside this repository's scope.
@@ -209,19 +209,46 @@ were overtaken when the module landed. The distinction worth keeping is the othe
 one — authored versus deployed — so the correction narrows the caveat to that
 rather than dropping it.
 
+Refactoring Rationale: the chain was **eleven** states and is now **twelve**. The one
+added — state 3, `VerifyMigration` — stands between refreshing the masters and posting
+against them, and it replaces no JCL job at all: the baseline verified no load. Its
+`Choice` is the ONLY edge into state 4, so business processing is unreachable over data
+that does not match its source. What state 2 does changed at the same time, and that
+change carries no new state. It used to invoke `stage-dataset`, which copies an extract
+to a retained generation prefix and writes no row — so with nothing after it loading
+Aurora, every business state ran against whatever the tables already held, and a first
+execution against an empty cluster posted nothing and reported success. It now invokes
+`refresh-dataset`, which performs the whole per-dataset round trip in one branch:
+fetch, stage, load, the three verification passes, and for the transaction master the
+identifier-allocator reconciliation without which the first transaction the online
+service adds would collide on the primary key hours later.
+
+Alternatives Considered: the load and the allocator reconciliation were authored as two
+further top-level states, `LoadSeedDatasets` and `ReconcileTransactionSequence`, which
+would have made the chain fourteen. Both are withdrawn, and the work each was to
+perform is done — inside state 2's branch, in the same invocation that staged the
+generation. Withdrawing them is what keeps a dataset's fetch, stage, load and verify in
+one unit whose failure names the dataset that failed, rather than spreading one
+dataset's round trip across three `Map` states that can disagree about which generation
+they are looking at. The count is stated as twelve throughout this document,
+`docs/adr/ADR-005-batch-orchestration.md`, `infra/README.md` and the module's own
+README precisely because a chain length is the one figure a reader checks against the
+resource graph, and `var.state_timeout_seconds` carries exactly twelve keys.
+
 | # | State | Replaces | Mechanism |
 |---|---|---|---|
 | 1 | `QuiesceOnlineWrites` | [`app/jcl/CLOSEFIL.jcl`](../../app/jcl/CLOSEFIL.jcl) L22–L30 — an SDSF operator command issuing `CEMT SET FIL(...) CLO` | Function setting a read-only flag in Parameter Store |
-| 2 | `StageSeedDatasets` | the `IDCAMS REPRO` master-refresh block — the ten load jobs listed in [State 2](#state-2--stageseeddatasets-the-ten-load-branches) | `Map` state, one branch per dataset, each a synchronous run-task on the data-migration image |
-| 3 | `PreflightDailyTransactions` | `CBTRN01C` — **which has no JCL driver in the baseline**; see [State 3](#state-3--cbtrn01c-has-no-jcl-driver-in-the-baseline) | Container task |
-| 4 | `PostTransactions` | [`app/jcl/POSTTRAN.jcl`](../../app/jcl/POSTTRAN.jcl) L23–L41 driving `CBTRN02C` | Container task, explicit run-scoped outcome handoff, then a `Choice` that distinguishes clean, warn and invalid/fatal outcomes |
-| 5 | `CalculateInterest` | [`app/jcl/INTCALC.jcl`](../../app/jcl/INTCALC.jcl) L22–L41 driving `CBACT04C` | Container task; the business date arrives as a parameter, never as a clock read |
-| 6 | `BackupTransactions` | [`app/jcl/TRANBKP.jcl`](../../app/jcl/TRANBKP.jcl) L23–L67 | Container task exporting to a new object-store generation |
-| 7 | `CombineTransactions` | [`app/jcl/COMBTRAN.jcl`](../../app/jcl/COMBTRAN.jcl) L22–L48 — a DFSORT merge followed by a `REPRO` reload | Container task using SQL ordering |
-| 8 | `GenerateStatements` | [`app/jcl/CREASTMT.JCL`](../../app/jcl/CREASTMT.JCL) L22–L96 driving `CBSTM03A` with its called subprogram `CBSTM03B` | Container task writing plain-text and HTML statements to object storage |
-| 9 | `GenerateReports` | [`app/jcl/TRANREPT.jcl`](../../app/jcl/TRANREPT.jcl) L23–L80 driving `CBTRN03C`, **and** [`app/jcl/PRTCATBL.jcl`](../../app/jcl/PRTCATBL.jcl) L21–L63 | Container task writing the 133-column report to object storage |
-| 10 | `AnalyzeTables` | [`app/jcl/TRANIDX.jcl`](../../app/jcl/TRANIDX.jcl) L22–L54 — `DEFINE ALTERNATEINDEX`, `DEFINE PATH` and `BLDINDEX` | Function running `VACUUM ANALYZE`; see [Index building is retired](#index-building-is-retired-and-the-index-is-not) |
-| 11 | `ResumeOnlineWrites` | [`app/jcl/OPENFIL.jcl`](../../app/jcl/OPENFIL.jcl) L22–L30 — the matching `CEMT SET FIL(...) OPE` | Function clearing the read-only flag |
+| 2 | `StageSeedDatasets` | the whole `IDCAMS REPRO` master-refresh block — the ten load jobs listed in [States 2 and 3](#states-2-and-3--refreshing-and-verifying-the-eleven-seed-datasets), plus the `DALYTRAN.PS` daily feed | `Map` state, eleven branches, each a synchronous run-task on the data-migration image invoking `refresh-dataset`: fetch, stage a generation, load, verify, and for the transaction master reconcile the identifier allocator |
+| 3 | `VerifyMigration` | **nothing** — the baseline verified no load at all | Container task invoking `verify-all`, then a `Choice` admitting only exit code zero, which is the ONLY edge into state 4 |
+| 4 | `PreflightDailyTransactions` | `CBTRN01C` — **which has no JCL driver in the baseline**; see [State 4](#state-4--cbtrn01c-has-no-jcl-driver-in-the-baseline) | Container task |
+| 5 | `PostTransactions` | [`app/jcl/POSTTRAN.jcl`](../../app/jcl/POSTTRAN.jcl) L23–L41 driving `CBTRN02C` | Container task, explicit run-scoped outcome handoff, then a `Choice` that distinguishes clean, warn and invalid/fatal outcomes |
+| 6 | `CalculateInterest` | [`app/jcl/INTCALC.jcl`](../../app/jcl/INTCALC.jcl) L22–L41 driving `CBACT04C` | Container task; the business date arrives as a parameter, never as a clock read |
+| 7 | `BackupTransactions` | [`app/jcl/TRANBKP.jcl`](../../app/jcl/TRANBKP.jcl) L23–L67, **and** the unload halves of [`app/jcl/TRANREPT.jcl`](../../app/jcl/TRANREPT.jcl) L23–L55 and [`app/jcl/PRTCATBL.jcl`](../../app/jcl/PRTCATBL.jcl) L29–L39 | Container task exporting **three** generations: the full transaction copy, the card-ordered daily subset, and the category-balance unload |
+| 8 | `CombineTransactions` | [`app/jcl/COMBTRAN.jcl`](../../app/jcl/COMBTRAN.jcl) L22–L48 — a DFSORT merge followed by a `REPRO` reload | Container task using SQL ordering |
+| 9 | `GenerateStatements` | [`app/jcl/CREASTMT.JCL`](../../app/jcl/CREASTMT.JCL) L22–L96 driving `CBSTM03A` with its called subprogram `CBSTM03B` | Container task writing plain-text and HTML statements to object storage |
+| 10 | `GenerateReports` | [`app/jcl/TRANREPT.jcl`](../../app/jcl/TRANREPT.jcl) L59–L80 driving `CBTRN03C`, **and** [`app/jcl/PRTCATBL.jcl`](../../app/jcl/PRTCATBL.jcl) L43–L63 | Container task writing **both** reports to object storage: the 133-column transaction report, to a request-scoped key and to the `TRANREPT` generation, and the 40-byte category-balance report to its fixed key |
+| 11 | `AnalyzeTables` | [`app/jcl/TRANIDX.jcl`](../../app/jcl/TRANIDX.jcl) L22–L54 — `DEFINE ALTERNATEINDEX`, `DEFINE PATH` and `BLDINDEX` | Function running `VACUUM ANALYZE`; see [Index building is retired](#index-building-is-retired-and-the-index-is-not) |
+| 12 | `ResumeOnlineWrites` | [`app/jcl/OPENFIL.jcl`](../../app/jcl/OPENFIL.jcl) L22–L30 — the matching `CEMT SET FIL(...) OPE` | Function clearing the read-only flag |
 
 ### Per-state resilience settings
 
@@ -233,16 +260,17 @@ the numeric interval and timeout values will be per-environment parameters of
 
 | State | Integration | Timeout | Retry | Catch |
 |---|---|---|---|---|
-| 1, 11 | Function invoke | Explicit, parameterised | Up to 3 attempts on a transient parameter-store or throttling error, exponential backoff | To `NotifyFailure` |
-| 2 | `Map` over ten branches, each a synchronous run-task | Explicit per branch **and** on the `Map` state | Up to 3 attempts per branch on task-launch failure | Branch catch aborts the `Map`, then to `NotifyFailure` |
-| 3, 5, 6, 7, 8, 9 | Synchronous run-task | Explicit, parameterised | Up to 3 attempts on task-launch and container-start failure only | To `NotifyFailure` |
-| 4 | Synchronous run-task, read run-scoped posting outcome, then a `Choice` | Explicit, parameterised | Up to 3 attempts on task-launch and container-start failure only | Task/runtime or malformed outcome goes through cleanup, `NotifyFailure`, resume and `Fail` |
-| 10 | Function invoke | Explicit, parameterised | Up to 3 attempts on a transient connection error, exponential backoff | To `NotifyFailure` |
+| 1, 12 | Function invoke | Explicit, parameterised | Up to 3 attempts on a transient parameter-store or throttling error, exponential backoff | To `NotifyFailure` |
+| 2 | `Map` over eleven branches, each a synchronous run-task | Explicit per branch **and** on the `Map` state | Up to 3 attempts per branch on task-launch failure | Branch catch aborts the `Map`, then to `NotifyFailure` |
+| 3 | Synchronous run-task, then a `Choice` admitting only exit code zero | Explicit, parameterised | Up to 3 attempts on task-launch and container-start failure only | To `NotifyFailure` |
+| 4, 6, 7, 8, 9, 10 | Synchronous run-task | Explicit, parameterised | Up to 3 attempts on task-launch and container-start failure only | To `NotifyFailure` |
+| 5 | Synchronous run-task, read run-scoped posting outcome, then a `Choice` | Explicit, parameterised | Up to 3 attempts on task-launch and container-start failure only | Task/runtime or malformed outcome goes through cleanup, `NotifyFailure`, resume and `Fail` |
+| 11 | Function invoke | Explicit, parameterised | Up to 3 attempts on a transient connection error, exponential backoff | To `NotifyFailure` |
 
 Assumptions: the retry policies above are scoped to **launch and infrastructure
 faults**, not to application outcomes. A container that started and then exited
 non-zero has already done work against the database, so retrying it would repeat
-that work; the reject-count path at state 4 and the run ledger described in
+that work; the reject-count path at state 5 and the run ledger described in
 [The restart story](#the-restart-story-there-is-no-baseline-checkpoint-contract-to-preserve)
 are what handle application outcomes. Retrying an application failure is the
 single most likely way to turn a one-night reject into a double-posted
@@ -266,9 +294,13 @@ flowchart TD
     SCH["Managed scheduler<br/>starts one execution"] --> S1
 
     S1["1 QuiesceOnlineWrites<br/>replaces CLOSEFIL.jcl"] --> S2
-    S2["2 StageSeedDatasets<br/>Map, 10 branches<br/>replaces the IDCAMS REPRO loads"] --> S3
-    S3["3 PreflightDailyTransactions<br/>CBTRN01C - no JCL driver"] --> S4
-    S4["4 PostTransactions<br/>replaces POSTTRAN.jcl / CBTRN02C"] --> R4
+    S2["2 StageSeedDatasets<br/>Map, 11 branches, refresh-dataset<br/>replaces the IDCAMS REPRO copy AND load"] --> S2V
+    S2V["3 VerifyMigration<br/>verify-all, three mandatory passes"] --> C2V
+    C2V{"Choice:<br/>exitCode"}
+    C2V -->|"exactly 0"| S3
+    C2V -->|"anything else"| VMF["VerificationFailed"]
+    S3["4 PreflightDailyTransactions<br/>CBTRN01C - no JCL driver"] --> S4
+    S4["5 PostTransactions<br/>replaces POSTTRAN.jcl / CBTRN02C"] --> R4
 
     R4["ReadPostingOutcome<br/>run-scoped status handoff"] --> C4
     C4{"Choice:<br/>returnCode + rejectCount"}
@@ -279,16 +311,19 @@ flowchart TD
     D4 --> S5
     I4 --> CP4["DeletePostingOutcomeIfPresent"]
 
-    S5["5 CalculateInterest<br/>replaces INTCALC.jcl / CBACT04C<br/>business date is a parameter"] --> S6
-    S6["6 BackupTransactions<br/>replaces TRANBKP.jcl<br/>writes a new generation"] --> S7
-    S7["7 CombineTransactions<br/>replaces COMBTRAN.jcl<br/>DFSORT merge becomes ORDER BY"] --> S8
-    S8["8 GenerateStatements<br/>replaces CREASTMT.JCL<br/>CBSTM03A + CBSTM03B"] --> S9
-    S9["9 GenerateReports<br/>replaces TRANREPT.jcl / CBTRN03C<br/>and PRTCATBL.jcl"] --> S10
-    S10["10 AnalyzeTables<br/>replaces TRANIDX.jcl<br/>statistics only, not BLDINDEX"] --> S11
-    S11["11 ResumeOnlineWrites<br/>replaces OPENFIL.jcl"] --> OK["Succeed"]
+    S5["6 CalculateInterest<br/>replaces INTCALC.jcl / CBACT04C<br/>business date is a parameter"] --> S6
+    S6["7 BackupTransactions<br/>replaces TRANBKP.jcl<br/>writes three generations"] --> S7
+    S7["8 CombineTransactions<br/>replaces COMBTRAN.jcl<br/>DFSORT merge becomes ORDER BY"] --> S8
+    S8["9 GenerateStatements<br/>replaces CREASTMT.JCL<br/>CBSTM03A + CBSTM03B"] --> S9
+    S9["10 GenerateReports<br/>replaces TRANREPT.jcl / CBTRN03C<br/>and PRTCATBL.jcl<br/>two reports, three keys"] --> S10
+    S10["11 AnalyzeTables<br/>replaces TRANIDX.jcl<br/>statistics only, not BLDINDEX"] --> S11
+    S11["12 ResumeOnlineWrites<br/>replaces OPENFIL.jcl"] --> GW{"onlineWritesEnabled?"}
+    GW -->|true| OK["Succeed"]
+    GW -->|false| NF
 
     S1 -.->|Catch| NF
     S2 -.->|Catch| NF
+    S2V -.->|Catch| NF
     S3 -.->|Catch| NF
     S4 -.->|Catch| CP4
     S5 -.->|Catch| NF
@@ -298,14 +333,20 @@ flowchart TD
     S9 -.->|Catch| NF
     S10 -.->|Catch| NF
 
+    VMF --> NF
+
     CP4 --> NF
     NF["NotifyFailure"] --> RF["ResumeOnlineWritesOnFailure<br/>idempotent"]
-    RF --> FA["Fail<br/>redrive resumes from the failed state"]
+    RF --> GF{"onlineWritesEnabled?"}
+    GF -->|true| FA["Fail: CardDemoBatchFailed<br/>redrive resumes from the failed state"]
+    GF -->|false| ST["Fail: CardDemoOnlineWritesStranded<br/>writes may still be refused"]
 %% The posting warn branch comes from CBTRN02C and the return-code contract.
 %% TRANBKP.jcl's COND=(4,LT) is local to that separate job and is not this edge.
+%% Both release edges are gated on the flag's RESULTING state rather than on the call
+%% returning, which is what stops an execution reporting a bracket it did not release.
 ```
 
-### The state-4 status handoff is explicit
+### The state-5 status handoff is explicit
 
 The posting warn branch cannot be inferred from
 [`TRANBKP.jcl`](../../app/jcl/TRANBKP.jcl), and it also cannot be recovered from
@@ -363,7 +404,7 @@ card across the whole cross-reference file
 ([`CREASTMT.JCL`](../../app/jcl/CREASTMT.JCL) L79–L96). A step that exceeds the
 ceiling does not run slowly, it is terminated mid-work, which for the posting step
 means an interrupted chain of committed transactions. The two states that *are*
-functions — 1, 11 and the statistics state 10 — each perform a single bounded
+functions — 1, 12 and the statistics state 11 — each perform a single bounded
 action with no per-record loop, so the ceiling is not in play for them.
 
 ### Why a state machine, and not a managed batch queue service
@@ -469,9 +510,9 @@ different jobs, and JCL `COND` evaluates return codes from earlier steps in the
 `COND=(4,LT)` as provenance for the posting warn path.
 
 **Target mapping.** The specific gate retires with the VSAM
-delete-and-redefine mechanism. State 6 exports the relational transaction data
+delete-and-redefine mechanism. State 7 exports the relational transaction data
 without deleting and recreating its Aurora table, so there is no target redefine
-step to conditionally enter. An export/task failure follows state 6's `Catch`;
+step to conditionally enter. An export/task failure follows state 7's `Catch`;
 successful export continues. Creating a `Choice` for this JCL occurrence would
 preserve syntax after the operation it guarded had disappeared.
 
@@ -479,7 +520,7 @@ preserve syntax after the operation it guarded had disappeared.
 [`app/cbl/CBTRN02C.cbl`](../../app/cbl/CBTRN02C.cbl) L229–L230 sets
 `RETURN-CODE` to 4 when `WS-REJECT-COUNT > 0`, and
 [`tests/README.md`](../../tests/README.md) §8 classifies 4 as warn/soft reject.
-That business contract, not `TRANBKP.jcl`, is why target state 4 must distinguish
+That business contract, not `TRANBKP.jcl`, is why target state 5 must distinguish
 clean and warn outcomes through the explicit status handoff above.
 
 ### Form 3 — `INCLUDE COND=(...)`: record selection, never a step gate
@@ -551,16 +592,16 @@ grep -rn -A3 'DEFINE GENERATIONDATAGROUP' app/jcl
 
 | # | Generation base | Defined at | `LIMIT(5)` at | Written by |
 |---|---|---|---|---|
-| 1 | `TRANSACT.BKUP` | [`DEFGDGB.jcl`](../../app/jcl/DEFGDGB.jcl) L25 | L26, `SCRATCH` L27 | State 6, and state 9's unload half |
-| 2 | `TRANSACT.DALY` | [`DEFGDGB.jcl`](../../app/jcl/DEFGDGB.jcl) L31 | L32, `SCRATCH` L33 | State 9's filter half |
-| 3 | `TRANREPT` | [`DEFGDGB.jcl`](../../app/jcl/DEFGDGB.jcl) L37 | L38, `SCRATCH` L39 | State 9's report output |
-| 4 | `TCATBALF.BKUP` | [`DEFGDGB.jcl`](../../app/jcl/DEFGDGB.jcl) L43 | L44, `SCRATCH` L45 | State 9's category-balance half |
-| 5 | `SYSTRAN` | [`DEFGDGB.jcl`](../../app/jcl/DEFGDGB.jcl) L49 | L50, `SCRATCH` L51 | State 5 — the system-generated interest transactions |
-| 6 | `TRANSACT.COMBINED` | [`DEFGDGB.jcl`](../../app/jcl/DEFGDGB.jcl) L55 | L56, `SCRATCH` L57 | State 7 |
+| 1 | `TRANSACT.BKUP` | [`DEFGDGB.jcl`](../../app/jcl/DEFGDGB.jcl) L25 | L26, `SCRATCH` L27 | State 7 — written by `BackupTransactionsJob` |
+| 2 | `TRANSACT.DALY` | [`DEFGDGB.jcl`](../../app/jcl/DEFGDGB.jcl) L31 | L32, `SCRATCH` L33 | State 7 — the card-ordered subset bounded to the business date |
+| 3 | `TRANREPT` | [`DEFGDGB.jcl`](../../app/jcl/DEFGDGB.jcl) L37 | L38, `SCRATCH` L39 | State 10 — `ReportArtifactPublisher.publishDaily` writes this generation and the request-scoped key from one pass |
+| 4 | `TCATBALF.BKUP` | [`DEFGDGB.jcl`](../../app/jcl/DEFGDGB.jcl) L43 | L44, `SCRATCH` L45 | State 7 — the category-balance unload, staged beside the two transaction families |
+| 5 | `SYSTRAN` | [`DEFGDGB.jcl`](../../app/jcl/DEFGDGB.jcl) L49 | L50, `SCRATCH` L51 | State 6 — the system-generated interest transactions |
+| 6 | `TRANSACT.COMBINED` | [`DEFGDGB.jcl`](../../app/jcl/DEFGDGB.jcl) L55 | L56, `SCRATCH` L57 | State 8 |
 | 7 | `TRANTYPE.BKUP` | [`DEFGDGD.jcl`](../../app/jcl/DEFGDGD.jcl) L28 | L29, `SCRATCH` L30 | Reference-data refresh |
 | 8 | `TRANCATG.PS.BKUP` | [`DEFGDGD.jcl`](../../app/jcl/DEFGDGD.jcl) L51 | L52, `SCRATCH` L53 | Reference-data refresh |
 | 9 | `DISCGRP.BKUP` | [`DEFGDGD.jcl`](../../app/jcl/DEFGDGD.jcl) L74 | L75, `SCRATCH` L76 | Reference-data refresh |
-| 10 | `DALYREJS` | [`DALYREJS.jcl`](../../app/jcl/DALYREJS.jcl) L25 | L26, `SCRATCH` L27 | State 4 — the reject stream |
+| 10 | `DALYREJS` | [`DALYREJS.jcl`](../../app/jcl/DALYREJS.jcl) L25 | L26, `SCRATCH` L27 | State 5 — the reject stream |
 
 The authored `infra/modules/s3-datasets` contract declares prefixes, versioning
 and lifecycle configuration for **ten** families, and publishes the effective
@@ -592,27 +633,31 @@ generation being created by this step, `(0)` names the **current** one.
 
 | Reference | Where | Meaning in the chain |
 |---|---|---|
-| `TRANSACT.BKUP(+1)` | [`TRANBKP.jcl`](../../app/jcl/TRANBKP.jcl) L33 | State 6 creates the backup generation |
-| `TRANSACT.BKUP(+1)` | [`TRANREPT.jcl`](../../app/jcl/TRANREPT.jcl) L33 | State 9 unloads to a new generation, then reads it back at L39 |
+| `TRANSACT.BKUP(+1)` | [`TRANBKP.jcl`](../../app/jcl/TRANBKP.jcl) L33 | State 7 creates the backup generation |
+| `TRANSACT.BKUP(+1)` | [`TRANREPT.jcl`](../../app/jcl/TRANREPT.jcl) L33 | **Not reproduced as a second unload.** The reference unloads the master twice per night because each job is self-contained; state 7 unloads once and state 10 reads the relation directly |
 | `TRANSACT.DALY(+1)` | [`TRANREPT.jcl`](../../app/jcl/TRANREPT.jcl) L55 | The filtered, card-ordered extract, read back at L66 |
 | `TRANREPT(+1)` | [`TRANREPT.jcl`](../../app/jcl/TRANREPT.jcl) L80 | The 133-column report output, `LRECL=133` at L78 |
-| `TRANSACT.BKUP(0)` | [`COMBTRAN.jcl`](../../app/jcl/COMBTRAN.jcl) L24 | State 7 reads the **current** backup generation |
+| `TRANSACT.BKUP(0)` | [`COMBTRAN.jcl`](../../app/jcl/COMBTRAN.jcl) L24 | State 8 reads the **current** backup generation |
 | `SYSTRAN(0)` | [`COMBTRAN.jcl`](../../app/jcl/COMBTRAN.jcl) L26 | Concatenated as the second input — the current interest generation |
 | `TRANSACT.COMBINED(+1)` | [`COMBTRAN.jcl`](../../app/jcl/COMBTRAN.jcl) L37, then L44 | Written by the sort, then read by the reload in the same job |
-| `SYSTRAN(+1)` | [`INTCALC.jcl`](../../app/jcl/INTCALC.jcl) L41 | State 5 creates the interest-transaction generation |
-| `DALYREJS(+1)` | [`POSTTRAN.jcl`](../../app/jcl/POSTTRAN.jcl) L38 | State 4 creates the reject generation |
-| `TCATBALF.BKUP(+1)` | [`PRTCATBL.jcl`](../../app/jcl/PRTCATBL.jcl) L39, read back at L45 | State 9's category-balance half |
+| `SYSTRAN(+1)` | [`INTCALC.jcl`](../../app/jcl/INTCALC.jcl) L41 | State 6 creates the interest-transaction generation |
+| `DALYREJS(+1)` | [`POSTTRAN.jcl`](../../app/jcl/POSTTRAN.jcl) L38 | State 5 creates the reject generation |
+| `TCATBALF.BKUP(+1)` | [`PRTCATBL.jcl`](../../app/jcl/PRTCATBL.jcl) L39, read back at L45 | State 7 stages the generation; state 10 reads the relation directly rather than reading the generation back |
 | `TRANTYPE.BKUP(+1)`, `TRANCATG.PS.BKUP(+1)`, `DISCGRP.BKUP(+1)` | [`DEFGDGD.jcl`](../../app/jcl/DEFGDGD.jcl) L40, L63, L86 | First generation of each reference base |
 
 Note the pattern at [`COMBTRAN.jcl`](../../app/jcl/COMBTRAN.jcl) L37 and L44: the
 same `(+1)` is written by one step and read by the next **within one job**, which
 resolves to the same physical generation because a relative reference is fixed for
-the duration of the job. The target equivalent will compute the generation prefix
-once per execution and pass it to every state that touches it as a
-container override, rather than each state deriving "the next generation" for
-itself. Assumptions: two states independently computing "next" would resolve to two
-different prefixes, and the reload at state 7 would then read an empty location
-while the sort's output sat elsewhere.
+the duration of the job. The target reaches the same guarantee by a different
+mechanism: `DatasetGenerationService` records each allocation per family and run, so a
+repeat request inside one execution answers with the coordinate it already gave, and
+the states that touch a generation receive it rather than deriving "the next" for
+themselves. Assumptions: two independent computations of "next" would resolve to two
+different prefixes. In the reference that would leave the reload at L48 reading an
+empty location while the sort's output sat elsewhere; the migrated chain has no reload
+— registered as `D-COMBINE-NO-LOADBACK` — so the same hazard would instead surface as
+a later state naming a generation no step wrote, which is why the allocator's
+record-and-reuse behaviour is a contract and not an optimisation.
 
 ### The object-store convention
 
@@ -710,41 +755,68 @@ hint, the target's restart design is a **documented improvement, not a
 reproduction**, and describing it as a port would be a false claim about the
 baseline. It specifies two complementary mechanisms:
 
-* **Redrive** will resume a failed execution **from the failed state**, so states
+* **Redrive** resumes a failed execution **from the failed state**, so states
   that already succeeded are not re-entered. This is the analogue of what the
-  commented `RESTART=STEP30` was reaching for; the state machine that enables it
-  is not authored.
-* **A durable per-step run ledger** is defined in the authored
-  `batch.batch_run` DDL. Target job writers will give every step an idempotency
-  key, so **a resumed step that already completed is a no-op**. Its
+  commented `RESTART=STEP30` was reaching for, and it is a property of the
+  STANDARD workflow type the authored state machines are declared with.
+* **A durable per-step run ledger** in `batch.batch_run` gives every step an
+  idempotency key, so **a resumed step that already completed is a no-op**. Its
   columns — `run_id`, `step_name`, `status`, `started_at`, `finished_at`,
   `return_code` — are specified in
   [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) and are
-  not restated here. No repository/job writer currently records those rows.
+  not restated here. It is written by `BatchStepLedger` through
+  `BatchStepLedgerWriter`.
+* **A durable feed watermark** in `batch.daily_feed_watermark` records how far a
+  named consumer has read the accumulating daily feed. This one has no baseline
+  counterpart at all, not even a commented hint, because the reference's feed is a
+  flat dataset REPLACED between runs: a program reading it from the top reads
+  exactly one night. The target's feed is `ledger.daily_transactions`, which
+  accumulates because its rows are what the three post-load verification passes
+  compare against, so reading it from the top would repost every retained night.
+  Posting advances the watermark; the preflight report reads it and advances
+  nothing.
 
-Assumptions: the two mechanisms cover different failure modes and neither is
+Refactoring Rationale: the first two bullets read "will resume", "is not authored"
+and "No repository/job writer currently records those rows". All three described a
+checkpoint state that has since been left behind, and the last was the one that
+misled — a reader planning a resumed run would conclude no idempotency key existed
+and that a redrive would repost. The third bullet is new; it is listed here rather
+than with the posting state because it is a restart mechanism, and separating it
+from the ledger matters: the ledger answers "did this STEP finish", the watermark
+answers "how much of the INPUT was consumed", and a step can fail after consuming.
+
+Assumptions: the three mechanisms cover different failure modes and none is
 sufficient alone. Redrive handles a state that failed and was never marked
 complete. The ledger handles the harder case — a state whose work committed but
 whose completion was not recorded, because the task died between the commit and the
-reply — where redrive alone would re-enter a step that had already posted. Together
-they make a resumed execution converge on the same end state as an uninterrupted
-one, which is the property golden-master comparison actually depends on.
+reply — where redrive alone would re-enter a step that had already posted. The
+watermark handles the case neither addresses: a step that consumed part of its input
+and then failed, where re-entering from the top is correct for the step and wrong
+for the input. Together they make a resumed execution converge on the same end state
+as an uninterrupted one, which is the property golden-master comparison actually
+depends on.
 
-Trade-offs: the target ledger write must share the same database transaction as
-the step's own work where the step writes to the database, coupling the ledger to
-the posting unit of work rather than keeping it in a separate store. An
-independent store was considered and rejected: a ledger that commits separately
-from the work it describes can disagree with it, which is exactly the failure the
-ledger exists to detect.
+Trade-offs: the ledger write and the watermark advance sit on OPPOSITE sides of the
+step's transaction, deliberately, and the asymmetry is the point rather than an
+inconsistency. `BatchStepLedgerWriter` annotates every method
+`Propagation.REQUIRES_NEW` so a ledger row survives the failure it exists to record
+— a row saved inside the step's transaction is rolled back by that very failure, so
+a hard-failed run would leave no failed row at all. The watermark does the opposite
+and takes no propagation annotation of its own, so it commits WITH the postings it
+describes: a position that committed while the postings rolled back would silently
+skip a night's records, which is the one outcome worse than reposting one. An
+independent store for either was considered and rejected — a position that commits
+separately from the work it describes can disagree with it.
 
 
 ## State contracts preserved from the JCL
 
-### State 2 — `StageSeedDatasets`, the ten load branches
+### States 2 and 3 — refreshing and verifying the eleven seed datasets
 
 The master-refresh block is not one job; it is ten `IDCAMS REPRO` load jobs, each
-loading one flat dataset into one indexed cluster. The `Map` state carries one
-branch per job, and the branch list is fixed by that inventory:
+loading one flat dataset into one indexed cluster. One `Map` state carries one branch per
+dataset, and the branch list is fixed by that inventory plus the daily feed — eleven
+branches, which is exactly what `var.seed_datasets` defaults to:
 
 | Load job | `REPRO` statement |
 |---|---|
@@ -759,19 +831,98 @@ branch per job, and the branch list is fixed by that inventory:
 | [`TRANCATG.jcl`](../../app/jcl/TRANCATG.jcl) | `REPRO INFILE(TRANCATG) OUTFILE(TCATVSAM)` |
 | [`DUSRSECJ.jcl`](../../app/jcl/DUSRSECJ.jcl) | `REPRO INFILE(IN) OUTFILE(OUT)` |
 
-Each target branch will run the data-migration image, whose readers and loaders
-are the `IDCAMS REPRO` equivalent. Alternatives Considered: a single task looping
-over ten datasets was rejected in favour of a `Map` with ten branches because a
-`Map` branch failure identifies *which* dataset failed in the execution history,
-whereas a loop inside one task reports one failure for the whole block and leaves
-the operator to read logs to find out which load did not complete.
+Each branch runs the data-migration image with the `refresh-dataset` subcommand,
+whose readers and loaders are the `IDCAMS REPRO` equivalent. One invocation
+performs the whole per-dataset round trip: fetch the published extract from the
+dataset bucket's source-extract prefix, refuse it if its byte count is not a whole
+multiple of the registered record length or if any integrity value the object
+carries disagrees with the bytes that arrived, stage it as a new generation,
+decode and load it into its owning schema, run the three mandatory verification
+passes in order — row counts, record checksum, money parity — and, for the
+transaction master alone, reconcile the transaction-identifier allocator. The
+allocator step is appended after the verifications rather than before them because
+advancing a sequence changes nothing the three passes compare.
 
-### State 3 — `CBTRN01C` has no JCL driver in the baseline
+**One `IDCAMS` job is two halves, and the missing half was the defect.** A `REPRO`
+load both places the bytes and fills the cluster. Staging performed only the first
+half — it copied an extract to a retained generation prefix, which is what gives
+the target its `LIMIT(5)` generation semantics, and it wrote no row. The second
+half, decoding each record per field and bulk-copying it into the schema that owns
+it as a single committed unit of work, did not happen anywhere in the chain. Both
+halves now run in one branch, in one invocation, against one resolved generation.
 
-**`CBTRN01C` is specified as state 3 even though no member of `app/jcl` executes
-it.** No corresponding `Job` bean exists yet. This is stated explicitly because
-a reader comparing the state list against the JCL tree will otherwise go looking
-for a job that does not exist.
+Refactoring Rationale: the branch used to invoke `stage-dataset`, which stages a
+generation and stops, and the extracts were expected at a container FILESYSTEM
+path supplied as `CARDDEMO_DATASET_STAGING_ROOT` from a `dataset_staging_root`
+module input. Three things were wrong with that, and each on its own breaks the
+state. Staging alone performs no load, so a chain that reported success at state 2
+continued into posting against whatever the previous run had left in the
+relational masters — the load half of the ten `REPRO` jobs this state claims
+lineage from was simply absent, and a first execution against an empty cluster
+posted nothing, accrued interest over nothing, produced empty statements and
+reported success. Nothing in the deployable package provisioned that filesystem:
+no volume, no mount, no file. The path was therefore an out-of-band operator
+action, which the migration's own end-to-end deployability constraint forbids. And
+the transaction-identifier allocator was left behind the rows the load inserts, so
+the first transaction the online service added would have collided on the primary
+key hours later. The extracts are now read from object storage, which the
+runbook's `aws s3 sync` already populates, through the same client and credentials
+the branch uses to write generations.
+
+Alternatives Considered: expanding the round trip into further TOP-LEVEL states —
+a `LoadSeedDatasets` `Map` running `load-dataset` once per dataset, and a
+`ReconcileTransactionSequence` task running `reconcile-sequences`, which together
+would have made the chain fourteen work states. Both are withdrawn, and the work
+each was to perform runs inside this branch instead. The argument for splitting was
+that each state's failure would then be attributable to one action; the argument
+against, which won, is that a dataset's fetch, stage, load and verify are one unit
+of work over one resolved generation, and splitting them across three `Map` states
+re-opens the question of WHICH generation the load reads — the operator's inbox or
+the prefix staging actually wrote. Keeping them together also keeps the branch's
+failure attributable to one DATASET, which is the attribution an operator needs,
+and it keeps the published chain length countable: a `Map` whose branch holds five
+work states makes "twelve" ambiguous the moment anyone counts what actually runs.
+The branch is therefore four states — the task, its exit-code `Choice`, and the two
+terminals — so what the branch reports is the refresh's own exit status rather than
+the task integration's.
+
+Alternatives Considered: a single task looping over the eleven datasets was rejected
+in favour of a `Map` with eleven branches because a `Map` branch failure identifies
+*which* dataset failed in the execution history, whereas a loop inside one task
+reports one failure for the whole block and leaves the operator to read logs to find
+out which load did not complete.
+
+Assumptions: the eleventh branch, `daily_transactions`, has no `IDCAMS` row in the
+table above and is not an invention. [`app/jcl/POSTTRAN.jcl`](../../app/jcl/POSTTRAN.jcl)
+L30 reads `DALYTRAN.PS` directly with `DISP=SHR`, so in the baseline it is flat
+sequential input rather than a loaded master; in the target, posting reads
+`ledger.daily_transactions`, a real table with a declared load target whose `amount`
+column the committed money-total query totals. Omitting it would leave a declared
+target unloaded while verification totalled it, which the third pass refuses — which
+is why `var.seed_datasets` defaults to eleven names and its validation admits only
+those eleven.
+
+Assumptions: a branch is idempotent per dataset within a business date, and
+nothing detects that a branch already ran. The durable ledger below records steps
+of the chain, not items of a `Map`, so a partially-completed `Map` redriven from
+state 2 repeats every branch. Repetition converges rather than duplicating — the
+single-writer loads decline against a populated table and the transaction master
+merges on its key — so the cost is time, not correctness.
+
+### State 4 — `CBTRN01C` has no JCL driver in the baseline
+
+**`CBTRN01C` is specified as a work state — state 4 in the current chain — even though
+no member of `app/jcl` executes it.** No corresponding `Job` bean exists yet. This is
+stated explicitly because a reader comparing the state list against the JCL tree will
+otherwise go looking for a job that does not exist.
+
+Assumptions: this heading's number moved from 3 to 4 when `VerifyMigration` was
+inserted ahead of it, and it was renumbered rather than frozen. Freezing it was the
+alternative considered — the heading is a link target — and it was rejected because an
+ordinal that disagrees with the table two screens above it is read as a defect in one of
+the two, and there are exactly two link sites to update in lockstep: this document's own
+state table, and `docs/architecture/observability.md`, whose two references to
+[the state-5 status handoff](#the-state-5-status-handoff-is-explicit) moved with it.
 
 ```text
 # WHAT: show which JCL member drives each batch program, and that one program has
@@ -797,11 +948,11 @@ grounds that the baseline never scheduled it. That was rejected because the prog
 exists, is compiled by the existing build, and performs the daily-transaction
 preflight that the posting step assumes has happened; omitting it would move a
 validation the baseline performs somewhere into a place the target performs it
-nowhere. The accepted consequence is that state 3 is the one state whose ordering
+nowhere. The accepted consequence is that state 4 is the one state whose ordering
 is inferred from the program's function rather than read off a scheduler edge, and
 this paragraph is the disclosure of that inference.
 
-### State 4 — the posting step and its nine data definitions
+### State 5 — the posting step and its nine data definitions
 
 [`POSTTRAN.jcl`](../../app/jcl/POSTTRAN.jcl) runs posting as a **single step** —
 `//STEP15 EXEC PGM=CBTRN02C` at L23 — with **nine data definitions** at L24–L41:
@@ -826,7 +977,7 @@ what the existing suite compares against its golden masters; the per-column
 derivation of that record belongs to
 [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md).
 
-### State 5 — the injected business date
+### State 6 — the injected business date
 
 [`INTCALC.jcl`](../../app/jcl/INTCALC.jcl) L22 reads:
 
@@ -854,24 +1005,96 @@ second access path that the target satisfies with a secondary index. L37–L41
 creates the system-transaction output, `DISP=(NEW,CATLG,DELETE)` with `LRECL=350`
 at L39, into `SYSTRAN(+1)` at L41.
 
-### States 6 and 7 — backup, then combine
+### States 7 and 8 — backup, then combine
 
-State 6 replaces [`TRANBKP.jcl`](../../app/jcl/TRANBKP.jcl), whose three steps
+State 7 replaces [`TRANBKP.jcl`](../../app/jcl/TRANBKP.jcl), whose three steps
 unload the transaction master to a new generation through the shared procedure
 (L23–L33), delete the cluster and its alternate index (L37–L45), then re-define the
 cluster behind the `COND=(4,LT)` gate at L51 with `KEYS(16 0)` at L58 and
 `RECORDSIZE(350 350)` at L59.
 
-State 7 replaces [`COMBTRAN.jcl`](../../app/jcl/COMBTRAN.jcl), a DFSORT merge of
+State 7 also stages the **two other generation families the baseline derives from an
+unload**, so one state produces three:
+
+| Family | Object name | Baseline unload | What the target writes |
+|---|---|---|---|
+| `TRANSACT.BKUP` | `transact.bkup` | [`TRANBKP.jcl`](../../app/jcl/TRANBKP.jcl) L23–L33 | Every posted transaction, in transaction-identifier order |
+| `TRANSACT.DALY` | `transact.daly` | [`TRANREPT.jcl`](../../app/jcl/TRANREPT.jcl) L37–L55 | The business date's transactions, ordered by card number then identifier |
+| `TCATBALF.BKUP` | `tcatbalf.bkup` | [`PRTCATBL.jcl`](../../app/jcl/PRTCATBL.jcl) L29–L39 | Every category balance, 50 bytes each, in the three-key sort order `PRTCATBL.jcl` L52 declares |
+
+Refactoring Rationale: these three were one state rather than three because the
+alternative is three states each holding the same open cursor over the same
+relation, and because two of the three families **had no production writer at
+all** before this — so the prefixes and the five-generation lifecycle rules
+`infra/modules/s3-datasets` provisions for them governed nothing. The list is
+published by `BackupTransactionsJob.stagedFamilies()` and the IAM scoping in both
+environment roots reads it, so a family added without a grant fails at run time
+rather than at plan time; `BackupTransactionsJobTest` asserts the list exactly for
+that reason.
+
+Assumptions: the daily subset is bounded by a **half-open** window over
+`proc_ts` — from the business date's first instant, up to but excluding the next
+date's. The reference selects on `TRAN-PROC-DT,305,10,CH`, which is the first ten
+characters of that timestamp and therefore a date, so a closed upper bound at the
+following midnight would carry a row the reference's `INCLUDE` at
+[`TRANREPT.jcl`](../../app/jcl/TRANREPT.jcl) L47–L48 excludes.
+
+Assumptions: the daily subset carries a **tie-break the reference sort does not**.
+`SORT FIELDS=(TRAN-CARD-NUM,A)` at L46 names one control field, so the order of two
+records sharing a card number is decided by whether the `EQUALS` option is in effect
+at the installation rather than by the job. The target orders by card number then
+transaction identifier, which makes the staged bytes repeatable; registered as
+`D-DALY-CARD-TIE-BREAK` in
+[`cobol-to-service-traceability.md`](cobol-to-service-traceability.md).
+
+State 8 replaces [`COMBTRAN.jcl`](../../app/jcl/COMBTRAN.jcl), a DFSORT merge of
 two concatenated inputs — the current backup generation at L24 and the current
 interest generation at L26 — under `SYMNAMES` declaring `TRAN-ID,1,16,CH` at L28
 and `SORT FIELDS=(TRAN-ID,A)` at L30, followed by a `REPRO` reload into the master
-at L48. The merge becomes `ORDER BY` on the transaction identifier and the reload
-becomes a set-based insert.
+at L48. The merge becomes `ORDER BY` on the transaction identifier.
 
-### State 9's second half — `PRTCATBL.jcl`
+Three differences then reach the artefact, and each is registered in
+[`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) rather than
+described only here, because each is visible to somebody comparing a migrated
+generation against a reference extract:
 
-State 9 carries two report jobs, and the category-balance half is easy to overlook.
+* the reload at L48 has **no counterpart** — `D-COMBINE-NO-LOADBACK`. The copy exists
+  to fold rows into the master that were written outside it, and the migrated accrual
+  pass commits them to `ledger.transactions` directly, so the master already holds
+  everything the combined extract is assembled from.
+* the two inputs are resolved as a **precondition and never read** —
+  `D-COMBINE-GENERATION-BYPASS`. `CombineTransactionsJob` requires a current
+  generation of each family, fails the state by family name when one is absent, and
+  then composes its output from the relation; `DatasetGenerationService` publishes no
+  operation that returns a generation's contents at all.
+* the backup generation is a **superset of the reference's** —
+  `D-COMBINE-BACKUP-SUPERSET`. State 7 runs after state 6, so `transact.bkup` already
+  carries the night's accrual rows, which `systran` also carries. Concatenating the
+  two objects the way the reference does would therefore emit every accrual row twice
+  in the target, which is the second independent reason the output is composed from
+  the relation instead.
+
+`CH` is a **byte-by-byte** character comparison, and reproducing it takes an explicit
+decision rather than an `ORDER BY` alone: a character column's comparison resolves
+through its collation, so on a database created with a linguistic default the same
+`ORDER BY` reorders exactly the identifiers state 6 produces — the accrual pass
+concatenates a ten-character token into the key unchanged at
+[`CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) L476–L480, and one committed layout of
+that token carries hyphens, to which a linguistic collation gives no primary weight.
+The ordering-critical character columns of the `ledger` schema are therefore pinned to
+the bytewise `C` collation by
+`services/transaction-service/src/main/resources/db/migration/V3__ledger_bytewise_collation.sql`:
+`transactions.transaction_id` for this state's `CH` sort, `transactions.card_num` for
+the card-ordered sequence state 9 and state 10 read, and
+`transaction_category_balances.type_cd` and `.category_cd` for the three-key sort
+described below. The pin sits on the **column**, so every ordered read inherits it —
+including the derived repository finders, which cannot express a `COLLATE` clause of
+their own. The descriptive columns are deliberately left on the database default,
+where a locale-aware order is the correct one.
+
+### State 10's second half — `PRTCATBL.jcl`
+
+State 10 carries two report jobs, and the category-balance half is easy to overlook.
 [`PRTCATBL.jcl`](../../app/jcl/PRTCATBL.jcl):
 
 * declares `//JOBLIB JCLLIB ORDER=('AWS.M2.CARDDEMO.PROC')` at L19, which is how it
@@ -891,7 +1114,33 @@ State 9 carries two report jobs, and the category-balance half is easy to overlo
   and the `OUTREC` at L53–L56 with `EDIT=(TTTTTTTTT.TT)` is the output edit mask.
 
 The job carries no `COND=` at all, so all three of its steps run unconditionally in
-the baseline; the target design folds them into one state reached by one edge.
+the baseline; the target folds them into one state reached by one edge — with its
+**unload half in state 7** and its **report half in state 10**, because the unload
+produces a generation and the report produces an artifact and the two have different
+retention contracts.
+
+The report half is produced by `CategoryBalanceReportService`, over the read-only
+view `reporting.v_transaction_category_balances`, and published by
+`CategoryBalanceArtifactPublisher` to `reports/category-balance/category-balance.txt`
+— a **fixed key with no date partition**, because `PRTCATBL.jcl` writes a plain
+sequential dataset that it deletes first at L21–L25 and no `GENERATIONDATAGROUP`
+base for `TCATBALF.REPT` exists anywhere in the baseline. Object versioning is what
+expresses the delete-then-rewrite, so each run's predecessor becomes a noncurrent
+version rather than being scratched.
+
+Assumptions: the emitted line is **forty** bytes and the `OUTREC` operand list at
+L53–L56 composes forty-one. The `EDIT=(TTTTTTTTT.TT)` mask is twelve characters, so
+`11 + 1 + 2 + 1 + 4 + 1 + 12 + 9 = 41` against the `LRECL=40` declared at L61.
+Unlike the comparable disagreement in [`CREASTMT.JCL`](../../app/jcl/CREASTMT.JCL),
+which a COBOL record declaration settles, `PRTCATBL.jcl` has no program at all — so
+the declared length is taken and the disputed byte comes out of the trailing
+padding, which loses nothing. Registered as `D-PRTCATBL-LRECL`.
+
+Refactoring Rationale: this section previously recorded the category-balance half as
+having no target path, and the state's own rationale in
+`infra/modules/step-functions-batch/main.tf` claimed it replaced both report jobs
+while only the transaction report was built. The half is now built, so both
+statements are corrected rather than one being left to contradict the other.
 
 ### The wait step retires with an analogue
 
@@ -972,10 +1221,17 @@ independently refuses a duplicate execution name on a STANDARD machine. The
 operator convention that makes the name repeatable is in
 [the batch operations runbook](../runbooks/batch-operations.md).
 
-Assumptions: the shared execution role is reused rather than a third one created.
-Its `ecs:RunTask` grant already covers the batch task definition, and the round
-trip runs no other, so a third role would duplicate every statement with no
-narrowing.
+Refactoring Rationale: this machine holds its **own** execution role, keyed `dataset`
+in the module's `local.machines`. This paragraph previously said the shared role was
+reused because it "already covers the batch task definition, and the round trip runs
+no other, so a third role would duplicate every statement with no narrowing" — the
+first clause was true and the conclusion was not. The shared role also covered the
+data-migration, reporting and authorization task definitions, all eight task and
+execution roles, and the quiesce, analyze-tables and resume functions, none of which
+this two-state round trip references; so a per-machine role narrows a great deal
+rather than duplicating. There are now four roles, four inline policies and four
+trust documents, each constrained to one exact state-machine ARN, and the module
+publishes them as the `execution_role_arns` and `execution_role_names` maps.
 
 
 ## The pending-authorization segment export is operator-invoked too
@@ -1097,7 +1353,7 @@ and is specified in
 `DEFINE PATH` at L42 becomes nothing at all, because a relational index needs no
 separate object to make it readable.
 
-What survives as state 10 is **table maintenance** — `VACUUM ANALYZE` — which is a
+What survives as state 11 is **table maintenance** — `VACUUM ANALYZE` — which is a
 different job with a different purpose: it reclaims the dead tuples the chain's write
 states just produced and refreshes the planner's statistics, and it would be required
 whether or not the baseline had ever had a `BLDINDEX` step. `VACUUM ANALYZE` is what
@@ -1117,7 +1373,7 @@ warning when it does; the guard is narrow, so any other failure fails the state.
 fallback protects the statistics refresh — the thing this state is accountable for —
 without pretending the reclaim is impossible. It is recorded at its point of use in
 [`infra/lambda/database_admin.py`](../../infra/lambda/database_admin.py).
-Alternatives Considered: state 10 could have been
+Alternatives Considered: state 11 could have been
 dropped entirely on the grounds that the step it replaces is retired. That was
 rejected because the chain's write states change row counts and value
 distributions substantially in one execution, and a planner working from
@@ -1167,7 +1423,7 @@ file to be closed, because all four open their dataset `DISP=SHR`:
 
 **The honest caveat.** The write-path scoping holds for the scheduler chains, and
 not for initial load: the ten `IDCAMS REPRO` load jobs listed under
-[State 2](#state-2--stageseeddatasets-the-ten-load-branches) do write those same
+[States 2 and 3](#states-2-and-3--refreshing-and-verifying-the-eleven-seed-datasets) do write those same
 datasets, and they sit outside every scheduler chain. So the correct statement is
 that the bracket covers the write path *of the chains it brackets*, and that
 initial load is a separate activity performed outside them. Anyone reading the
@@ -1237,11 +1493,14 @@ against it:
 
 The read-only flag is what every online service reads, and it is **not** what holds
 the bracket. Ownership lives in a DynamoDB item the environment root provisions, and
-the two edges operate on it with condition expressions the service arbitrates:
-`QuiesceOnlineWrites` acquires with a conditional `PutItem` that succeeds only when
-no lease is stored or the stored one has expired, and every release path issues a
-conditional `DeleteItem` that succeeds only for the recorded owner or an expired
-lease. The flag is then written as a **consequence** of the lease decision.
+the two edges operate on it with condition expressions the service arbitrates.
+`QuiesceOnlineWrites` acquires with a conditional `PutItem` that succeeds in exactly
+three cases — no lease is stored, the stored one has expired, or the stored one
+already names **this** execution. Every release path takes two steps around the flag
+write: a conditional `UpdateItem` that **claims** the release for the recorded owner
+or an expired lease, shortening the expiry to the release window without giving the
+lease up, and then a conditional `DeleteItem` that completes it. The flag is written
+as a **consequence** of the lease decision, between the claim and the delete.
 
 Refactoring Rationale: the flag used to be the lease, and that could not work. There
 is no compare-and-set for a plain String parameter in Parameter Store, so acquisition
@@ -1270,6 +1529,46 @@ and immediate. The expiry recorded is the state machine's own timeout, which is 
 longest a running execution can hold the bracket, so a lease can only be expired once
 its owner can no longer be running. That is what makes the mechanism self-healing
 without letting a lease lapse underneath a live chain.
+
+⚠️ Refactoring Rationale: self-healing describes the **lease** and must not be read as
+covering the **flag**. Expiry changes what a future caller is permitted to do; nothing
+observes an expiry and nothing writes the flag on it, so a release that never happened
+leaves online writes refused until some later invocation performs one. Three mechanisms
+close that, and none of them is an expiry. The release itself is ordered claim, write,
+delete — the lease is held across the flag write, so a failed write leaves a lease a
+retry can verify and finish, where deleting first left a retry unable to tell an
+abandoned release from a completed one. Both graph release edges then gate on the flag's
+resulting state, so an execution cannot reach `Succeed`, or report an ordinary
+`CardDemoBatchFailed`, without having proved writes were re-enabled. And the
+out-of-graph finalizer's undelivered events land on a dead-letter queue with an alarm,
+so the one path with no in-graph recovery has an out-of-band one.
+
+Refactoring Rationale: both edges are retry-safe, and the first shape of the lease left
+neither of them so. The quiesce admits its own execution because a fault the platform
+reports after the `PutItem` landed — a lost response, a throttle on the way back, an
+attempt the state timed out — leaves a lease owned by this execution and a flag not yet
+written; without that third case the retry met a condition that could only fail,
+reported `leaseAcquired` false naming **itself** as the holder, and
+`CheckQuiesceLeaseAcquired` routed it to `OnlineWriteLeaseUnavailable`: an execution
+deadlocked against its own lease, with online writes still enabled and the bracket held
+until it expired. The release claims before writing because it used to delete first, so
+a failed flag write left online writes disabled with no lease left to prove who was
+entitled to re-enable them — and this graph's own recovery re-invoked the release with
+the same `expectedLeaseOwner`, which found no lease, was refused with "no lease is
+held", skipped the write and returned **success** with every online service still
+read-only. The delete runs on every successful claim, including the retry that finds the
+flag already correct, which is what makes the pair converge rather than stall on a flag
+that needs no write.
+
+Assumptions: the claim window is far shorter than the lease itself — five minutes
+against the state machine's own timeout — because every caller that claims has by
+definition finished the work the bracket protected. Both in-graph release states are
+terminal on their paths, and the bracket-finalizer rule fires only for an execution that
+has already ended, so shortening the expiry at that moment is what stops a release that
+never completes from locking the next night out for whatever remained of the original
+hold. It does not have to cover the caller's own retries, which are admitted by the
+owner clause rather than by expiry, and it covers the one flag write it must by an order
+of magnitude, because both functions run under a 30-second Lambda timeout.
 
 
 ## The procedure and control-card tier
@@ -1399,7 +1698,7 @@ into the cluster. The 32-byte key is corroborated by
 `TRNX-CARD-NUM PIC X(16)` followed by `TRNX-ID PIC X(16)`.
 
 Recorded because it explains a target decision that would otherwise look like a
-simplification: state 8 builds **no** second table. Alternatives Considered:
+simplification: state 9 builds **no** second table. Alternatives Considered:
 materialising a card-ordered copy would mirror the baseline structurally, and was
 rejected because the reason the baseline needs a physical copy is that VSAM requires
 a separate cluster or index to browse in a different order, whereas the target
@@ -1527,7 +1826,7 @@ flowchart LR
 ```
 
 Assumptions: the target inherits **ordering from these edges**, not from any clock
-value in the artifact. That is what fixes state 8 before state 9 — see
+value in the artifact. That is what fixes state 9 before state 10 — see
 [the retirement consequence](#the-txt2pdf1-retirement-and-its-consequence) — and it
 is why this section can describe the chain's shape without making a single temporal
 claim.
@@ -1542,7 +1841,7 @@ and no throughput or duration commitment is made anywhere in this document.
 
 ### The curation trade-off
 
-Trade-offs: the single eleven-state `carddemo-daily-batch` machine is a **curated
+Trade-offs: the single twelve-state `carddemo-daily-batch` machine is a **curated
 consolidation of the write-path chain the migration brings into scope**, not a
 transcription of either scheduler artifact. Concretely: the states cover the posting,
 interest, backup, combine, statement and report work plus the bracket, drawing
@@ -1595,7 +1894,7 @@ So the statement-creation job fed the text-to-PDF utility, which then fed both t
 wait step and the category-balance report job. Removing the middle node collapses
 that link, and the report job's predecessor edge has to be **re-parented onto the
 statement step**. That is what the target graph must do, and it is the structural
-reason state 8 (`GenerateStatements`) precedes state 9 (`GenerateReports`) — the
+reason state 9 (`GenerateStatements`) precedes state 10 (`GenerateReports`) — the
 adjacency is inherited from the baseline graph with the retired node's edge spliced
 out, rather than chosen.
 
@@ -1633,12 +1932,12 @@ specified once, in [`service-catalog.md`](service-catalog.md) and
 [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md), and is not
 restated here.
 
-Refactoring Rationale: within states 7 and 9 the record-at-a-time file reads become
+Refactoring Rationale: within states 8 and 10 the record-at-a-time file reads become
 set-based SQL and the sort-merge step becomes an ordered query, because a relational
 engine can express the whole operation as one statement where the baseline had to
 read, compare and write a record at a time through a file interface. But **faster is
 only acceptable here if it is also identical**, so the change stops at the boundary
-of the unit of work: state 4's three writes remain one commit, and no set-based
+of the unit of work: state 5's three writes remain one commit, and no set-based
 rewrite is applied to them. That sentence is the justification for where the
 rewriting stops.
 

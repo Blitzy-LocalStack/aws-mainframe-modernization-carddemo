@@ -41,4 +41,30 @@ public record TransactionReportTotals(List<ReportTotalsResponse> bands) {
                 + " carries an empty list rather than an absent one");
         bands = List.copyOf(bands);
     }
+
+    /**
+     * Renders the band count rather than the bands.
+     *
+     * <p>Purpose. Every band carries a monetary total, so the compiler-generated rendering of this
+     * single-component type emitted the report's whole set of subtotals. Each band's own renderer already
+     * withholds its amount, which makes this override look redundant -- and it is not: relying on it would
+     * make this type's disclosure a property of another file, where a component added to a band without
+     * its renderer updated would leak through here with nothing here to show it.</p>
+     *
+     * <p>Assumptions: the count is the meaningful fact. The band set is closed, so a count below its
+     * cardinality says a band failed to be produced, which is a generation fault a reader can act on;
+     * the amounts themselves belong to the artifact and to the response body.</p>
+     *
+     * <p>Trade-offs: naming WHICH bands are present would say more than counting them, and is not done
+     * here because the closed set makes the count sufficient to detect the only fault this type has -- a
+     * missing band -- while keeping the rendering a fixed shape.</p>
+     *
+     * @return a rendering naming the number of bands, with the bands themselves omitted; never
+     *     {@code null}
+     */
+    @Override
+    public String toString() {
+        return "TransactionReportTotals[bands=" + (this.bands == null ? "absent"
+                : this.bands.size() + " entries") + ']';
+    }
 }

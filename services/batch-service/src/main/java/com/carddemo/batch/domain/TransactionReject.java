@@ -60,11 +60,12 @@ import org.hibernate.type.SqlTypes;
  * {@code tests/golden/posting} is a single 430-character line whose characters 350 to 353 are a
  * zero-padded code and whose characters 354 to 429 are the message followed by blanks.</p>
  *
- * <h2>The reason codes this module can persist</h2>
+ * <h2>The reason codes the posting pass emits</h2>
  *
  * <table border="1">
- *   <caption>The four reachable reason codes, the line that sets each, and its verbatim
- *   text</caption>
+ *   <caption>The four reason codes the posting pass reaches, the line that sets each, and its
+ *   verbatim text. They are the codes PRODUCED, not the bound on what may be stored: the column and
+ *   this type admit any value in 0 to 9999, for the reason given further below</caption>
  *   <tr><th>Code</th><th>Condition</th><th>Set at</th><th>Text, verbatim</th></tr>
  *   <tr><td>100</td><td>Card number absent from the cross-reference</td>
  *       <td>{@code :385-387}</td><td>{@code INVALID CARD NUMBER FOUND}</td></tr>
@@ -119,10 +120,29 @@ import org.hibernate.type.SqlTypes;
  * rejected transaction, then a four-digit reason code, then a 76-character description. The width
  * derivation is given three independent ways above.</p>
  *
- * <p>The reason-code domain this module can PERSIST is exactly {@code {100, 101, 102, 103}}. A
- * fifth value, 109, is assigned by the baseline at {@code app/cbl/CBTRN02C.cbl:556} on a path that
- * cannot reach the write, so it is not part of the domain; the reachability analysis sits on
- * {@link #getReasonCode()}.</p>
+ * <p>Two different domains apply to the reason code and they must not be conflated. The domain this
+ * type and its column can REPRESENT is the inclusive range {@code 0} to {@code 9999}: the
+ * constructor validates exactly that range, and the owning migration enforces it as
+ * {@code CHECK (reason_code BETWEEN 0 AND 9999)} on
+ * {@code ck_transaction_rejects_reason_code}. The set the posting pass actually EMITS is the four
+ * values {@code {100, 101, 102, 103}} tabulated above, and no other value is written on any path
+ * this module runs.</p>
+ *
+ * <p>Assumptions: the representable range is the source picture's and not a widening chosen here.
+ * {@code app/cpy/CVTRA06Y.cpy} carries the trailer as a four-digit numeric field, so any value of
+ * that width is expressible in the reference record, and the baseline writes the code it computed
+ * rather than one drawn from a closed list.</p>
+ *
+ * <p>Alternatives Considered: narrowing the constraint to {@code IN (100, 101, 102, 103)} so that
+ * the representable domain equalled the emitted set. Rejected on two grounds. It would make the
+ * schema assert a closed vocabulary the reference record does not have, so a reject image the
+ * baseline can produce would become unstorable and the divergence would surface as a constraint
+ * violation rather than as data. And it would move a rule that belongs to the posting pass into the
+ * shape of the table every consumer reads, which is the pattern the sibling constraint removal for
+ * {@code customers} was corrected for. The four-value set is documented where it is decided --
+ * {@link #getReasonCode()} carries the reachability analysis, including the fifth value {@code 109}
+ * that {@code app/cbl/CBTRN02C.cbl:556} assigns on a path that cannot reach the write -- rather than
+ * being encoded as a constraint.</p>
  *
  * <p>Assumptions: reason 101 and the unreachable 109 carry BYTE-IDENTICAL text -- {@code ACCOUNT
  * RECORD NOT FOUND} at {@code app/cbl/CBTRN02C.cbl:398} and {@code :557} respectively -- so a

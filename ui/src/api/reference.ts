@@ -63,7 +63,7 @@
  * on one spelling of the code.
  */
 
-import { getApiClient, requestPath } from './client';
+import { getApiClient, keysetPagingMembers, requestPath } from './client';
 import type {
   ContractOperation,
   DateEvaluationResult,
@@ -274,14 +274,23 @@ export const REFERENCE_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
  * Assumptions: the direction is sent only alongside a cursor, because the contract declares it
  * meaningful only there and defaults it to next. A direction alone describes a position relative to
  * nothing, and the edge would refuse the request before a handler saw it.
+ *
+ * Refactoring Rationale: ⚠️ that refusal is now raised HERE, by `keysetPagingMembers`, instead of the
+ * direction being dropped. Dropping it made the five browses in this module answer the opening page to
+ * a caller that had asked to step from a position it did not hold, which is indistinguishable from a
+ * browse that simply has nothing further to show. Because all five funnel through this one function, a
+ * single call covers every one of them -- which is the same reason the request itself is issued once
+ * below, and the same failure mode it avoids: a detail applied in four places out of five.
  * @param {LookupListQuery} query - The cursor and direction a caller supplied, either or both absent.
  * @returns {Record<string, string>} The paging parameters, empty when the caller supplied no cursor.
+ * @throws {RangeError} If a direction is supplied without a usable cursor.
  */
 function pagingParameters(query: LookupListQuery): Record<string, string> {
   const params: Record<string, string> = {};
-  if (query.cursor !== undefined) {
-    params.cursor = query.cursor;
-    params.direction = query.direction ?? 'next';
+  const paging = keysetPagingMembers(query.cursor, query.direction);
+  if (paging !== undefined) {
+    params.cursor = paging.cursor;
+    params.direction = paging.direction;
   }
   return params;
 }
@@ -330,6 +339,7 @@ function referenceParameters(query: ReferenceListQuery): Record<string, string> 
  * @param {ReferenceListQuery} [query] - Optional code and description filters, plus a sealed cursor and
  *   the direction it was issued for.
  * @returns {Promise<PageResponse<TransactionType>>} One bounded page of transaction types.
+ * @throws {RangeError} If a direction is supplied with no cursor to step from.
  * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails.
  */
 export async function listTransactionTypes(
@@ -412,6 +422,7 @@ export async function deleteTransactionType(typeCd: string): Promise<void> {
  * @param {ReferenceListQuery} [query] - Optional type-code and description filters, plus a sealed
  *   cursor and the direction it was issued for.
  * @returns {Promise<PageResponse<TransactionCategory>>} One bounded page of categories.
+ * @throws {RangeError} If a direction is supplied with no cursor to step from.
  * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails.
  */
 export async function listTransactionCategories(
@@ -548,6 +559,7 @@ export async function getDisclosureGroupRate(
  * @param {PhoneAreaCodeListQuery} [query] - Optional class filter, plus a sealed cursor and the
  *   direction it was issued for.
  * @returns {Promise<PageResponse<UsPhoneAreaCode>>} One bounded page of area codes.
+ * @throws {RangeError} If a direction is supplied with no cursor to step from.
  * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails.
  */
 export async function listUsPhoneAreaCodes(
@@ -578,6 +590,7 @@ export async function getUsPhoneAreaCode(areaCd: string): Promise<UsPhoneAreaCod
  * Lists state codes by key.
  * @param {LookupListQuery} [query] - Optional sealed cursor and the direction it was issued for.
  * @returns {Promise<PageResponse<UsState>>} One bounded page of state codes.
+ * @throws {RangeError} If a direction is supplied with no cursor to step from.
  * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails.
  */
 export async function listUsStates(query: LookupListQuery = {}): Promise<PageResponse<UsState>> {
@@ -600,6 +613,7 @@ export async function getUsState(stateCd: string): Promise<UsState> {
  * Lists state-and-ZIP-prefix pairs by key.
  * @param {LookupListQuery} [query] - Optional sealed cursor and the direction it was issued for.
  * @returns {Promise<PageResponse<UsStateZipPrefix>>} One bounded page of prefix pairs.
+ * @throws {RangeError} If a direction is supplied with no cursor to step from.
  * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails.
  */
 export async function listUsStateZipPrefixes(
@@ -661,7 +675,11 @@ export async function getUsStateZipPrefix(stateZipCd: string): Promise<UsStateZi
  * echoing back a mask it received in a previous result -- narrowing the parameter would make that round
  * trip need a cast. Alternatives Considered: writing it as `DateMask | string`, which was the first
  * attempt. Rejected because a union of a literal type with `string` collapses to `string`, so it reads
- * as a constraint while imposing none -- and the lint rule forbidding that redundancy is correct to.
+ * as a constraint while imposing none -- and the lint rule that forbids that redundancy,
+ * `@typescript-eslint/no-redundant-type-constituents`, is right to reject it: a reader of the signature
+ * would believe the two named forms were enforced, while every other string passed just as well. The
+ * plain `string` states the truth, and the two supported forms are named in the parameter's own
+ * documentation below, where a statement of intent belongs when the type system cannot carry it.
  * @param {string} date - Eight or ten characters of date text, matching the mask.
  * @param {string} [mask] - The mask to read it against, normally one of the two `DateMask` forms.
  *   Omit it for the hyphenated form the contract defaults to.

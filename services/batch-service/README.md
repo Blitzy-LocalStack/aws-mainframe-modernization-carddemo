@@ -394,29 +394,38 @@ computationally different — it yields different cents on many inputs, because 
 intermediate quotient is rounded before the multiplication rather than after.
 Re-ordering is forbidden, and the ordering is asserted by test to the cent.
 
-**The quotient is truncated toward zero, matching the baseline cent for cent.**
-Assumptions: the reference stores its result into `WS-MONTHLY-INT PIC S9(09)V99` at
-`:168` and a COBOL `COMPUTE` without `ROUNDED` discards the surplus digits toward
-zero — and no statement anywhere in that program's 652 lines carries `ROUNDED`. The
-accrual therefore reduces under `Money.BASELINE_INTEREST_ROUNDING`, which is
-`RoundingMode.DOWN` and which governs that one operation; every other reduction in
-the money path uses `Money.GENERAL_ROUNDING`, half up.
-`InterestCalculationService.ACCRUAL_ROUNDING` names the mode beside this service and
-is asserted equal to the shared constant, so a name that drifted from the behaviour
-fails the build. `Money.monthlyInterest` takes no rounding-mode parameter and no call
-site can select another.
+**The quotient is reduced half up, once, and that differs from the baseline by a
+cent on an exact half.** Assumptions: transformation rule T3 states the money path as
+an exact decimal at scale 2 with `RoundingMode.HALF_UP` in Java and states no exception
+for the accrual quotient, while rule T4 constrains the operand ORDER only. The reference
+reduces differently — it stores its result into `WS-MONTHLY-INT PIC S9(09)V99` at `:168`
+and a COBOL `COMPUTE` without `ROUNDED` discards the surplus digits toward zero, and no
+statement anywhere in that program's 652 lines carries `ROUNDED`. The accrual therefore
+reduces under `Money.GENERAL_ROUNDING`, the one mode the money path declares.
+`InterestCalculationService.ACCRUAL_ROUNDING` is derived from that shared constant rather
+than restating a literal, and is asserted equal to it, so a name that drifted from the
+behaviour fails the build. `Money.monthlyInterest` takes no rounding-mode parameter and
+no call site can select another.
 
-Refactoring Rationale: the accrual reduced with `HALF_UP` and the resulting cent was
-registered as divergence **C-ROUNDING**. That is withdrawn — the accrual formula is
-one of the business rules the reference test suite asserts verbatim, so a cent of
-drift in it is a parity failure rather than a rounding preference, and the cent did
-not stay local: line 467 adds each reduced term into the account total and line 352
-adds that total to the account balance, which the next **inclusive** over-limit
-comparison is made against. The identifier survives only as a withdrawal record in
-§7.5 of `docs/architecture/cobol-to-service-traceability.md`.
-Alternatives Considered: keeping a mode parameter so a parity caller could ask for
-truncation while others kept half up. Rejected because a selectable mode is a second
-money contract in disguise: two call sites computing the same accrual could disagree
+Trade-offs: the difference is one cent, it appears only where the quotient lands exactly
+on a half — `1000.80` at `2.50` gives `2.0850` exactly, so this service emits `2.09` where
+the reference emits `2.08` — and it does not stay local: line 467 adds each reduced term
+into the account total and line 352 adds that total to the account balance, which the next
+**inclusive** over-limit comparison is made against. It is registered as divergence
+**C-ROUNDING** in §7.4 of
+`docs/architecture/cobol-to-service-traceability.md`, which carries the reachability
+measurement — no shipped interest fixture reaches an exact half, so every golden scenario
+matches the reference cent for cent.
+
+Refactoring Rationale: this service reduced the accrual with `RoundingMode.DOWN` for a
+time, to match the baseline cent for cent, and `C-ROUNDING` was withdrawn on that ground.
+That is reversed. The plan is frozen and admits a departure from a transformation rule only
+where it states an exception; T3 states none, and it does admit a behavioural difference
+from the reference when the difference is registered. Matching the baseline therefore
+bought parity by breaking the rule that exists to keep the money path uniform, which is the
+wrong trade of the two. Alternatives Considered: keeping a mode parameter so a parity caller
+could ask for truncation while others kept half up. Rejected because a selectable mode is a
+second money contract in disguise: two call sites computing the same accrual could disagree
 by a cent with nothing signalling that they had chosen differently.
 
 The operand types set the shape of the arithmetic:
@@ -1326,7 +1335,7 @@ exactly and a column here would answer it only until the next commit.
 | `PostingValidationServiceTest` | All four reject reasons with their exact message text, **and both inclusive boundaries** — exactly at the credit limit posts, one cent over rejects `102`; equal to the expiration date posts, one day past rejects `103` |
 | The exit-status test | A run with rejects reports `4` **and emits the counter line verbatim**, two spaces before the colon; a clean run reports `0` |
 | `CategoryBalanceServiceTest` | The create path and the update path **separately**, so an upsert that collapsed them would fail |
-| `InterestCalculationServiceTest` | The multiply-before-divide result **to the cent**, the truncating reduction under `RoundingMode.DOWN` on a datum where half up would differ, per-row truncation rather than truncation of the sum, the `DEFAULT` fallback carrying type and category through, a missing `DEFAULT` row failing hard, and the final-account flush that the baseline does not reach |
+| `InterestCalculationServiceTest` | The multiply-before-divide result **to the cent**, the half-up reduction under `Money.GENERAL_ROUNDING` on two data where the baseline's truncation would differ, per-row reduction rather than reduction of the sum, the `DEFAULT` fallback carrying type and category through, a missing `DEFAULT` row failing hard, and the final-account flush that the baseline does not reach |
 | `ExportJob` / `ImportJob` round trip | The 500-byte packed-decimal record survives a write-then-read unchanged, including the three usages of one picture at `app/cpy/CVEXPORT.cpy:50-57` |
 | The business-date test | The date comes from a **parameter**: injecting a fixed date twice produces byte-identical output, and no code path reads a clock for it |
 | `*RepositoryIT` | Against a real PostgreSQL container, the three-write unit of work **commits atomically and rolls back atomically**, across `ledger.*` and `account.*`, in **one** transaction |

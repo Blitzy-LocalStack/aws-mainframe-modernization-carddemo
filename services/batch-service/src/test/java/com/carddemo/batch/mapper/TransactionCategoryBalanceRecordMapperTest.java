@@ -131,8 +131,8 @@ class TransactionCategoryBalanceRecordMapperTest {
      * read, which the sibling test below rules out.</p>
      */
     @Test
-    @DisplayName("the single-argument encode restores every field and pads with blanks")
-    void theSingleArgumentEncodeWritesBlankPadding() {
+    @DisplayName("the single-argument encode restores every field and writes the create arm's pad")
+    void theSingleArgumentEncodeWritesTheCreateArmPad() {
         byte[] encoded = TransactionCategoryBalanceRecordMapper.toRecord(
                 TransactionCategoryBalanceRecordMapper.toEntity(referenceImage()));
 
@@ -140,9 +140,23 @@ class TransactionCategoryBalanceRecordMapperTest {
         assertThat(new String(encoded, 0, PAD_OFFSET, StandardCharsets.UTF_8))
                 .as("the four mapped fields are reproduced exactly")
                 .isEqualTo(REFERENCE_RECORD.substring(0, PAD_OFFSET));
-        assertThat(new String(encoded, PAD_OFFSET, PAD_LENGTH, StandardCharsets.UTF_8))
-                .as("the pad is blanks, which the authoritative record is not")
-                .isEqualTo(" ".repeat(PAD_LENGTH));
+
+        // WHY : Assumptions: the pad is asserted to be the byte the reference's CREATE arm leaves,
+        //       measured as twenty-two low values in
+        //       tests/golden/posting/zero_balance/tcatbal.expected -- the one committed scenario whose
+        //       fixture holds no category-balance row, so its expectation is the image the reference
+        //       writes for a row it originated. The seed row this case decodes carries ASCII zeros
+        //       instead, because the update arm wrote back the bytes it read, which is why this
+        //       overload still does not reproduce a SEED record and the sibling case below is what
+        //       does.
+        // WHY : Refactoring Rationale: this case required blanks and named them "which the
+        //       authoritative record is not". That was an assertion of the shared codec's default
+        //       rather than of any measured file, and the create-arm expectation contradicts it in
+        //       twenty-two bytes, so both the production pad and this expectation are corrected
+        //       together.
+        assertThat(Arrays.copyOfRange(encoded, PAD_OFFSET, RECORD_LENGTH))
+                .as("the pad is the create arm's low values, which the seed record is not")
+                .containsOnly((byte) 0x00);
         assertThat(encoded)
                 .as("so the single-argument overload does NOT reproduce the seed record")
                 .isNotEqualTo(referenceImage());
@@ -236,22 +250,31 @@ class TransactionCategoryBalanceRecordMapperTest {
         assertThat(row.getBalance()).isEqualByComparingTo(new BigDecimal("-1.05"));
         assertThat(row.getBalance().scale()).isEqualTo(2);
         assertThat(TransactionCategoryBalanceRecordMapper.toRecord(row))
-                .as("the plain overload reproduces the signed span and blanks only the pad")
-                .isEqualTo(imageWithBalanceAndBlankPad("0000000010N"));
+                .as("the plain overload reproduces the signed span and writes the create arm's pad")
+                .isEqualTo(imageWithBalanceAndFreshPad("0000000010N"));
         assertThat(TransactionCategoryBalanceRecordMapper.toRecord(row, source))
                 .as("the source-image overload reproduces the whole record")
                 .isEqualTo(source);
     }
 
     /**
-     * Returns an image carrying the supplied balance and a blank pad, as the plain encode produces.
+     * Returns an image carrying the supplied balance and the create arm's pad, as the plain encode
+     * produces.
+     *
+     * <p>Refactoring Rationale: this helper filled the pad with blanks, matching what the plain encode
+     * emitted when the encode deferred to the shared codec's rebuild. The measured create-arm
+     * expectation {@code tests/golden/posting/zero_balance/tcatbal.expected} carries twenty-two low
+     * values in that span -- it is the one committed scenario whose fixture holds no category-balance
+     * row, so its expectation shows what the reference writes for a row it ORIGINATED -- and the plain
+     * encode now writes that byte. The helper follows the measurement rather than the previous
+     * default.</p>
      *
      * @param zonedBalance the eleven zoned characters to place at the balance offset
-     * @return a fresh 50-byte image with that balance, the reference key fields and a blank pad
+     * @return a fresh 50-byte image with that balance, the reference key fields and a low-value pad
      */
-    private static byte[] imageWithBalanceAndBlankPad(String zonedBalance) {
+    private static byte[] imageWithBalanceAndFreshPad(String zonedBalance) {
         byte[] image = imageWithBalance(zonedBalance);
-        Arrays.fill(image, PAD_OFFSET, RECORD_LENGTH, (byte) ' ');
+        Arrays.fill(image, PAD_OFFSET, RECORD_LENGTH, (byte) 0x00);
         return image;
     }
 

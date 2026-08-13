@@ -635,4 +635,3 @@ logging:
 #       arithmetic, view resolution and cursor streaming, and a different engine
 #       implements all three differently.
 # =============================================================================
-

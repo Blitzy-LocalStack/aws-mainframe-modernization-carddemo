@@ -47,22 +47,51 @@ public class GenerateReportsTask implements ReportingTask {
     private final ReportArtifactPublisher publisher;
 
     /**
+     * The publisher of the category-balance report this state also replaces.
+     *
+     * <p>Assumptions: TWO publishers rather than one, because the state replaces TWO reference jobs
+     * that share no input, no record length and no key. The migration plan's section 0.4.1.7 assigns
+     * both {@code app/jcl/TRANREPT.jcl} and {@code app/jcl/PRTCATBL.jcl} to this state, and a single
+     * publisher would have to branch internally on which report it was producing.</p>
+     */
+    private final CategoryBalanceArtifactPublisher categoryBalances;
+
+    /**
      * Creates the nightly report task.
      *
-     * @param publisher the artifact publisher; must not be {@code null}
-     * @throws NullPointerException if {@code publisher} is {@code null}
+     * @param publisher the transaction-report artifact publisher; must not be {@code null}
+     * @param categoryBalances the category-balance report publisher; must not be {@code null}
+     * @throws NullPointerException if either argument is {@code null}
      */
-    public GenerateReportsTask(ReportArtifactPublisher publisher) {
+    public GenerateReportsTask(ReportArtifactPublisher publisher,
+            CategoryBalanceArtifactPublisher categoryBalances) {
+
         this.publisher = Objects.requireNonNull(publisher, "publisher must not be null");
+        this.categoryBalances =
+                Objects.requireNonNull(categoryBalances, "categoryBalances must not be null");
     }
 
     /**
-     * Produces the night's transaction-report artifact.
+     * Produces the night's two report artifacts.
+     *
+     * <p>Assumptions: the transaction report is produced FIRST and the category-balance report second,
+     * and the order is the reference's own. {@code app/jcl/TRANREPT.jcl} and
+     * {@code app/jcl/PRTCATBL.jcl} are separate jobs with no condition between them, so no order is
+     * transcribed from a gate; what fixes it is that the transaction report is the one an operator
+     * reads first and the one whose failure says most about the night, so producing it before the
+     * smaller report means a partial state is the more useful half rather than the lesser one.</p>
+     *
+     * <p>Trade-offs: a failure in either report fails the state, and the transaction report is NOT
+     * rolled back when the category-balance report fails. Neither artifact is transactional in object
+     * storage, so the alternatives were to delete the first on the second's failure -- which destroys a
+     * good artifact over an unrelated fault -- or to swallow the second's failure, which would report a
+     * night as complete having produced one of two reports. Failing the state leaves the good report
+     * present and the chain stopped, which is the state an operator can act on.</p>
      *
      * @param parameters the validated run parameters, which must carry the business date; must not be
      *     {@code null}
-     * @throws Exception if the artifact cannot be published, or if the range holds a transaction whose
-     *     dimensions do not resolve, which stops the run as the reference's abend does
+     * @throws Exception if either artifact cannot be published, or if the range holds a transaction
+     *     whose dimensions do not resolve, which stops the run as the reference's abend does
      * @throws IllegalArgumentException if no business date was supplied, because a report is defined by
      *     its range
      */
@@ -91,5 +120,21 @@ public class GenerateReportsTask implements ReportingTask {
                 businessDate, ReportingTaskRunner.runIdentity(), published.locator(),
                 summary.recordsWritten(), summary.detailLines(),
                 summary.pageTotalBands(), summary.accountTotalBands());
+
+        // WHY : Assumptions: the category-balance report takes NO business date, and passing one would
+        //       be inventing a contract. app/jcl/PRTCATBL.jcl:44-45 feeds its sort the whole unloaded
+        //       file with no INCLUDE condition, unlike app/jcl/TRANREPT.jcl:47-48 which does carry one,
+        //       so the report is a full print of current balances rather than a period report.
+        CategoryBalanceArtifactPublisher.PublishedCategoryBalanceReport balances =
+                this.categoryBalances.publish();
+        // WHY : Assumptions: the total is logged and is NOT written into the artifact. The reference's
+        //       sort declares only SORT FIELDS and OUTREC -- no OUTFIL TRAILER and no SECTIONS -- so
+        //       every byte of its output is a detail line, and adding a total would make the artifact
+        //       differ from the reference's by a line. Logging it gives an operator a figure to
+        //       reconcile against the money-parity verification pass without changing the bytes.
+        LOG.info("event=reporting.category-balance.produced businessDate={} run={} artifact={}"
+                        + " lines={} total={}",
+                businessDate, ReportingTaskRunner.runIdentity(), balances.locator(),
+                balances.summary().linesWritten(), balances.summary().total());
     }
 }

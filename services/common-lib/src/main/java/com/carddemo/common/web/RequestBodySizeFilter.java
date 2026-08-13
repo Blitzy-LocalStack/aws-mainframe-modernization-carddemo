@@ -133,8 +133,12 @@ public final class RequestBodySizeFilter implements Filter {
      * <p>Assumptions: the same media type {@link CorrelationIdFilter} serves its own refusal as, so the
      * two refusals a caller can receive before the dispatcher runs are indistinguishable in shape from
      * the ones the shared advice renders after it.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: read from {@link ApiError#MEDIA_TYPE} rather than restated, for the
+     * reason recorded on that constant: three private copies of one string left the published contracts
+     * ungated against the emitter, and one contract drifted to a media type no handler writes.</p>
      */
-    private static final String PROBLEM_MEDIA_TYPE = "application/json";
+    private static final String PROBLEM_MEDIA_TYPE = ApiError.MEDIA_TYPE;
 
     /**
      * The writer the refusal body is rendered by.
@@ -284,7 +288,7 @@ public final class RequestBodySizeFilter implements Filter {
                 + ". Submit a smaller request.";
 
         String correlationId = MDC.get(CorrelationIdFilter.CORRELATION_ID_MDC_KEY);
-        String path = CardNumberMasker.maskEmbeddedCardNumbers(request.getRequestURI());
+        String path = CardNumberMasker.maskEmbeddedIdentifiers(request.getRequestURI());
 
         // WHY : Assumptions: the record names the method, the masked path and the two sizes, and no
         //       part of the body. A refusal is the one case where the body is known to be something

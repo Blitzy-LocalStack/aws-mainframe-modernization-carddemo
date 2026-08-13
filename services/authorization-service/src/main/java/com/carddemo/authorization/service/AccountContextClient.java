@@ -161,7 +161,31 @@ public interface AccountContextClient {
      */
     record CustomerDisplay(String customerName, String addressLine1, String addressLine2,
             String phoneNumber1) {
-    }
+    
+        /**
+         * Renders NONE of the four values, reporting only which optional members arrived.
+         *
+         * <p>Purpose. All four components are personal data about an identified cardholder -- a composed
+         * name, two address lines and a telephone number -- and {@code docs/architecture/observability.md}
+         * L1093 to L1112 withholds each of them. This record crosses a service boundary, so it is
+         * stringified by whichever side of the seam fails: a client-side mapping fault and a server-side
+         * refusal both reach a diagnostic holding the whole of a cardholder's postal identity.</p>
+         *
+         * <p>Assumptions: the two presence flags are the only content, and they are what a seam fault
+         * actually needs. The two nullable members are the ones a screen renders as blank, so whether they
+         * were absent in the response or dropped in the mapping is the question this rendering answers --
+         * and it is the question the account context's own projection records the same choice for.</p>
+         *
+         * @return a rendering reporting which optional members are present, with all four personal values
+         *     withheld; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "CustomerDisplay[addressLine2Present=" + (this.addressLine2 != null)
+                    + ", phoneNumber1Present=" + (this.phoneNumber1 != null)
+                    + ", personalData=[REDACTED]]";
+        }
+}
 
     /**
      * The cross-reference row that resolves a card to an account and a customer.
@@ -174,7 +198,32 @@ public interface AccountContextClient {
      * @param customerId the customer the card belongs to, from {@code XREF-CUST-ID}
      */
     record CardXref(long accountId, long customerId) {
-    }
+    
+        /**
+         * Renders NEITHER identifier, because both are withheld and the record holds nothing else.
+         *
+         * <p>Purpose. The account identifier and the customer identifier are the two components, and
+         * {@code docs/architecture/observability.md} L1093 to L1112 names both among the values a
+         * rendering must omit. The rendering therefore carries no value at all, and saying so explicitly
+         * is the point: a reader who sees the type name in a log learns that a cross-reference was
+         * resolved, and learns nothing about whose.</p>
+         *
+         * <p>Alternatives Considered: masking either identifier to its last digits, as the card contexts
+         * briefly did with an account number. Rejected on that rule's first clause, which requires
+         * omission rather than abbreviation, and on its second, which confines the shared masker to a
+         * primary account number.</p>
+         *
+         * <p>Trade-offs: a rendering with no content is worth emitting because the alternative is the
+         * generated one, which prints both values. Correlation comes from the request-scoped identifier
+         * that {@code com.carddemo.common.web.CorrelationIdFilter} puts on the same line.</p>
+         *
+         * @return a rendering naming the type with both identifiers withheld; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "CardXref[identifiers=[REDACTED]]";
+        }
+}
 
     /**
      * The account fields an authorization decision reads.
@@ -196,7 +245,29 @@ public interface AccountContextClient {
      * @param currentBalance the account's posted balance, {@code ACCT-CURR-BAL}; never {@code null}
      */
     record Account(BigDecimal creditLimit, BigDecimal cashCreditLimit, BigDecimal currentBalance) {
-    }
+    
+        /**
+         * Renders no value at all: all three components are limits or balances.
+         *
+         * <p>Purpose. The credit limit, the cash credit limit and the current balance are named
+         * individually by {@code docs/architecture/observability.md} L1093 to L1112, which withholds
+         * credit limits and balances as a class. Those three are the whole record, so the generated
+         * rendering was a complete statement of an account's financial position -- and this record exists
+         * precisely to carry that position across a service boundary for an authorization decision, which
+         * is the moment it is most likely to be logged.</p>
+         *
+         * <p>Assumptions: no derived summary stands in for the values -- not a rounded figure, not a
+         * remaining-headroom flag, not a sign. Each of those is an abbreviation of a withheld value, and
+         * headroom in particular is the exact quantity an over-limit decision turns on, so publishing it
+         * would disclose the comparison rather than the operands.</p>
+         *
+         * @return a rendering naming the type with all three amounts withheld; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "Account[amounts=[REDACTED]]";
+        }
+}
 
     /**
      * Reports that the account context could not be asked, as distinct from answering not-found.

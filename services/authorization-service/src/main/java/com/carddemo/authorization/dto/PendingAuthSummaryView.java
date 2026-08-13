@@ -65,10 +65,17 @@ import java.util.Objects;
  * name still contributes its single position, so the name holds three spaces in the middle, and each value
  * truncates at the map width rather than overflowing.
  *
- * <p>Assumptions: all four are nullable and the schema publishes none of them as required, while every
- * segment column above is required. A customer the account context no longer holds yields a summary whose
- * sixteen columns are all present and whose four display values are absent, and a required display member
- * would turn a neighbouring context's missing row into a failure of this response.
+ * <p>Assumptions: all four are NULLABLE, and the schema publishes them as required-and-nullable rather
+ * than as optional. A customer the account context no longer holds yields a summary whose sixteen columns
+ * are all present and whose four display values are {@code null} -- present, carrying null, and never
+ * missing: the services pin {@code default-property-inclusion: always}, so the writer emits every
+ * component of this record on every response. The nullability is what carries the neighbouring context's
+ * missing row, and it does so without asking a caller to distinguish an absent member from a null one.
+ *
+ * <p>⚠️ Refactoring Rationale: this paragraph said the schema published none of the four as required, and
+ * it did not; both statements have been corrected together. Publishing an always-written member as
+ * optional described an omission the writer cannot produce, and a generated type then declared it optional
+ * AND nullable -- two states for one fact.
  *
  * @param accountId the eleven-digit account this summary belongs to, never {@code null}
  * @param customerId the nine-digit customer that owns the account, never {@code null}
@@ -205,5 +212,44 @@ public record PendingAuthSummaryView(
                                 + (index + 1));
             }
         }
+    }
+
+    /**
+     * Renders this summary as its statuses and its two counters, omitting the other twelve components.
+     *
+     * <p>Purpose. Twelve of the twenty components are prohibited from a diagnostic rendering by
+     * {@code docs/architecture/observability.md} L1093 to L1112: the account and customer identifiers by
+     * name, the two limits and two balances as credit limits and balances, the two authorization totals
+     * as monetary amounts, and the cardholder's name, two address lines and telephone number as personal
+     * data. That is the account's whole financial position beside the cardholder's whole postal identity,
+     * and the compiler-generated rendering printed it on the header of every list page.</p>
+     *
+     * <p>Assumptions: the two COUNTS are kept while the two amounts beside them are omitted, and the
+     * distinction is the rule's own: a count of authorizations is a counter, which that rule's third
+     * clause names as identity disclosing nothing, whereas the sum of those authorizations is a monetary
+     * amount its first clause prohibits. The counters are also the pair whose overflow policy this
+     * context enforces, so a diagnostic that shows them is what a saturation question is read from.</p>
+     *
+     * <p>Assumptions: the six status characters are kept for the same clause. Each is a bounded code from
+     * a closed set, none names a party, and together they are what an eligibility question about an
+     * account is answered with.</p>
+     *
+     * <p>Trade-offs: no presence flag is offered for the omitted personal components, unlike the account
+     * context's customer projection, which reports which of its optional members were present. Nothing
+     * here is optional in a way a client can act on -- the summary is populated as one unit from one row
+     * -- so a flag would be a constant dressed as an observation.</p>
+     *
+     * @return a rendering carrying the authorization status, the five account status characters and the
+     *     two authorization counts, with the identifiers, the four money components, the two totals and
+     *     the four personal components omitted; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "PendingAuthSummaryView[authStatus=" + this.authStatus
+                + ", accountStatus=" + this.accountStatus1 + this.accountStatus2
+                + this.accountStatus3 + this.accountStatus4 + this.accountStatus5
+                + ", approvedAuthCnt=" + this.approvedAuthCnt
+                + ", declinedAuthCnt=" + this.declinedAuthCnt
+                + ", omitted=12 components]";
     }
 }

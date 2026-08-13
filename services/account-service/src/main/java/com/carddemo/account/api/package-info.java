@@ -138,9 +138,12 @@
  * <ul>
  *   <li><b>Selection context</b> -- {@code CDEMO-CUST-ID} at {@code app/cpy/COCOM01Y.cpy} L33,
  *       {@code CDEMO-ACCT-ID} at L38, {@code CDEMO-ACCT-STATUS} at L39 and {@code CDEMO-CARD-NUM} at
- *       L41 -- arrives as path and query parameters. That is what makes each request
- *       self-describing, and a self-describing request is one that can be authorized on its own
- *       terms rather than against something the server remembered from a previous turn.</li>
+ *       L41 -- arrives in a VALIDATED REQUEST BODY, on a {@code POST} to a fixed address. Every one
+ *       of the four does, without exception: there is not one {@code @PathVariable} anywhere in this
+ *       package, and no identifier reaches a handler from a request line or a query string. That is
+ *       what makes each request self-describing, and a self-describing request is one that can be
+ *       authorized on its own terms rather than against something the server remembered from a
+ *       previous turn.</li>
  *   <li><b>Identity</b> -- {@code CDEMO-USER-ID}, a {@code PIC X(08)} at L25, and
  *       {@code CDEMO-USER-TYPE}, a {@code PIC X(01)} at L26 whose two condition names admit
  *       {@code 'A'} at L27 and {@code 'U'} at L28 -- arrives as claims on a validated bearer token.
@@ -158,6 +161,45 @@
  *       so field-level error presentation is driven by the response body alone and by nothing the
  *       server retained.</li>
  * </ul>
+ *
+ * <p>Assumptions: the four above are the whole decomposition, and the paging cursor is deliberately
+ * NOT presented as a fifth. It is part of the selection the first bullet covers -- the baseline
+ * carried its browse position in the same structure, at {@code app/cbl/COCRDLIC.cbl} L230 to L244 --
+ * and it is the one part of that selection which does travel in the query string, so it is stated
+ * here rather than folded silently into a bullet about bodies. Three query parameters exist across
+ * the whole package and that is the complete set: {@code cursor} and {@code direction} on the two
+ * cross-reference walks, and {@code cursor} and {@code size} on the customer page. None of the three
+ * is an identifier -- a cursor is a sealed opaque token rather than a key, a direction is one of two
+ * published words, and a page size is a bound -- so none discloses a subject to anything that logs a
+ * request line, which is why they stay where they are while the identifiers do not.</p>
+ *
+ * <p>Refactoring Rationale: the selection bullet above said "path and query parameters" until it was
+ * re-measured against the annotations, and the correction matters because the two transports have
+ * opposite disclosure properties. A keyed address of the shape {@code /accounts/{accountId}} puts a
+ * subject in the request line, and a request line is written to an access log, a proxy log and a
+ * browser history by default -- so a keyed form leaks the identifier to three places no handler
+ * controls. The keyed forms were therefore REMOVED rather than kept as aliases beside the body-bound
+ * ones: an alias would have preserved exactly the leak the fixed sub-paths were introduced to close,
+ * and it would have done so on a route nobody reads because the documented one is the other. What
+ * this costs is real and is accepted: a body-bound read is a {@code POST} that is not idempotent by
+ * method, so it is not cacheable and not bookmarkable, and the shape is unidiomatic enough to look
+ * like an error to a reader who has not read this paragraph. What it buys is that no operation in
+ * this package can disclose an account, card or customer identifier by being called.</p>
+ *
+ * <p>Assumptions: the prohibition holds mechanically and not by review.
+ * {@code AccountContextContractTest} compares every mapping annotation in this package against
+ * {@code src/main/resources/openapi/account-api.yaml} and fails on a difference in either direction, so
+ * an address that regained a place to put an identifier would have to be declared in the contract for
+ * the comparison to stay green -- and its case
+ * {@code noRequestLineCanCarryAnAccountOrCustomerIdentifier} then sweeps every declared path template
+ * and every declared path-or-query parameter for an account, customer or card identifier name and fails
+ * on any hit. That case is structural on purpose: it asks whether a target with a place to put an
+ * identifier exists, because the load balancer writes the request line into its access log before any
+ * application code runs and no downstream masking can reach what is already written. The three cursor,
+ * direction and size parameters are deliberately not caught by that sweep, for the reason the bullet
+ * above gives. The disclosure property is additionally recorded on each path constant at its
+ * declaration, so the reason a path is fixed is readable where the path is defined rather than only
+ * here.</p>
  *
  * <p>Assumptions: the identity substitution changes what a caller is able to assert, and the baseline
  * evidence for that is specific. The communication area is storage the client is handed and hands

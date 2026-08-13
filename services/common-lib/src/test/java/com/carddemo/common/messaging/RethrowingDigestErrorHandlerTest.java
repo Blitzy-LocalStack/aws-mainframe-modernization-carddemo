@@ -205,7 +205,7 @@ class RethrowingDigestErrorHandlerTest {
      * the claim that matters: it is a card-number-shaped run, so the redaction must remove it. The previous
      * form of this case asserted that the record contained no part of the message, and a line that carries
      * the condition without its values cannot satisfy that while still being the line an operator needs.
-     * See {@code theRecordCarriesTheRedactedConditionAndTheStateCode} for the presence half.</p>
+     * See {@code theRecordNamesTheConditionAndTheConstraintAndCarriesNoMessageText} for the presence half.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
@@ -247,25 +247,34 @@ class RethrowingDigestErrorHandlerTest {
     }
 
     /**
-     * The record carries the failure's condition in words, with every value-shaped run replaced.
+     * The record names the failure's condition and the constraint, and carries no message text.
      *
      * <p>⚠️ Purpose: this is the presence half of the pair whose absence half is above, and it is the
      * reason the two extra fields exist. A persistence failure reaches this handler as one driver
      * exception type whatever went wrong, so a line carrying only the type chain records a numeric
      * overflow, a unique violation and a serialisation conflict identically — and the operator response to
-     * each differs. The condition is words; the values are digits.</p>
+     * each differs. The condition is a NAME from a closed vocabulary; everything else is withheld.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this case asserted that the driver's own WORDS survived —
+     * {@code duplicate key value violates unique constraint} and the table-and-column tuple — with only
+     * digit runs masked, and its rationale was that "the condition is words; the values are digits". That
+     * rationale was false in a way this fixture cannot show but a real engine can: the driver folds the
+     * server's {@code DETAIL} field into the message by default, and a check violation's detail enumerates
+     * every column of the rejected row, so a cardholder name is words too and survived a digit rule
+     * exactly as the constraint name did. The renderer now emits the condition name and the quoted
+     * identifiers only, so this case asserts those present and the sentence absent.</p>
      *
      * <p>⚠️ Assumptions: the failure is built to look exactly like the driver message that prompted this,
      * carrying a state code, a constraint name, a table-and-column tuple and the two values that broke it
-     * — an eleven-digit account identifier and a five-digit ordinal date. Neither is card-number shaped, so
-     * neither is touched by the masking the sibling rendering applies, and both are what this case requires
-     * to be gone.</p>
+     * — an eleven-digit account identifier and a five-digit ordinal date. Both values are asserted gone,
+     * and so is the surrounding prose, which is the stronger property: an assertion about digits alone
+     * would pass against a rendering that published the whole sentence.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the record carries the redacted condition and the database state code")
-    void theRecordCarriesTheRedactedConditionAndTheStateCode() {
+    @DisplayName("the record names the condition and the constraint and carries no message text")
+    void theRecordNamesTheConditionAndTheConstraintAndCarriesNoMessageText() {
         Message<String> message = messageOn(QUEUE);
         SQLException driverFailure = new SQLException(
                 "ERROR: duplicate key value violates unique constraint \"pk_pending_auth_detail\""
@@ -280,15 +289,19 @@ class RethrowingDigestErrorHandlerTest {
         String rendered = this.captured.list.get(0).getFormattedMessage();
 
         assertThat(rendered)
-                .as("the words are what make the condition actionable, so they must survive")
-                .contains("duplicate key value violates unique constraint")
-                .contains("pk_pending_auth_detail")
-                .contains("(account_id, auth_date)");
+                .as("the engine's own name for 23505 is what makes the condition actionable")
+                .contains("detail=unique_violation")
+                .contains("constraint=pk_pending_auth_detail");
         assertThat(rendered)
-                .as("the values are what must not survive, and neither is card-number shaped")
+                .as("no value from the failure may survive, and neither of these is card-number shaped")
                 .doesNotContain("20000000005")
-                .doesNotContain("99366")
-                .contains("(###########, #####)");
+                .doesNotContain("99366");
+        assertThat(rendered)
+                .as("nor may the driver's prose, which is where a folded server DETAIL line would arrive")
+                .doesNotContain("duplicate key value")
+                .doesNotContain("Detail")
+                .doesNotContain("already exists")
+                .doesNotContain("(account_id, auth_date)");
         assertThat(rendered)
                 .as("the state code is a fixed five-character class name that no requester can influence")
                 .contains("sqlState=23505");

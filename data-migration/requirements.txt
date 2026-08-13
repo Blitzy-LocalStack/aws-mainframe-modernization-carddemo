@@ -227,10 +227,58 @@ botocore==1.43.50 \
 # -- so an install on a different platform fails with a hash mismatch rather than
 # silently resolving a different artifact. That is the correct failure: it says the
 # platform is not the reference platform, which is exactly what has changed.
-# Version-matched to tests/requirements-test.txt line 101, so the ETL and the
-# harness that validates it run identical cipher code.
-cryptography==49.0.0 \
-    --hash=sha256:cbc77da8c523d5abd028635ba850a6966fcee2c82e2bf65a41d1d8afe0f98be9
+# Assumptions: the version is 50.0.0 because 49.0.0 is affected by
+# GHSA-g6cj-pr64-35w5 / CVE-2026-69247, and 50.0.0 is the release that fixes it.
+# The advisory covers every version from 44.0.0 up to 50.0.0: `pkcs7_decrypt_der`
+# and its PEM and S/MIME variants reported the outcome of unwrapping a
+# `RecipientInfo`'s `encryptedKey` in distinguishable ways and in distinguishable
+# time, which is a Bleichenbacher oracle for a caller that decrypts untrusted
+# messages. 50.0.0 substitutes a random key on failure per RFC 3218.
+# Assumptions: this ETL does not call the affected functions. Nothing here reads
+# PKCS#7 at all -- what this distribution is for is the AES-GCM framing the three
+# encrypted columns hold -- so the exposure being closed is not a reachable one.
+# The floor is raised anyway, and that is deliberate rather than reflexive: a
+# runtime closure that names a version with a live HIGH advisory is a supply-chain
+# defect on its own terms, because the next caller to reach for `pkcs7` in this
+# package would inherit the oracle silently, and because a scanner cannot
+# distinguish "present but unreached" from "present and called" without reading
+# this file. Pinning the fixed version costs one reviewed line and removes the
+# question.
+# ⚠️ Assumptions: this pin is NO LONGER version-matched to
+# tests/requirements-test.txt line 101, which stays at 49.0.0, and the divergence
+# is forced rather than chosen. The earlier claim that the match made "the ETL and
+# the harness that validates it run identical cipher code" was doubly wrong, and the
+# evidence is in that file's own conventions: the pin there carries no
+# `# Direct (AAP 0.6.1)` marker where every direct dependency in it does, so it is a
+# transitive of the optional emulator and AWS command-line closure rather than
+# something the oracle asks for. The harness that validates THIS package's cipher
+# code is data-migration/tests, which installs THIS closure. AAP §0.2.2 and §0.6.1.6 make tests/** REFERENCE
+# ONLY -- it is the functional-parity oracle, every `==` pin in it "is left
+# exactly as it stands", and zero version drift may be introduced into it -- so
+# advancing that file is not a change this migration is permitted to make. The
+# earlier claim of a match is therefore replaced rather than repaired.
+# ⚠️ Trade-offs: two consequences follow and both are stated so neither surprises a
+# reader. (1) Installing both closures into one interpreter, which is what the
+# documented developer setup does, leaves whichever was installed LAST resident;
+# the documented order installs the harness closure first and this one second, so
+# 50.0.0 wins. (2) That is behaviourally inert for the oracle: no module under
+# tests/ imports cryptography -- it is there as a transitive of the AWS and
+# emulator tooling, not as something the COBOL suite calls -- so the harness
+# exercises no cipher code whose version this changes. The two closures are
+# hash-locked independently and each remains internally consistent, which is the
+# property that actually matters; a shared version number was only ever a
+# convenience.
+# Assumptions: the hash below is the 50.0.0 cp311-abi3 manylinux_2_34_x86_64
+# wheel, replacing the 49.0.0 hash for the same platform. The abi3 tag is
+# unchanged, so the reference platform is unchanged, and the trade-off recorded
+# above about a non-reference platform failing on a hash mismatch still holds
+# exactly as written.
+# Assumptions: 50.0.0 declares `cffi>=2.0.0` on CPython, which the cffi==2.1.0
+# pin below already satisfies, so this bump needs no companion edit. Its other
+# conditional dependency `typing-extensions` still carries the marker
+# `python_full_version < "3.11"` and still must NOT be added here.
+cryptography==50.0.0 \
+    --hash=sha256:82148ec5bddac30b51a5b3c1945075f896fa022cb93f8e4a01e9f6ee95292c5f
 
 # Assumptions: this distribution is imported PURELY for its codec-registration
 # side effect. It exposes nothing the ETL calls, so no symbol from it appears

@@ -30,6 +30,8 @@ import com.carddemo.account.dto.CardXrefView;
 import com.carddemo.account.service.AccountViewService;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.GlobalExceptionHandler;
+import com.carddemo.common.security.CardNumberMasker;
+import com.carddemo.common.security.MaskedCardNumber;
 import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
@@ -181,11 +183,19 @@ class CardXrefControllerTest {
      *
      * <p>Assumptions: the mapper upstream of this controller composes a published card number as this
      * marker followed by the disclosed trailing digits, so a fixture built any other way would assert a
-     * form no deployment produces. The marker is declared here rather than read from that class because it
-     * is private there, which is itself the correct arrangement: the only place a masking decision is made
-     * is the one place that makes it.</p>
+     * form no deployment produces.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the marker is now COMPOSED from the shared masker's own two constants
+     * rather than written here as the four-character literal {@code "****"}. That literal asserted a form
+     * no consumer accepts: the mapper prefixed it onto the last four digits, yielding an eight-character
+     * value, while the published contract declares exactly twelve mask characters and four digits and
+     * {@code requireMaskedCardNumber} in {@code ui/src/api/accounts.ts} rejects anything else with a
+     * RangeError. The mapper now delegates to {@code com.carddemo.common.security.CardNumberMasker}, so
+     * this fixture is derived from the same constants the renderer masks with -- which is also why it is no
+     * longer a literal: a fixture that restates a masking rule can keep passing while the rule changes.</p>
      */
-    private static final String MASK_MARKER = "****";
+    private static final String MASK_MARKER = String.valueOf(CardNumberMasker.MASK_CHARACTER)
+            .repeat(MaskedCardNumber.MASK_PREFIX_LENGTH);
 
     /**
      * The published form of {@link #CARD_KEY}, reduced to its trailing digits.
@@ -237,8 +247,14 @@ class CardXrefControllerTest {
 
     /**
      * The request body of both account-keyed operations.
+     *
+     * <p>⚠️ Refactoring Rationale: the member is composed from {@link #ACCOUNT_KEY} and QUOTED, because
+     * the published schema declares this identifier as digits-only text at its declared width rather
+     * than as an integer. It was previously composed from the numeric constant and sent unquoted, which
+     * the reader accepted only by coercing a number onto a textual member -- so the body conformed to
+     * nothing the document declared while every case built on it passed.</p>
      */
-    private static final String ACCOUNT_BODY = "{\"accountId\":" + ACCOUNT_ID + "}";
+    private static final String ACCOUNT_BODY = "{\"accountId\":\"" + ACCOUNT_KEY + "\"}";
 
     /**
      * The validated caller the walk seals its boundaries for.

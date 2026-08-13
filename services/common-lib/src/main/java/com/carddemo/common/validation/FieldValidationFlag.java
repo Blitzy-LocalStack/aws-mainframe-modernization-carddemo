@@ -3,6 +3,7 @@ package com.carddemo.common.validation;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -481,7 +482,7 @@ public enum FieldValidationFlag {
         //       "unrecognised code ' '" would leave a reader unable to tell which of those two
         //       arrived, which is exactly the diagnosis this message exists to supply.
         return "unrecognised field validation code: U+"
-                + String.format("%04X", (int) code)
+                + String.format(Locale.ROOT, "%04X", (int) code)
                 + "; expected one of U+0000, '1', '0', 'B' or ' '";
     }
 

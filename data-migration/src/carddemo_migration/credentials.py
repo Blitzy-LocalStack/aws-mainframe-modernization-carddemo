@@ -10,11 +10,12 @@ module is what does, and it is the delivered mechanism the two of them name.
 
 The ordered sequence a deployment follows is therefore:
 
-1. Terraform creates the cluster and the fifteen per-role secrets.
+1. Terraform creates the cluster and the sixteen per-role secrets.
 2. The bootstrap step applies ``sql/V0__schemas_and_roles.sql``, which creates the schemas, the
-   three tiers of role behind them -- eight NOLOGIN schema owners, seven migration logins and
-   eight runtime logins -- and every grant. Only the fifteen LOGIN roles need a credential; an
-   owner is reached by ``SET ROLE`` from its migration role, never by authenticating.
+   four tiers of role behind them -- eight NOLOGIN schema owners, seven migration logins, eight
+   runtime logins and one read-only verification login -- and every grant. Only the sixteen LOGIN
+   roles need a credential; an owner is reached by ``SET ROLE`` from its migration role, never by
+   authenticating.
 3. The bootstrap step runs **this module**, which reads each secret, derives that role's
    SCRAM-SHA-256 verifier locally, applies it, and then proves the role can log in.
 4. The services start and authenticate with the credential each one reads from its own secret.
@@ -22,7 +23,13 @@ The ordered sequence a deployment follows is therefore:
 Step 3 refuses to report success unless every role in
 :data:`carddemo_migration.config.LOGIN_ROLE_NAMES` both holds a SCRAM verifier and completes a
 real TLS login, so a deployment cannot finish green while a service still cannot reach its schema
-or apply its migration.
+or apply its migration. ⚠️ Refactoring Rationale: that sentence was published while the step
+applied and verified only the eight runtime roles, so the seven ``_migrator`` credentials and the
+read-only verification credential were never created and a bootstrap that had credited eight of
+sixteen reported success -- iterating
+:data:`carddemo_migration.config.LOGIN_ROLE_NAMES` itself is what makes the sentence true, and
+:data:`_UNCLAIMED_LOGIN_ROLES` is what stops that tuple and the tier mappings behind it drifting
+apart in either direction.
 
 Command-line entry point
 ------------------------
@@ -35,9 +42,15 @@ section 8, so the batch state machine can branch on them exactly as the COBOL su
 do: ``0`` applied and verified, ``2`` invoked incorrectly, ``8`` at least one role could not be
 applied or verified, ``16`` the cluster or its configuration could not be reached at all.
 
-Assumptions: when ``carddemo_migration.cli`` is authored it should expose this as a subcommand by
-calling :func:`apply_service_credentials`, not by reimplementing it. The module entry point above
-exists so the mechanism is invocable and testable on its own, and it stays the published form.
+Assumptions: ``carddemo_migration.cli`` exposes this as its ``apply-credentials`` subcommand by
+delegating to :func:`main` with an empty argument list, rather than reimplementing the step. ⚠️
+Refactoring Rationale: this paragraph read "when ``carddemo_migration.cli`` is authored it should
+expose this as a subcommand by calling :func:`apply_service_credentials`" -- a forward-looking note
+that outlived the module it was waiting for and named the wrong function once it landed. The
+delegation goes through :func:`main` deliberately, and that module records why: this module owns
+the mapping from each documented failure to its exit code, and a second caller re-deriving the
+status is how the two spellings of one step come to disagree about 8 versus 16. The module entry
+point above stays the published form so the mechanism is invocable and testable on its own.
 
 Design decisions (WHY)
 ----------------------
@@ -83,7 +96,8 @@ Trade-offs:
     the whole set back and leaves the previous state intact; the alternative -- committing each
     role as it is applied -- would leave a deployment in which some services can authenticate and
     others cannot, which is harder to diagnose than none of them being able to. The accepted cost
-    is that the eight statements hold one transaction open for the length of eight secret reads.
+    is that the fifteen statements hold one transaction open for the length of fifteen secret
+    reads.
 Assumptions:
     **Re-running is safe and is the intended repair action.** Applying a role's credential again
     derives a fresh salt, so the stored verifier changes while the password behind it does not:
@@ -108,16 +122,22 @@ import logging
 import re
 import secrets
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Final
 
 from carddemo_migration.config import (
     ENV_DB_MASTER_SECRET,
+    LOGIN_ROLE_NAMES,
+    MIGRATION_SCHEMA_ROLES,
     SCHEMA_ROLES,
+    VERIFICATION_SCOPE,
+    VERIFIER_ROLE,
     AuroraConnectionSettings,
     ConfigurationError,
     resolve_aurora_settings,
     resolve_master_settings,
+    resolve_migration_settings,
+    resolve_verifier_settings,
 )
 
 # Trade-offs: an explicit ``__all__`` is declared for the same narrowing reason
@@ -212,6 +232,38 @@ class CredentialApplicationError(RuntimeError):
     rejected because no caller branches on which of the four happened -- every one of them stops
     the deployment -- and the message names which it was.
     """
+
+
+# WHY : Refactoring Rationale: this guard is the four-tier form of a check that was written as a
+#   derivation. An earlier revision built the work list by walking the two schema mappings and
+#   REFUSED to proceed unless the roles it derived were exactly LOGIN_ROLE_NAMES, which caught a
+#   mapping that had drifted from the inventory the deployment verifies against. That derivation
+#   cannot express the verification login, which belongs to no bounded-context schema, so the work
+#   list is now the inventory itself -- and the drift check it carried would have been lost with it.
+#   It is kept here instead, as an assertion over the same three tiers, so a schema added to either
+#   mapping without a secret being generated for its role still fails at import rather than at the
+#   moment that role tries to authenticate.
+# WHY : Trade-offs: this raises from module import, which stops every subcommand rather than only
+#   the bootstrap. That bluntness is right for the same reason it is right in the seed registry: an
+#   inventory that disagrees with its own tier mappings means no role's credential can be trusted to
+#   be the one the deployment checks, and discovering that at import is strictly better than
+#   discovering it when a service cannot reach its schema.
+# WHY : Refactoring Rationale: this guard sits BELOW CredentialApplicationError rather than above
+#   it, and the order is the point. It stood above the class and raised that very type, so the one
+#   condition it exists to report -- an inventory disagreeing with its tier mappings -- would have
+#   surfaced as NameError from a half-imported module instead of as the named error whose message
+#   lists the offending roles. Moving the assertion was preferred to moving the class, because the
+#   class is this module's exported error type and belongs with the other exported names, while an
+#   import-time assertion reads correctly anywhere after its operands and its error type exist.
+_UNCLAIMED_LOGIN_ROLES: Final[frozenset[str]] = frozenset(LOGIN_ROLE_NAMES) ^ (
+    frozenset(SCHEMA_ROLES.values()) | frozenset(MIGRATION_SCHEMA_ROLES.values()) | {VERIFIER_ROLE}
+)
+if _UNCLAIMED_LOGIN_ROLES:
+    raise CredentialApplicationError(
+        "the login inventory and the tier mappings behind it do not describe the same roles, so a"
+        " credential would be applied for a role nothing verifies or withheld from one that is"
+        f" verified; the roles named by only one of them are {sorted(_UNCLAIMED_LOGIN_ROLES)}"
+    )
 
 
 def scram_verifier(
@@ -434,7 +486,7 @@ def _apply_verifier(cursor: Any, role: str, verifier: str) -> None:
     cursor : Any
         An open cursor on the master connection, inside the caller's transaction.
     role : str
-        The role to alter, as named by :data:`carddemo_migration.config.SCHEMA_ROLES`.
+        The role to alter, as named by :data:`carddemo_migration.config.LOGIN_ROLE_NAMES`.
     verifier : str
         The verifier produced by :func:`scram_verifier`.
 
@@ -532,7 +584,92 @@ def _roles_without_verifier(cursor: Any, roles: Sequence[str]) -> list[str]:
     return [role for role in roles if role in unusable]
 
 
-def _verify_login(schema: str, role: str) -> None:
+def _scope_for_role(role: str) -> str:
+    """Return the label whose secret carries one login role's credential.
+
+    Purpose
+    -------
+    Give every login role, whatever tier it belongs to, one label this module can name in a
+    message and pass to the resolver that reads its secret.
+
+    Parameters
+    ----------
+    role : str
+        A login role name, expected to be one of
+        :data:`carddemo_migration.config.LOGIN_ROLE_NAMES`.
+
+    Returns
+    -------
+    str
+        The bounded-context schema for a runtime or migration role, or
+        :data:`carddemo_migration.config.VERIFICATION_SCOPE` for the read-only verification role.
+
+    Raises
+    ------
+    CredentialApplicationError
+        If the role belongs to no tier this module knows how to resolve a credential for. That is
+        reported rather than defaulted, because guessing a schema would read the wrong secret and
+        then apply a credential nothing will present.
+    """
+    # WHY : Assumptions: a runtime role and its schema's migration role are DISTINCT names, so one
+    #   reverse lookup over both tiers is unambiguous. That is what lets this module carry a flat
+    #   list of role names rather than a schema-keyed mapping -- a mapping cannot hold both tiers
+    #   of one schema at once, which is why the inventory used to cover only the runtime eight.
+    for schema, runtime in SCHEMA_ROLES.items():
+        if role == runtime:
+            return schema
+    for schema, migrator in MIGRATION_SCHEMA_ROLES.items():
+        if role == migrator:
+            return schema
+    if role == VERIFIER_ROLE:
+        return VERIFICATION_SCOPE
+    raise CredentialApplicationError(
+        f"{role!r} is not a login role this step knows how to resolve a credential for; the roles"
+        f" it applies are {', '.join(LOGIN_ROLE_NAMES)}"
+    )
+
+
+def _settings_for_role(role: str) -> AuroraConnectionSettings:
+    """Resolve one login role's connection descriptor through that role's own resolver.
+
+    Purpose
+    -------
+    Route every tier's credential through the resolver a consumer of that tier uses, so the
+    secret name and the assertion that the stored user name IS this role are applied here exactly
+    as they are where the credential is later presented.
+
+    Parameters
+    ----------
+    role : str
+        A login role name.
+
+    Returns
+    -------
+    AuroraConnectionSettings
+        The descriptor for that role, whose rendering masks the password.
+
+    Raises
+    ------
+    CredentialApplicationError
+        If the role belongs to no known tier.
+    ConfigurationError
+        If a parameter or the secret is absent, unreadable or malformed, or if the secret carries
+        another role's user name.
+    """
+    scope = _scope_for_role(role)
+    # WHY : Assumptions: the THREE resolvers are distinct functions rather than one taking a role,
+    #   because each asserts a different user name against a different secret. Reading every
+    #   credential through `resolve_aurora_settings` would resolve the runtime role's secret for
+    #   every tier -- so a migration role would be handed the runtime role's password, apply it,
+    #   and then fail its own login for a reason no message would name.
+    if role == VERIFIER_ROLE:
+        return resolve_verifier_settings()
+    if role in set(MIGRATION_SCHEMA_ROLES.values()):
+        return resolve_migration_settings(scope)
+    return resolve_aurora_settings(scope)
+
+
+def _verify_login(role: str) -> None:
     """Prove one role can authenticate with the credential now stored for it.
 
     Purpose
@@ -541,18 +678,17 @@ def _verify_login(schema: str, role: str) -> None:
     successful login shows that what was written matches the secret each service will read, which
     is the property a deployment depends on.
 
-    Assumptions: the settings are resolved through
-    :func:`carddemo_migration.config.resolve_aurora_settings`, so this login exercises exactly the
-    path a loader takes -- the same secret name, the same user-name assertion against the schema's
-    owning role, and the same certificate verification. A bespoke connection built from the
-    credential in hand would prove the password and none of that.
+    Assumptions: the settings are resolved through the same resolver the role's own consumer uses
+    -- :func:`carddemo_migration.config.resolve_aurora_settings` for a runtime role,
+    ``resolve_migration_settings`` for a migrator, ``resolve_verifier_settings`` for the
+    verification role -- so this login exercises exactly the path that consumer takes: the same
+    secret name, the same user-name assertion, and the same certificate verification. A bespoke
+    connection built from the credential in hand would prove the password and none of that.
 
     Parameters
     ----------
-    schema : str
-        The bounded-context schema whose credential is being verified.
     role : str
-        The login role that schema resolves to, used only in the failure message.
+        The login role whose credential is being verified.
 
     Returns
     -------
@@ -562,12 +698,13 @@ def _verify_login(schema: str, role: str) -> None:
     Raises
     ------
     CredentialApplicationError
-        If the login failed, or if the connection could not be established.
+        If the login failed, if the connection could not be established, or if the role belongs
+        to no known tier.
     ConfigurationError
-        If the schema's settings cannot be resolved -- an absent parameter, an unreadable secret,
+        If the role's settings cannot be resolved -- an absent parameter, an unreadable secret,
         or a secret whose user name is not this role.
     """
-    settings = resolve_aurora_settings(schema)
+    settings = _settings_for_role(role)
     with _connect(settings) as connection:
         with connection.cursor() as cursor:
             # Trade-offs: the probe reads CURRENT_USER rather than issuing SELECT 1. Both
@@ -580,7 +717,7 @@ def _verify_login(schema: str, role: str) -> None:
     connected_as = row[0] if row else None
     if connected_as != role:
         raise CredentialApplicationError(
-            f"the credential stored for the {schema} schema authenticated as "
+            f"the credential stored for the {_scope_for_role(role)} scope authenticated as "
             f"{connected_as!r} rather than {role!r}, so that secret holds another role's "
             "identity"
         )
@@ -588,25 +725,26 @@ def _verify_login(schema: str, role: str) -> None:
 
 def apply_service_credentials(
     *,
-    roles: Mapping[str, str] | None = None,
+    roles: Sequence[str] | None = None,
     verifier_factory: Callable[[str], str] = scram_verifier,
 ) -> tuple[str, ...]:
-    """Apply every service credential to its role and prove each one authenticates.
+    """Apply every login role's credential and prove each one authenticates.
 
     Purpose
     -------
     The whole of this module's work, in the order the ordering contract requires: connect as the
     cluster master, establish that the roles exist, apply one verifier per role in a single
     transaction, confirm the catalogue holds a verifier for each, and then log in as every role
-    through the same path a loader uses.
+    through the same path its own consumer uses.
 
     Parameters
     ----------
-    roles : Mapping[str, str] or None, optional
-        Schema name to login role. ``None`` -- the default and the only value production uses --
-        applies :data:`carddemo_migration.config.SCHEMA_ROLES`, the single declaration of the
-        eight bounded contexts and their roles. An explicit mapping exists so a test can drive a
-        subset without the module needing a flag that a deployment could pass by mistake.
+    roles : Sequence[str] or None, optional
+        The login role names to apply. ``None`` -- the default and the only value production uses
+        -- applies :data:`carddemo_migration.config.LOGIN_ROLE_NAMES`, the single declaration of
+        every role V0 creates with ``LOGIN``: eight runtime roles, seven migration roles and the
+        one read-only verification role. An explicit sequence exists so a test can drive a subset
+        without the module needing a flag that a deployment could pass by mistake.
     verifier_factory : Callable[[str], str], optional
         How a password becomes a verifier, defaulting to :func:`scram_verifier`. Injected for the
         same reason: a test can supply a deterministic derivation without this module reading a
@@ -615,7 +753,7 @@ def apply_service_credentials(
     Returns
     -------
     tuple[str, ...]
-        The role names that were applied and verified, in the order of the mapping.
+        The role names that were applied and verified, in the order supplied.
 
     Raises
     ------
@@ -623,26 +761,43 @@ def apply_service_credentials(
         If the master locator, the endpoint parameters, the trust anchor or any secret cannot be
         resolved.
     CredentialApplicationError
-        If a role is missing, if the server refuses a credential, if the catalogue does not hold
-        a verifier for every role afterwards, or if any role then fails to log in.
+        If a role is unrecognised or missing from the cluster, if the server refuses a credential,
+        if the catalogue does not hold a verifier for every role afterwards, or if any role then
+        fails to log in.
+
+    Notes
+    -----
+    Refactoring Rationale: the inventory was the eight-entry schema-to-role mapping, so this step
+    left the seven migration roles and the verification role with a null password on a cluster it
+    reported as fully applied -- while the module docstring above already claimed every role in
+    ``LOGIN_ROLE_NAMES``. The consequence was the self-hiding kind: Flyway and the post-load
+    verification would each fail on an authentication error naming a role no bootstrap log had
+    mentioned. A schema-keyed mapping could not express the fix, because a schema has both a
+    runtime and a migration role and a mapping holds one value per key, which is why the parameter
+    is now a flat sequence of role names with each role's scope derived from the role itself.
     """
-    role_map = dict(SCHEMA_ROLES if roles is None else roles)
-    ordered_roles = tuple(role_map.values())
+    ordered_roles = tuple(LOGIN_ROLE_NAMES if roles is None else roles)
+
+    # WHY : Assumptions: every supplied role is resolved to its scope BEFORE anything is read or
+    #   connected to, so an unrecognised name fails having done nothing at all. `_scope_for_role`
+    #   raises for a role no tier claims, which is the check that stops a typo reaching the secret
+    #   store at all -- and the loop is written for its refusal rather than for a value, because
+    #   each scope is looked up again where it is actually needed.
+    for role in ordered_roles:
+        _scope_for_role(role)
 
     # Assumptions: the master settings resolve BEFORE any secret is read, so a deployment
-    # missing the master locator fails having read nothing. Reading eight service secrets and
-    # then discovering there is nowhere to apply them wastes eight audited GetSecretValue calls
+    # missing the master locator fails having read nothing. Reading sixteen service secrets and
+    # then discovering there is nowhere to apply them wastes sixteen audited GetSecretValue calls
     # and reports the least useful of the two faults.
     master = resolve_master_settings()
 
     # Trade-offs: every password is read and derived BEFORE the transaction opens, so the
-    # transaction contains only the eight ALTER ROLE statements. A secret that cannot be read
+    # transaction contains only the sixteen ALTER ROLE statements. A secret that cannot be read
     # therefore fails before anything is altered, and the transaction does not stay open across
-    # eight network calls to another service -- which is what would turn a slow secret store into
-    # a lock held on the role catalogue.
-    verifiers = {
-        role: verifier_factory(_password_for(schema, role)) for schema, role in role_map.items()
-    }
+    # sixteen network calls to another service -- which is what would turn a slow secret store
+    # into a lock held on the role catalogue.
+    verifiers = {role: verifier_factory(_password_for(role)) for role in ordered_roles}
 
     with _connect(master) as connection:
         with connection.cursor() as cursor:
@@ -665,21 +820,21 @@ def apply_service_credentials(
             f"{', '.join(outstanding)}"
         )
 
-    for schema, role in role_map.items():
-        _verify_login(schema, role)
+    for role in ordered_roles:
+        _verify_login(role)
         _LOGGER.info("verified that database role %s can authenticate", role)
 
     return ordered_roles
 
 
-def _password_for(schema: str, role: str) -> str:
+def _password_for(role: str) -> str:
     """Read one role's password out of the secret the provisioning step wrote for it.
 
     Purpose
     -------
-    Resolve a single credential through the same helper a loader uses, so that the secret name,
-    the required document shape and the assertion that the stored user name IS this role are all
-    applied here exactly as they are at load time.
+    Resolve a single credential through the same helper that role's own consumer uses, so that
+    the secret name, the required document shape and the assertion that the stored user name IS
+    this role are all applied here exactly as they are where the credential is presented.
 
     Trade-offs: the resolver returns a full connection descriptor and only its password is used.
     Reading the secret directly would avoid resolving three parameters that are not needed yet,
@@ -688,10 +843,8 @@ def _password_for(schema: str, role: str) -> str:
 
     Parameters
     ----------
-    schema : str
-        The bounded-context schema whose owning role's secret is to be read.
     role : str
-        The role that schema resolves to, used only in the failure message.
+        The login role whose secret is to be read.
 
     Returns
     -------
@@ -700,16 +853,18 @@ def _password_for(schema: str, role: str) -> str:
 
     Raises
     ------
+    CredentialApplicationError
+        If the role belongs to no tier this module can resolve a credential for.
     ConfigurationError
         If the secret is absent, unreadable, malformed, or carries a user name that is neither
         this role nor an alternate allowlisted for it.
     """
     try:
-        return resolve_aurora_settings(schema).password
+        return _settings_for_role(role).password
     except ConfigurationError as exc:
         raise ConfigurationError(
-            f"the credential for database role {role} (schema {schema}) could not be resolved: "
-            f"{exc}"
+            f"the credential for database role {role} (scope {_scope_for_role(role)}) could not"
+            f" be resolved: {exc}"
         ) from exc
 
 
@@ -723,7 +878,7 @@ def _parse_arguments(argv: Sequence[str] | None) -> argparse.Namespace:
 
     Trade-offs: there is no ``--role`` or ``--schema`` option, and the omission is deliberate. A
     per-role invocation is what leaves a deployment half applied, and the whole point of the step
-    is that it either makes every service able to authenticate or fails. A test that needs a
+    is that it either makes every login role able to authenticate or fails. A test that needs a
     subset passes ``roles`` to :func:`apply_service_credentials` directly, which no deployment
     command line can reach.
 

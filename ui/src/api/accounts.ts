@@ -35,14 +35,21 @@
  * Assumptions: every amount crosses this boundary as a STRING and is never read as a number. The
  * five account amounts are zoned-decimal fields -- `ACCT-CURR-BAL PIC S9(10)V99` at
  * `app/cpy/CVACT01Y.cpy` L7 among them -- held server-side as `NUMERIC(p,2)` and put on the wire as
- * text, and a JSON number would be parsed into an IEEE-754 double. Nothing in this file turns text
- * into a number except the single documented fold below, so a reviewer asking whether an amount can
- * lose a cent here can answer it by searching for one thing rather than by reading every call site.
+ * text, and a JSON number would be parsed into an IEEE-754 double.
+ *
+ * Refactoring Rationale: NOTHING in this file turns text into a number any more, and the account
+ * identifier is why the qualification used to be needed. It travelled as an integer because the
+ * published schema declared one, so this module folded the digits at the wire boundary -- discarding the
+ * leading zeroes of the declared eleven-character width while the file's own prose said the identifier
+ * stayed text. The schema now declares digits-only text, the fold is gone, and the property is
+ * unqualified: a reviewer asking whether a value can lose precision here can answer it by finding no
+ * numeric conversion at all rather than by judging the one that was excepted.
  */
 
-import { getApiClient, requestPath } from './client';
+import { getApiClient, keysetPagingMembers, requestPath } from './client';
 import type {
   AccountDetail,
+  AccountLookupRequest,
   AccountUpdateRequest,
   AccountUpdateResponse,
   AccountViewResponse,
@@ -66,6 +73,7 @@ import type {
  */
 export type {
   AccountDetail,
+  AccountLookupRequest,
   AccountUpdateRequest,
   AccountUpdateResponse,
   AccountViewResponse,
@@ -149,9 +157,6 @@ export const ACCOUNT_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
 /** Matches an account identifier within the eleven-digit range the contract admits. */
 const ACCOUNT_ID_DIGITS = /^[0-9]{1,11}$/u;
 
-/** The decimal digits in value order, so that a digit's value is its index in this string. */
-const DECIMAL_DIGITS = '0123456789';
-
 /** Matches the masked rendering every cross-reference row must carry. */
 const MASKED_CARD_NUMBER = /^[*]{12}[0-9]{4}$/u;
 
@@ -161,8 +166,12 @@ const REVISION_HEADER = 'etag';
 /** The request header carrying the revision an edit is conditional on. */
 const PRECONDITION_HEADER = 'If-Match';
 
-/** The reading direction the contract applies when a cursor is supplied without one. */
-const DEFAULT_DIRECTION: PageDirection = 'next';
+/*
+ * WHY : Refactoring Rationale: the local forward-default constant that stood here was withdrawn when
+ *       the cursor-and-direction pair became `keysetPagingMembers` in `./client`. Seven clients each
+ *       spelled that default for themselves, which is seven places for one contract fact to be edited
+ *       and six chances for the edit to be missed; the guard now applies it once for all of them.
+ */
 
 /*
  * WHY : Assumptions: each is a HOISTED named function rather than an inline expression at its call
@@ -207,48 +216,29 @@ function requireAccountIdDigits(accountId: string): string {
 }
 
 /**
- * Folds a string of decimal digits into the integer it spells.
- *
- * Refactoring Rationale: this stands in for `Number(accountId)`, and the substitution is not about
- * this identifier -- a coercion would convert eleven digits correctly. It is about the property the
- * whole file has to hold: an amount crosses this boundary as text precisely because a JSON number
- * becomes an IEEE-754 double, so the question "does anything here turn text into a number?" has to
- * be answerable by one search rather than by judging each call site. With no `Number(`, no
- * `parseInt`, no `parseFloat` and no unary plus anywhere in this module, that search answers itself
- * and lands on this function, whose input is an identifier and never an amount. The same exchange is
- * recorded on the equivalent fold in `./client`.
- *
- * Assumptions: the caller has already established that every character is a decimal digit, so the
- * position lookup cannot miss; this is not a general parser and must not be used as one. The result
- * is exact because the contract bounds the value at eleven digits, which is far below the largest
- * integer a double represents without loss.
- * @param {string} digits - One to eleven decimal digits, already validated by the caller.
- * @returns {number} The whole number those digits spell, in order of significance.
- */
-function digitsToInteger(digits: string): number {
-  let total = 0;
-  for (const digit of digits) {
-    total = total * 10 + DECIMAL_DIGITS.indexOf(digit);
-  }
-  return total;
-}
-
-/**
  * Builds the sole request body both account-keyed reads take.
  *
- * Assumptions: the member is an INTEGER because that is what `AccountLookupRequest` declares --
- * `type: integer`, `format: int64`, bounded at eleven digits -- while this module's own parameters
- * are text, as every screen-facing shape in `./types` is. The conversion therefore happens once, at
- * the wire boundary, rather than in each caller: a screen holds what the user typed and the document
- * receives what it declares. The schema is shared with the internal account-context read, which is
- * why a second identical shape is not declared for these two operations.
+ * Refactoring Rationale: the member is carried as TEXT and this function performs no conversion of any
+ * kind. It used to fold the digits into a JavaScript number, because the published schema declared the
+ * property `type: integer` -- and that conversion contradicted this module's own account of the
+ * identifier, discarded the leading zeroes that belong to the declared eleven-character width, and
+ * obliged every consumer of the operation to convert, correctly, in a place of its own. The schema now
+ * declares digits-only text at that width, matching `AccountUpdateRequest` on the neighbouring route,
+ * every `accountId` the sibling contracts declare, and the rule AAP section 0.7.2 states: these
+ * identifiers transport as strings validated digits-only, because the reference holds them as characters
+ * and reinterprets them as numbers only for arithmetic. What a screen holds is now what the request
+ * carries, and the service converts once, when it addresses the stored row.
+ *
+ * Assumptions: the shape is imported from `./types` rather than written here. This function used to
+ * declare its own `{ accountId: number }` return type at the point of use, which was a second definition
+ * of one contract shape -- free to drift from the document, and outside the reach of the gate in
+ * `ui/src/api/contracts.test.ts` that keeps every wire shape to a single declaration.
  * @param {string} accountId - The account to read, as one to eleven decimal digits.
- * @returns {{ accountId: number }} The request body, carrying the identifier as the integer the
- *   contract's schema declares.
+ * @returns {AccountLookupRequest} The request body, carrying the identifier exactly as it was supplied.
  * @throws {RangeError} If the identifier is not one to eleven decimal digits.
  */
-function accountLookupBody(accountId: string): { accountId: number } {
-  return { accountId: digitsToInteger(requireAccountIdDigits(accountId)) };
+function accountLookupBody(accountId: string): AccountLookupRequest {
+  return { accountId: requireAccountIdDigits(accountId) };
 }
 
 /**
@@ -460,13 +450,14 @@ export async function updateAccount(
  *   against the query, the caller, the account and the direction together, so it carries meaning only
  *   to the service that minted it. Omit it for the opening page.
  * @param {PageDirection} [direction] - Which way to step from that cursor. Meaningful only alongside
- *   one, and defaulted to forward when a cursor is supplied without it; a direction alone would
- *   describe a position relative to nothing, so it is not sent without a cursor.
+ *   one, and defaulted to forward when a cursor is supplied without it; a direction alone describes a
+ *   position relative to nothing, so supplying one without a cursor — or with a blank one — is refused
+ *   rather than sent.
  * @returns {Promise<CardXrefPage>} Resolves with at most seven rows in ascending card-number order,
  *   each carrying a card number masked to its last four digits, together with both sealed boundaries
  *   and the forward-availability indicator the caller pages on.
- * @throws {RangeError} If the identifier is not one to eleven decimal digits, or if any row arrives
- *   with a card number that is not masked.
+ * @throws {RangeError} If the identifier is not one to eleven decimal digits, if a direction is
+ *   supplied without a usable cursor, or if any row arrives with a card number that is not masked.
  * @throws {Error} If the request fails. The rejection is the normalised problem document `./client`
  *   raises, whose `fieldErrors` array names `accountId`, `direction` or `cursor` on HTTP 400 -- a
  *   cursor being refused when it was altered, has expired, or was issued for another query, caller,
@@ -477,15 +468,23 @@ export async function listAccountCardCrossReferences(
   cursor?: string,
   direction?: PageDirection,
 ): Promise<CardXrefPage> {
+  // Assumptions: the blank cursor this module used to normalise here is normalised inside
+  //   `keysetPagingMembers` instead, so this module and the shared helper cannot come to disagree
+  //   about what "present" means. A blank cursor is no cursor on the same grounds the service reads it
+  //   that way -- as a subset of absent rather than as a third state -- so a direction accompanied by
+  //   a blank cursor is a direction with no cursor and is refused as one.
   const query: Record<string, string> = {};
 
-  if (cursor !== undefined && cursor.length > 0) {
-    query.cursor = cursor;
-    // Assumptions: the direction accompanies the cursor and is omitted without one, because the
-    //   contract declares it meaningful only alongside a cursor and defaults it to forward. A blank
-    //   cursor is treated as no cursor here for the same reason the service treats it that way --
-    //   as a subset of error rather than as a third state.
-    query.direction = direction ?? DEFAULT_DIRECTION;
+  // Refactoring Rationale: ⚠️ the pair is established by the shared guard, which REFUSES a direction
+  //   supplied without a usable cursor instead of dropping it. Dropping it -- what this block did --
+  //   turned "step backward from here" into "read the opening page" for a caller that had asked for
+  //   something the contract answers with a 400 keyed on the direction. The blank-cursor reading is
+  //   unchanged and now lives in the guard: a blank cursor is no cursor, on the same grounds the
+  //   service reads it that way, so a direction sent with one is refused rather than silently ignored.
+  const paging = keysetPagingMembers(cursor, direction);
+  if (paging !== undefined) {
+    query.cursor = paging.cursor;
+    query.direction = paging.direction;
   }
 
   const response = await getApiClient().post<CardXrefPage>(

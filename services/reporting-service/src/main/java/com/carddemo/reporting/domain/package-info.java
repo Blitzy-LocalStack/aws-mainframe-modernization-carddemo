@@ -4,12 +4,12 @@
  *
  * <h2>The closed set of types</h2>
  *
- * <p>This package holds exactly seven projection types plus this charter, eight {@code .java}
- * files in all, and it holds no subdirectory whatsoever. The seven are
+ * <p>This package holds exactly eight projection types plus this charter, nine {@code .java}
+ * files in all, and it holds no subdirectory whatsoever. The eight are
  * {@code StatementTransactionView}, {@code ReportTransactionView}, {@code CardXrefView},
- * {@code AccountView}, {@code CustomerView}, {@code TransactionTypeView} and
- * {@code TransactionCategoryView}. An eighth projection is a defect rather than an addition,
- * and so is a nested package: nesting one would manufacture a second package-charter
+ * {@code AccountView}, {@code CustomerView}, {@code TransactionTypeView},
+ * {@code TransactionCategoryView} and {@code TransactionCategoryBalanceView}. A ninth projection
+ * is a defect rather than an addition, and so is a nested package: nesting one would manufacture a second package-charter
  * obligation that nothing in the plan asks for. No {@code db/migration} directory appears
  * here, and none appears anywhere under this module.
  *
@@ -32,7 +32,10 @@
  * TransactionCategoryView     reporting.v_transaction_categories    V1__reporting_views.sql
  * AccountView                 reporting.v_accounts                  V1__reporting_views.sql
  * CustomerView                reporting.v_customers                 V1__reporting_views.sql
- * CardXrefView                reporting.v_card_xref                 V1__reporting_views.sql
+ * CardXrefView                reporting.v_card_xref                  V1__reporting_views.sql
+ * TransactionCategoryBalanceView
+ *                             reporting.v_transaction_category_balances
+ *                                                                   V1__reporting_views.sql
  * </pre>
  *
  * <p>Refactoring Rationale: the last three relations formerly read <b>planned</b> here, on the
@@ -41,18 +44,23 @@
  * a view over them could not be created and would have taken the four that could down with it.
  * That ground is spent: {@code V1__account.sql} now creates all three base tables and
  * {@code data-migration/sql/V1__reporting_views.sql} creates all three views, so the relation
- * column above names the file that declares each of the seven rather than an intention.
+ * column above names the file that declares each of the eight rather than an intention.
  *
  * <p>Refactoring Rationale: the three projection TYPES named in those rows formerly read as still
  * to be authored as well, with the count stated as SEVEN by declaration and FOUR by present count.
  * That is spent too: {@code CardXrefView}, {@code AccountView} and {@code CustomerView} are
- * authored, so the count is SEVEN by declaration and SEVEN by present count and an eighth name is
- * a defect on both readings. The reason they were withheld was that nothing read them, and the
+ * authored, so declaration and present count agree and a name beyond the set is a defect on both
+ * readings.
+ * Refactoring Rationale: that agreed count was SEVEN and is now EIGHT.
+ * {@code TransactionCategoryBalanceView} was added with the category-balance report of
+ * {@code app/jcl/PRTCATBL.jcl}, whose generation family had no writer at all before it -- so the
+ * eighth projection is an addition the plan asks for rather than the defect the paragraph above
+ * warns about, and the warning now names a ninth. The reason they were withheld was that nothing read them, and the
  * stated cost of authoring them early was that a wrong column name or nullability in one would be
  * caught by no test until its first reader arrived. That cost is now paid rather than avoided: the
- * four statement repository roles and the report role in
- * {@code com.carddemo.reporting.repository} read all seven, and the services above those roles
- * compose the statement and the report from what they return, so every mapping in this package has
+ * four statement repository roles, the report role and the category-balance role in
+ * {@code com.carddemo.reporting.repository} read all eight between them, and the services above
+ * those roles compose the statement and the two reports from what they return, so every mapping in this package has
  * a reader and a wrong column name fails a read rather than sitting undetected.
  *
  * <p>Refactoring Rationale: {@code TransactionTypeView} previously mapped the base relation

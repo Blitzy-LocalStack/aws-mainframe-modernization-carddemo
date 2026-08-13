@@ -25,11 +25,18 @@
  * at-clause bodies for emptiness through {@code NonEmptyAtclauseDescription}, so an invented empty
  * at-clause would be reported rather than credited.</p>
  *
- * <h2>The four classes this package holds, and how each one reaches the surface</h2>
+ * <h2>The five classes this package holds, and how each one reaches the surface</h2>
  *
- * <p>This directory holds this descriptor and four test classes, and admits no subdirectory. The four
+ * <p>This directory holds this descriptor and five test classes, and admits no subdirectory. The five
  * reach the boundary by three different routes, which is the distinction to carry away, because it
  * decides what each one is able to detect:</p>
+ *
+ * <p>⚠️ Assumptions: this charter deliberately carries NO counted directory marker, and the omission is a
+ * decision rather than an oversight. The marker switches on a check that holds every list entry in the
+ * charter to a file in this directory, and this charter carries a SECOND list further down naming the six
+ * CONTROLLERS the dispatcher classes assemble -- main-source types that are not files here. Adding the marker
+ * therefore failed that check on all six. The figure this charter states is instead covered by the per-package
+ * census in this module's README, which is itself machine-checked.</p>
  *
  * <ul>
  *   <li>{@code ReferenceApiRoutingContractTest} compares the set of mounted handlers against the set of
@@ -60,6 +67,15 @@
  *       rather than in the service test package because what it pins is the boundary contract of the
  *       refusal, the error body and its per-field entries, and not the date arithmetic that produced
  *       it.</li>
+ *   <li>{@code TransactionCategoryCreationDispatcherTest} drives the one CREATE route through a real
+ *       dispatcher and holds its response LINE to the contract, which is the thing none of the four above
+ *       can see. ⚠️ Refactoring Rationale: it exists because the 201 of
+ *       {@code src/main/resources/openapi/reference-api.yaml} declares a {@code Location} header as
+ *       required and the handler produced only a status and a body, so every successful creation answered
+ *       without a header the document promises. Nothing here could have caught it -- no class in this module
+ *       drove a write route through a dispatcher at all -- and no service test can, because a response header
+ *       is produced by the value the handler hands the framework rather than by anything the service
+ *       does.</li>
  * </ul>
  *
  * <p>Refactoring Rationale: a dispatcher class earns its cost over a direct handler call for one
@@ -74,7 +90,7 @@
  * not-found sentence. The second is the harder of the two to notice, because its status looks like an
  * ordinary outcome rather than a fault.</p>
  *
- * <p>Assumptions: all four names end in {@code Test}, so Surefire collects them at the {@code test}
+ * <p>Assumptions: all five names end in {@code Test}, so Surefire collects them at the {@code test}
  * phase of the build. Failsafe collects the {@code IT} names, which in this module means the
  * container-backed classes under {@code com.carddemo.reference.repository}, and asserts their result at
  * {@code verify}. The suffix is therefore doing structural work: a container-backed class misnamed

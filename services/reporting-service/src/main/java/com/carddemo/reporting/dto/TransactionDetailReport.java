@@ -85,4 +85,32 @@ public record TransactionDetailReport(
         lines = List.copyOf(lines);
         totals = List.copyOf(totals);
     }
+
+    /**
+     * Renders the report as its date range and the SIZES of its two lists.
+     *
+     * <p>Purpose. Both lists carry values withheld by {@code docs/architecture/observability.md} L1093 to
+     * L1112 -- every detail line holds an account identifier and an amount, and every total holds a sum --
+     * so the compiler-generated rendering emitted an entire report, one account and one figure at a time,
+     * into whatever stringified it.</p>
+     *
+     * <p>Assumptions: the two dates are kept and are the report's identity. They are the parameters the
+     * reference job is driven by rather than values read from a row, so they name WHICH report this is
+     * without naming anything in it, and a report produced for the wrong range is the most common fault
+     * this rendering is read for.</p>
+     *
+     * <p>Trade-offs: the two sizes are rendered rather than the lists, and the pair of counts is worth
+     * more than either alone -- a report with lines but no totals, or totals with no lines, is a
+     * generation fault that both counts together make obvious.</p>
+     *
+     * @return a rendering naming the start and end dates and the sizes of the line and total lists, with
+     *     the lines and totals themselves omitted; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "TransactionDetailReport[startDate=" + this.startDate
+                + ", endDate=" + this.endDate
+                + ", lines=" + (this.lines == null ? "absent" : this.lines.size() + " entries")
+                + ", totals=" + (this.totals == null ? "absent" : this.totals.size() + " entries") + ']';
+    }
 }

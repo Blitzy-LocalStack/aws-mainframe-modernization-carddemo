@@ -37,8 +37,13 @@
  * In outline: the asynchronous inquiry consumer sends its reply and then returns, and the queue
  * acknowledges the request only on that return, so a task killed between the two leaves the request
  * visible again and the next delivery would send a second reply bearing the same correlation identifier as
- * the first. The ledger records the answer under the requester's own identity before it is sent, so a
- * redelivery can tell that it was already produced.</p>
+ * the first. The ledger records the answer under the BROKER's own identifier for the delivery before
+ * it is sent -- an identity that is stable across every redelivery of one message and unique per
+ * accepted send -- so a redelivery can tell that it was already produced. Assumptions: the key is
+ * deliberately not either identity the PRODUCER supplies, because neither is authenticated or
+ * constrained and a producer reusing one correlation identifier across several questions would have
+ * its second, genuine inquiry suppressed as a redelivery of the first. Both are retained below the
+ * broker identifier as legacy fallbacks, for a request that never passed the broker.</p>
  *
  * <ul>
  *   <li>{@code AccountRepository}, over {@code com.carddemo.account.domain.Account}. The entity

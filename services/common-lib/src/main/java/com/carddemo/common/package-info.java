@@ -40,10 +40,13 @@
  *       {@code ApprovedOriginPolicy}.</li>
  *   <li><b>{@code messaging}</b> -- the message-expiry attribute every queue
  *       consumer honours, the canonical encoding a correlation identity must
- *       satisfy to travel as queue metadata, and the rule that every bound on a
- *       consumer's per-message work fits inside that message's visibility period.
- *       Three production classes: {@code MessageExpiry},
- *       {@code MessagingCorrelationId}, {@code QueueClientBudget}.</li>
+ *       satisfy to travel as queue metadata, the rule that every bound on a
+ *       consumer's per-message work fits inside that message's visibility period,
+ *       and the listener error handler that records a failed delivery as a
+ *       message-free digest and rethrows it unchanged so the queue's own
+ *       redelivery is untouched. Four production classes:
+ *       {@code MessageExpiry}, {@code MessagingCorrelationId},
+ *       {@code QueueClientBudget}, {@code RethrowingDigestErrorHandler}.</li>
  *   <li><b>{@code observability}</b> -- the Micrometer common tag set
  *       {@code service}, {@code environment} and {@code version}, the decision
  *       about what a rendered value may contain before it reaches a log line, and
@@ -121,8 +124,8 @@
  *
  * <h2>The closed inventory</h2>
  *
- * <p>The module holds <b>43 production classes</b> in a root and ten
- * subpackages, each carrying one charter file, for <b>54</b> compilation units. The
+ * <p>The module holds <b>44 production classes</b> in a root and ten
+ * subpackages, each carrying one charter file, for <b>55</b> compilation units. The
  * table is the closed set: a class belonging to this module belongs to exactly one
  * of these eleven rows, and a proposed addition that fits none of them does not belong
  * in the shared kernel at all. The set is deliberately FLAT: there is no nested
@@ -178,6 +181,19 @@
  * for itself, rejected because a listing says what is there and this table says what
  * BELONGS there, which is the judgement a reviewer needs when deciding whether a new
  * type is in the right module.
+ *
+ * <p>Refactoring Rationale: a third wrongness has now been corrected, and it was of a
+ * different kind -- the SENTENCE introducing the table said 43 and 54 while the table's
+ * own rows, its two cross-check sums and the authoritative-figures paragraph all said 44
+ * and 55. That form of drift survives {@code SharedKernelInventoryTest} by construction,
+ * because the test re-derives the ROWS and the SUMS from the directory and never reads the
+ * introductory prose, so the one figure a reader meets first was the only one nothing
+ * checked. It is corrected from the same measurement as the rows rather than incremented,
+ * and the same measurement was carried to {@code services/common-lib/README.md}, whose
+ * tree captions had drifted the same way in the same direction. Trade-offs: the prose
+ * figure is kept rather than deleted in favour of the rows alone, because a reader needs
+ * the magnitude before the breakdown; the accepted cost is one unchecked number, stated
+ * here so that whoever edits the rows knows this sentence moves with them.
  *
  * <h2>Where this inventory exceeds the plan, and why each addition is here</h2>
  *
@@ -443,9 +459,9 @@
  * absence is a decision rather than an oversight, and it rests on two
  * independent grounds.
  *
- * <p>Assumptions: first, the count canon above admits exactly ten charter
- * files, every one of them at this package or deeper. An eleventh would break the
- * 45-compilation-unit total, and authoring an artifact the migration plan does
+ * <p>Assumptions: first, the count canon above admits exactly eleven charter
+ * files, every one of them at this package or deeper. A twelfth would break the
+ * 55-compilation-unit total, and authoring an artifact the migration plan does
  * not call for falls outside the scope this tree is held to. Second, the
  * ruleset's charter-presence check is a file-set check: it fires only for a
  * directory that contains a compilation unit the audit actually processed.
@@ -656,7 +672,10 @@
  * docstring. That is a formatting concession and not a waiver, since the
  * docstring is still required. It has no application to this file, which
  * declares no accessor, and it is restated here because this charter is where
- * the author of any of the other 25 compilation units looks first. The
+ * the author of any other compilation unit in this module looks first. No count is
+ * written into that sentence: the module's unit total is stated once, in the closed
+ * inventory above where a test re-derives it, and a second copy here would be a
+ * figure nothing measures. The
  * concession is usable at all only because the repository ruleset deliberately
  * omits the single-line Javadoc check while requiring a return at-clause on
  * every value-returning method: with both enabled, a one-line docstring
@@ -706,7 +725,7 @@
  * layer, its single-program integration layer, its golden-master end-to-end
  * layer, and its fixtures, goldens, helpers and mocks. This module's own test
  * tree is {@code services/common-lib/src/test}, and it holds the unit tests and
- * the architecture rules for the 39 production classes this charter enumerates.
+ * the architecture rules for the 44 production classes this charter enumerates.
  * Neither substitutes for the other, and work on one does not modify the other.
  *
  * <p>Assumptions: the oracle suite covers batch flows. Three of the contracts

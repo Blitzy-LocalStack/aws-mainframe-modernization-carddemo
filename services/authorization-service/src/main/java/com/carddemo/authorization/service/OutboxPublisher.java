@@ -1158,7 +1158,38 @@ public class OutboxPublisher {
      */
     private boolean publishReply(AuthReplyOutbox row) {
         try {
-            SendMessageRequest request = requestFor(row);
+            // WHY : Assumptions: a row the broker has ALREADY accepted is reconciled and never sent
+            //       again. The acceptance instant is written by its own transaction immediately after
+            //       the broker answers, so a row carrying one and no publication instant is a reply
+            //       that reached the wire and whose status write did not land. Sending it again would
+            //       enqueue a second copy of one authorization's reply as soon as the queue's
+            //       five-minute deduplication window had passed -- the window expires and the row does
+            //       not, which is why the decision is taken from the row.
+            if (row.isSendAccepted()) {
+                transition(row, AuthReplyOutbox::markPublished);
+                LOG.warn(
+                        "event=auth.reply.publish-reconciled outboxId={} attempts={} sentAt={} "
+                                + "brokerMessageId={} brokerSequenceNumber={}",
+                        row.getOutboxId(), row.getAttempts(), row.getSentAt(),
+                        brokerValue(row.getBrokerMessageId()),
+                        brokerValue(row.getBrokerSequenceNumber()));
+                return true;
+            }
+
+            // WHY : Assumptions: the deadline is computed PER ATTEMPT, from the window the deciding
+            //       transaction chose, and is recorded with the acceptance rather than before the send.
+            //       Alternatives Considered: fixing it at the first attempt and reusing it, so that two
+            //       attempts at one reply are byte-identical. Rejected because the first attempt may
+            //       never have reached the broker at all -- a connect refusal is the commonest transport
+            //       fault there is -- and a frozen deadline would then be stamped on a message sent
+            //       after it had already passed, which docs/adr/ADR-004-messaging.md records as
+            //       guaranteed non-delivery of a reply the committed decision says is owed. The defect
+            //       that frozen stamping was meant to close is closed by the acceptance record instead:
+            //       an accepted send is never sent a second time, so the two values cannot disagree
+            //       except in the one window recorded on recordSendAccepted.
+            LocalDateTime deadline = sendDeadlineFor(row);
+
+            SendMessageRequest request = requestFor(row, deadline);
             // WHY : Assumptions: the send is wrapped in a Supplier held in a LOCAL rather than passed
             // as a lambda literal. The template overloads `invoke` on Supplier and on Runnable, and an
             // expression lambda returning a method-invocation result is compatible with both -- so
@@ -1180,19 +1211,35 @@ public class OutboxPublisher {
                 return this.sqs.sendMessage(request);
             };
             SendMessageResponse accepted = SEND_RETRIES.invoke(send);
+            // WHY : Assumptions: the acceptance is recorded in its OWN transaction, before the
+            //       publication instant, and the two are deliberately not combined. Combining them
+            //       would restore the defect: one transaction failing would leave no evidence of the
+            //       accepted send, and the next pass would send again. Split this way the ambiguous
+            //       interval is one statement wide, and any failure after it commits leads to the
+            //       reconciling branch above rather than to a second send. Trade-offs: two round trips
+            //       per publication instead of one, which is not measurable beside the network call
+            //       they follow.
+            String brokerMessageId = messageIdOf(accepted);
+            String brokerSequenceNumber = sequenceNumberOf(accepted);
+            transition(row, (stored, at) -> stored.recordSendAccepted(brokerMessageId,
+                    brokerSequenceNumber, deadline, at));
             transition(row, AuthReplyOutbox::markPublished);
             // WHY : Assumptions: the BROKER'S OWN identities are logged beside this service's row
             // identity, because they are the only evidence that distinguishes a message the broker
             // newly enqueued from one it suppressed as a duplicate of an earlier accept. Both answer
-            // 200 and both reach this line. Trade-offs: neither identity is persisted on the row --
-            // the column set is frozen by the applied migration, and adding one would change a Flyway
-            // checksum in every environment that has already run it -- so the pairing lives in the log
-            // and is joined to the row by `outboxId`, which is on both.
+            // 200 and both reach this line. ⚠️ Refactoring Rationale: this comment said neither
+            // identity was persisted "because the column set is frozen by the applied migration, and
+            // adding one would change a Flyway checksum in every environment that has already run it".
+            // That reasoning was wrong on its own terms: a checksum is per MIGRATION, so adding columns
+            // in a NEW version leaves V1's checksum untouched -- which is exactly what V2 and V3
+            // already did to this table, and what V4 now does to persist both identities. They are
+            // logged here as well because a log query joins them to the send, while the columns answer
+            // the different question the reconciling branch above asks.
             LOG.info(
                     "event=auth.reply.published outboxId={} attempts={} brokerMessageId={} "
                             + "brokerSequenceNumber={}",
-                    row.getOutboxId(), row.getAttempts(), brokerValue(messageIdOf(accepted)),
-                    brokerValue(sequenceNumberOf(accepted)));
+                    row.getOutboxId(), row.getAttempts(), brokerValue(brokerMessageId),
+                    brokerValue(brokerSequenceNumber));
             return true;
         } catch (RuntimeException failure) {
             // WHY : Assumptions: the reason PERSISTED on the row stays message-free -- it is the cause
@@ -1210,9 +1257,21 @@ public class OutboxPublisher {
             // a message would give a transport-authored string an unbounded lifetime in the database
             // while the log it also reaches is retained by policy. FailureSummary is what makes it
             // sayable at all: it neutralises control characters, masks any embedded card number and
-            // bounds the length, in that order, so the value on this line is already treated exactly as
-            // every other diagnostic value in this service is.
-            String detail = FailureSummary.of(failure);
+            // bounds the length, in that order.
+            // WHY : ⚠️ Refactoring Rationale: the renderer is the WITHHOLDING one, and it used to be
+            //       FailureSummary.of. This catch receives whatever a send raised, so it cannot reason
+            //       about who composed the message it is holding, and the masking of `of` recognises
+            //       card-shaped digit runs only: a transport failure reporting a connect refusal
+            //       against a signed location, or an access-key identifier, carries no digit run at all
+            //       and passed through untouched into a retained log. FailureSummary's own contract
+            //       names exactly this shape of site -- a generic handler -- and directs it to
+            //       databaseConditionOf, which admits a message only when some link in the chain
+            //       carries a database state code and withholds it otherwise. Trade-offs: a transport
+            //       message is now withheld at this site, which is the diagnostic an operator would
+            //       most like to read; what replaces it is the digest below, which names every type and
+            //       frame in the chain, plus the queue's own metrics. Withholding by default cannot
+            //       fail open, and this catch is not the place that knows the provenance of its input.
+            String detail = FailureSummary.databaseConditionOf(failure);
             // WHY : ⚠️ Refactoring Rationale: the absence token comes from the shared kernel now, where
             // this method previously rendered it through this class's own broker-value helper. The two
             // produced the same text, and that agreement was a coincidence of two literals rather than
@@ -1230,20 +1289,32 @@ public class OutboxPublisher {
                 // decision says was owed, which is why the row is retained with its diagnostic rather
                 // than deleted, is excluded from the retention sweep, and is logged at error.
                 transition(row, (stored, at) -> stored.abandon(at, reason));
-                // WHY : Assumptions: this ONE line also names the acquirer's TRANSACTION IDENTIFIER,
-                // and no other line in this class does. It is the terminal statement that a reply the
-                // committed decision owed will never be delivered, so it is the line an operator
-                // reaches for when a requester reports an unanswered transaction -- and an operator
-                // holding that report has the transaction identifier, not this service's surrogate
-                // row key. Trade-offs: the identifier is message metadata rather than a protected
-                // value -- the specification freezes it as the deduplication identity, so it already
-                // travels in queue telemetry on every send -- which is why naming it here discloses
-                // nothing the transport does not already carry, whereas naming the card number or the
-                // payload would.
+                // WHY : ⚠️ Refactoring Rationale: this line named the acquirer's TRANSACTION
+                // IDENTIFIER and no longer does. The argument for naming it was that the identifier "is
+                // message metadata rather than a protected value" because the specification freezes it
+                // as the deduplication identity, "so it already travels in queue telemetry on every
+                // send". Both halves are true and the conclusion does not follow: queue telemetry is a
+                // different sink with a different retention and a different audience from this
+                // service's application log, so a value being present in one is not a reason to write
+                // it into the other. The identifier is the key of a committed decision and of the
+                // ledger entry behind it, which is precisely what makes an unanswered-transaction
+                // report answerable -- and equally what makes a log line carrying it a link from log
+                // access to a financial record. This module's own request payload type already renders
+                // the same field as withheld in its diagnostic form, so naming it here was also the
+                // outlier.
+                // WHY : Assumptions: outboxId, which was already on this line, is what an operator
+                // pivots on. The path from a requester's report to this row runs through the governed
+                // table -- the identifier is the deduplication column, so one indexed query answers
+                // "was a reply owed for this transaction, and was it abandoned" -- and that query is
+                // access-controlled and audited where a log read is neither. Alternatives Considered: a
+                // keyed opaque token over the identifier, which this context can mint because it holds
+                // a tokeniser bean for its queue metadata. Rejected because it would put a second
+                // purpose on that key and would still need the same governed query to be useful, so it
+                // would add a coupling and remove nothing.
                 LOG.error(
-                        "event=auth.reply.abandoned outboxId={} transactionId={} attempts={} "
+                        "event=auth.reply.abandoned outboxId={} attempts={} "
                                 + "maxAttempts={} fault={} reason={} sqlState={}",
-                        row.getOutboxId(), row.getDeduplicationId(), row.getAttempts(),
+                        row.getOutboxId(), row.getAttempts(),
                         this.maxAttempts, reason, detail, sqlState);
                 // WHY : Assumptions: the group does NOT advance past an abandoned row, so this returns
                 // false. Advancing would deliver that card's later replies with a gap where the
@@ -1365,6 +1436,18 @@ public class OutboxPublisher {
      * verbatim value is passed through so a receiver applies the sender's own arithmetic rather than this
      * method's guess at it.</p>
      *
+     * <p>⚠️ Assumptions: the value this method returns is RECORDED on the row, in the same transaction
+     * that records the broker's acceptance, and that is what makes the recomputation safe. Refactoring
+     * Rationale: the recomputation was previously stored nowhere, and the consequence was measurable. The
+     * queue deduplicates on the acquirer's transaction identifier, so a retry after an accepted send was
+     * SUPPRESSED and answered with the identity of the message the broker already held -- the one carrying
+     * the earlier deadline -- while the row was then marked published against a value that attempt had
+     * computed and nothing had sent; and beyond the five-minute deduplication window the same
+     * recomputation enqueued a genuine second reply whose window had been refreshed, so a duplicate looked
+     * live long after the answer was owed. Neither is reachable now: a row whose send the broker accepted
+     * is reconciled and never sent again, and the deadline that accompanied the accepted send is the value
+     * stored beside it.</p>
+     *
      * @param row the already-claimed row being sent; must not be {@code null}
      * @return the deadline to stamp on this send, or {@code null} when the row carries none
      */
@@ -1450,12 +1533,14 @@ public class OutboxPublisher {
      * moving a fault that would otherwise be a rejected send to the moment the row is read.</p>
      *
      * @param row the already-claimed outbox row; must not be {@code null}
+     * @param sendDeadline the deadline to stamp, already fixed and persisted by the caller, of type
+     *     {@code LocalDateTime}; {@code null} when this reply carries none
      * @return the send request naming that row's own destination, never {@code null}
      * @throws NullPointerException if a column the publication requires is unpopulated on the row
      * @throws IllegalArgumentException if a column on the row is blank or wider than the publication
      *     admits
      */
-    private SendMessageRequest requestFor(AuthReplyOutbox row) {
+    private SendMessageRequest requestFor(AuthReplyOutbox row, LocalDateTime sendDeadline) {
         OutboxMessage publication = OutboxMessage.from(row);
         Map<String, MessageAttributeValue> attributes = new HashMap<>();
         attributes.put(ATTRIBUTE_CONTENT_TYPE, stringAttribute(publication.contentType()));
@@ -1463,10 +1548,14 @@ public class OutboxPublisher {
             attributes.put(ATTRIBUTE_CORRELATION_ID, stringAttribute(publication.correlationId()));
         }
         // WHY : Assumptions: the presence question is asked of the PUBLICATION -- which is the projection
-        // that has already validated the row -- and the VALUE is taken from the rebasing helper, whose
-        // reasoning about why the stored instant is not the instant to send is recorded on it.
+        // that has already validated the row -- and the VALUE is the one the CALLER fixed and persisted
+        // before this method was reached. Refactoring Rationale: this method used to call the deadline
+        // helper itself, which computed a fresh value per attempt and stored none, so the attribute a
+        // retry carried differed from the attribute the queue was holding for the same reply; taking the
+        // value as a parameter is what makes "the row records what the wire carries" a property of the
+        // call graph rather than of two computations agreeing.
         if (publication.expiresAt() != null) {
-            attributes.put(ATTRIBUTE_EXPIRES_AT, stringAttribute(sendDeadlineFor(row).toString()));
+            attributes.put(ATTRIBUTE_EXPIRES_AT, stringAttribute(sendDeadline.toString()));
         }
         return SendMessageRequest.builder()
                 .queueUrl(publication.replyQueueUrl())

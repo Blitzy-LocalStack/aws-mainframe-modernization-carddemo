@@ -287,4 +287,35 @@ public record TransactionReportLineResponse(
     public Money amount() {
         return amount;
     }
+
+    /**
+     * Renders the line's identity and its classification, WITHOUT the account or the amount.
+     *
+     * <p>Purpose. The account identifier and the amount are both withheld by
+     * {@code docs/architecture/observability.md} L1093 to L1112, the first by name and the second as a
+     * monetary value. This shape is a report's element type, so a rendering that printed both put one
+     * identified account beside one exact figure on every line of a report -- the pairing that rule
+     * exists to prevent -- multiplied by however many lines the range produced.</p>
+     *
+     * <p>Assumptions: the transaction identifier is kept while the account identifier is omitted, which is
+     * that rule's own asymmetry: a transaction identifier names one ledger row and no party, and it is
+     * what lets a questioned report line be traced back to the transaction it summarises.</p>
+     *
+     * <p>Trade-offs: the two codes AND their descriptions are kept. The descriptions are reference-data
+     * text seeded from the type and category tables rather than free text a submitter authored, so they
+     * disclose nothing about a transaction while making a line legible without a second lookup.</p>
+     *
+     * @return a rendering naming the transaction identifier, the type and category codes with their
+     *     descriptions and the source, with the account identifier and the amount omitted; never
+     *     {@code null}
+     */
+    @Override
+    public String toString() {
+        return "TransactionReportLineResponse[transactionId=" + this.transactionId
+                + ", typeCode=" + this.typeCode
+                + ", typeDescription=" + this.typeDescription
+                + ", categoryCode=" + this.categoryCode
+                + ", categoryDescription=" + this.categoryDescription
+                + ", source=" + this.source + ']';
+    }
 }

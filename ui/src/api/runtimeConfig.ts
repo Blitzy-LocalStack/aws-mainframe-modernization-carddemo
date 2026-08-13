@@ -60,6 +60,8 @@ export function runtimeApiBaseUrl(): string | undefined {
  *
  * Assumptions: this exists for tests, which need each case to start from a known state because the
  * loaded value is module-level and would otherwise leak between them.
+ * @returns {void} Nothing; the module-level value is discarded, after which `runtimeApiBaseUrl`
+ *   reports the unloaded state again.
  */
 export function resetRuntimeConfig(): void {
   loaded = undefined;

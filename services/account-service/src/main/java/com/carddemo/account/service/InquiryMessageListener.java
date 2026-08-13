@@ -10,6 +10,7 @@ import com.carddemo.common.messaging.MessageExpiry;
 import com.carddemo.common.messaging.MessagingCorrelationId;
 import com.carddemo.common.observability.ThrowableDigest;
 import io.awspring.cloud.sqs.annotation.SqsListener;
+import io.awspring.cloud.sqs.listener.SqsHeaders;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -101,7 +102,8 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  * that identifier then holds two answers for one question, and nothing on the wire distinguishes the
  * duplicate from the original. That is a divergence from the baseline, not a property of it.</p>
  *
- * <p>Assumptions: the remedy is a durable CLAIM keyed by the requester's own identity for its request, in
+ * <p>Assumptions: the remedy is a durable CLAIM keyed by the QUEUE SERVICE's own identifier for the
+ * delivery -- stable across every redelivery of one message and unique per accepted send -- in
  * {@code account.inquiry_reply_ledger} through
  * {@link com.carddemo.account.repository.InquiryReplyLedger}. The reply is composed, then recorded and
  * COMMITTED, then sent, then marked sent. A redelivery finding the claim already retired suppresses its
@@ -122,12 +124,31 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  * eliminated by this migration and not to be refilled. What is bought is that duplication is now one specific
  * failure rather than the outcome of every redelivery.</p>
  *
- * <p>Trade-offs: a request carrying NEITHER identity is answered unguarded, exactly as before, and the fact
- * is logged. There is nothing to key a claim on, and the alternative -- keying on a digest of the payload --
- * was rejected because it cannot tell a redelivery of one request from a second, legitimately identical
- * request, so it would silently answer only the first of two genuine inquiries. Treating an unidentified
- * request as new is also the baseline's own behaviour, which performs no idempotency check of any kind, so
- * the unguarded path is a preserved property rather than a weakened one.</p>
+ * <p>⚠️ Refactoring Rationale: the claim was keyed on the PRODUCER-supplied message attribute, falling back
+ * to the correlation identifier, and that inverted the guarantee for a whole class of requester. Neither value
+ * is authenticated or constrained: a producer that reuses one correlation identifier across several
+ * questions -- which a requester is entitled to do, and which this system's own contract permits -- had its
+ * second, genuine inquiry suppressed as a redelivery of the first and received the earlier answer for the
+ * later question. Keying on the broker's identifier removes that outcome by construction, because a second
+ * send is a second identifier whatever the producer labels it with, and it costs nothing: the value is present
+ * on every delivery the queue makes. The two producer-supplied values remain BELOW it as legacy fallbacks for
+ * a request that reaches this consumer without passing the broker at all, which deployed traffic cannot
+ * arrange.</p>
+ *
+ * <p>Trade-offs: a request carrying NEITHER a broker identifier nor any usable identity of its own is answered
+ * unguarded, and the fact is logged. There is nothing to key a claim on, and the alternative -- keying on a
+ * digest of the payload -- was rejected because it cannot tell a redelivery of one request from a second,
+ * legitimately identical request, so it would silently answer only the first of two genuine inquiries.
+ * Treating an unidentified request as new is also the baseline's own behaviour, which performs no idempotency
+ * check of any kind, so the unguarded path is a preserved property rather than a weakened one.</p>
+ *
+ * <p>Assumptions: every identity that reaches the durable row is BOUNDED at intake by the shared queue-identity
+ * rule in {@link com.carddemo.common.messaging.MessagingCorrelationId}, so an arbitrarily long or
+ * control-character-bearing producer value can no longer be discovered by an insert. An unusable value is
+ * treated as absent for the exchange and reported to the error sink as a controlled protocol diagnostic
+ * carrying its LENGTH and never its bytes, while the request itself is still answered -- because the payload
+ * of such a request is ordinarily valid, and dead-lettering it would answer a legitimate question with
+ * silence.</p>
  *
  * <h2>Statelessness</h2>
  * <p>Assumptions: this bean holds no cross-message state, and the baseline asks for exactly that.
@@ -247,6 +268,41 @@ public class InquiryMessageListener {
      */
     public static final String ATTRIBUTE_REPLY_TO_QUEUE_URL = "replyToQueueUrl";
 
+    /**
+     * The header the QUEUE SERVICE's own identifier for a delivery arrives under.
+     *
+     * <p>Assumptions: this is the message identifier the broker assigns when a request is accepted for
+     * delivery, not a value any producer can set. It is stable across every redelivery of one message --
+     * only the receipt handle changes -- which is exactly the property a duplicate-suppression key needs,
+     * and it is unique per accepted send, which is the property a producer-supplied attribute does not
+     * have.</p>
+     *
+     * <p>Assumptions: the constant is DERIVED from the framework's own
+     * {@code SqsHeaders.MessageSystemAttributes.MESSAGE_ID} rather than restating its literal
+     * {@code "Sqs_Msa_messageId"}, so a framework rename fails compilation here instead of silently
+     * turning every lookup into an absent header -- which would demote this consumer back to the
+     * producer-supplied fallback without any test noticing.</p>
+     */
+    static final String HEADER_BROKER_MESSAGE_ID = SqsHeaders.MessageSystemAttributes.MESSAGE_ID;
+
+    /**
+     * The header carrying the broker's identifier in its unconverted form.
+     *
+     * <p>Assumptions: the framework may republish the broker identifier as a UUID in the framework's own
+     * identity header while keeping the original string here, so this is read as the second source rather
+     * than as an equivalent of the first. Reading both is what keeps the durable key broker-assigned under
+     * either framework setting instead of depending on one of them.</p>
+     */
+    static final String HEADER_BROKER_RAW_MESSAGE_ID = SqsHeaders.SQS_RAW_MESSAGE_ID_HEADER;
+
+    /**
+     * The attribute every payload this class publishes declares its media type under.
+     *
+     * <p>Assumptions: the NAME is published separately from the VALUE in {@link #CONTENT_TYPE} because a
+     * test and a producer assert against different halves of the same contract -- a consumer looks for the
+     * attribute by name, and only then reads what it declares -- and a single constant carrying both would
+     * force one of the two to be a repeated literal.</p>
+     */
     public static final String ATTRIBUTE_CONTENT_TYPE = "contentType";
 
     /**
@@ -374,15 +430,6 @@ public class InquiryMessageListener {
     private final Clock clock;
 
     /**
-     * Resolved queue addresses, cached by configured name.
-     *
-     * <p>Assumptions: a queue's address is stable for the life of the queue, and this service is configured
-     * to FAIL rather than create a queue that does not exist, so a cached entry cannot become a pointer to a
-     * queue this system did not provision. Resolving per message instead would add a service call to every
-     * reply for a value that never changes. The map is concurrent because the container dispatches messages
-     * on several threads at once.</p>
-     */
-    /**
      * The template the keyed read runs inside.
      *
      * <p>Assumptions: read-only and short -- one keyed lookup -- and it ends before the reply is published.
@@ -411,6 +458,20 @@ public class InquiryMessageListener {
      */
     private final TransactionTemplate ledgerTransaction;
 
+    /**
+     * Resolved queue addresses, cached by configured name.
+     *
+     * <p>Assumptions: a queue's address is stable for the life of the queue, and this service is configured
+     * to FAIL rather than create a queue that does not exist, so a cached entry cannot become a pointer to a
+     * queue this system did not provision. Resolving per message instead would add a service call to every
+     * reply for a value that never changes. The map is concurrent because the container dispatches messages
+     * on several threads at once.</p>
+     *
+     * <p>Refactoring Rationale: this description was authored immediately ABOVE a second documentation block
+     * and therefore documented nothing -- a compiler attaches only the last block before a declaration, so
+     * the explanation of the one piece of mutable state on this class was dropped from the generated
+     * documentation while this field carried none at all. It is attached to the field it describes.</p>
+     */
     private final Map<String, String> queueUrls = new ConcurrentHashMap<>();
 
     /**
@@ -574,8 +635,10 @@ public class InquiryMessageListener {
         //   372, all before any processing that could overwrite the descriptor. Reading them later would be
         //   reading them after the work rather than before it, and those three save areas exist in the
         //   baseline precisely to make that impossible.
-        String correlationId = correlationId(message);
-        String messageId = attribute(message, ATTRIBUTE_MESSAGE_ID);
+        String brokerMessageId = brokerMessageId(message);
+        String correlationId = usableIdentity(correlationId(message), ATTRIBUTE_CORRELATION_ID);
+        String messageId =
+                usableIdentity(attribute(message, ATTRIBUTE_MESSAGE_ID), ATTRIBUTE_MESSAGE_ID);
         String requestedReplyTo = attribute(message, ATTRIBUTE_REPLY_TO_QUEUE_URL);
 
         // WHY : Assumptions: the LOGGING context carries the sanitised rendering while the reply carries the
@@ -613,7 +676,8 @@ public class InquiryMessageListener {
                     this.readTransaction.execute(status -> replyFor(request)),
                     "the read transaction returned no reply, which its callback cannot do");
 
-            answerOnce(reply, resolveReplyDestination(requestedReplyTo), messageId, correlationId);
+            answerOnce(reply, resolveReplyDestination(requestedReplyTo), brokerMessageId, messageId,
+                    correlationId);
         } catch (RuntimeException failure) {
             reportFailure(failure, messageId, correlationId);
             throw failure;
@@ -797,21 +861,31 @@ public class InquiryMessageListener {
      *
      * @param reply the framed reply this delivery composed; must not be {@code null}
      * @param destination the resolved reply destination; must not be {@code null}
-     * @param messageId the request's message identity to echo, or {@code null} if it supplied none
+     * @param brokerMessageId the queue service's own identifier for this delivery, or {@code null} when the
+     *     delivery carried none, which only a non-broker producer can arrange
+     * @param messageId the request's message identity to echo, or {@code null} if it supplied none or supplied
+     *     an unusable one
      * @param correlationId the request's correlation identity to echo, possibly empty when none was supplied
      * @throws software.amazon.awssdk.core.exception.SdkException if the send fails, which propagates so the
      *     request becomes visible again rather than being acknowledged unanswered
      * @throws org.springframework.dao.DataAccessException if the ledger cannot be written, which propagates
      *     for the same reason -- an unrecorded answer must not be sent
      */
-    private void answerOnce(String reply, String destination, String messageId, String correlationId) {
-        String requestKey = requestKey(messageId, correlationId);
+    private void answerOnce(String reply, String destination, String brokerMessageId, String messageId,
+            String correlationId) {
+
+        String requestKey = requestKey(brokerMessageId, messageId, correlationId);
         if (requestKey == null) {
             // WHY : Assumptions: an unidentified request is answered unguarded and the fact is logged, for
             //   the reason the class documentation records -- there is nothing to key a claim on, keying on
             //   a payload digest would suppress a second genuine inquiry, and the baseline performs no
             //   idempotency check at all. The line exists so the gap is visible in the operational record
             //   rather than silent.
+            // WHY : Assumptions: this is now reachable only for a delivery that carries NO broker identifier
+            //   and no usable identity of its own. Queue traffic always carries one, so an occurrence of this
+            //   event in a deployed environment says a request reached this consumer without passing the
+            //   broker -- which is worth knowing on its own and is why the event is kept rather than removed
+            //   as unreachable.
             LOG.warn("event=account.inquiry.unidentified reason=no-request-identity");
             publishReply(reply, destination, messageId, correlationId);
             return;
@@ -853,7 +927,8 @@ public class InquiryMessageListener {
     /**
      * Marks a sent reply as sent, reporting rather than raising when another delivery got there first.
      *
-     * @param requestKey the requester's own identity for its request; must not be {@code null}
+     * @param requestKey the claim key of the request, the broker's own identifier for the delivery
+     *     where it supplied one; must not be {@code null}
      */
     private void retireClaim(String requestKey) {
         boolean retired = Boolean.TRUE.equals(this.ledgerTransaction.execute(status ->
@@ -868,24 +943,48 @@ public class InquiryMessageListener {
     }
 
     /**
-     * Chooses the identity a claim is keyed on, preferring the message identity.
+     * Chooses the identity a claim is keyed on, preferring the identity the BROKER assigned.
      *
-     * <p>Assumptions: the message identity is preferred because it identifies the REQUEST, where a
-     * correlation identity identifies the exchange a requester is pairing -- and a requester is entitled to
-     * reuse one correlation identity across several questions. Keying on the correlation identity when a
-     * message identity is present would therefore suppress a second, distinct request as though it were a
-     * redelivery of the first. The baseline holds both, saving the correlation identifier at physical line
-     * 370 and the message identifier at physical line 372, so both are available here for the same reason.</p>
+     * <p>Assumptions: the broker-assigned identifier is preferred over anything the producer supplied,
+     * because only it has both properties a duplicate-suppression key needs: it is STABLE across every
+     * redelivery of one message, so a redelivery finds the row its first delivery wrote, and it is UNIQUE per
+     * accepted send, so two distinct requests can never collide onto one row. It is read from
+     * {@link #HEADER_BROKER_MESSAGE_ID}, falling back to {@link #HEADER_BROKER_RAW_MESSAGE_ID}, and it is not
+     * settable by a producer at all.</p>
      *
-     * <p>Assumptions: a blank value counts as absent. The correlation reader answers with an empty string
-     * when the request carried no conforming identity, and an empty key would collide every unidentified
-     * request onto one row -- so the first such request would suppress every later one.</p>
+     * <p>Refactoring Rationale: the producer-supplied message attribute used to be preferred, and that was a
+     * correctness defect rather than a style choice. Nothing authenticates or constrains a producer attribute:
+     * a producer that reuses one value across two questions -- or a retry framework that replays a value it
+     * minted once -- had its SECOND, genuine inquiry suppressed as though it were a redelivery of the first,
+     * and the requester received the earlier answer for a later question. The broker identifier removes that
+     * class of failure entirely, because a second send is a second identifier however the producer labels
+     * it.</p>
      *
-     * @param messageId the request's message identity, or {@code null} if it supplied none
+     * <p>Trade-offs: the two producer-supplied values are retained BELOW the broker identifier as explicitly
+     * legacy fallbacks rather than dropped. They are reachable only when a delivery carries no broker
+     * identifier, which real queue traffic cannot arrange -- a direct in-process call and a substituted client
+     * can -- so keeping them preserves at-most-once for a producer that bypasses the broker, at the cost of
+     * one collision mode confined to a path no deployed request takes. Dropping them would answer such a
+     * request unguarded instead, which is strictly weaker for no gain.</p>
+     *
+     * <p>Assumptions: a blank value counts as absent, and a non-canonical producer value has already been
+     * refused by {@link #usableIdentity(String, String)} before reaching here, so every value this method can
+     * return is bounded by {@link MessagingCorrelationId#MAX_LENGTH} or is a broker identifier of the same
+     * order. That is what keeps the returned key inside the durable ledger's own column width instead of
+     * discovering the width on an insert. An empty key would collide every unidentified request onto one row,
+     * so the first such request would suppress every later one.</p>
+     *
+     * @param brokerMessageId the queue service's own identifier for the delivery, or {@code null} when it
+     *     carried none
+     * @param messageId the request's message identity, or {@code null} if it supplied none or an unusable one
      * @param correlationId the request's correlation identity, possibly empty when none was supplied
-     * @return the key to claim on, or {@code null} when the request supplied no identity at all
+     * @return the key to claim on, or {@code null} when neither the broker nor the request supplied a usable
+     *     identity
      */
-    private static String requestKey(String messageId, String correlationId) {
+    private static String requestKey(String brokerMessageId, String messageId, String correlationId) {
+        if (brokerMessageId != null && !brokerMessageId.isBlank()) {
+            return brokerMessageId;
+        }
         if (messageId != null && !messageId.isBlank()) {
             return messageId;
         }
@@ -893,6 +992,111 @@ public class InquiryMessageListener {
             return correlationId;
         }
         return null;
+    }
+
+    /**
+     * Reports the queue service's own identifier for one delivery.
+     *
+     * <p>Assumptions: the system-attribute header is read first and the unconverted header second, because a
+     * framework configured to republish the identifier as a UUID leaves the original string in the second one.
+     * Both are broker-assigned, so either is equally usable as a durable key, and reading both is what makes
+     * the key broker-assigned under either setting rather than under one of them.</p>
+     *
+     * <p>Assumptions: the value is put through the same canonical rule as a producer-supplied identity even
+     * though a broker identifier is a hyphenated hexadecimal token well inside that rule. One rule for every
+     * source is what guarantees the returned key fits the durable column whatever produced it; a value that
+     * failed the rule is treated as absent so the fallbacks below it still apply, rather than being trusted
+     * because of where it came from.</p>
+     *
+     * @param message the received message; must not be {@code null}
+     * @return the broker's identifier for this delivery, or {@code null} when the delivery carries none
+     * @throws NullPointerException if {@code message} is {@code null}
+     */
+    private static String brokerMessageId(Message<String> message) {
+        String system = attribute(message, HEADER_BROKER_MESSAGE_ID);
+        if (MessagingCorrelationId.isCanonical(system)) {
+            return system;
+        }
+        String raw = attribute(message, HEADER_BROKER_RAW_MESSAGE_ID);
+        return MessagingCorrelationId.isCanonical(raw) ? raw : null;
+    }
+
+    /**
+     * Admits a producer-supplied identity only when it can be echoed and recorded, reporting one that cannot.
+     *
+     * <p>Purpose: this is the intake bound finding 44 of the code review asks for. An identity that reaches
+     * the reply's attributes and the durable ledger unchecked can be arbitrarily long and can carry control
+     * characters, and both end the exchange the same way: the send or the insert raises, the request is
+     * redelivered, the redelivery raises identically, and the requester receives NO reply while its request
+     * ends on the dead-letter queue. The rule applied is the shared one,
+     * {@link MessagingCorrelationId#isCanonical(String)} -- non-blank, at most
+     * {@link MessagingCorrelationId#MAX_LENGTH} characters, printable US-ASCII only -- so every queue identity
+     * in this system is bounded by one rule rather than by each consumer's own.</p>
+     *
+     * <p>Assumptions: an ABSENT identity is not a malformed one and is returned unchanged. The baseline
+     * accepts a request that supplies neither identifier, clearing its own field to spaces at physical line
+     * 338, so absence is ordinary and is never routed through the rule.</p>
+     *
+     * <p>Trade-offs: an unusable identity is treated as ABSENT for this exchange -- not echoed, not recorded,
+     * not keyed on -- and the requester still receives its business answer, with a controlled protocol
+     * diagnostic published to the error sink naming the attribute and its LENGTH. The alternatives were both
+     * worse. Refusing the message, as the pending-authorization consumer does, dead-letters a request whose
+     * PAYLOAD is perfectly valid and answers the requester with silence, which is the very outcome the review
+     * finding is about. Truncating the value to the column width would record and echo a value that is neither
+     * the requester's nor absent, so a requester pairing on it would match the answer to nothing while
+     * believing it had matched. What this accepts is that such a requester cannot pair the reply it receives;
+     * it could not pair a reply it never received either, and the diagnostic says why.</p>
+     *
+     * <p>Assumptions: the diagnostic and the log line carry the LENGTH and never the value, for the same
+     * reason every other line on this path does -- the value came off the wire, and a non-canonical one is
+     * precisely the kind that can carry a field or line terminator into a record.</p>
+     *
+     * @param candidate the identity the request supplied, {@code null} or empty when it supplied none
+     * @param attributeName the attribute the value arrived under, named in the diagnostic; must not be
+     *     {@code null}
+     * @return the identity when absent or usable, or {@code null} when it was present and unusable
+     */
+    private String usableIdentity(String candidate, String attributeName) {
+        if (!MessagingCorrelationId.isPresent(candidate)) {
+            return candidate;
+        }
+        if (MessagingCorrelationId.isCanonical(candidate)) {
+            return candidate;
+        }
+        LOG.warn("event=account.inquiry.identity-refused attribute={} length={}",
+                attributeName, candidate.length());
+        reportProtocolFault(attributeName, candidate.length());
+        return null;
+    }
+
+    /**
+     * Publishes one controlled protocol diagnostic for an identity this exchange cannot carry.
+     *
+     * <p>Assumptions: the diagnostic goes to the ERROR SINK and is framed in the same positional shape as
+     * every other report published there, so an operator reads it at the offsets the baseline's diagnostic
+     * group establishes. The return-message field is left BLANK deliberately: the baseline has no literal for
+     * this condition, and inventing one would put a sentence in a field whose every other value is carried
+     * across from the reference character for character.</p>
+     *
+     * <p>Assumptions: a failure to publish the diagnostic is SWALLOWED after being logged. The request itself
+     * is answerable and is about to be answered, so raising here would dead-letter a valid request over a
+     * report about an attribute -- which is the failure mode this whole path exists to remove.</p>
+     *
+     * @param attributeName the attribute whose value was refused; must not be {@code null}
+     * @param length the refused value's length in characters, which is the only property of it that is safe
+     *     to publish
+     */
+    private void reportProtocolFault(String attributeName, int length) {
+        try {
+            send(queueUrl(this.errorQueue),
+                    this.replies.frame(errorDiagnostic(PARAGRAPH_PROCESS_REQUEST_REPLY, null,
+                            this.errorQueue,
+                            "identity-refused attribute=" + attributeName + " length=" + length)),
+                    replyAttributes(null, null));
+        } catch (RuntimeException reportingFailure) {
+            LOG.warn("event=account.inquiry.identity-refusal-unreported failure={}",
+                    ThrowableDigest.of(reportingFailure));
+        }
     }
 
     /**
@@ -1120,14 +1324,18 @@ public class InquiryMessageListener {
      *
      * <p>Assumptions: an ABSENT correlation identifier is accepted rather than refused, because the baseline
      * accepts one -- it clears the field to spaces at physical line 338 and echoes whatever the descriptor
-     * carried, including nothing. A NON-CANONICAL one is also accepted and echoed unchanged, because it is
-     * the requester's own value and this consumer's reply is useless to it otherwise; what protects this
-     * service is that the value never reaches a log unsanitised.</p>
+     * carried, including nothing. This method reports the value as the request carried it; whether it is
+     * USABLE is decided once, by {@link #usableIdentity(String, String)}, so the rule applies identically to
+     * this identity and to the message identity beside it.</p>
      *
-     * <p>Alternatives Considered: refusing a non-canonical identifier, as the pending-authorization consumer
-     * does. Rejected for this flow because that consumer's identifier participates in a durable outbox row
-     * and a deduplication decision, so an unusable value there corrupts stored state; here it is echoed once
-     * and forgotten within one message.</p>
+     * <p>Refactoring Rationale: a non-canonical identifier used to be echoed unchanged, on the ground that it
+     * is the requester's own value and a reply is useless to it otherwise. That reasoning was sound about the
+     * REPLY and silent about the two places the value also reaches. It is attached as a message attribute,
+     * where a control character is rejected by the queue service itself, and it is recorded in the durable
+     * ledger, where a value longer than the column is rejected by the database -- and either rejection ends
+     * the exchange with the request redelivered, then dead-lettered, and the requester answered with nothing
+     * at all. So the earlier decision did not deliver an echoed value to such a requester; it delivered
+     * silence. The bound is applied at intake instead, and the requester receives its answer.</p>
      *
      * @param message the received message; must not be {@code null}
      * @return the correlation identifier, or an empty string, never {@code null}

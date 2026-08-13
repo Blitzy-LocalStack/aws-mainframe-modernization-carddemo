@@ -308,4 +308,29 @@ public record ReportTotalsResponse(
     public Money amount() {
         return amount;
     }
+
+    /**
+     * Renders the band and its label WITHOUT the total.
+     *
+     * <p>Purpose. The amount is a monetary value and is withheld by
+     * {@code docs/architecture/observability.md} L1093 to L1112. A total is the most consequential single
+     * figure this context produces -- it is a sum over a date range for an account or a whole portfolio --
+     * so the compiler-generated rendering put the report's headline number into any line that stringified
+     * one of these.</p>
+     *
+     * <p>Assumptions: the band and its label are kept and disclose nothing. The band is a closed
+     * enumeration naming which subtotal this is, and the label is the reference report's own literal
+     * heading carried across character for character; neither is derived from a row.</p>
+     *
+     * <p>Trade-offs: what is lost is the ability to reconcile a report from a log, which is a real cost for
+     * a reporting context in particular. It is accepted because the total is published in the response and
+     * written into the report artifact, so a reconciliation reads the artifact -- the authoritative
+     * output -- rather than a line about it.</p>
+     *
+     * @return a rendering naming the band and its label, with the total omitted; never {@code null}
+     */
+    @Override
+    public String toString() {
+        return "ReportTotalsResponse[band=" + this.band + ", label=" + this.label + ']';
+    }
 }

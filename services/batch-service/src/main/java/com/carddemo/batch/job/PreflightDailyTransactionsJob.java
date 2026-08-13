@@ -9,6 +9,7 @@ import com.carddemo.batch.repository.AccountRepository;
 import com.carddemo.batch.repository.CardXrefRepository;
 import com.carddemo.batch.repository.DailyTransactionRepository;
 import com.carddemo.batch.service.BatchStepLedger;
+import com.carddemo.batch.service.DailyFeedWatermarkService;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -106,10 +107,19 @@ import org.springframework.transaction.PlatformTransactionManager;
  * {@code CBTRN01C} exists to break. Reproducing the extra lookup would have preserved a read count
  * nothing measures at the price of shipping a known defect.</p>
  *
- * <p>This divergence is registered as D-7 in
+ * <p>This divergence is registered as {@code D-PREFLIGHT-LOOKUP-PAST-END-OF-FILE} in
  * {@code docs/architecture/cobol-to-service-traceability.md}, which the migration plan designates as
  * the register of every documented behavioural divergence. A reader comparing this loop against the
  * reference should start there.</p>
+ *
+ * <p>Refactoring Rationale: this citation previously read "registered as D-7 in" that document, and
+ * it resolved to the wrong entry. {@code D-7} there is the online header clock, which belongs to a
+ * different program, and no entry covered this loop at all — so a reader following the citation
+ * would have found an unrelated divergence and concluded this one was registered when it was not.
+ * The heading above keeps the number, because {@code D-7} is correct as the class-local label within
+ * this file's own documentation, the same way {@code ImportJob} numbers its own {@code D-8} and
+ * {@code D-9}; the register-side identifier is a name precisely so that a class-local number can
+ * never again collide with a register heading.</p>
  *
  * <h2>Why only three repositories are injected, where the reference opens six files</h2>
  *
@@ -234,14 +244,52 @@ public class PreflightDailyTransactionsJob {
      * <p>Alternatives Considered: masking to the last four digits, as the sibling card diagnostic in
      * this class does. Rejected because the card mask exists to keep a card RECOGNISABLE to an operator
      * who is looking at a specific card, whereas nothing in this pass needs an account to be
-     * recognisable: the line already carries the transaction identifier and the run-local ingestion
-     * ordinal, and either locates the feed row from which the account can be resolved through the
-     * cross-reference. A partial identifier would therefore be residual disclosure bought for no
-     * diagnostic gain. Trade-offs: an operator reading only this line cannot name the account, and must
-     * follow the transaction identifier into the feed to do so; that indirection is the price of the
-     * line carrying no identifier at all.</p>
+     * recognisable: the line carries the run-local ingestion ordinal, which locates the feed row from
+     * which the account can be resolved through the cross-reference. A partial identifier would
+     * therefore be residual disclosure bought for no diagnostic gain. Trade-offs: an operator reading
+     * only this line cannot name the account, and must follow the ingestion ordinal into the feed to do
+     * so; that indirection is the price of the line carrying no identifier at all.</p>
+     *
+     * <p>⚠️ Assumptions: this paragraph named the TRANSACTION IDENTIFIER as a second way to reach the
+     * row, and no longer does, because that identifier is now redacted here too -- see
+     * {@link #TRANSACTION_ID_REDACTION}. The ingestion ordinal is the whole of what locates the row, and
+     * it is sufficient: it is unique on the feed table and is not a key of any financial record.</p>
      */
     private static final String ACCOUNT_ID_REDACTION = "***********";
+
+    /**
+     * The redaction written into the card-unresolved diagnostic in place of the transaction identifier.
+     *
+     * <p>⚠️ Refactoring Rationale: this replaces the identifier itself, which this class interpolated
+     * verbatim on the stated ground that it "identifies nobody". That ground does not hold. The value is
+     * {@code TRAN-ID}, the ledger's own primary key, so a holder of log access can join every line
+     * carrying it to a posted financial record and to the card and amount on that record -- which is the
+     * disclosure the card masking and the account redaction beside it already refuse. It reached durable
+     * storage twice per unresolved record, once as a structured field and once inside this diagnostic.
+     *
+     * <p>Assumptions: the width is sixteen because {@code TRAN-ID} is declared {@code PIC X(16)} at
+     * {@code app/cpy/CVTRA06Y.cpy}, and the reference's line is that wide at this position whatever the
+     * identifier's content, so the redaction preserves the shape a positional reader expects.
+     *
+     * <p>Alternatives Considered: keeping a partial identifier, by analogy with the card mask.
+     * Rejected for the reason recorded on {@link #ACCOUNT_ID_REDACTION}: a partial value is residual
+     * disclosure bought for no diagnostic gain, because the run-local ingestion ordinal on the same line
+     * already locates the feed row exactly, and the ledger key is reached from that row by a governed
+     * query. Also considered: a keyed opaque token, which would give the log a stable non-reversible
+     * handle for the record. Rejected as disproportionate here -- the tokeniser this repository already
+     * carries requires key material from the deployment's secret store, and this module has none
+     * provisioned, so adopting it would add a secret, a task-definition binding and a configuration
+     * property to close a gap the ingestion ordinal already closes.
+     *
+     * <p>Assumptions: two DEFECT-ASSERTION messages in this class still name the identifier, and their
+     * exclusion is deliberate rather than overlooked. Both are {@code IllegalStateException} texts for
+     * states no row read from the feed table can be in -- an unhandled inspection outcome, and a feed row
+     * with no ingestion ordinal -- so neither is reachable by operating the job, and the second one
+     * CANNOT use the ordinal because the fault it reports is the ordinal's absence. A message that named
+     * nothing would leave a defect untraceable to any record, which is a worse trade on a path that
+     * indicates a programming error rather than a business condition.</p>
+     */
+    private static final String TRANSACTION_ID_REDACTION = "****************";
 
     /**
      * The number of trailing digits of a card number that may appear in a log line.
@@ -253,9 +301,6 @@ public class PreflightDailyTransactionsJob {
 
     /** The stand-in a card number too short to mask is rendered as. */
     private static final String CARD_NUMBER_UNAVAILABLE = "none";
-
-    /** The ordinal a walk of the feed starts strictly above, so the first record is included. */
-    private static final long BEFORE_FIRST_ORDINAL = 0L;
 
     /** The operational log this job reports its findings through. */
     private static final Logger LOG = LoggerFactory.getLogger(PreflightDailyTransactionsJob.class);
@@ -271,6 +316,9 @@ public class PreflightDailyTransactionsJob {
 
     /** The durable step record that makes a re-run of a completed step a no-op. */
     private final BatchStepLedger ledgerOfSteps;
+
+    /** The feed's consumed position, read so this report describes the window posting will consume. */
+    private final DailyFeedWatermarkService watermark;
 
     /**
      * Builds the job over the repositories it reads.
@@ -289,17 +337,20 @@ public class PreflightDailyTransactionsJob {
      * @param accounts the account master read for a card that resolved; must not be {@code null}
      * @param ledgerOfSteps the durable step ledger that makes a redriven completed step a no-op;
      *     must not be {@code null}
+     * @param watermark the feed's consumed position, read so this pass reports on the SAME window
+     *     the posting step will consume; must not be {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
     public PreflightDailyTransactionsJob(DailyTransactionRepository feed,
             CardXrefRepository crossReferences, AccountRepository accounts,
-            BatchStepLedger ledgerOfSteps) {
+            BatchStepLedger ledgerOfSteps, DailyFeedWatermarkService watermark) {
 
         this.feed = Objects.requireNonNull(feed, "feed must not be null");
         this.crossReferences =
                 Objects.requireNonNull(crossReferences, "crossReferences must not be null");
         this.accounts = Objects.requireNonNull(accounts, "accounts must not be null");
         this.ledgerOfSteps = Objects.requireNonNull(ledgerOfSteps, "ledgerOfSteps must not be null");
+        this.watermark = Objects.requireNonNull(watermark, "watermark must not be null");
     }
 
     /**
@@ -413,7 +464,21 @@ public class PreflightDailyTransactionsJob {
     private BatchReturnCode reportOnEveryRecord() {
         LOG.info("event=batch.preflight.started banner=\"{}\"", START_BANNER);
 
-        long lastOrdinal = BEFORE_FIRST_ORDINAL;
+        // WHY : Refactoring Rationale: this pass starts at the feed's stored consumed position and
+        //       no longer at the first row, so it reports on the SAME window the posting step will
+        //       consume. The reference's preflight and its posting job read one dataset that was
+        //       replaced between runs (app/jcl/POSTTRAN.jcl:30-31), so both necessarily saw the same
+        //       records; the target's feed accumulates, so a preflight starting at the beginning
+        //       described every night ever loaded while posting described one -- and the counts an
+        //       operator reconciles them by would not have matched for a correct run.
+        // WHY : Assumptions: the UNLOCKED read is used here, and posting uses the locking one. This
+        //       pass writes nothing and advances nothing, so it must not hold a row lock that the
+        //       step which does consume would then wait on. It also means this window can be one
+        //       night stale if a posting pass overlapped, which is acceptable for a report and is
+        //       impossible in the chain, where this state runs before the posting state.
+        long lastOrdinal = this.watermark.consumedThroughForReader(
+                DailyFeedWatermarkService.DAILY_TRANSACTION_FEED);
+        long startedAbove = lastOrdinal;
         long read = 0L;
         long unresolvedCards = 0L;
         long unresolvedAccounts = 0L;
@@ -454,6 +519,12 @@ public class PreflightDailyTransactionsJob {
 
         LOG.info("event=batch.preflight.completed read={} unresolvedCards={} unresolvedAccounts={}"
                 + " banner=\"{}\"", read, unresolvedCards, unresolvedAccounts, END_BANNER);
+        // WHY : Assumptions: the WINDOW is logged on its own line rather than added to the line
+        //       above, so the reference's reported totals keep their own event and this pass's
+        //       target-only context keeps its. An operator comparing this report against the posting
+        //       step's counters needs both windows to see that the two describe the same rows.
+        LOG.info("event=batch.preflight.window feed={} above={} through={} read={}",
+                DailyFeedWatermarkService.DAILY_TRANSACTION_FEED, startedAbove, lastOrdinal, read);
         return BatchReturnCode.CLEAN;
     }
 
@@ -528,12 +599,28 @@ public class PreflightDailyTransactionsJob {
      * @return which of the three mutually exclusive paths the record took, never {@code null}
      */
     private RecordOutcome inspect(DailyTransaction feedRecord) {
-        LOG.debug("event=batch.preflight.record record={}", feedRecord);
+        // WHY : ⚠️ Refactoring Rationale: this renders three CHOSEN members rather than the entity, and
+        //       it rendered the entity. That type's diagnostic form deliberately omits the card number
+        //       and the amount, which is why it was used here, but it names the TRANSACTION IDENTIFIER
+        //       -- the ledger's primary key -- so raising this class to DEBUG published a ledger key for
+        //       every record read. A level that is off by default is not a control: an operator raising
+        //       it to diagnose one record writes them all. Alternatives Considered: narrowing the
+        //       entity's own rendering, which is where the value originates. Rejected because this is
+        //       its ONLY logging consumer, its rendering is a documented contract reasoned about in its
+        //       own charter, and the ordinal it also carries already identifies the row here.
+        LOG.debug("event=batch.preflight.record ingestSeq={} typeCd={} categoryCd={} origTs={}",
+                feedRecord.getIngestSeq(), feedRecord.getTypeCd(), feedRecord.getCategoryCd(),
+                feedRecord.getOrigTs());
 
         Optional<CardXref> resolved = this.crossReferences.findByCardNum(feedRecord.getCardNum());
         if (resolved.isEmpty()) {
-            LOG.warn("event=batch.preflight.card-unresolved transactionId={} diagnostic=\"{}\"",
-                    feedRecord.getTransactionId(), cardUnresolvedDiagnostic(feedRecord));
+            // WHY : ⚠️ Refactoring Rationale: the structured field is the run-local ingestion ORDINAL
+            //       and was the transaction identifier. Both name the same feed row; only one of them is
+            //       also the ledger's primary key, and that one reached durable log storage for every
+            //       unresolved record. See TRANSACTION_ID_REDACTION for the full reasoning, including why
+            //       the identifier inside the verbatim diagnostic is redacted rather than kept.
+            LOG.warn("event=batch.preflight.card-unresolved ingestSeq={} diagnostic=\"{}\"",
+                    feedRecord.getIngestSeq(), cardUnresolvedDiagnostic(feedRecord));
             return RecordOutcome.CARD_UNRESOLVED;
         }
 
@@ -544,13 +631,17 @@ public class PreflightDailyTransactionsJob {
             //       again interpolated into the diagnostic -- so a durable log recorded, for every
             //       account whose master row was missing, an identifier that any holder of log access
             //       could read. What replaces it is identity that locates the record without naming the
-            //       account: the transaction identifier, which identifies nobody, and the run-local
-            //       ingestion ordinal, which is the feed table's own row position. Either is enough to
-            //       reach the row and resolve the account through the cross-reference, which is where
-            //       that lookup belongs. See ACCOUNT_ID_REDACTION for why a partial identifier was
-            //       rejected as well as a full one.
-            LOG.warn("event=batch.preflight.account-unresolved transactionId={} ingestSeq={}"
-                    + " diagnostic=\"{}\"", feedRecord.getTransactionId(),
+            //       account: the run-local ingestion ordinal, which is the feed table's own row
+            //       position. It is enough to reach the row and resolve the account through the
+            //       cross-reference, which is where that lookup belongs. See ACCOUNT_ID_REDACTION for
+            //       why a partial identifier was rejected as well as a full one.
+            // WHY : ⚠️ Refactoring Rationale: this statement also carried the TRANSACTION IDENTIFIER,
+            //       and the paragraph above described it as identity that "identifies nobody". It is the
+            //       ledger's primary key, so it identifies a posted financial record and, through it, a
+            //       card and an amount. It is gone from this line; the ordinal that remains locates the
+            //       same row without keying anything outside the feed.
+            LOG.warn("event=batch.preflight.account-unresolved ingestSeq={}"
+                    + " diagnostic=\"{}\"",
                     feedRecord.getIngestSeq(), accountMissingDiagnostic());
             return RecordOutcome.ACCOUNT_UNRESOLVED;
         }
@@ -565,17 +656,20 @@ public class PreflightDailyTransactionsJob {
      * writes the full sixteen-digit value at {@code app/cbl/CBTRN01C.cbl:181}, and reproducing that
      * would put a primary account number into a log the migration plan requires to carry at most its
      * last four digits. The template is what an operator greps for and the masked suffix is enough to
-     * recognise a card, while the transaction identifier the line ends with — carried in full,
-     * because it identifies nobody — is what locates the record in the feed. This is the one place
-     * the verbatim-text rule is knowingly qualified, and it is qualified only in the interpolated
-     * value.</p>
+     * recognise a card. This is the one place the verbatim-text rule is knowingly qualified, and it is
+     * qualified only in the interpolated values.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the transaction identifier this line ends with is REDACTED too, and
+     * was interpolated in full on the ground that it "identifies nobody". It is the ledger's primary
+     * key, so it identifies a posted financial record; the ingestion ordinal on the same statement is
+     * what locates the record in the feed. See {@link #TRANSACTION_ID_REDACTION}.</p>
      *
      * @param feedRecord the record whose card did not resolve; must not be {@code null}
      * @return the diagnostic line, never {@code null}
      */
     private static String cardUnresolvedDiagnostic(DailyTransaction feedRecord) {
         return CARD_UNRESOLVED_PREFIX + maskedCardNumber(feedRecord.getCardNum())
-                + CARD_UNRESOLVED_SUFFIX + feedRecord.getTransactionId();
+                + CARD_UNRESOLVED_SUFFIX + TRANSACTION_ID_REDACTION;
     }
 
     /**

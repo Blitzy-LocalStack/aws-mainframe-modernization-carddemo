@@ -51,6 +51,12 @@ class AuthConfigPackageTest {
     /** The base profile, packaged from {@code src/main/resources}. */
     private static final String BASE_PROFILE = "/application.yml";
 
+    /** The shared defaults document every service imports, packaged by the shared module. */
+    private static final String SHARED_DEFAULTS_RESOURCE = "carddemo-common-defaults.yml";
+
+    /** The import entry this profile must carry for the shared defaults to apply to it. */
+    private static final String SHARED_DEFAULTS_IMPORT = "classpath:/" + SHARED_DEFAULTS_RESOURCE;
+
     /** The class-path location that must be served for the committed contract to be reachable. */
     private static final String OPENAPI_LOCATION = "classpath:/openapi/";
 
@@ -476,5 +482,72 @@ class AuthConfigPackageTest {
             throw new IllegalStateException("expected a mapping but found " + node);
         }
         return (Map<String, Object>) node;
+    }
+
+    /**
+     * Confirms this context inherits the shared strict-deserialisation and null-inclusion defaults.
+     *
+     * <p>Purpose: the strictness that makes this context refuse an undeclared request member, and the
+     * always-inclusion its published error shape depends on, are set in one shared document rather than in
+     * this profile. This case asserts the inheritance is actually wired -- that this profile imports the
+     * shared document, and that the shared document really carries the three settings the contract relies
+     * on -- so a profile that stopped importing it fails here rather than at a caller.</p>
+     *
+     * <p>⚠️ Assumptions: this reads the two documents rather than a refreshed application context, and the
+     * choice is deliberate. The controller slice in this module builds its own context and never reads a
+     * profile at all, so a context-based assertion would either prove nothing about the packaged
+     * configuration or require standing up a full application to observe one boolean. Reading the import
+     * chain proves the packaged artifacts agree; the serialiser's behaviour under those settings is
+     * asserted where it belongs, on the shared module that ships them.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the always-inclusion setting is asserted here because this document's
+     * own error schema states it as fact -- the ApiError block explains that its nullable members are
+     * required rather than optional and closes the argument by citing that setting. That claim named no
+     * file and was inaccurate for six of the seven services, so it is now pinned centrally and checked
+     * here, where a removal breaks a test rather than a generated client.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("the packaged profile inherits the shared strict-JSON and null-inclusion defaults")
+    void theProfileInheritsTheSharedJsonDefaults() {
+        assertThat(String.valueOf(at(profile(), "spring", "config", "import")))
+                .as("a profile that stops importing the shared document silently loosens this context")
+                .contains(SHARED_DEFAULTS_IMPORT);
+
+        Map<String, Object> shared = document("/" + SHARED_DEFAULTS_RESOURCE);
+        assertThat(at(shared, "spring", "jackson", "deserialization", "fail-on-unknown-properties"))
+                .as("every request body in the contract declares additionalProperties false, which only"
+                        + " holds at run time if the reader refuses an undeclared member")
+                .isEqualTo(true);
+        assertThat(at(shared, "spring", "jackson", "read", "strict-duplicate-detection"))
+                .as("a body naming one member twice must be refused rather than resolved silently")
+                .isEqualTo(true);
+        assertThat(String.valueOf(at(shared, "spring", "jackson", "default-property-inclusion")))
+                .as("the error schema publishes its nullable members as required, which needs the key"
+                        + " emitted with a null value rather than omitted")
+                .isEqualTo("always");
+    }
+
+    /**
+     * Reads one nested value out of a parsed document by its key path.
+     *
+     * <p>Assumptions: the path is walked one key at a time and a missing key yields {@code null} rather
+     * than raising, so an assertion about an absent setting reports the absence rather than an exception
+     * whose message names only the key that happened to be missing.</p>
+     *
+     * @param document the parsed document to read from; must not be {@code null}
+     * @param path the successive keys to follow
+     * @return the value at that path, or {@code null} if any key along it is absent
+     */
+    private static Object at(Map<String, Object> document, String... path) {
+        Object node = document;
+        for (String key : path) {
+            if (!(node instanceof Map<?, ?> mapping)) {
+                return null;
+            }
+            node = mapping.get(key);
+        }
+        return node;
     }
 }

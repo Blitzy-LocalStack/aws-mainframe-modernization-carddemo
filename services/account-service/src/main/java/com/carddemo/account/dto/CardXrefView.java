@@ -28,4 +28,31 @@ package com.carddemo.account.dto;
  *     a response this service produces
  */
 public record CardXrefView(Long accountId, Long customerId) {
+
+    /** Rendered in place of the two identifiers, so an absent field cannot be read as an empty one. */
+    private static final String WITHHELD = "[REDACTED]";
+
+    /**
+     * Renders this projection for a log line, carrying neither identifier.
+     *
+     * <p>Purpose. A record's compiler-generated rendering prints every component, and both components here
+     * are values {@code docs/architecture/observability.md} names among the ones a durable diagnostic may
+     * not hold -- an account identifier and a customer identifier. That contract is about LOGGING and is
+     * separate from what a response may carry: this projection publishes both identifiers deliberately,
+     * because its caller's next two reads are keyed on exactly them, and the same values are still
+     * withheld from a log line.</p>
+     *
+     * <p>Trade-offs: both are omitted rather than abbreviated. Abbreviating a protected value is masking,
+     * and masking has one owner per value -- the primary account number has a shared masker and these two
+     * identifiers have none, so a shortened form here would be inventing a second rule for a value that
+     * has no masked shape. What is accepted is that this rendering does not say which row was translated;
+     * the correlation identifier on every request-scoped line locates the event instead.</p>
+     *
+     * @return a rendering naming the type and recording that its identifiers were withheld, never
+     *     {@code null}
+     */
+    @Override
+    public String toString() {
+        return "CardXrefView[identifiers=" + WITHHELD + ']';
+    }
 }

@@ -2,6 +2,7 @@ package com.carddemo.reporting.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -9,6 +10,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -24,8 +26,11 @@ import com.carddemo.reporting.dto.ReportSubmissionResponse;
 import com.carddemo.reporting.dto.ReportTotalsResponse;
 import com.carddemo.reporting.dto.TransactionReportLineResponse;
 import com.carddemo.reporting.repository.TransactionReportRepository;
+import com.carddemo.reporting.service.ArtifactStore;
+import com.carddemo.reporting.service.ReportArtifactLocator;
 import com.carddemo.reporting.service.ReportExecutionService;
 import com.carddemo.reporting.service.TransactionReportService;
+import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.Principal;
 import java.time.Clock;
@@ -34,11 +39,15 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.NoSuchElementException;
+import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.http.converter.ResourceHttpMessageConverter;
 import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -83,7 +92,30 @@ class ReportControllerTest {
      */
     private static final JsonMapper REQUEST_MAPPER = JsonMapper.builder().build();
 
+    /**
+     * The report key prefix, matching the base configuration document.
+     *
+     * <p>Assumptions: a literal here rather than a read of the property, because the case asserting a
+     * result location has to know the prefix in order to assert the whole location -- and a location
+     * assembled from the same source it is compared against asserts nothing.</p>
+     */
+    private static final String REPORT_PREFIX = "reports/transaction-detail/";
+
+    /** An execution name of the shape this service composes. */
+    private static final String EXECUTION_NAME = "carddemo-monthly-20220701-20220731-a1b2c3d4";
+
+    /** When a described run started. */
+    private static final String STARTED_AT = "2026-08-05 09:14:27.481903";
+
+    /** When a described run stopped. */
+    private static final String STOPPED_AT = "2026-08-05 09:19:02.117400";
+
+    /** When a stored artifact was written. */
+    private static final String WRITTEN_AT = "2026-08-05 09:19:03.882001";
+
     private ReportExecutionService executions;
+
+    private ArtifactStore artifacts;
 
     private TransactionReportService reports;
 
@@ -125,6 +157,7 @@ class ReportControllerTest {
     @BeforeEach
     void setUp() {
         executions = Mockito.mock(ReportExecutionService.class);
+        artifacts = Mockito.mock(ArtifactStore.class);
         reports = Mockito.mock(TransactionReportService.class);
 
         // WHY : Assumptions: the money module is registered on the converter rather than left out,
@@ -140,8 +173,15 @@ class ReportControllerTest {
         //       with another without the test noticing. The key is fixed so a token asserted here is
         //       reproducible from the source alone.
         mockMvc = MockMvcBuilders.standaloneSetup(
-                        new ReportController(executions, reports, new CursorToken(CURSOR_KEY, CURSOR_LIFETIME)))
-                .setMessageConverters(converter)
+                        new ReportController(executions, reports,
+                                new CursorToken(CURSOR_KEY, CURSOR_LIFETIME),
+                                new ReportArtifactLocator(REPORT_PREFIX), artifacts))
+                // WHY : Assumptions: the resource converter is registered beside the JSON one because
+                //       setMessageConverters REPLACES the default list, and the artifact operation's body
+                //       is a stream rather than a document -- without it the collection case would fail on
+                //       the harness rather than on the controller. A running application registers it
+                //       itself, so this restores the production shape rather than extending it.
+                .setMessageConverters(converter, new ResourceHttpMessageConverter())
                 .setControllerAdvice(new GlobalExceptionHandler(
                         Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC)))
                 .build();
@@ -178,7 +218,7 @@ class ReportControllerTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(REQUEST_MAPPER.writeValueAsString(request)))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.submitted").value(true))
+                .andExpect(jsonPath("$.outcome").value("STARTED"))
                 .andExpect(jsonPath("$.message")
                         .value("Monthly" + ReportController.SUBMITTED_SUFFIX))
                 .andExpect(jsonPath("$.submission.reportName").value("Monthly"));
@@ -262,7 +302,13 @@ class ReportControllerTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(REQUEST_MAPPER.writeValueAsString(monthlyRequest("N"))))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.submitted").value(false))
+                // WHY : ⚠️ Refactoring Rationale: the discriminator is asserted as DECLINED, where this
+                //       case asserted a boolean false. The boolean could not separate this turn from an
+                //       unanswered confirmation -- both answered 200 with it false -- and the browser
+                //       client, reading the status alone, labelled an unanswered turn DECLINED. Asserting
+                //       the value that distinguishes them is what makes the two cases distinguishable
+                //       here too.
+                .andExpect(jsonPath("$.outcome").value("DECLINED"))
                 .andExpect(jsonPath("$.message").doesNotExist())
                 .andExpect(jsonPath("$.submission").doesNotExist());
 
@@ -286,6 +332,14 @@ class ReportControllerTest {
      * wrong -- and the space before the report name and the absence of one before the three dots are
      * both carried by the fragments rather than retyped here.</p>
      *
+     * <p>Measured: the two turns that share 200 were each relabelled as the other, and each mutation
+     * fails exactly one case with the wrong label named. Answering this turn with the cancellation
+     * outcome -- which is the defect the review found in the browser client -- fails this case with
+     * {@code JSON path "$.outcome" expected:<UNANSWERED> but was:<DECLINED>}. Answering the cancellation
+     * with this turn's outcome instead fails {@code aDeclinedRequestAnswersWithNoRun} with
+     * {@code JSON path "$.outcome" expected:<DECLINED> but was:<UNANSWERED>}. Neither mutation changes a
+     * status code, so no case that reads only the status detects either one.</p>
+     *
      * @throws Exception if the request cannot be performed
      */
     @Test
@@ -304,7 +358,7 @@ class ReportControllerTest {
                                 new ReportRequest(null, null, null, null, null, null,
                                         null, MARK, null, null, null, null, null))))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.submitted").value(false))
+                .andExpect(jsonPath("$.outcome").value("UNANSWERED"))
                 .andExpect(jsonPath("$.message").value(ReportController.CONFIRM_PROMPT_PREFIX
                         + "Yearly" + ReportController.CONFIRM_PROMPT_SUFFIX))
                 .andExpect(jsonPath("$.submission").doesNotExist());
@@ -935,5 +989,177 @@ class ReportControllerTest {
                 CursorToken.binding(ReportController.CURSOR_QUERY_NAME, PRINCIPAL.getName(),
                         CursorToken.scope("backward", start, end)),
                 "0000000000000001");
+    }
+
+    // WHY : ⚠️ Refactoring Rationale: the six cases below cover the two operations that close the report
+    //       lifecycle, and both were absent. A submission returned an orchestration handle that no
+    //       operation consumed, so a caller could not tell a run still going from one that had failed and
+    //       could not reach the document the run produced. Each case asserts one thing that was
+    //       unobservable before it: the status, the echoed coordinates, the result location, its absence
+    //       while nothing is stored, the refusal of a malformed name, and the streamed bytes.
+    /**
+     * Asserts that a running execution reports its status with no result location.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a running execution reports its status and no result")
+    void aRunningExecutionReportsNoResult() throws Exception {
+        when(executions.describeExecution(EXECUTION_NAME)).thenReturn(new ReportExecutionService
+                .ExecutionState(EXECUTION_NAME, ReportExecutionService.ExecutionStatus.RUNNING,
+                        STARTED_AT, null, coordinates()));
+
+        mockMvc.perform(get(ReportController.BASE_PATH + "/executions/" + EXECUTION_NAME))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("RUNNING"))
+                .andExpect(jsonPath("$.startedAt").value(STARTED_AT))
+                .andExpect(jsonPath("$.reportType").value("monthly"))
+                .andExpect(jsonPath("$.startDate").value("2022-07-01"))
+                .andExpect(jsonPath("$.endDate").value("2022-07-31"))
+                .andExpect(jsonPath("$.resultUri").value((String) null))
+                .andExpect(jsonPath("$.resultGeneratedAt").value((String) null));
+
+        // WHY : Assumptions: the store is asserted NEVER consulted for a run that has produced nothing.
+        //       A metadata call there would spend a request to learn what the status already says, and it
+        //       is the kind of cost that only shows up under polling.
+        verify(artifacts, never()).describe(anyString());
+    }
+
+    /**
+     * Asserts that a succeeded execution reports the location of the artifact the store holds.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a succeeded execution reports where its report is collected from")
+    void aSucceededExecutionReportsItsResult() throws Exception {
+        when(executions.describeExecution(EXECUTION_NAME)).thenReturn(new ReportExecutionService
+                .ExecutionState(EXECUTION_NAME, ReportExecutionService.ExecutionStatus.SUCCEEDED,
+                        STARTED_AT, STOPPED_AT, coordinates()));
+        String key = REPORT_PREFIX + "dt=2022-07-31/type=monthly/from=2022-07-01/to=2022-07-31/"
+                + ReportArtifactLocator.REPORT_OBJECT;
+        when(artifacts.describe(key)).thenReturn(Optional.of(
+                new ArtifactStore.ArtifactDescriptor(key, 8_192L, WRITTEN_AT)));
+
+        mockMvc.perform(get(ReportController.BASE_PATH + "/executions/" + EXECUTION_NAME))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SUCCEEDED"))
+                .andExpect(jsonPath("$.stoppedAt").value(STOPPED_AT))
+                .andExpect(jsonPath("$.resultUri").value(ReportArtifactLocator.ARTIFACT_PATH
+                        + "?type=monthly&startDate=2022-07-01&endDate=2022-07-31"))
+                .andExpect(jsonPath("$.resultGeneratedAt").value(WRITTEN_AT));
+    }
+
+    /**
+     * Asserts that a succeeded execution whose artifact is gone reports no location.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a succeeded execution whose artifact is gone reports no location")
+    void aSucceededExecutionWithoutAnArtifactReportsNoLocation() throws Exception {
+        when(executions.describeExecution(EXECUTION_NAME)).thenReturn(new ReportExecutionService
+                .ExecutionState(EXECUTION_NAME, ReportExecutionService.ExecutionStatus.SUCCEEDED,
+                        STARTED_AT, STOPPED_AT, coordinates()));
+        when(artifacts.describe(anyString())).thenReturn(Optional.empty());
+
+        mockMvc.perform(get(ReportController.BASE_PATH + "/executions/" + EXECUTION_NAME))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SUCCEEDED"))
+                .andExpect(jsonPath("$.resultUri").value((String) null));
+    }
+
+    /**
+     * Asserts that an unknown execution answers 404 through the shared advice.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("an unknown execution answers 404")
+    void anUnknownExecutionAnswersNotFound() throws Exception {
+        when(executions.describeExecution(EXECUTION_NAME))
+                .thenThrow(new NoSuchElementException("no report execution of that name is known"));
+
+        mockMvc.perform(get(ReportController.BASE_PATH + "/executions/" + EXECUTION_NAME))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value(ApiError.CODE_NOT_FOUND));
+    }
+
+    /**
+     * Asserts that an execution name of the wrong shape is refused before the orchestration is asked.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a malformed execution name is refused before the orchestration is asked")
+    void aMalformedExecutionNameIsRefused() throws Exception {
+        mockMvc.perform(get(ReportController.BASE_PATH + "/executions/" + "a".repeat(81)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION));
+
+        verify(executions, never()).describeExecution(anyString());
+    }
+
+    /**
+     * Asserts that the produced report is streamed as an attachment at its declared length.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("the produced report is streamed as an attachment")
+    void theProducedReportIsStreamed() throws Exception {
+        byte[] bytes = "REPORT LINE ONE\n".getBytes(StandardCharsets.UTF_8);
+        String key = REPORT_PREFIX + "dt=2022-07-31/type=monthly/from=2022-07-01/to=2022-07-31/"
+                + ReportArtifactLocator.REPORT_OBJECT;
+        when(artifacts.open(key)).thenReturn(
+                new ArtifactStore.OpenArtifact(bytes.length, new ByteArrayInputStream(bytes)));
+
+        byte[] body = mockMvc.perform(get(ReportArtifactLocator.ARTIFACT_PATH)
+                        .param(ReportArtifactLocator.TYPE_PARAMETER, "monthly")
+                        .param(ReportArtifactLocator.START_DATE_PARAMETER, "2022-07-01")
+                        .param(ReportArtifactLocator.END_DATE_PARAMETER, "2022-07-31"))
+                .andExpect(status().isOk())
+                .andExpect(header().string(HttpHeaders.CONTENT_TYPE,
+                        MediaType.APPLICATION_OCTET_STREAM_VALUE))
+                .andExpect(header().longValue(HttpHeaders.CONTENT_LENGTH, bytes.length))
+                .andExpect(header().string(HttpHeaders.CONTENT_DISPOSITION, "attachment"))
+                .andReturn()
+                .getResponse()
+                .getContentAsByteArray();
+
+        assertThat(body).isEqualTo(bytes);
+    }
+
+    // WHY : Assumptions: the store is asserted NEVER opened, which is what separates a closed domain from
+    //       a coincidence. A type outside the domain reaching a key would let a caller compose a key
+    //       segment of its own, which is the whole reason the type is admitted from a fixed set.
+    /**
+     * Asserts that a report type outside the published domain is refused before the store is opened.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a report type outside the published domain is refused")
+    void anUnpublishedReportTypeIsRefused() throws Exception {
+        mockMvc.perform(get(ReportArtifactLocator.ARTIFACT_PATH)
+                        .param(ReportArtifactLocator.TYPE_PARAMETER, "../secrets")
+                        .param(ReportArtifactLocator.START_DATE_PARAMETER, "2022-07-01")
+                        .param(ReportArtifactLocator.END_DATE_PARAMETER, "2022-07-31"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
+                .andExpect(jsonPath("$.fieldErrors[0].field")
+                        .value(ReportArtifactLocator.TYPE_PARAMETER));
+
+        verify(artifacts, never()).open(anyString());
+    }
+
+    /**
+     * Builds the coordinates a described execution carries.
+     *
+     * @return the coordinates of a monthly run over July 2022; never {@code null}
+     */
+    private static ReportExecutionService.ExecutionCoordinates coordinates() {
+        return new ReportExecutionService.ExecutionCoordinates("monthly",
+                LocalDate.of(2022, 7, 1), LocalDate.of(2022, 7, 31));
     }
 }

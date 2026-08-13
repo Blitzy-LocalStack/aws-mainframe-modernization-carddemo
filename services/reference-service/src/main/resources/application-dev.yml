@@ -4,8 +4,23 @@
 # Purpose:
 #   The dev profile overlay for the CardDemo reference-data bounded context --
 #   module six of the nine in the com.carddemo:carddemo-services reactor, owner
-#   of the reference schema and its six tables, and the only module in the
-#   migration that carries two migrations. It overrides ELEVEN values that
+#   of the reference schema and its six tables, and the only module whose
+#   migrations carry a reference-DATA SEED rather than schema alone.
+#
+#   ⚠️ Refactoring Rationale: that clause read "the only module in the migration
+#   that carries two migrations", and it was false in the plainest way -- three
+#   modules carry two, two carry three, one carries five and one carries one. The
+#   count was never the distinguishing fact anyway; the CONTENT is.
+#   V2__seed_reference.sql in this module's db/migration directory is the only
+#   migration in the whole reactor holding INSERT statements -- six of them, loading
+#   the transaction types, the transaction categories, the mandatory DEFAULT
+#   disclosure group and the three lookup tables -- and that is why this module's
+#   second migration dominates its startup cost, which is the fact the sizing below
+#   and in application.yml is actually reasoning from. Assumptions: the inventory
+#   moves as schemas evolve, so it is deliberately NOT restated here; the claim
+#   above is stated in a form that a directory listing settles.
+#
+#   It overrides ELEVEN values that
 #   application.yml in this same directory already declares, and it declares
 #   nothing else. Every key below is a key the base file already has, and every
 #   key below carries a value different from the base's; a key that merely

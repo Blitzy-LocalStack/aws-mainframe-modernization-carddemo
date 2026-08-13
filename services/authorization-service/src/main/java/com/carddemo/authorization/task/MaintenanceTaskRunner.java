@@ -52,7 +52,17 @@ public final class MaintenanceTaskRunner {
     /** The argument prefix that selects a job and marks the invocation as a task rather than a service. */
     public static final String JOB_OPTION = "--job=";
 
-    /** The argument prefix carrying the purge's business date. */
+    /**
+     * The argument prefix carrying the business date, which the purge and the export both require.
+     *
+     * <p>⚠️ Refactoring Rationale: this was the purge's option alone, and the export took no date at
+     * all while the orchestrator composed the export's two destination keys from one -- writing
+     * {@code .../dt={businessDate}/run={execution}/roots.dat}. Nothing then parsed that value: the
+     * state machine's own guard matches the SHAPE {@code ????-??-??}, which admits {@code abcd-ef-gh}
+     * and {@code 2022-02-30} alike, so an unparseable date reached the key builder and an export
+     * landed under a prefix no later run could find by date. Requiring the option here is what makes
+     * a real calendar date a precondition of the export rather than a hope about its caller.</p>
+     */
     public static final String BUSINESS_DATE_OPTION = "--business-date=";
 
     /** The argument prefix carrying the path of the staged root-image extract. */
@@ -89,7 +99,13 @@ public final class MaintenanceTaskRunner {
     /** The argument prefix carrying how many committed windows fall between purge progress reports. */
     public static final String PROGRESS_LOG_FREQUENCY_OPTION = "--progress-log-frequency=";
 
-    /** The parameter name the business date is published under. */
+    /**
+     * The parameter name the business date is published under, read by the purge and the export.
+     *
+     * <p>Assumptions: one name serves both jobs rather than two names for one value. The purge uses
+     * it as the cutoff it computes an expiry from and the export reports it as the date the extract
+     * represents, and both are the same fact about the run -- which business day it belongs to.</p>
+     */
     public static final String BUSINESS_DATE_PARAMETER = "businessDate";
 
     /** The parameter name the root-image extract path is published under. */
@@ -251,12 +267,22 @@ public final class MaintenanceTaskRunner {
             //       previous paragraph gave for that stands -- a driver's unique-violation message quotes
             //       the offending KEY VALUES, and on this schema those are a primary account number and an
             //       acquirer transaction identifier. What has changed is that withholding the message is no
-            //       longer the only alternative: FailureSummary.databaseConditionOf shows a message only
-            //       when some link in the chain carries a database state code, and then sanitises it, masks
-            //       a card-shaped run and replaces every run of three or more digits -- so the WORDS reach
-            //       the line and the VALUES do not. That is what turns "the purge failed" into "the purge
-            //       failed on a numeric field overflow", which was the measured gap: diagnosing one
-            //       otherwise meant re-running the job with driver debug logging enabled.
+            //       longer the only alternative: FailureSummary.databaseConditionOf answers only when some
+            //       link in the chain carries a database state code, and what it answers is the engine's
+            //       own CONDITION NAME for that code plus any constraint, relation or column name the
+            //       engine quoted after one of its own keywords. That is what turns "the purge failed"
+            //       into "the purge failed on numeric_value_out_of_range", which was the measured gap:
+            //       diagnosing one otherwise meant re-running the job with driver debug logging enabled.
+            // WHY : ⚠️ Assumptions: this comment previously described that field as the driver's
+            //       message "sanitised, with a card-shaped run masked and every run of three or more digits
+            //       replaced -- so the WORDS reach the line and the VALUES do not". The second half of that
+            //       claim did not hold, which is why the field no longer carries a message at all: the
+            //       PostgreSQL driver folds the server's DETAIL line into its message by default, and a
+            //       check violation's detail enumerates every column of the rejected row, so the values
+            //       that are WORDS -- a cardholder name, a city, merchant free text -- reached the line
+            //       untouched by any digit rule. The driver property is now off and the renderer emits from
+            //       a closed vocabulary; both had to change, because this runner also holds failures no
+            //       PostgreSQL property governs.
             // WHY : ⚠️ Assumptions: the message is DEFAULT-WITHHELD rather than default-shown, and this
             //       runner is exactly the site that needs that discipline -- it wraps whatever a task
             //       raised, so it cannot know who composed what it is holding. A cloud-client failure
@@ -348,6 +374,21 @@ public final class MaintenanceTaskRunner {
             case UNLOAD_JOB -> {
                 parameters.put(ROOT_EXTRACT_PARAMETER, requiredValue(args, ROOT_EXTRACT_OPTION));
                 parameters.put(CHILD_EXTRACT_PARAMETER, requiredValue(args, CHILD_EXTRACT_OPTION));
+                // WHY : ⚠️ Refactoring Rationale: the business date is REQUIRED here, where the
+                //       export accepted none. Its two destinations are keyed by date -- the
+                //       orchestrator composes `dt={businessDate}` into both -- and the only check
+                //       that value met was a ten-character shape match in the state machine, which
+                //       admits `abcd-ef-gh` and the impossible `2022-02-30`. Parsing it in this
+                //       method is what refuses those BEFORE the application context starts and
+                //       before either destination is opened, which is the same guarantee the purge
+                //       already had and the same reason it has it.
+                // WHY : Assumptions: it is required rather than defaulted to the current day. A
+                //       default read from a clock would make two runs of the same command produce
+                //       extracts under different prefixes and would make a re-run after midnight
+                //       silently write a second day's key, which is precisely the property the
+                //       injected-date discipline exists to prevent everywhere else in this
+                //       migration.
+                parameters.put(BUSINESS_DATE_PARAMETER, requiredDate(args, BUSINESS_DATE_OPTION));
                 // WHY : Assumptions: the form is optional and is therefore absent from the map when the
                 //       operator omitted it, rather than present with the default written in here. The
                 //       default belongs to the exporter, which publishes it, and a copy of it in this
@@ -511,7 +552,7 @@ public final class MaintenanceTaskRunner {
                 + "  " + JOB_OPTION + LOAD_JOB + " " + ROOT_EXTRACT_OPTION + "<location> "
                 + CHILD_EXTRACT_OPTION + "<location>\n"
                 + "  " + JOB_OPTION + UNLOAD_JOB + " " + ROOT_EXTRACT_OPTION + "<location> "
-                + CHILD_EXTRACT_OPTION + "<location> ["
+                + CHILD_EXTRACT_OPTION + "<location> " + BUSINESS_DATE_OPTION + "<YYYY-MM-DD> ["
                 + EXTRACT_FORM_OPTION + String.join("|", UnloadService.UnloadForm.WIRE_VALUES) + "]\n"
                 + "  " + JOB_OPTION + PURGE_JOB + " " + BUSINESS_DATE_OPTION + "<YYYY-MM-DD> ["
                 + EXPIRY_DAYS_OPTION + "<1-" + PurgeJob.MAX_EXPIRY_DAYS + ">] ["

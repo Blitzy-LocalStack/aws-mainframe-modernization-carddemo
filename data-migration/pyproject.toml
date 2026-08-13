@@ -52,15 +52,15 @@
 #   every previous correction of this block also claimed to have re-measured.
 #
 # carddemo:gate-inventory:begin
-#   source-modules = 35
-#   test-modules = 34
-#   suite-files = 35
-#   governed-files = 71
+#   source-modules = 37
+#   test-modules = 38
+#   suite-files = 39
+#   governed-files = 77
 # carddemo:gate-inventory:end
 #
 #   Each figure, with the command that produces it:
 #     - `source-modules` is `find src -name '*.py' -not -path '*__pycache__*' | wc -l`. The
-#       THIRTY-FIVE are: `__init__.py`, `cli.py`, `config.py`, `credentials.py`,
+#       THIRTY-SEVEN are: `__init__.py`, `cli.py`, `config.py`, `credentials.py`,
 #       `role_credentials.py`, `seed_datasets.py`; the `copybook/` package -- `__init__.py`,
 #       `ebcdic_codec.py`, `layouts.py`, `packed.py`, `timestamp.py`, `zoned.py`; the `loaders/`
 #       package -- `__init__.py`, `aurora.py`, `protected_columns.py`, `s3_stage.py`; the
@@ -68,11 +68,12 @@
 #       readers `account.py`, `card.py`, `customer.py`, `dalytran.py`, `discgrp.py`,
 #       `export_record.py`, `tcatbal.py`, `trancatg.py`, `transaction.py`, `trantype.py`,
 #       `usrsec.py`, `xref.py`; and the `verify/` package -- `__init__.py`, `checksum.py`,
-#       `money_parity.py`, `row_counts.py`.
+#       `gate.py`, `money_parity.py`, `row_counts.py`, `session.py`.
 #     - `test-modules` is `find tests -name 'test_*.py' -not -path '*__pycache__*' | wc -l`, and
-#       `suite-files` adds `conftest.py`. The THIRTY-FOUR are `test_aurora_loader`,
+#       `suite-files` adds `conftest.py`. The THIRTY-EIGHT are `test_aurora_loader`,
 #       `test_authorization_disclosure`, `test_card_protected_value`, `test_cli`,
-#       `test_config_name_contract`, `test_corpus_disclosure`, `test_database_trust`,
+#       `test_config_name_contract`, `test_corpus_disclosure`, `test_credentials`,
+#       `test_database_trust`,
 #       `test_declaration_shadowing`, `test_docstring_gate`, `test_doubles`,
 #       `test_ebcdic_code_page_allow_list`, `test_ebcdic_codec`, `test_gate_inventory`,
 #       `test_loaders`,
@@ -80,17 +81,37 @@
 #       `test_package_surfaces`, `test_packed`, `test_protected_columns`, `test_reader_factory`,
 #       `test_reader_hardening`, `test_readers`, `test_readme_inventory`, `test_reporting_views`,
 #       `test_s3_stage`, `test_seed_datasets`, `test_seed_user_subjects`, `test_shared_doubles`,
-#       `test_source_hardening`, `test_symbol_uniqueness`, `test_timestamp`, `test_verification`
-#       and `test_zoned`.
-#     - `governed-files` is `ruff check . --show-files | wc -l`, which is the SEVENTY-ONE files
-#       this configuration lints: the thirty-five source modules, the thirty-five suite files, and
+#       `test_source_hardening`, `test_step_functions_asl_contract`, `test_symbol_uniqueness`,
+#       `test_timestamp`, `test_verification`, `test_verification_authority`, `test_verify` and
+#       `test_zoned`.
+#       Refactoring Rationale: `test_step_functions_asl_contract` is the sixth entry this block has
+#       had to absorb after the fact, and it is named here rather than folded silently because the
+#       block's whole history is additions that were not re-measured. It asserts the Step Functions
+#       module's Choice-rule semantics -- that each entry gate admits a real ISO date and refuses an
+#       absent, mistyped or undelimited one -- from the committed HCL, which is why an ASL contract
+#       test lives in the ETL suite: this package already owns the only Python test runner in the
+#       repository, and standing a second one up for one contract would cost more than it proves.
+#       Refactoring Rationale: `test_verification_authority` was absent from this enumeration while
+#       being counted by nothing, which is the fifth form of the fault this block's own history
+#       records. It proves the verification passes read only the committed query files and the
+#       certified read-only session -- the authority half of the gate, where `test_verification`
+#       covers the passes' own arithmetic.
+#       Refactoring Rationale: `test_verify` landed beside `test_verification` rather than inside
+#       it, and the near-identical names are deliberate rather than an oversight: the older module
+#       proves the three verification PASSES are independent of one another, while the new one
+#       proves the record-checksum pass's own mechanism -- its canonicalisation across the source
+#       and driver value classes, its pairing, its timestamp contract and its report bound. Naming
+#       them for what they cover would have meant renaming a module every other file's inventory
+#       cites, for no gain a reader of both docstrings does not already get.
+#     - `governed-files` is `ruff check . --show-files | wc -l`, which is the SEVENTY-SEVEN files
+#       this configuration lints: the thirty-seven source modules, the thirty-nine suite files, and
 #       this file, which ruff lists because it lints the configuration itself. It is that command's
-#       own output rather than a count of `.py` files, which is seventy; quoting the smaller number
-#       would make the two disagree for a reason a reader could not see.
+#       own output rather than a count of `.py` files, which is seventy-six; quoting the smaller
+#       number would make the two disagree for a reason a reader could not see.
 #   Measured consequences (re-measure with the commands above before editing any figure):
-#     - `ruff check .` passes over all seventy-one governed files, so the docstring gate is live
-#       for every module that exists.
-#     - `ruff format --check .` reports all seventy-one already formatted and none it would
+#     - `ruff check .` passes over all seventy-seven governed files, so the docstring gate is
+#       live for every module that exists.
+#     - `ruff format --check .` reports all seventy-seven already formatted and none it would
 #       reformat.
 #       Refactoring Rationale: this entry previously named two files as pre-existing formatter
 #       failures and recorded that the formatter was not clean over this package. Every one has
@@ -98,23 +119,41 @@
 #       concession. It is re-asserted rather than weakened after each round of work, because
 #       `ruff format --check` is NOT one of the CI steps -- so this block is the only place the
 #       property is recorded and a weakened claim here would be the end of it.
-#     - `python -m pytest data-migration/tests` collects the thirty-four modules named above and
-#       reports ONE THOUSAND FOUR HUNDRED AND THIRTY-SIX passed with EIGHT skipped, the same totals
-#       serially and under `-n "$(nproc)"`. Assumptions:
+#     - `python -m pytest data-migration/tests` collects the thirty-eight modules named above,
+#       gathers ONE THOUSAND NINE HUNDRED AND EIGHTY-THREE cases and reports ONE THOUSAND NINE
+#       HUNDRED AND SEVENTY-FOUR passed with NINE skipped, the same totals serially and under
+#       `-n "$(nproc)"`. Assumptions:
 #       the pass and skip totals are a checkpoint MEASUREMENT rather than an invariant, and they
 #       are deliberately not asserted by the inventory test -- a total that fails whenever a test
 #       is added would be re-measured mechanically rather than read, which is how the figures above
-#       went stale four times. The module inventory is asserted instead, because that changes only
-#       when a file does. The eight skips are stated rather than elided because "none skipped" was
+#       went stale seven times. The module inventory is asserted instead, because that changes only
+#       when a file does. The nine skips are stated rather than elided because "none skipped" was
 #       true of an earlier tree: each names its own reason at the skip site -- `usrsec` ships in one
-#       encoding only and publishes no character decode path, `transaction` has no committed
-#       fixed-length extract to read or divide, and two source-hardening cases cannot be exercised
-#       as a superuser, for whom a mode bit is not a barrier.
+#       encoding only and publishes no character decode path, `transaction` ships in one encoding
+#       only and has no committed fixed-length extract to read or to divide, three reader- and
+#       source-hardening cases cannot be exercised as a superuser, for whom a mode bit is not a
+#       barrier, and one parameterised case over the contracted-but-unregistered roster collects
+#       nothing because that roster is now EMPTY -- the emptiness is asserted directly by
+#       `test_no_contracted_subcommand_remains_unregistered`, so the property survives its own
+#       parameterisation becoming vacuous.
 #   Every package named in this distribution is now PRESENT, so nothing here is a later-index
-#   artifact and `cli.py` registers eight of the nine documented subcommands -- the four read-only
-#   ones plus `load-dataset` and the three verification passes. Only `verify-all` is unregistered,
-#   and for a reason that is not about a missing module: it would need a dataset-to-source manifest
-#   this distribution does not carry. The `[project.scripts]` block below records that too.
+#   artifact and `cli.py` registers ALL THIRTEEN documented subcommands -- three that stage or load
+#   (`stage-dataset`, `refresh-dataset`, `load-dataset`), two that inspect (`list-datasets`,
+#   `decode-record`), two that provision or maintain (`apply-credentials`,
+#   `reconcile-sequences`), and six that verify: the three per-dataset passes
+#   (`verify-row-counts`, `verify-checksum`, `verify-money-parity`), the two whole-schema reports
+#   (`verify-row-count-report`, `verify-money-total-report`) and the combined `verify-all` gate.
+#   Nothing is documented that the parser refuses, so `--help` and section 5.2 of the README agree
+#   one-for-one. The `[project.scripts]` block below records that too.
+#   Refactoring Rationale: this entry read "eight of the nine documented subcommands" and named
+#   `verify-all` as the exception, which was accurate while the gate had no caller. Two verbs were
+#   also missing from its arithmetic -- `reconcile-sequences` and `verify-row-count-report` were
+#   registered and uncounted -- so the figure understated the surface in both directions at once.
+#   It then read ELEVEN, which stayed behind the surface again: `refresh-dataset`, the verb the
+#   nightly seed-refresh branch actually invokes, and `verify-money-total-report` were both
+#   registered and uncounted. The figure is now enumerated by group rather than summarised, because
+#   every one of the three wrong values was produced by adding up a description instead of the
+#   parser -- so `build_parser()` is what this figure is measured from.
 #   Refactoring Rationale: `readers/` and `copybook/` each had no `__init__.py` at one point while
 #   `loaders/` did, so they resolved as implicit NAMESPACE packages -- measured, not assumed:
 #   `importlib.import_module` reported `__file__ = None` for them and a real path for the sibling.
@@ -266,7 +305,20 @@ dependencies = [
   #   it has to work. `data-migration/requirements.txt` records the three
   #   alternatives that were rejected before adding it, and the fact that it is the
   #   one platform-tagged member of this closure.
-  "cryptography>=49.0.0",
+  # WHY : Assumptions: the floor is 50.0.0 rather than 49.0.0 because 49.0.0 is
+  #   affected by GHSA-g6cj-pr64-35w5 / CVE-2026-69247 and 50.0.0 is the fix. It is
+  #   stated as a floor and not a ceiling-bounded range on purpose: the advisory
+  #   named a first-fixed version, so every later release also clears it, and a
+  #   range would have to be widened by hand on each upgrade for no safety gained.
+  #   This keeps the single-sourcing rule stated at the head of this list intact -
+  #   the floor is still exactly the version `requirements.txt` pins, which moved
+  #   in the same change - so the two files still agree by rule rather than by luck.
+  # WHY : Assumptions: a floor earns its place here even though the exact pin lives in
+  #   `requirements.txt`, because an install can resolve this distribution WITHOUT that
+  #   manifest -- `pip install ./data-migration` in a container build is exactly that
+  #   shape -- and the floor is what makes such an install unable to select the affected
+  #   release.
+  "cryptography>=50.0.0",
 ]
 
 # WHY : Trade-offs: `readme` and an explicit `license` are deliberately left
@@ -297,26 +349,36 @@ dependencies = [
 #   is rewritten rather than deleted because the boundary it recorded has MOVED
 #   rather than disappeared, and a reader who had learned the old limitation needs
 #   to be told which part of it still holds.
-# WHY : Assumptions: what the entry point covers is narrower than what
-#   `data-migration/README.md` section 5.2 contracts, by exactly one command. It
-#   registers `list-datasets`, `decode-record`, `stage-dataset`,
-#   `apply-credentials`, `load-dataset`, `verify-row-counts`, `verify-checksum` and
-#   `verify-money-parity` -- the eight whose backing modules are in this
-#   distribution -- and does NOT register `verify-all`, the aggregator over the
-#   three verification passes. Naming it is refused as a usage error. Since each of
-#   the three passes it would aggregate is individually reachable, what is withheld
-#   is the convenience of one invocation, not any capability.
+# WHY : Assumptions: what the entry point covers is now EXACTLY what
+#   `data-migration/README.md` section 5.2 contracts -- all thirteen verbs, with no
+#   command documented that the parser refuses. It registers `list-datasets`,
+#   `decode-record`, `stage-dataset`, `refresh-dataset`, `apply-credentials`,
+#   `reconcile-sequences`, `load-dataset`, `verify-row-counts`, `verify-checksum`,
+#   `verify-money-parity`, `verify-row-count-report`, `verify-money-total-report` and
+#   `verify-all`. The two this list omitted are the two a reader is most likely to need:
+#   `refresh-dataset` is the verb the nightly seed-refresh branch invokes, and
+#   `verify-money-total-report` is one half of the whole-schema pair, so an omission here
+#   read as "not delivered" for the one command the orchestrator actually issues.
 # WHY : Refactoring Rationale: this note listed `load-dataset` and the three
 #   `verify-*` passes as unregistered for exactly as long as `readers/`,
-#   `loaders/aurora.py` and `verify/` were absent from the distribution. All three
-#   are now present, so those four are registered. The rule the note records has
-#   not changed -- only which commands fall on which side of it.
-# WHY : Assumptions: `load-dataset` refuses `CUSTOMER` and `CARD` by name, because
-#   `account.customers` and `card.cards` declare ciphertext columns as `BYTEA NOT
-#   NULL` under a key the owning services hold and this package does not. A
-#   complete data cutover therefore still has to account for those two records,
-#   and for the fact that nothing here has been exercised against a provisioned
-#   cluster; schema and security validation must not be mistaken for a cutover.
+#   `loaders/aurora.py` and `verify/` were absent from the distribution, and then
+#   listed `verify-all` alone as withheld on the grounds that it needed a
+#   dataset-to-source manifest this distribution does not carry. It carries one:
+#   `seed_datasets.py` names every dataset, its owning context, its prefix segments
+#   and its extract, and an omitted `--source` resolves to that dataset's newest
+#   staged generation. Withholding it was not withholding a convenience -- the
+#   coverage, order and short-circuit rules in `verify/gate.py` had no caller, so
+#   nothing in the delivered system enforced the three-pass mandate at all, and the
+#   nightly chain reached posting with no verb able to refuse a load.
+# WHY : Refactoring Rationale: this note also recorded that `load-dataset` refuses
+#   `CUSTOMER` and `CARD` by name, because `account.customers` and `card.cards`
+#   declare ciphertext columns as `BYTEA NOT NULL` under a key the owning services
+#   hold and this package does not. It holds them now: `loaders/protected_columns.py`
+#   seals all three columns in the framing each owning service's own decipher
+#   expects, under the key that service resolves, so all ELEVEN loadable records
+#   load. What a complete cutover must still account for is that nothing here has
+#   been exercised against a provisioned cluster; schema and security validation
+#   must not be mistaken for a cutover.
 carddemo-migrate = "carddemo_migration.cli:main"
 
 [tool.setuptools.packages.find]

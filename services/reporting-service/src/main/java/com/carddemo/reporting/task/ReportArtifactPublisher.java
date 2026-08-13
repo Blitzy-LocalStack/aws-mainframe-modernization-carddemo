@@ -1,14 +1,15 @@
 package com.carddemo.reporting.task;
 
+import com.carddemo.reporting.service.ReportArtifactLocator;
 import com.carddemo.reporting.service.StatementService;
 import com.carddemo.reporting.service.TransactionReportService;
 import com.carddemo.reporting.sink.S3ArtifactWriter;
 import com.carddemo.reporting.sink.S3ReportSink;
 import java.io.IOException;
 import java.time.LocalDate;
-import java.util.List;
-import java.util.Locale;
 import java.util.Objects;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -67,27 +68,22 @@ import software.amazon.awssdk.services.s3.S3Client;
 public class ReportArtifactPublisher {
 
     /**
-     * Configuration property carrying the key prefix report artifacts sit under.
-     *
-     * <p>Assumptions: named here rather than on the service because the service publishes no report
-     * artifact -- it writes to a seam -- and the prefix is a property of where a stored artifact goes.</p>
+     * Configuration property carrying the key prefix report artifacts sit under, aliasing the
+     * declaration on {@link ReportArtifactLocator}.
      */
-    public static final String REPORT_PREFIX_PROPERTY = "carddemo.reporting.s3.report-prefix";
+    public static final String REPORT_PREFIX_PROPERTY = ReportArtifactLocator.REPORT_PREFIX_PROPERTY;
 
-    /** The object name, appended after the date partition. */
-    public static final String REPORT_OBJECT = "transaction-detail.txt";
-
-    /** The date-partition segment the dataset convention fixes. */
-    private static final String DATE_PARTITION = "dt=";
-
-    /** The report-type partition segment. */
-    private static final String TYPE_PARTITION = "type=";
-
-    /** The range-start partition segment. */
-    private static final String RANGE_START_PARTITION = "from=";
-
-    /** The range-end partition segment. */
-    private static final String RANGE_END_PARTITION = "to=";
+    /**
+     * The object name, appended after the date partition.
+     *
+     * <p>⚠️ Refactoring Rationale: this constant and the property above now ALIAS
+     * {@link ReportArtifactLocator}, and the four partition segments that used to sit here are gone. The
+     * key convention moved to the service layer because the read side needs the identical key and could
+     * not import this package without a cycle -- a review found that a submitted report's artifact was
+     * reachable by nothing at all. Aliasing keeps every existing reference to these two names compiling
+     * while leaving one place where a value can change.</p>
+     */
+    public static final String REPORT_OBJECT = ReportArtifactLocator.REPORT_OBJECT;
 
     /**
      * The type token the scheduled nightly run publishes under.
@@ -97,17 +93,33 @@ public class ReportArtifactPublisher {
      * it carries its own token rather than borrowing one of theirs. Borrowing "monthly" would make a
      * one-day report indistinguishable in the key from a calendar-month one.</p>
      */
-    public static final String DAILY_REPORT_TYPE = "daily";
+    public static final String DAILY_REPORT_TYPE = ReportArtifactLocator.DAILY_REPORT_TYPE;
 
     /**
-     * The type tokens an on-demand run may publish under.
+     * Bounded context owning the {@code TRANREPT} generation family, and its first key segment.
      *
-     * <p>Assumptions: the three are the lower-cased forms of the report names
-     * {@code com.carddemo.reporting.service.ReportExecutionService} resolves, which are what the state
-     * machine forwards to the on-demand task as its report-type argument. They are compared
-     * case-insensitively because the argument travels through a command line an operator can type.</p>
+     * <p>Assumptions: {@code reporting}, matching the {@code domain} that
+     * {@code infra/modules/s3-datasets} declares for the {@code tranrept} family. The two must agree
+     * character for character: the module's lifecycle rule filters on the composed prefix, so a
+     * mismatch would write generations under a prefix carrying no retention rule at all.</p>
      */
-    private static final List<String> ON_DEMAND_REPORT_TYPES = List.of("monthly", "yearly", "custom");
+    public static final String TRANREPT_DOMAIN = "reporting";
+
+    /** Dataset segment of the {@code TRANREPT} generation family, matching that module's map key. */
+    public static final String TRANREPT_DATASET = "tranrept";
+
+    /**
+     * Object name of the report inside its generation prefix.
+     *
+     * <p>Assumptions: named for the baseline base {@code AWS.M2.CARDDEMO.TRANREPT} rather than reusing
+     * {@value #REPORT_OBJECT}, because the two keys hold the same bytes for different readers -- one is
+     * addressed by request range, the other is the generation an operator restores from -- and one name
+     * on both would leave a bucket listing unable to say which it was looking at.</p>
+     */
+    public static final String TRANREPT_GENERATION_OBJECT = "tranrept.txt";
+
+    /** The journal this publisher reports the generation it wrote through. */
+    private static final Logger LOG = LoggerFactory.getLogger(ReportArtifactPublisher.class);
 
     /** The report generator this publisher drives. */
     private final TransactionReportService reports;
@@ -118,8 +130,8 @@ public class ReportArtifactPublisher {
     /** The destination bucket. */
     private final String bucket;
 
-    /** The key prefix report artifacts sit under. */
-    private final String prefix;
+    /** The key convention this publisher writes under, shared with the read side. */
+    private final ReportArtifactLocator locator;
 
     /**
      * Creates the publisher.
@@ -128,19 +140,19 @@ public class ReportArtifactPublisher {
      * @param s3 the object-store client; must not be {@code null}
      * @param bucket the destination bucket, supplied by
      *     {@value StatementService#OUTPUT_BUCKET_PROPERTY}; must not be {@code null}
-     * @param prefix the report key prefix, supplied by {@value #REPORT_PREFIX_PROPERTY}; must not be
-     *     {@code null}
+     * @param locator the key convention, shared with the request surface that serves the artifact; must
+     *     not be {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
     public ReportArtifactPublisher(
             TransactionReportService reports,
             S3Client s3,
             @Value("${" + StatementService.OUTPUT_BUCKET_PROPERTY + "}") String bucket,
-            @Value("${" + REPORT_PREFIX_PROPERTY + "}") String prefix) {
+            ReportArtifactLocator locator) {
         this.reports = Objects.requireNonNull(reports, "reports must not be null");
         this.s3 = Objects.requireNonNull(s3, "s3 must not be null");
         this.bucket = Objects.requireNonNull(bucket, "bucket must not be null");
-        this.prefix = Objects.requireNonNull(prefix, "prefix must not be null");
+        this.locator = Objects.requireNonNull(locator, "locator must not be null");
     }
 
     /**
@@ -163,7 +175,57 @@ public class ReportArtifactPublisher {
      */
     public PublishedArtifact publishDaily(LocalDate businessDate) throws IOException {
         Objects.requireNonNull(businessDate, "businessDate must not be null");
-        return publish(DAILY_REPORT_TYPE, businessDate, businessDate, businessDate);
+
+        // WHY : Assumptions: the request-scoped key is composed by the LOCATOR here as well, so the
+        //       nightly run and an on-demand run address the same artifact through one convention and
+        //       the status surface that serves it reads the key its writer wrote. A private copy in this
+        //       class was the alternative and is what this call replaces: two spellings of one contract,
+        //       either of which could be corrected without the other.
+        String requestScopedKey = this.locator.key(
+                DAILY_REPORT_TYPE, businessDate, businessDate, businessDate);
+        int generation = GenerationKeys.nextGeneration(
+                this.s3, this.bucket, TRANREPT_DOMAIN, TRANREPT_DATASET, businessDate);
+        String generationKey = GenerationKeys.generationKey(
+                TRANREPT_DOMAIN, TRANREPT_DATASET, businessDate, generation,
+                TRANREPT_GENERATION_OBJECT);
+
+        // WHY : Refactoring Rationale: the nightly report is published to TWO keys and used to be
+        //       published to one. The second is the generation coordinate the baseline's
+        //       AWS.M2.CARDDEMO.TRANREPT base resolves to -- defined at app/jcl/DEFGDGB.jcl:37-39 with
+        //       LIMIT(5) SCRATCH and written as TRANREPT(+1) at app/jcl/TRANREPT.jcl:80 -- and without
+        //       it that family had no production writer at all, so the prefix and lifecycle rule
+        //       infra/modules/s3-datasets provisions for it governed nothing.
+        // WHY : Assumptions: both keys are written in ONE generation pass over a single sink, not by
+        //       running the report twice. The reference produces one report per night from one sort, so
+        //       a second pass could return different rows if a posting landed between them -- and it
+        //       would double the read of the largest relation this context touches for bytes that must
+        //       be identical.
+        // WHY : Trade-offs: the same bytes are stored twice rather than one key redirecting to the
+        //       other. S3 has no server-side alias, so the alternatives were a copy after the fact --
+        //       which is a second full transfer and can fail after the first key is published, leaving
+        //       exactly one of the two present -- or dropping one key. Neither is better: the
+        //       request-scoped key is what the on-demand path and the runbooks address by range, and
+        //       the generation key is what carries the retention contract and what the retention
+        //       function prunes. A 133-byte-per-transaction text artifact is the cheapest thing in this
+        //       bucket to hold twice.
+        S3ArtifactWriter requestScoped = new S3ArtifactWriter(this.s3, this.bucket, requestScopedKey);
+        S3ArtifactWriter generational = new S3ArtifactWriter(this.s3, this.bucket, generationKey);
+        TransactionReportService.ReportGenerationSummary summary;
+        try (S3ReportSink primary = new S3ReportSink(requestScoped);
+                S3ReportSink secondary = new S3ReportSink(generational)) {
+            summary = this.reports.generateReport(businessDate, businessDate, record -> {
+                primary.write(record);
+                secondary.write(record);
+            });
+        }
+
+        LOG.info("event=reporting.report.generation-published family={}/{} generation={} key={}"
+                        + " versionId={}",
+                TRANREPT_DOMAIN, TRANREPT_DATASET, generation, generationKey,
+                generational.publishedVersionId());
+
+        return new PublishedArtifact(
+                summary, this.bucket, requestScopedKey, requestScoped.publishedVersionId());
     }
 
     /**
@@ -195,13 +257,10 @@ public class ReportArtifactPublisher {
         Objects.requireNonNull(rangeEnd, "rangeEnd must not be null");
         Objects.requireNonNull(runDate, "runDate must not be null");
 
-        String typeToken = requireKnownReportType(reportType);
-        String key = prefix
-                + DATE_PARTITION + runDate + "/"
-                + TYPE_PARTITION + typeToken + "/"
-                + RANGE_START_PARTITION + rangeStart + "/"
-                + RANGE_END_PARTITION + rangeEnd + "/"
-                + REPORT_OBJECT;
+        // WHY : Assumptions: the key is composed by the locator and not here, so the key this run WRITES
+        //       and the key the status surface READS can never diverge. The locator also performs the
+        //       closed-domain check on the type, which is why no separate check remains at this point.
+        String key = locator.key(reportType, rangeStart, rangeEnd, runDate);
 
         // WHY : Assumptions: the writer is held in its own local so its version can be read AFTER the
         //       try-with-resources has closed it. The version exists only once the artifact is published,
@@ -216,33 +275,6 @@ public class ReportArtifactPublisher {
         }
 
         return new PublishedArtifact(summary, bucket, key, writer.publishedVersionId());
-    }
-
-    /**
-     * Canonicalises a report type against the closed domain, refusing anything outside it.
-     *
-     * <p>Assumptions: the returned token is lower-cased, so one type produces one key however an operator
-     * capitalised the argument. Without that, {@code MONTHLY} and {@code monthly} would be two artifacts
-     * for one report and the second would not replace the first.</p>
-     *
-     * @param reportType the requested type as the caller stated it; must not be {@code null}
-     * @return the canonical lower-case token; never {@code null}
-     * @throws IllegalArgumentException if the type is not in the closed domain
-     */
-    private static String requireKnownReportType(String reportType) {
-        String token = reportType.trim().toLowerCase(Locale.ROOT);
-        if (DAILY_REPORT_TYPE.equals(token) || ON_DEMAND_REPORT_TYPES.contains(token)) {
-            return token;
-        }
-
-        // WHY : Assumptions: the refusal does NOT quote the offending value. It reaches an object key on
-        //       the accepting path and an exception message on this one, and a message that quotes an
-        //       unvalidated argument is the same exposure in a different destination -- the shared advice
-        //       records an internal failure's message. The domain is stated instead, which is what a
-        //       caller needs in order to correct the argument.
-        throw new IllegalArgumentException(
-                "the report type is not one this service publishes: the accepted tokens are "
-                        + DAILY_REPORT_TYPE + " and " + ON_DEMAND_REPORT_TYPES);
     }
 
     /**

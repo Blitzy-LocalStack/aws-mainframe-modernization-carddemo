@@ -336,16 +336,27 @@ docstring-less languages use:
   `pyproject.toml`, `requirements.txt`, `.env.example` and `.gitignore` in this
   repository already carry that form.
 * **JSON has no comment syntax at all**, which is a real gap rather than an
-  exemption. The obligation is discharged beside the file instead: a manifest's
-  reasoning belongs in the package `README.md` and in the sibling documents that
-  cite it, and a pinned version whose pin is non-obvious is justified wherever a
-  comment *can* live — which is why the TypeScript compiler pin, for instance, is
-  justified in this document and in `ui/tsconfig.node.json` rather than inside
-  `ui/package.json`. Trade-offs: the alternative was to adopt a
-  comment-tolerant JSON dialect so the reasoning could sit inline. It was rejected
-  because `npm` and every consumer of a lockfile read strict JSON, so the dialect
-  would have to be stripped before use and the reasoning would be lost at exactly
-  the moment the file was consumed.
+  exemption. The obligation is discharged in the only form strict JSON admits — a
+  **string value under a key that npm ignores**. `ui/package.json` carries a
+  top-level `carddemoDependencyRationale` object whose entries are keyed by the exact
+  dependency or script they explain, and whose inner keys are the four canonical
+  labels **with their trailing colons retained**, so the labels appear there as
+  exactly the literal, colon-terminated strings a fixed-string audit searches for.
+  `config/rule1/rule1_gate.py` governs `.json` for label form precisely so that block
+  is audited rather than merely intended. Assumptions: this replaces an earlier
+  statement that a manifest's reasoning "belongs in the package `README.md`" and that
+  the TypeScript compiler pin, for instance, is justified "in this document and in
+  `ui/tsconfig.node.json` rather than inside `ui/package.json`". That stopped being
+  true: the pin's rationale now sits in all three places, and the copy inside
+  `ui/package.json` is the one an editor raising the version actually reads. The
+  sibling documents remain the right home for reasoning that is ABOUT the package
+  rather than about one entry in it. Trade-offs: the alternative was to adopt a
+  comment-tolerant JSON dialect so the reasoning could sit inline as a comment. It
+  was rejected because `npm` and every consumer of a lockfile read strict JSON, so
+  the dialect would have to be stripped before use and the reasoning would be lost at
+  exactly the moment the file was consumed. A generated lockfile is the one JSON file
+  with no obligation at all and is excluded from the gate by name, because it holds no
+  authored prose to carry one.
 * **Markdown** is governed by its own section below.
 
 
@@ -448,21 +459,21 @@ compilable as written.
  * multiplying second yields a different final cent on many balances, and the
  * golden-master comparison would flag it as a parity failure.
  *
- * <p>WHY this path takes the accrual rounding mode and not the general one.
- * Assumptions: the mode is a property of the operation, not of the caller. The
- * accrual paragraph in {@code app/cbl/CBACT04C.cbl} stores its result into
+ * <p>WHY this path reduces half up although the reference discards the digits.
+ * Trade-offs: the mode is a property of the money contract, not of the caller.
+ * The accrual paragraph in {@code app/cbl/CBACT04C.cbl} stores its result into
  * {@code PIC S9(09)V99} and carries no {@code ROUNDED} phrase — and no statement
  * anywhere in that program does — so the reference discards the surplus digits, which
- * is truncation toward zero. This method reduces the same way, through
- * {@code Money.BASELINE_INTEREST_ROUNDING}. Every other reduction to cents in this
- * migration is scale 2 with {@code RoundingMode.HALF_UP}, through
- * {@code Money.GENERAL_ROUNDING}, and those operations have no reference statement to
- * be faithful to. Neither mode is reachable from a signature, so no call site selects
- * between them.
+ * is truncation toward zero. This method reduces half up instead, through
+ * {@code Money.GENERAL_ROUNDING}, the one mode the money type declares, because
+ * transformation rule T3 states that mode for the money path and states no exception
+ * for the accrual. The one cent this can differ by is registered as divergence
+ * {@code C-ROUNDING} rather than absorbed. The mode is not reachable from a signature,
+ * so no call site selects anything.
  *
  * @param categoryBalance the category balance to accrue against; never {@code null}
  * @param annualRatePercent the annual disclosure-group rate as a percentage
- * @return the monthly interest, scaled to two decimal places, truncated toward zero
+ * @return the monthly interest, scaled to two decimal places, reduced half up
  * @throws IllegalArgumentException if either argument is negative
  */
 public Money monthlyInterest(Money categoryBalance, BigDecimal annualRatePercent) {
@@ -687,18 +698,37 @@ regardless of visibility or nesting, so the `ast` gate checks presence only and 
 none of them. Both halves are load-bearing: removing either leaves an unenforced half of
 the same obligation.
 
-**What neither half can decide, stated precisely because the gap is wide.** The `D` family
-checks that a docstring **exists** on a public declaration and checks its formatting —
-one-line summary, imperative mood, blank lines, closing quotes — and the `ast` gate
-extends only the existence half to the rest. Neither checks that the Args, Returns and
-Raises sections are present or complete: a single-line docstring on a five-parameter
-function satisfies every `D` rule, satisfies the presence gate, and still violates Rule 1's
-Docstring Requirements and its second Forbidden Pattern. Assumptions: pydocstyle has no
-rule that cross-checks a docstring's parameter list against a signature, and a presence
-walker cannot judge content at all, so that half of the obligation cannot be delegated and
-is a **required human-review check** on every Python change. It is called out here rather
-than left implied because a configured `D` family plus a green test run is easy to mistake
-for full coverage.
+**What these halves can and cannot decide, stated precisely because the gap is wide and
+because it is not the same gap for all three sections.** The `D` family checks that a
+docstring **exists** on a public declaration and checks its formatting — one-line summary,
+imperative mood, blank lines, closing quotes — and the `ast` gate extends the existence
+half to every visibility and nesting depth. Beyond that the three Rule 1 sections part
+company:
+
+* **Returns is ENFORCED for the package tree.** `test_every_package_function_documents_its_return`
+  in `data-migration/tests/test_docstring_gate.py` asserts that every function under
+  `data-migration/src/**` whose docstring exists carries a `Returns` **or** a `Yields`
+  section, so Rule 1's third docstring element is a build failure rather than a review
+  note for the code that ships. `Yields` counts because a generator's return contract *is*
+  its yield contract. That clause is scoped to the package tree on purpose and does **not**
+  reach the suite's own test functions; the gate states that limit at the assertion, and the
+  summary table at the foot of this document records it the same way.
+* **Args and Raises are review-only, and so is `Returns` for the suite tree.** No `D` rule
+  cross-checks a docstring's parameter list or its `raise` statements against the
+  signature, and the `ast` gate deliberately does not attempt it. A single-line docstring
+  on a five-parameter function therefore satisfies every `D` rule and satisfies the presence
+  gate while violating Rule 1's Docstring Requirements and its second Forbidden Pattern.
+* **Accuracy is review-only for all three.** A section that is present and complete can
+  still be wrong, and no gate in this repository reads for truth.
+
+Assumptions: this distinction is drawn rather than flattened into "neither half checks the
+sections", which is what this paragraph used to say. That wording was wrong in one
+direction and dangerous in the other: it understated the gate by denying an enforced
+clause, and a reader who then re-checked `Returns` by hand on every package function would
+spend attention the build already spends — while the sections that genuinely need a human,
+Args and Raises, would read as no more urgent than the one that does not. It is called out
+here rather than left implied because a configured `D` family plus a green test run is
+easy to mistake for full coverage.
 
 The example below is an **excerpt**: the function body is elided as `...` after the
 comment that is the point of the example.
@@ -1112,10 +1142,23 @@ that a `WHAT:` comment appears only inside a file's leading header block. It is
 fail-closed and self-testing -- it exposes no tolerance flag, no `--fix` and no
 allow-list argument, and its `self-test` check proves both detectors still fire
 before their silence is read as a pass -- and it runs as a required step in
-`services-ci.yml`, `ui-ci.yml` and `infra-ci.yml`. Its `consistency` check reads
-this table and asserts that each gate named below is present in the file named for
-it, so a claim here whose mechanism was deleted or renamed fails a build instead of
-being believed. Assumptions: it decides FORM and never truth, so it changes what the
+`services-ci.yml`, `ui-ci.yml` and `infra-ci.yml`. Its remit is wider than the seven
+languages of the table, because a rationale label can only be checked where the gate
+reads: it also governs the repository's XML, JSON, TOML, HTML, plain-text manifests
+and the environment template, which is where the JSON exception described in
+[§Language conventions](#language-conventions) is actually held to
+account. It deliberately does **not** read the generated `ui/package-lock.json`, the
+reference-only `app/**`, `tests/**`, `scripts/**` and `samples/**` trees, or the
+fixed-width record fixtures under `services/*/src/test/resources/fixtures/**`, whose
+`.txt` extension is incidental to bytes that are a copybook layout rather than prose.
+Its `consistency` check reads this table and asserts that each gate named below is
+present **in that file's active configuration** -- parsed as XML, JSON, TOML or
+Python where a standard-library parser exists, and comment-stripped per language
+where none does -- so a claim here whose mechanism was deleted, renamed or disabled
+fails a build instead of passing on the comment that still describes it. Assumptions:
+that distinction is drawn because these are the most heavily commented files in the
+repository: a text search for a module name is satisfied by the paragraph explaining
+why the module was WITHDRAWN, which is a real shape in `config/checkstyle/checkstyle.xml`. Assumptions: it decides FORM and never truth, so it changes what the
 per-language rows below can claim without changing the review obligation in any of
 them.
 

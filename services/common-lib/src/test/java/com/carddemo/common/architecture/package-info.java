@@ -176,22 +176,26 @@
  * <h2>Contents of this package</h2>
  *
  * <pre>
- * this directory: 10 java files = 9 tests + 1 charter
+ * this directory: 12 java files = 11 tests + 1 charter
  * </pre>
  *
  * <ul>
- *   <li>{@code LayeringRulesTest} across 9 cases -- the layering invariants described above, together
+ *   <li>{@code LayeringRulesTest} across 10 cases -- the layering invariants described above, together
  *       with the cases that guard against a vacuous pass. Assumptions: this is the ONE class the
  *       {@code architecture-rules} Surefire execution carries into the eight consumers of the shared
  *       kernel, so its nine cases run once here and once in each of them.</li>
  *   <li>{@code PackageCharterInventoryTest} across 4 cases -- holds every measured claim a package
  *       charter publishes to the directory the charter lives in.</li>
- *   <li>{@code SharedKernelInventoryTest} across 7 cases -- re-derives this module's class inventory
- *       from the directory and holds the kernel's own charters to it.</li>
+ *   <li>{@code SharedKernelInventoryTest} across 12 cases -- re-derives this module's class inventory
+ *       from the directory and holds the kernel's own charters, roster and README to it.</li>
  *   <li>{@code ServiceCatalogInventoryTest} across 4 cases -- re-derives the service catalog's
  *       measurable current-state claims from the repository.</li>
- *   <li>{@code RuntimeConfigurationContractTest} across 4 cases -- asserts that every runtime setting a
- *       service requires is one the infrastructure delivers, and the converse.</li>
+ *   <li>{@code RuntimeConfigurationContractTest} across 5 cases -- asserts that every runtime setting a
+ *       service requires is one the infrastructure delivers, the converse, and that every such setting is
+ *       named by the Dockerfile header an operator reads. The fifth case is the image-closure one: an
+ *       image header is the only place a task definition's variables are written down, so a header that
+ *       omits a no-fallback name presents a contract an operator can follow and still get a task that
+ *       will not stay up.</li>
  *   <li>{@code RuntimeDeletePrivilegeContractTest} across 2 cases -- asserts that every row-deleting
  *       call site is one the database permits, and that no table carries a delete grant nothing
  *       uses.</li>
@@ -199,9 +203,62 @@
  *       cross-schema grants are exactly the schemas its code can reach: no schema is granted that the
  *       service's own {@code search_path} omits, no schema on that path is left ungranted, and every
  *       schema an entity explicitly maps to is granted.</li>
- *   <li>{@code ServiceReadmeInventoryTest} across 3 cases -- holds the test census each service README
- *       publishes to that module's own test tree, so a class added or removed cannot leave a stale count
- *       standing in prose. The third case is the anti-vacuity floor.</li>
+ *   <li>{@code ServiceReadmeInventoryTest} across 6 cases -- holds every inventory a service README
+ *       publishes to that module's own trees, so a class added or removed cannot leave a stale count
+ *       standing in prose. THREE govern the test census: the two published tiers, the total stated beside
+ *       them, and an anti-vacuity floor over the READMEs that opt in. TWO govern the production tree: a
+ *       published inventory of production types, package charters and packages, and a file listing a
+ *       README delimits and calls closed, held to the tree in BOTH directions -- nothing listed that is
+ *       absent, nothing present that is unlisted. The sixth refuses the return of a withdrawn second
+ *       census marker. ⚠️ Refactoring Rationale: the production pair joined it because a review found
+ *       the shared kernel's own README stating three production figures that disagreed with each other
+ *       and with the tree, beside a note claiming its listing was closed while eight classes were absent
+ *       from it -- two of them production security controls, which reads as two controls that do not
+ *       exist rather than as two missing lines. The drift recurs in the direction the test census cannot
+ *       see: a stale test census understates COVERAGE, which reads as a gap, while a stale production
+ *       inventory understates the SURFACE. ⚠️ Refactoring Rationale: the sixth case exists because a
+ *       SECOND production-census marker was published for a time and is withdrawn -- it restated this
+ *       one's census in another spelling, so a README stated one census twice with nothing checking the
+ *       two statements against each other. Its pattern and its case are gone, so a README reintroducing
+ *       it would be measured by nothing at all, which is strictly worse than the redundancy the
+ *       withdrawal removed; that case is what makes the removal hold.</li>
+ *   <li>{@code DiagnosticRenderingRulesTest} across 3 cases -- holds every production record that carries
+ *       a protected or unbounded component to declaring its own {@code toString()}, and refuses the one
+ *       misuse the review found of the shared card masker: applying it to an account or customer
+ *       identifier, which that function abbreviates to its last four characters while the observability
+ *       contract requires such a value to be omitted. Assumptions: this class reads the SOURCE of all nine
+ *       modules rather than importing the executing module's classes, and it therefore runs ONCE -- the
+ *       {@code architecture-rules} execution carries only {@code LayeringRulesTest} into the services, so a
+ *       classpath-based rule hosted here would have gated the kernel alone while reading as though it gated
+ *       every module. ⚠️ Refactoring
+ *       Rationale: it joined this package because the prose rule in
+ *       {@code docs/architecture/observability.md} had no executable counterpart, and a review found
+ *       twenty-four records across seven modules relying on the rendering the compiler generates -- one of
+ *       them carrying a primary account number, an account identifier, a name, a six-component address, a
+ *       credit score and a balance together.</li>
+ *   <li>{@code PublishedContractClosureTest} across 8 cases -- holds all seven published contracts to the
+ *       protocol outcomes the shared runtime produces and to one canonical error-model facet set: 405 on
+ *       every operation, 406 wherever a body is returned, 413 and 415 wherever one is accepted, the
+ *       correlation contract on both halves of every operation and in BOTH forms a response is published
+ *       in -- inline and as a shared component, which are separate cases because 438 of the 555 published
+ *       responses are references and a component that omits the header omits it from every one of them --
+ *       a row ceiling on every page schema -- recognised by the keyset SHAPE rather than by a name suffix,
+ *       because one service publishes its envelope as {@code PageResponse} -- one set of widths and bounds on
+ *       the problem document, and the one narrowing that separates the correlation header from the body
+ *       member that carries the empty string when no identity was supplied, and the closure of every
+ *       response schema's {@code required} list over its own properties -- the pinned
+ *       {@code default-property-inclusion} writes every record component, so a published property is never
+ *       absent and a member that may hold no value is required AND nullable rather than optional; that
+ *       eighth case is structural rather than textual because a search of the seven documents for the word
+ *       "absent" returns thirty hits of which nearly all are legitimate, and a rule needing an exemption
+ *       list to stay green is not a rule. Assumptions: it reads the DOCUMENTS from the
+ *       filesystem rather than a generated client, so it runs once here and covers all seven; and it
+ *       asserts publication only -- the runtime half is asserted by {@code ProtocolRefusalRenderingTest}
+ *       and {@code RequestBodySizeFilterTest} in this module, and the two together are what make a
+ *       published document a description of behaviour. ⚠️ Refactoring Rationale: it joined this package
+ *       because a review measured 405 published on 10 operations of 61, 406 on 5, 415 on 5 of the 31 that
+ *       accept a body and 413 on none -- while every one of those refusals was already produced centrally
+ *       for every route.</li>
  *   <li>{@code ApplicationContextWiringContractTest} across 3 cases -- asserts that each deployable
  *       could actually refresh its context, in the three ways one of them could not: a collaborator a
  *       module injects but never publishes, a component declaring two constructors and marking neither,
@@ -213,9 +270,9 @@
  * </ul>
  *
  * <p>Refactoring Rationale: this section said two {@code .java} files and no others, and that
- * {@code LayeringRulesTest} declared six cases. Both figures are superseded: eight further
+ * {@code LayeringRulesTest} declared six cases. Both figures are superseded: NINE further
  * repository-reading checks have landed beside it and the rule class now declares nine. The
- * eight are here rather than in each module for the reason the layering rules are -- the check is
+ * nine are here rather than in each module for the reason the layering rules are -- the check is
  * identical everywhere, so nine copies would be nine files to keep in step -- and they read repository
  * FILES rather than importing service types, so the kernel's inward-only dependency rule is untouched.
  * The marker line above is re-measured against this directory by

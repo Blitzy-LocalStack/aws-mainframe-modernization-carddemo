@@ -184,9 +184,10 @@ class TestStagingDoubleBodyForms:
             dataset,
             STAGED_DATE,
             1,
-            source,
-            "extract.dat",
-            5,
+            source.name,
+            staging_root=tmp_path,
+            object_name="extract.dat",
+            retention_count=5,
         )
 
         expected_prefix = staging_settings.generation_prefix(domain, dataset, STAGED_DATE, 1)
@@ -235,7 +236,8 @@ class TestStagingDoubleBodyForms:
             dataset,
             STAGED_DATE,
             2,
-            source,
+            source.name,
+            staging_root=workspace,
             record_length=reclen,
         )
 
@@ -353,9 +355,10 @@ class TestStagingDoubleRetention:
             dataset,
             STAGED_DATE,
             3,
-            source,
-            "extract.dat",
-            5,
+            source.name,
+            staging_root=tmp_path,
+            object_name="extract.dat",
+            retention_count=5,
         )
         held_before = fake_object_store.stored_versions(staging_settings.bucket)
         assert held_before != ()

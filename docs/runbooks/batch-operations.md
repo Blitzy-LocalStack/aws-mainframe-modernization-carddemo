@@ -112,12 +112,131 @@ aws dynamodb get-item --table-name "$LEASE_TABLE" --consistent-read \
 
 Compare `expiresAt` with the current epoch second. If it is in the **future**, an
 execution legitimately holds the window: let it finish, or abort it so the
-finalizer rule releases the bracket. If it is in the **past**, no action is needed
-at all — the next acquisition will take the lease over, because the acquisition
-condition admits an expired lease. Trade-offs: that is why a crashed execution does
-not require an operator to clear anything by hand, and it is also why the item
-should not be deleted manually while `expiresAt` is still in the future — doing so
-would hand the bracket to a second execution while the first is still writing.
+finalizer rule releases the bracket. The lease itself needs no operator action once
+it expires: the acquisition condition admits an expired lease, so the next chain takes
+it over, and the scheduled reconciler below re-enables online writes without waiting
+for that acquisition. Trade-offs: the item should not be deleted manually while
+`expiresAt` is still in the future — doing so would hand the bracket to a second
+execution while the first is still writing.
+
+If `expiresAt` is in the **past**, read the **flag** as well, because the two
+answer different questions and only one of them decides whether online writes are
+working:
+
+```bash
+# WHAT: read the boolean every online service actually reads.
+# WHY : ⚠️ Refactoring Rationale: this runbook said an expired lease needed "no action
+#       at all", because the next acquisition takes it over. That is true of the LEASE
+#       and says nothing about the FLAG. Nothing observes an expiry and nothing writes
+#       the flag on it, so an expired lease beside a flag still reading false means
+#       online writes are refused right now and will stay refused until the next
+#       night's chain completes its own release. Reading only the lease is what turns a
+#       lost release into a day-long outage nobody is looking for.
+aws ssm get-parameter --name "$FLAG_PARAMETER" --query 'Parameter.Value' --output text
+```
+
+`true` means writes are enabled and the expired lease is harmless — the next
+acquisition takes it over. `false` with an expired lease means a release was lost.
+Check the finalizer rule's dead-letter queue, which the
+`carddemo-<env>-batch-release-dead-letters` alarm also fires on:
+
+```bash
+# WHAT: see whether a bracket-release event was never delivered, then redrive it.
+# WHY : Assumptions: redriving is preferred to writing the flag by hand, because the
+#       held message carries the terminating execution's NAME and the release condition
+#       is checked against it. A hand-written flag would open the window without the
+#       ownership check the release performs, which is the check that stops a release
+#       re-enabling writes inside another execution's live window.
+DLQ_URL="$(aws sqs get-queue-url --queue-name carddemo-<env>-batch-bracket-release-dlq \
+  --query QueueUrl --output text)"
+aws sqs get-queue-attributes --queue-url "$DLQ_URL" \
+  --attribute-names ApproximateNumberOfMessagesVisible
+aws sqs start-message-move-task --source-arn "$(aws sqs get-queue-attributes \
+  --queue-url "$DLQ_URL" --attribute-names QueueArn \
+  --query 'Attributes.QueueArn' --output text)"
+```
+
+A daily execution that failed **and** could not prove the bracket released ends in
+`CardDemoOnlineWritesStranded` rather than `CardDemoBatchFailed`. The two error
+names are two different jobs for an operator: the first says the online write path
+is still closed and should be acted on now, the second says tonight's work did not
+complete.
+
+A `releaseClaimedAt` attribute on the item distinguishes the two ways a lease can be
+live. Without it, the owner is still running the chain and `expiresAt` is the state
+machine's ceiling away. With it, the owner has already reached a release state and is
+between proving its ownership and writing the flag, so `expiresAt` is only the release
+window — five minutes — away. Assumptions: a lease still carrying `releaseClaimedAt`
+several minutes after `expiresAt` has passed means a release that never completed, and
+the diagnosis moves to that Lambda's log group rather than to the state machine: look
+for `event=online_write_lease_release_incomplete`, and read `enabled=` on it to see
+whether online writes were re-enabled before the lease was orphaned.
+
+### The three release paths, and what to do when none of them ran
+
+The bracket is released by whichever of three paths gets there first, and they differ
+in how much they can prove. Reading them in order is the fastest route to a diagnosis.
+
+| Path | Fires when | Proves before releasing |
+|---|---|---|
+| The two in-graph resume states | The execution reaches them | It owns the lease. Its tasks were already confirmed stopped by the graph's own cancellation states |
+| `<name>-<env>-batch-finalizer` rule | The daily execution ends `TIMED_OUT`, `ABORTED` or `FAILED` | It names the terminating execution as the owner, **and** confirms no task carrying the chain's `startedBy` marker is short of `STOPPED` |
+| `<name>-<env>-batch-bracket-reconciler` rule | Every `reconcile_interval_minutes`, 15 by default | It derives the owner from the lease, **and** confirms the owning execution is no longer `RUNNING`, **and** confirms the tasks are terminal |
+
+Assumptions: the finalizer REFUSING is a normal outcome after an aborted run, not a
+fault. An ECS task started by a synchronous run-task state outlives the state that
+started it, so at the instant an execution is aborted its container is usually still
+draining — and a release granted then would re-enable online writes underneath a
+posting container that is still writing. The reconciler picks the bracket up on its
+next cycle once the tasks have stopped, so the release is late rather than unsafe.
+
+```bash
+# WHAT: read why the last reconcile cycle did or did not release the bracket.
+# WHY : Assumptions: every cycle logs one line whether or not it releases, so the
+#       reason is a fact rather than an inference. `reconciled=false` with
+#       refused=<reason> is the normal idle answer -- "no lease is held" -- and the
+#       same field names the exact fact that was missing when a bracket is stuck.
+ENVIRONMENT=dev
+aws logs filter-log-events \
+  --log-group-name "/aws/lambda/carddemo-${ENVIRONMENT}-resume-online-writes" \
+  --filter-pattern "event=online_write_gate_updated" \
+  --max-items 20 \
+  --query 'events[].message' --output text
+```
+
+The refusal reasons a stuck bracket produces, and what each one means:
+
+| `refused=` | Meaning | Action |
+|---|---|---|
+| `no lease is held` | Nothing is stranded | None. This is the idle answer |
+| `lease has not expired and records no owning execution to verify` | A hand-run acquisition, still inside its window | Wait for expiry, or release deliberately by invoking the resume function with the owner named |
+| `owning execution is still RUNNING` | A legitimate long night | None. Let it finish |
+| `N batch task(s) are still desired-RUNNING` | Tasks abandoned by a terminated execution are still writing | Confirm they are the chain's, then let them finish or stop them. The next cycle releases |
+| `N batch task(s) have not reached STOPPED` | A stop was issued and the container has not exited | Wait out the container stop timeout |
+| `batch task terminality cannot be confirmed without ...` | The resume function is missing `BATCH_TASK_CLUSTER_ARN` or `BATCH_TASK_STARTED_BY` | Re-apply the environment root; the release is withheld until it can be justified |
+| `owning execution status could not be read (...)` | `states:DescribeExecution` was denied or failed | Check `<name>-<env>-online-write-reconcile` is attached to the online-write Lambda role |
+
+```bash
+# WHAT: read the undeliverable release invocations EventBridge could not hand over.
+# WHY : Assumptions: this queue has NO consumer by design, so a message stays until an
+#       operator purges it and the depth alarm stays in ALARM until they do -- an alarm
+#       that cleared itself while the message remained would report the problem gone.
+#       Each body is one bracket release that never happened, and it names the execution.
+ENVIRONMENT=dev
+QUEUE_URL="$(terraform -chdir="infra/envs/${ENVIRONMENT}" output -json batch_orchestration \
+  | jq -r '.bracket_release_dead_letter_queue_url')"
+aws sqs receive-message --queue-url "$QUEUE_URL" --max-number-of-messages 10 \
+  --visibility-timeout 0 --query 'Messages[].Body' --output text
+```
+
+Once the bracket is released and the cause understood, purge the queue so the depth
+alarm clears: `aws sqs purge-queue --queue-url "$QUEUE_URL"`.
+
+Three alarms publish to the same notification topic the chain's failures use, and
+between them they cover every way the out-of-execution release can fail: the two
+rules' `FailedInvocations`, the resume function's `Errors`, and this queue's depth.
+Their names are published as `bracket_release_alarm_names` in the
+`batch_orchestration` output.
 
 ## Start an Ad-Hoc Report
 
@@ -301,8 +420,18 @@ refusal names both published forms.
 # WHY : Assumptions: BOTH sources are named by the operator rather than derived,
 #       because the extract being loaded was not necessarily produced by this
 #       machine -- the reference programs' own output is a legitimate input and
-#       carries no run identifier a graph could reconstruct. Either source may be
-#       an s3:// location or a filesystem path inside the container.
+#       carries no run identifier a graph could reconstruct.
+# WHY : ⚠️ Refactoring Rationale: this note said "either source may be an s3://
+#       location or a filesystem path inside the container". Both are now refused
+#       unless they match s3://<dataset bucket>/authorization/extract/*, the same
+#       space the unload mode computes its own destinations in. The locations were
+#       checked for presence only and then forwarded verbatim into a container
+#       argument, written into the execution log at every transition and copied into
+#       the failure notification, so the machine's public API accepted -- and
+#       republished -- any string at all, including another account's bucket and a
+#       container-local path. To load an extract the reference programs produced,
+#       copy it under that prefix first; that is one object-store copy and it keeps
+#       both directions addressing one location space.
 # WHY : Assumptions: the load is IDEMPOTENT on the rows it inserts -- it reports
 #       alreadyPresent for a row it finds -- but it is NOT a no-op against a schema
 #       a purge has run on, because a row the purge deleted is absent and will be
@@ -317,9 +446,11 @@ aws stepfunctions start-execution \
       '{mode:"load", rootExtract:$roots, childExtract:$children}')"
 ```
 
-An input naming no `mode`, or a `mode` whose own arguments are absent, is refused
-by `ValidateAuthorizationExtractRequest` before any task starts, and the operator
-sees `InvalidAuthorizationExtractRequest` with the two accepted shapes named.
+An input naming no `mode`, a `mode` whose own arguments are absent, or a load whose
+`rootExtract` or `childExtract` falls outside the deployment's own
+`authorization/extract/` prefix is refused by
+`ValidateAuthorizationExtractRequest` before any task starts, and the operator sees
+`InvalidAuthorizationExtractRequest` with the accepted shapes named.
 Inspect and redrive an execution of this machine exactly as for the others above.
 
 ## Poison-Message Handling

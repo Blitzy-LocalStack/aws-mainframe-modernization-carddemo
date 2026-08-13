@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.IOException;
 import java.sql.SQLException;
+import java.util.Locale;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -252,27 +253,33 @@ class FailureSummaryTest {
     }
 
     /**
-     * The default-withheld renderer shows a driver's condition and withholds everything else.
+     * The default-withheld renderer names a driver's condition and withholds every message.
      *
      * <p>⚠️ Purpose: this is the rendering a generic log site uses -- a queue error handler, a job runner --
      * because such a site receives whatever the work it wrapped raised and cannot reason about who composed
-     * the message. The gate is the presence of a database state code, which is the only evidence available
-     * that a JDBC driver wrote the text.
+     * the message. The gate is the presence of a database state code; what passes the gate is a NAME drawn
+     * from a closed map, not the driver's sentence.
      *
-     * <p>⚠️ Assumptions: the withheld half is asserted with a message carrying an ACCESS-KEY identifier and
-     * no digit run at all, because that is the case that makes the gate necessary rather than tidy. A digit
-     * rule cannot recognise a credential, so a renderer that showed every message would have put that
-     * identifier into an operational log while passing every assertion about digits.
+     * <p>⚠️ Refactoring Rationale: this case previously asserted that the driver's own words appeared, with
+     * {@code contains("numeric field overflow")}. That expectation encoded the defect: rendering the
+     * message meant rendering whatever the server had folded into it, and the PostgreSQL driver folds its
+     * {@code DETAIL} field in by default. The expectation is now the condition NAME the state code maps to,
+     * and the sibling case below holds the absence the old expectation permitted.
+     *
+     * <p>⚠️ Assumptions: the withheld half is still asserted with a message carrying an ACCESS-KEY
+     * identifier and no digit run at all, because that is the case that makes the gate necessary rather
+     * than tidy. A digit rule cannot recognise a credential, so a renderer that showed every message would
+     * have put that identifier into an operational log while passing every assertion about digits.
      */
     @Test
-    @DisplayName("the default-withheld renderer shows a driver condition and withholds other messages")
+    @DisplayName("the default-withheld renderer names a driver condition and withholds other messages")
     void theDefaultWithheldRendererShowsOnlyDriverConditions() {
         Throwable driverFailure = new IllegalStateException("could not execute statement",
                 new SQLException("ERROR: numeric field overflow", "22003"));
 
         assertThat(FailureSummary.databaseConditionOf(driverFailure))
-                .as("a chain carrying a state code was composed by a driver, so its words are shown")
-                .contains("numeric field overflow");
+                .as("22003 is the engine's numeric_value_out_of_range, and the NAME is what is shown")
+                .isEqualTo("numeric_value_out_of_range");
 
         Throwable transportFailure = new IllegalStateException(
                 "connect failed to https://sqs.example.invalid using key AKIAEXAMPLEKEY");
@@ -285,6 +292,94 @@ class FailureSummaryTest {
         assertThat(FailureSummary.databaseConditionOf(new SQLException("no state declared")))
                 .as("a database type with no state code is no evidence either, so it withholds too")
                 .isEqualTo(FailureSummary.WITHHELD);
+    }
+
+    /**
+     * No word of a driver's message survives the condition renderer, however the message is shaped.
+     *
+     * <p>⚠️ Purpose: this is the security assertion the previous {@code contains} expectation made
+     * impossible to write. The renderer is handed the exact text the PostgreSQL driver produces for a check
+     * violation with its default {@code logServerErrorDetail}, measured from a live engine against the
+     * migrated identity table, and every value in that text is asserted ABSENT.
+     *
+     * <p>⚠️ Assumptions: the sentinels are of two kinds because the previous rendering caught neither and
+     * a rule aimed at one would not catch the other. {@code Nightingale} is FREE TEXT -- letters, so the
+     * digit rule left it untouched -- and {@code 4111111111111111} plus {@code 00000000123} are NUMERIC,
+     * one of card shape and one of account shape. A renderer that masked digits and echoed words would pass
+     * a numeric-only assertion and fail this one.
+     *
+     * <p>⚠️ Assumptions: the constraint and relation names are asserted PRESENT in the same case, because
+     * an implementation that returned the condition name alone would satisfy every absence here while
+     * losing the diagnosis the field exists to carry. Both directions have to hold together for the field
+     * to be both safe and useful.
+     */
+    @Test
+    @DisplayName("no value from a driver message reaches the condition renderer's output")
+    void theConditionRendererEmitsNoWordOfTheDriverMessage() {
+        Throwable measured = new IllegalStateException(
+                "could not execute statement [ERROR: new row for relation \"users\" violates check"
+                        + " constraint \"users_user_type_check\"\n  Detail: Failing row contains"
+                        + " (admin001, grace, nightingale, x, 4111111111111111, 00000000123).]",
+                new SQLException("ERROR: new row for relation \"users\" violates check constraint"
+                        + " \"users_user_type_check\"\n  Detail: Failing row contains (admin001, grace,"
+                        + " nightingale, x, 4111111111111111, 00000000123).", "23514"));
+
+        String rendered = FailureSummary.databaseConditionOf(measured);
+
+        assertThat(rendered)
+                .as("23514 is the engine's check_violation, and the name leads the rendering")
+                .startsWith("check_violation");
+        assertThat(rendered)
+                .as("the constraint name is a DDL name and is the diagnostic half worth keeping")
+                .contains("constraint=users_user_type_check");
+        assertThat(rendered)
+                .as("the relation name is a DDL name too, and names the object the rule guards")
+                .contains("relation=users");
+        assertThat(rendered.toLowerCase(Locale.ROOT))
+                .as("free text from the rejected row must not survive; this is the surname sentinel")
+                .doesNotContain("nightingale")
+                .doesNotContain("grace")
+                .doesNotContain("failing row")
+                .doesNotContain("detail");
+        assertThat(rendered)
+                .as("no numeric value from the rejected row may survive either, masked or otherwise")
+                .doesNotContain("4111")
+                .doesNotContain("123")
+                .doesNotContain(String.valueOf(FailureSummary.REDACTION_CHARACTER));
+    }
+
+    /**
+     * A quoted value that is not preceded by one of the engine's keywords is never emitted as a name.
+     *
+     * <p>⚠️ Purpose: the identifier capture is anchored on the engine's literal keywords, and this holds
+     * that anchor in place. The engine quotes an identifier after {@code constraint}, {@code relation} and
+     * {@code column}, and quotes a VALUE after other lead-ins; the value in this fixture has exactly the
+     * shape of a legal identifier, so a rule that tested only the shape would emit it.
+     *
+     * <p>⚠️ Assumptions: an unmapped state code is asserted in the same case, because both properties
+     * concern the renderer refusing to invent content. The code is a real PostgreSQL one this map does not
+     * list -- {@code 22P03}, invalid binary representation -- so it resolves through its class to
+     * {@code data_exception} rather than to the unclassified token, which is the tier that would otherwise
+     * go untested.
+     */
+    @Test
+    @DisplayName("a quoted value not preceded by an engine keyword is not emitted as an identifier")
+    void theConditionRendererEmitsOnlyKeywordAnchoredNames() {
+        Throwable quotedValue = new SQLException(
+                "ERROR: invalid input syntax for type integer: \"Nightingale\"", "22P03");
+
+        String rendered = FailureSummary.databaseConditionOf(quotedValue);
+
+        assertThat(rendered)
+                .as("22P03 is unlisted, so its class 22 resolves it to the standard data_exception")
+                .isEqualTo("data_exception");
+        assertThat(rendered.toLowerCase(Locale.ROOT))
+                .as("a quoted value shaped like an identifier must not be captured as one")
+                .doesNotContain("nightingale");
+
+        assertThat(FailureSummary.databaseConditionOf(new SQLException("refused", "ZZ999")))
+                .as("a code in no known class resolves to the unclassified token, naming the map's gap")
+                .isEqualTo(FailureSummary.UNCLASSIFIED_CONDITION);
     }
 
     /**

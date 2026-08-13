@@ -59,7 +59,7 @@
  * the reason these seven definitions sit together while the rules they enforce
  * sit elsewhere.</p>
  *
- * <p>Five of the seven are states in the eleven-state
+ * <p>Five of the seven are states in the twelve-state
  * {@code carddemo-daily-batch} Step Functions state machine, each invoked as a
  * Fargate task through the synchronous run-task integration. The other two are
  * operator-invoked and stand outside the nightly chain. Because the

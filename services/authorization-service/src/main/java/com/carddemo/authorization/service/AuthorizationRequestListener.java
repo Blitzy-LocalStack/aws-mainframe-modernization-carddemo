@@ -707,7 +707,22 @@ public class AuthorizationRequestListener {
                 // window, so a redelivery after that window arrives as a new message. Re-publishing the
                 // recorded answer keeps the requester served without incrementing the account's counters
                 // a second time, which is what re-deciding would do.
-                LOG.info("event=auth.request.replayed transactionId={}", request.transactionId());
+                // WHY : ⚠️ Refactoring Rationale: this statement named the acquirer's TRANSACTION
+                // IDENTIFIER and no longer does. That value is the key of the decision this service
+                // recorded and of the ledger entry behind it, so a durable log line carrying it links
+                // log access to a financial record -- and this is an INFO line, emitted on an ordinary
+                // redelivery, so it is among the most frequently written lines this class has. What
+                // discriminates the line instead is the CORRELATION IDENTIFIER, which is in the mapped
+                // diagnostic context for the whole of this method -- set at the top of the enclosing
+                // try and removed in its finally -- so the shared structured format renders it on this
+                // line and on every other line of the same handling, including the reply enqueued on
+                // the statement below. Alternatives Considered: a keyed opaque token over the
+                // identifier, which this context can mint because it already holds a tokeniser bean.
+                // Rejected because the constructor's own record states this class deliberately takes no
+                // tokeniser, and because the correlation identifier already joins the line to its
+                // request; the decision itself remains addressable in the governed table by the
+                // identifier, which is where a query for it belongs.
+                LOG.info("event=auth.request.replayed");
                 enqueueReply(replyQueueUrl, replyFor(alreadyDecided.get()), correlationId, now);
                 return;
             }
@@ -1172,7 +1187,7 @@ public class AuthorizationRequestListener {
         //       hold is preserved.
         long accountId = xref.accountId();
         if (summary.isPresent()) {
-            return contributeToStoredSummary(accountId, account, request, proposed, context);
+            return contributeToStoredSummary(accountId, account, summary, request, proposed, context);
         }
         if (insertFirstSummary(accountId, xref, account, request, proposed) == 1) {
             // WHY : Assumptions: the INSERT arm needs no credit guard and is the one approval path that
@@ -1203,7 +1218,14 @@ public class AuthorizationRequestListener {
             //       account identifier, so a loaded instance would be an unused object whose presence
             //       invited exactly the whole-row flush the statements exist to avoid. Its assertion is not
             //       lost -- each statement's row count is checked, and a zero raises the same refusal.
-            return contributeToStoredSummary(accountId, account, request, proposed, context);
+            // WHY : Assumptions: the summary is passed EMPTY here and the counter report below therefore
+            //       does not fire, which is correct rather than a gap. This arm is reached only when this
+            //       transaction found no summary and its insert was refused as a conflict, so the row it
+            //       is about to contribute to was created by another party within this window and carries
+            //       a counter of one -- four orders of magnitude from the bound the report exists to
+            //       announce.
+            return contributeToStoredSummary(accountId, account, Optional.empty(), request, proposed,
+                    context);
         }
     }
 
@@ -1308,16 +1330,22 @@ public class AuthorizationRequestListener {
      * are two groups and are delivered in parallel. Two authorizations for one account are an ordinary
      * concurrent case.</p>
      *
-     * <p>Assumptions: the summary instance this transaction read earlier is deliberately NOT passed in
-     * and is deliberately not refreshed afterwards. Nothing downstream reads it -- the decision was
-     * already taken from it before this write, and the detail row that follows is projected from the
-     * reply -- and leaving it untouched is what guarantees there is no dirty state for the commit to
-     * flush. A statement's effect is invisible to an instance the persistence context already holds, so
-     * a method that both wrote by statement and went on reading the instance would be reading values
-     * the row no longer carries.</p>
+     * <p>⚠️ Assumptions: the summary instance this transaction read earlier IS passed in, and it is read
+     * for exactly one purpose -- reporting a counter that this contribution will leave resting on its
+     * four-digit bound -- and is neither mutated nor refreshed. Refactoring Rationale: it used to be
+     * withheld, and this paragraph said so, because nothing downstream needed it; the counter clamp the
+     * three contribution statements now apply changed that, since a clamp performed inside a statement
+     * cannot report itself and the pre-state is the only place the condition is visible without a second
+     * query. The reason it was withheld still holds and still governs: no value is assigned to the
+     * instance, so there is no dirty state for the commit to flush, and no value is READ BACK from it after
+     * a statement runs -- a statement's effect is invisible to an instance the persistence context already
+     * holds, so reading one afterwards would report values the row no longer carries.</p>
      *
      * @param accountId the account whose summary receives the contribution
      * @param account the account master record, empty when it was not found; must not be {@code null}
+     * @param summary the summary this transaction read, empty on the arm reached after an insert conflict;
+     *     read ONLY to report a counter about to rest on its four-digit bound, never written; must not be
+     *     {@code null}
      * @param request the decoded request, whose amount a decline accumulates; must not be {@code null}
      * @param proposed the decision the decision service reached; must not be {@code null}
      * @param context the lookup outcomes that proposal was reached from, needed to select the reason a
@@ -1329,8 +1357,8 @@ public class AuthorizationRequestListener {
      *     work rolls back rather than committing a decision whose contribution reached no summary
      */
     private AuthorizationDecisionService.Decision contributeToStoredSummary(long accountId,
-            Optional<AccountContextClient.Account> account, AuthRequest request,
-            AuthorizationDecisionService.Decision proposed,
+            Optional<AccountContextClient.Account> account, Optional<PendingAuthSummary> summary,
+            AuthRequest request, AuthorizationDecisionService.Decision proposed,
             AuthorizationDecisionService.DecisionContext context) {
         // WHY : Assumptions: the refresh is conditional on the account master having been READ, which is
         //       the divergence persist(...) records as D-SUMMARY-LIMIT-REFRESH. Its row count is checked
@@ -1352,10 +1380,21 @@ public class AuthorizationRequestListener {
         }
 
         AuthorizationDecisionService.Decision confirmed = proposed;
+        if (proposed.approved()) {
+            // WHY : Assumptions: the counter's saturation is detected from the PRE-STATE this transaction
+            //       already read, so no extra query is issued for a condition that is normally absent. The
+            //       statement below clamps the counter atomically -- see the repository's own rationale and
+            //       the registered divergence D-SUMMARY-COUNTER-SATURATION -- and clamping cannot report
+            //       itself, because a modifying query returns a row count and not which assignment it
+            //       bounded.
+            reportCounterNarrowing(summary, PendingAuthSummary::getApprovedAuthCount,
+                    "approvedAuthCount", 1);
+        }
         if (proposed.approved()
                 && this.summaries.reserveApprovedAuthorization(accountId,
                         proposed.approvedAmount().amount(),
-                        PendingAuthSummary.MONEY_MAX_MAGNITUDE) == 0) {
+                        PendingAuthSummary.MONEY_MAX_MAGNITUDE,
+                        PendingAuthSummary.COUNTER_MAX) == 0) {
             // WHY : Refactoring Rationale: an approval is applied by a statement QUALIFIED on the same credit
             //       check the decision made, and a zero row count SUPERSEDES the approval rather than being
             //       treated as a missing row. The unguarded statement that stood here made the accumulation
@@ -1388,9 +1427,15 @@ public class AuthorizationRequestListener {
             // is what it now is. The requested amount is added to the declined total and the declined count
             // advances, which is exactly the row the reference would hold had it decided the two requests in
             // sequence -- the second reads the first's contribution and declines for want of funds.
+            // WHY : Assumptions: the declined counter is the one that reaches the bound first, because an
+            //       account whose limit is exhausted declines every further request and advances only this
+            //       member; the report is therefore worth making on the path that is expected to trip it.
+            reportCounterNarrowing(summary, PendingAuthSummary::getDeclinedAuthCount,
+                    "declinedAuthCount", 1);
             requireSummaryChanged(this.summaries.addDeclinedAuthorization(accountId,
                     request.transactionAmount().amount(),
-                    PendingAuthSummary.MONEY_MAX_MAGNITUDE));
+                    PendingAuthSummary.MONEY_MAX_MAGNITUDE,
+                    PendingAuthSummary.COUNTER_MAX));
         }
         return confirmed;
     }
@@ -1448,6 +1493,43 @@ public class AuthorizationRequestListener {
         if (rowsChanged != 1) {
             throw new IllegalStateException(rowCountFailureSentence());
         }
+    }
+
+    /**
+     * Warns when the contribution about to be applied will leave a counter resting on its bound.
+     *
+     * <p>Purpose: the three statements that move these counters clamp them to the four-digit domain
+     * {@code PIC S9(04) COMP} declares, which is what keeps an account answerable once it has recorded
+     * 9999 authorizations of one kind. A clamp is silent by construction -- the statement returns a row
+     * count -- so this is the line that says a stored count has stopped tracking the authorizations behind
+     * it.</p>
+     *
+     * <p>Assumptions: the check is made against the summary this transaction ALREADY READ, and it is
+     * skipped when there is none. That keeps the normal path free of an extra query for a condition an
+     * account reaches once in ten thousand authorizations, and the one arm that holds no summary cannot be
+     * near the bound, for the reason recorded at that call site.</p>
+     *
+     * <p>Assumptions: only the account identifier, the member and the two values are named. The account
+     * identifier is not a protected value -- every line this class writes carries it -- while the card
+     * number and the amounts are, so neither appears here.</p>
+     *
+     * @param summary the summary read in this transaction, empty when none was read; must not be
+     *     {@code null}
+     * @param counter the accessor of the member this contribution advances; must not be {@code null}
+     * @param field the member's name, reproduced in the report; must not be {@code null}
+     * @param addend how much this contribution adds to that member, of type {@code int}
+     */
+    private static void reportCounterNarrowing(Optional<PendingAuthSummary> summary,
+            java.util.function.Function<PendingAuthSummary, Short> counter, String field, int addend) {
+        summary.ifPresent(stored -> {
+            int next = counter.apply(stored) + addend;
+            if (PendingAuthSummary.exceedsCounterDomain(next)) {
+                LOG.warn("event=auth.summary.counter-narrowed accountId={} field={} requested={} "
+                                + "stored={}",
+                        stored.getAccountId(), field, next,
+                        PendingAuthSummary.narrowedCounterToStoredDomain(next));
+            }
+        });
     }
 
     /**

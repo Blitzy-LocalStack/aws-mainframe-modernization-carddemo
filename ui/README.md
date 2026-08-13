@@ -86,7 +86,12 @@ a label only at the same point, even though the key itself is accepted earlier.
 
 ## Prerequisites
 
-- Node.js satisfying `ui/package.json` (`^22.22.0 || >=24.0.0`)
+- Node.js satisfying `ui/package.json` (`^22.23.2 || >=24.18.1`) — this is a
+  security floor rather than a compatibility one: the highest floor any dependency
+  in the lock file asks for is 22.22.0, and the range sits above it because 22.23.2
+  and 24.18.1 are the first releases on their lines carrying the three HIGH fixes
+  from Node's 29 July 2026 security release. `ui/package.json` records the CVE
+  identifiers, and the range moves again with the next advisory.
 - npm with the committed `package-lock.json`
 - a non-secret API base URL
 

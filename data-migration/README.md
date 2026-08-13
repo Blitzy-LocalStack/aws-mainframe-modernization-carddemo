@@ -78,15 +78,29 @@ VSAM, Db2 or IMS. That is what makes the deployment satisfy the migration's
 > generation writer, the credential-application bootstrap, the schema/role DDL, the
 > masked reporting views, the twelve fixed-width readers, the shared timestamp
 > authority, the Aurora bulk loader with its protected-column ciphers, the
-> three verification passes, and the command-line entry point carrying the ten
-> subcommands whose backing modules are present — `list-datasets`, `decode-record`,
-> `stage-dataset`, `apply-credentials`, `reconcile-sequences`, `load-dataset`,
-> `verify-row-counts`, `verify-checksum`, `verify-money-parity` and
-> `verify-row-count-report`. The one command still
-> **not registered**
-> is `verify-all`, which would sequence the three passes and stop at the first failure:
-> it needs a dataset-to-source manifest this distribution does not carry, because every
-> verification command here is told its source explicitly.
+> three verification passes, the combined verification gate, and the command-line entry point
+> carrying **all thirteen** subcommands — `list-datasets`, `decode-record`, `stage-dataset`,
+> `refresh-dataset`, `apply-credentials`, `reconcile-sequences`, `load-dataset`,
+> `verify-row-counts`, `verify-checksum`, `verify-money-parity`, `verify-row-count-report`,
+> `verify-money-total-report` and `verify-all`. **Nothing is contracted-but-unregistered any
+> more**, so `--help` and [§5.2](#52-subcommands-and-their-arguments) agree one-for-one.
+> Assumptions: `refresh-dataset` registers no new capability of its own; it composes the staging,
+> loading, verification and reconciliation commands beside it into the one invocation the nightly
+> seed-refresh state makes, so the roster gains a row without the package gaining a module.
+>
+> Refactoring Rationale: `verify-all` was the last command this note recorded as not registered,
+> and the reason given — that sequencing the three passes needs a dataset-to-source manifest this
+> distribution does not carry, because every other verification command is told its source
+> explicitly — was a real gap and is now closed twice over, which is why the verb accepts two
+> coverage sources rather than one. An operator may be told in, through `--manifest`; and with no
+> manifest the seed registry in
+> [`seed_datasets.py`](src/carddemo_migration/seed_datasets.py) IS the manifest — it names every
+> dataset, its owning context, its prefix segments and its extract file, and an omitted `--source`
+> resolves to the newest STAGED generation of that dataset. What the absence cost was worse than an
+> unreachable capability, because the three passes remained individually reachable: a cutover could
+> run two of them and read each command it managed to run as green, so "verified" meant whatever the
+> operator happened to invoke. The chain's `VerifyMigration` state invokes exactly this verb, and it
+> is the only edge into business processing.
 >
 > Refactoring Rationale: this note previously recorded the readers, the loader and the
 > verification passes as undelivered, and the parser correspondingly advertised four
@@ -103,9 +117,9 @@ VSAM, Db2 or IMS. That is what makes the deployment satisfy the migration's
 > belongs BEFORE a load rather than after one -- it proves the delivered bytes match the
 > declared geometry while nothing has been written yet.
 > [§2](#2-directory-layout) marks each item and [§5.2](#52-subcommands-and-their-arguments)
-> marks each subcommand. `python -m carddemo_migration.cli --help` and every
-> registered subcommand run against this checkout; an unregistered one is refused as
-> a usage error rather than failing part-way through.
+> marks each subcommand. `python -m carddemo_migration.cli --help` and every one of the
+> eleven subcommands run against this checkout; a misspelled verb is refused as a usage
+> error rather than failing part-way through.
 >
 > Assumptions: a source-record cutover from this checkout is now a matter of
 > CREDENTIALS AND A CLUSTER rather than of missing code. The load and the three
@@ -114,11 +128,20 @@ VSAM, Db2 or IMS. That is what makes the deployment satisfy the migration's
 > columns that this package now produces under the same envelope framing and the same
 > key the owning service reads, as [§5.2](#52-subcommands-and-their-arguments)
 > records, and `TRAN`, the transaction master, for which the seed corpus ships no extract
-> and an absent one is a zero-row success rather than a failure. Two things a cutover
-> claim must still account for: the checksum pass
-> serves three of the eleven records rather than all eleven, for the measured reason in
-> [§10](#10-verification), and nothing here has been exercised against a provisioned
-> Aurora cluster.
+> and an absent one is a zero-row success rather than a failure. All three verification
+> passes now serve every record they can be asked about — pass 1 and pass 2 all eleven
+> loadable records, pass 3 the five that carry a money column
+> ([§10](#10-verification)) — so the one thing a cutover claim must still account for is
+> that nothing here has been exercised against a provisioned Aurora cluster.
+>
+> Refactoring Rationale: this paragraph recorded the checksum pass as serving three of
+> the eleven records, which was accurate while its canonicaliser admitted only
+> characters, an exact decimal and raw bytes. It is now layout-aware: an integer,
+> a date, a timestamp, a UUID and a null each canonicalise under their own type tag, and
+> an identifier read back as a number is rendered into the declared digit width the
+> reader publishes. The eight records the pass could not serve were the eight carrying a
+> `BIGINT`, `DATE`, `SMALLINT`, `TIMESTAMP` or `UUID` comparable column, and that is the
+> defect that was fixed rather than a limit that was accepted.
 >
 > Refactoring Rationale: this paragraph recorded `CUSTOMER` and `CARD` as deliberately
 > refused, which was accurate while the loader held no cipher for their `*_encrypted`
@@ -133,8 +156,8 @@ VSAM, Db2 or IMS. That is what makes the deployment satisfy the migration's
 > reading it would have written a second copy of something that already exists, or
 > concluded that a path they could see in the tree was not meant to be used. The
 > inventory is measured rather than remembered: `src/carddemo_migration/` holds
-> **thirty-four** modules and `ruff check . --show-files` lists **sixty-two** governed
-> files, and [`pyproject.toml`](pyproject.toml) states the same two numbers so a
+> **thirty-seven** modules and `ruff check . --show-files` lists **seventy-four**
+> governed files, and [`pyproject.toml`](pyproject.toml) states the same two numbers so a
 > disagreement between the two files is visible.
 >
 > Refactoring Rationale: these two figures read thirty-one and forty-nine here while
@@ -142,16 +165,18 @@ VSAM, Db2 or IMS. That is what makes the deployment satisfy the migration's
 > was itself broken — the two files disagreed and nothing surfaced it. Both are now
 > set from the same two commands, run against this tree.
 >
-> Assumptions: an unimplemented subcommand is left OUT of the parser rather than
-> registered and made to fail. A registered command that cannot work would be
-> advertised by `--help`, an orchestrator author would wire a batch state to it, and
-> the failure would then arrive in a deployment instead of at the point where the
-> command was chosen. The `--encoding` selector described in
-> [§6.2](#62-what-the-shipped-seed-data-actually-contains) is now a usable flag: it
-> belongs to `load-dataset` and to the three verification commands, all of which are
-> registered, and it is **required** on each of them rather than defaulted. Assumptions:
-> requiring it is deliberate — the seed form is declared rather than sniffed, because an
-> all-ASCII EBCDIC dataset sniffs as text and decodes to plausible wrong values.
+> Assumptions: an unimplemented subcommand would be left OUT of the parser rather than
+> registered and made to fail. A registered command that cannot work would be advertised
+> by `--help`, an orchestrator author would wire a batch state to it, and the failure
+> would then arrive in a deployment instead of at the point where the command was chosen.
+> No such command remains — all eleven are implemented — so the rule is recorded here for
+> the next one rather than describing anything in this tree.
+>
+> Assumptions: the `--encoding` selector belongs to `load-dataset` and to the three
+> per-dataset verification commands, and it is **required** on each of them rather than
+> defaulted, for the reason [§6.2](#62-seven-facts-a-reader-would-otherwise-rediscover-the-hard-way)
+> measures: the seed form is declared rather than sniffed, because an all-ASCII EBCDIC
+> dataset sniffs as text and decodes to plausible wrong values.
 
 ---
 
@@ -181,7 +206,7 @@ data-migration/
 │   ├── config.py                 delivered -- runtime settings, resolved when a command runs
 │   ├── credentials.py            delivered -- applies each generated credential to its role
 │   ├── role_credentials.py       delivered -- SCRAM verifier derivation and role bootstrap
-│   ├── cli.py                    delivered -- the ten registered subcommands in section 5
+│   ├── cli.py                    delivered -- the twelve registered subcommands in section 5
 │   ├── copybook/
 │   │   ├── __init__.py           delivered -- makes the subpackage a regular package
 │   │   ├── layouts.py            delivered -- offset, length and usage, declared ONCE
@@ -243,6 +268,8 @@ data-migration/
     ├── test_shared_doubles.py          delivered
     ├── test_timestamp.py               delivered -- the two admitted stamp forms, round-tripped
     ├── test_verification.py            delivered -- the three passes and their two queries
+    ├── test_verification_authority.py  delivered -- the read-only role the passes run as
+    ├── test_verify.py                  delivered -- the checksum pass's own mechanism
     └── test_zoned.py                   delivered
 ```
 
@@ -329,37 +356,52 @@ unrelated project from PyPI rather than this directory.
 ## 5. Command-line interface
 
 **This section is the contract.** [`src/carddemo_migration/cli.py`](src/carddemo_migration/cli.py)
-implements the ten subcommands marked **registered** in
+implements all thirteen subcommands tabulated in
 [§5.2](#52-subcommands-and-their-arguments) below, and
 [`MIGRATION_README.md`](../MIGRATION_README.md) publishes the invocation. Nothing here
 describes a flag that should not be implemented, and no two subcommands do the same
-work.
+work. `python -m carddemo_migration.cli --help` lists exactly these thirteen, so the
+table and `--help` agree one-for-one.
 
-Assumptions: the one subcommand marked **contracted** — `verify-all` — is stated here but
-is deliberately **not registered** by the parser, because it is the only one with no
-implementation: sequencing the three passes and stopping at the first failure needs a
-dataset-to-source manifest this distribution does not carry, since every verification
-command here is told its source explicitly. So
-`python -m carddemo_migration.cli --help` lists ten subcommands, not eleven, and
-naming the contracted one is refused as a usage error (exit 2). It remains documented
-because the batch state machine and this package's `Dockerfile` are written against
-the whole set, and filling an interface in later is a smaller change than renaming one.
+Assumptions: **no subcommand is marked contracted.** The table below therefore carries no
+unreachable row, which is the property this section's own convention exists to make visible: a
+name in it is a name an operator can invoke.
 
-Refactoring Rationale: this section previously described four registered and five
-contracted subcommands, on the stated premise that the backing modules — `readers/`,
-`loaders/aurora.py` and `verify/` — were not in this distribution. They are: all three
-are present, so the premise was true of the distribution this text was written against
-and false of this one. Four commands were therefore documented as unreachable while the
-code behind them already worked, which is the same defect the paragraph below warns
-about with the sign reversed — a capability an operator cannot reach is as much a
-mismatch between `--help` and this table as a command that cannot run.
+Refactoring Rationale: `verify-all` was the last row marked **contracted**, and the reason it
+carried that mark — that an aggregate over every dataset cannot be told on the command line where
+each extract is — is closed from both ends: the verb takes a `--manifest` to be told in, and with
+none it covers the datasets the seed registry declares. Alternatives Considered: letting
+`--dataset` mean "every dataset" on the three per-dataset passes. Rejected because each would then
+have had to resolve every extract's PATH for itself, and a verification that guesses where the
+bytes are is a verification of whatever it found.
 
-Trade-offs: the alternative was to register all nine and have the one unbacked command
-fail when invoked. That was rejected: `--help` would advertise a command that cannot
-run, an orchestrator author would wire a batch state to it on that evidence, and the
-failure would surface in a deployment rather than at the point where the command was
-chosen. The accepted cost is that `--help` and this table do not match one-for-one,
-which is why the table marks each row.
+Refactoring Rationale: this section previously described ten registered subcommands and
+one **contracted** one, `verify-all`, deliberately unregistered on the ground that
+sequencing the three passes needed "a dataset-to-source manifest this distribution does
+not carry". The premise was accurate and the conclusion did not follow: the answer to
+needing a manifest is to accept one as input, which is what the command now does
+(`--manifest`, or the single-dataset triple its constituent passes take). While it was
+withheld, an operator's only reachable option was to run the three passes separately and
+judge the results together — the partial verdict [§10](#10-verification) exists to
+prevent — so the gap was not merely a missing convenience. An earlier revision had the
+same defect on a larger scale, describing four registered and five contracted
+subcommands while the modules behind four of the five were already present.
+
+Refactoring Rationale: the last unregistered verb, `verify-all`, was then held back on a
+different premise — that it needed a dataset-to-source manifest this distribution does
+not carry — and a Trade-offs paragraph here argued that registering an unbacked command
+would let an orchestrator author wire a batch state to it on the evidence of `--help`.
+Both are now moot in the same direction: the verb is backed, and it is backed twice — by a
+manifest an operator supplies, and by the seed registry, which names every dataset's context,
+prefix segments and extract and resolves an omitted `--source` to the newest staged generation.
+The reversed risk turned out to be the real one — the batch chain reached posting with no verb
+able to refuse a load, which is a deployment that succeeds over unverified data rather than one
+that fails visibly.
+
+Assumptions: `verify-all` is the ONLY combined verb, and the three per-dataset passes it
+runs remain separately invocable. An operator diagnosing one dataset needs the narrow
+verb; an orchestrator certifying a migration must not be able to ask for less than all
+three, which is why the gate is one invocation rather than three states in a row.
 
 ### 5.1 Invocation
 
@@ -386,19 +428,50 @@ carddemo-migrate <subcommand> [options]
 
 ### 5.2 Subcommands and their arguments
 
-| Subcommand | State | Purpose | Required arguments | Optional arguments |
-|---|---|---|---|---|
-| `list-datasets` | **registered** | Print the record-layout contract — identifier, copybook, record length, key length and provenance — for every registered layout, so a caller can enumerate the set instead of hard-coding it | none | `--format {table,json}` |
-| `decode-record` | **registered** | Decode **one** record of a fixed-length extract through the per-field codec stack and print its fields, so a delivery can be proved against its declared geometry before anything is loaded. Sensitive fields are redacted ([§8.2](#82-sensitive-fields-in-diagnostic-output)) | `--dataset`, `--source` | `--record` (default 1), `--code-page` (default `cp037`) |
-| `stage-dataset` | **registered** | Stage **one** exported extract to object storage under the generation prefix convention, copying bytes verbatim | `--dataset`, `--source`, `--business-date`, `--generation`, `--domain` | `--object-name`, `--retain` (default 5) |
-| `apply-credentials` | **registered** | Give every service login role the credential it authenticates with, then prove each role can log in | none | none |
-| `reconcile-sequences` | **registered** | Advance `ledger.transaction_id_seq` past every sequence-format identifier `ledger.transactions` holds. Run after the last load into that table and **before** writes are enabled; only ever advances, so a repeat run is a no-op | none | none |
-| `load-dataset` | **registered** | Decode **one** dataset per field and bulk-load it into the schema that owns it, as a single committed unit of work | `--dataset`, `--source`, `--encoding {ascii,ebcdic}` | none |
-| `verify-row-counts` | **registered** | Verification pass 1 — loaded row count against source record count, for one dataset | `--dataset`, `--source`, `--encoding {ascii,ebcdic}` | none |
-| `verify-checksum` | **registered** | Verification pass 2 — per-record digest of the loaded rows against the source image, for one dataset. No field value is printed | `--dataset`, `--source`, `--encoding {ascii,ebcdic}` | none |
-| `verify-money-parity` | **registered** | Verification pass 3 — exact money totals from the source bytes against the database's own `SUM` of each column they load into, for one dataset | `--dataset`, `--source`, `--encoding {ascii,ebcdic}` | none |
-| `verify-row-count-report` | **registered** | Verification pass 1 for the WHOLE migration at once — executes [`sql/verify/row_counts.sql`](sql/verify/row_counts.sql) on a session for the read-only `carddemo_reporting` role and prints its six-column verdict for every dataset. The session's role is checked against the server before the query runs, so a pass that could write cannot certify the load. Reads no local extract | none | `--sql-root` (omit in a source checkout; pass `.` in the container image, whose working directory holds the copied `sql` tree) |
-| `verify-all` | contracted | Run all three passes in the fixed order 1, 2, 3 and stop at the first failure. Needs a dataset-to-source manifest this distribution does not carry, so it is not registered | none | none |
+| Subcommand | Purpose | Required arguments | Optional arguments |
+|---|---|---|---|
+| `list-datasets` | Print the record-layout contract — identifier, copybook, record length, key length and provenance — for every registered layout, so a caller can enumerate the set instead of hard-coding it | none | `--format {table,json}` |
+| `decode-record` | Decode **one** record of a fixed-length extract through the per-field codec stack and print its fields, so a delivery can be proved against its declared geometry before anything is loaded. Sensitive fields are redacted ([§8.2](#82-sensitive-fields-in-diagnostic-output)) | `--dataset`, `--source` | `--record` (default 1), `--code-page` (default `cp037`) |
+| `stage-dataset` | Stage **one** exported extract to object storage under the generation prefix convention, copying bytes verbatim. The extract is read from the staging root ([§5.7](#57-how-connection-details-reach-the-process)) and every other coordinate — owning context, object name, generation — is derived, never passed | `--dataset`, `--business-date` | `--retain` (default and floor 5), `--dataset-segment` (default: the dataset's own generation family) |
+| `refresh-dataset` | Perform **one** dataset's whole cutover as a single step: fetch the exported extract from the deployment's provisioned source prefix in the dataset bucket, stage its bytes as a new generation, decode it per field and bulk-load it into the schema that owns it, then run all three verification passes over the load — and then, for the dataset that feeds `ledger.transactions`, advance the identifier allocator, or, for each of the three reference datasets the baseline copies to a backup base, stage that backup generation. This is the migrated form of one `IDCAMS` DELETE/DEFINE/REPRO master-refresh job, and it is what the batch chain's seed-refresh state invokes | `--dataset`, `--business-date` | `--extract-prefix` (default `migration/source/EBCDIC/`), `--encoding {ascii,ebcdic}` (default `ebcdic`), `--source` (use a local extract and skip the fetch), `--retain` (default and floor 5) |
+| `apply-credentials` | Give every service login role the credential it authenticates with, then prove each role can log in | none | none |
+| `reconcile-sequences` | Advance `ledger.transaction_id_seq` past every sequence-format identifier `ledger.transactions` holds. Run after the last load into that table and **before** writes are enabled; only ever advances, so a repeat run is a no-op | none | none |
+| `load-dataset` | Decode **one** dataset per field and bulk-load it into the schema that owns it, as a single committed unit of work | `--dataset` | `--source` (a local path or an `s3://` key), `--encoding {ascii,ebcdic}` -- both DERIVED when `--dataset` names a dataset the seed registry carries, and both required when it names a copybook layout the registry does not |
+| `verify-row-counts` | Verification pass 1 — loaded row count against source record count, for one dataset | `--dataset` | `--source`, `--encoding {ascii,ebcdic}` -- derived as for `load-dataset` |
+| `verify-checksum` | Verification pass 2 — per-record digest of the loaded rows against the source image, for one dataset, plus an audit that every sealed column holds a well-formed envelope. No field value is printed | `--dataset` | `--source`, `--encoding {ascii,ebcdic}` -- derived as for `load-dataset` |
+| `verify-money-parity` | Verification pass 3 — exact money totals from the source bytes against the database's own `SUM` of each column they load into, for one dataset | `--dataset` | `--source`, `--encoding {ascii,ebcdic}` -- derived as for `load-dataset` |
+| `verify-row-count-report` | Verification pass 1 for the WHOLE migration at once — executes [`sql/verify/row_counts.sql`](sql/verify/row_counts.sql) on a session for the read-only `carddemo_reporting` role and prints its six-column verdict for every dataset. The session's role is checked against the server before the query runs, so a pass that could write cannot certify the load. Reads no local extract | none | `--sql-root` (omit in a source checkout; pass `.` in the container image, whose working directory holds the copied `sql` tree) |
+| `verify-money-total-report` | Verification pass 3 for the WHOLE migration at once — executes [`sql/verify/money_totals.sql`](sql/verify/money_totals.sql) on a session for the read-only `carddemo_reporting` role, recomputes each money column's exact total independently from the named extracts' own bytes, and compares both the totals and the negative-row counts. The negative-row comparison is what catches a compensating sign swap, which leaves every total unchanged and therefore passes `verify-money-parity`. The session's role is checked against the server before the query runs. Every money column whose layout ships a committed extract must be named, or the run is refused | `--extract LAYOUT=PATH[=ENCODING]` (repeatable), `--encoding {ascii,ebcdic}` | `--sql-root` (as for the row-count report) |
+| `verify-all` | **The combined gate.** Run all three passes in the fixed order 1, 2, 3 and report one binary verdict, stopping at the first pass that fails. Coverage comes from a `--manifest` when one is supplied and from the seed registry's own datasets when none is — every registered dataset that ships a committed extract. It takes no `--dataset`: it cannot be narrowed to a subset, and no option can skip a pass or continue past a failure. This is the verb the nightly chain's `VerifyMigration` state invokes | none | `--manifest`, `--source-root` (a directory or `s3://` prefix holding the extracts; omitted, the staging root is read), `--sql-root` (as for `verify-row-count-report`) |
+
+⚠ **`--dataset` accepts two vocabularies, and they are disjoint.** A seed-dataset token --
+lower-case and plural, such as `accounts` or `card_xref` -- and a copybook layout name -- short
+and upper-case, such as `ACCOUNT` or `XREF` -- both resolve, and the parser normalises whichever
+arrives to the layout name every registry downstream is keyed by. No value is in both
+registries, which `tests/test_seed_datasets.py` asserts at import rather than assumes, so a value
+resolves to exactly one dataset. A layout the seed registry does NOT carry derives nothing and
+still requires `--source` and `--encoding`, because such a layout is not bound to one extract:
+`REJECT` and `INTTRAN` are produced by the pipeline and shipped by nothing.
+
+⚠️ Refactoring Rationale: the `stage-dataset` row once listed `--source`, `--generation`,
+`--domain` and `--object-name` as arguments -- first required, then optional overrides -- and all
+four are now **withdrawn**. Each let a caller replace a value the seed registry or the durable
+generation reservation is the authority for, and each carried a destructive reading rather than
+merely a redundant one: a caller-named source has no root it can be contained by, a wrong owning
+context writes one bounded context's master under another's prefix past a policy written per
+prefix, an out-of-sequence generation makes the retention sweep scratch a generation that is not
+the oldest, and a caller-chosen object name is a staged object the verification pass does not
+look for. `--retain` survives with a floor, because retaining MORE history than the contract
+requires destroys nothing.
+
+⚠ **The extract location may be an `s3://bucket/prefix` URI.**
+`CARDDEMO_DATASET_STAGING_ROOT` names either a filesystem directory or an object-storage
+prefix; a registered extract under an object-storage prefix is streamed to task-local scratch
+storage for the duration of one command and removed afterwards, and is checked against the
+object's own declared length, its recorded digest where one exists, and the declared record
+width before a record is decoded. The object-storage form is the one a Fargate task can use at
+all -- the image ships no extract and the task definition mounts no volume -- and the filesystem
+form is the one a checkout uses.
 
 Refactoring Rationale: the four rows above were `contracted` for exactly as long as
 `readers/`, `loaders/aurora.py` and `verify/` were absent, and two of them were spelled
@@ -408,21 +481,66 @@ that back them — `verify/checksum.py` and `verify/money_parity.py` — because
 whose name does not match its implementation is one indirection an operator reading a
 traceback has to resolve for no benefit.
 
-Assumptions: all four take `--dataset`, `--source` and `--encoding`, and none takes an
-optional `--dataset` meaning "every dataset". A pass over every dataset would have to
-resolve each extract's PATH from somewhere, and this distribution holds no
-dataset-to-path mapping — the seed trees are an input an operator names, not a location
-this package knows. Requiring the pair is what keeps the command honest about needing to
-be told where the bytes are. It is also why they share one option set: they are four
-questions about the same pairing of an extract and a table, so a caller who has just
-loaded a dataset verifies it by changing only the verb.
+Assumptions: all four take `--dataset`, share one option set, and none of them takes a
+`--dataset` meaning "every dataset". They are four questions about the same pairing of one extract
+and one table, so a caller who has just loaded a dataset verifies it by changing only the verb; and
+"every dataset" is a different question with a different answer shape, which is what `verify-all`
+is for.
 
-Assumptions: `--dataset` here is the record-layout identifier `list-datasets` reports,
-which is the same meaning it carries on `decode-record` and `stage-dataset`. It is
-emphatically **not** `decode-record`'s `--record`, which is a one-based ORDINAL within an
-extract; an earlier draft of these four commands spelled the selector `--record` and so
-gave one flag two unrelated meanings, which the "change only the verb" path above would
-have run straight into.
+Assumptions: `--source` and `--encoding` are OPTIONAL on all four and are derived for any dataset
+the seed registry carries, under either spelling. That is what lets the orchestrator invoke them
+with the one value a Step Functions branch holds. They remain required for a layout the registry
+does not carry, and the refusal names both.
+
+Assumptions: `verify-all` is the one command that covers many datasets, and it is told where their
+bytes are rather than inventing a location. A `--manifest` is a JSON object carrying a non-empty
+`datasets` array whose entries each declare `dataset`, `source` and `encoding` — the same three
+values the four commands above take on the command line — and a relative `source` resolves against
+the manifest's OWN directory, so one manifest describes a delivery tree wherever that tree is
+mounted; the datasets are then verified in the manifest's declared order, because a load runs in a
+dependency order and the operator owns it. With no manifest the coverage is the seed registry's own
+datasets and the extracts are resolved beneath `--source-root`, or beneath the staging root when
+that is omitted.
+
+Assumptions: the two whole-migration reports take NONE of that option set, and
+`verify-money-total-report` names its sources through repeated `--extract LAYOUT=PATH`
+pairings rather than through `--dataset`. That is the same reasoning applied to a pass
+that genuinely spans every dataset: it needs several extracts at once, so the paths are named
+explicitly — one pairing per money-bearing record — and the pass refuses a set that
+leaves a column whose layout ships a committed extract unmeasured. `--encoding` on that
+command is the form to read a pairing that declares none of its own, which is why a
+pairing may carry a third component overriding it.
+
+Refactoring Rationale: `--source` was REQUIRED on all four and is now optional, and the
+reason it was required has been answered rather than relaxed. The stated reason was that
+this distribution held no dataset-to-path mapping, so the caller had to be told where the
+bytes were. It holds one now: the seed registry names each dataset's extract file and its
+prefix segments, so an omitted `--source` resolves to the newest STAGED generation of that
+dataset — the direct analogue of a JCL step referencing `TRANSACT.BKUP(0)`. That default
+is what lets the batch chain's load and verification states pass a dataset token and
+nothing else, and an empty family is a named refusal rather than an empty read.
+
+Assumptions: the default reads what was STAGED, not what an operator put in the inbox.
+The staged object carries the digest this package recorded when it wrote it, so the fetch
+is integrity-checked against its own metadata; the inbox holds bytes this package did not
+write and carries no such record. It is also the only reading under which a load is
+provably reading what the staging step before it wrote.
+
+Assumptions: the same reasoning is why `verify-money-total-report` takes a repeated
+`--extract LAYOUT=PATH[=ENCODING]` rather than discovering the seed tree. It needs **every**
+layout that feeds a money column in one call — the pass refuses to certify a load with any
+declared money column left unmeasured — so it cannot be driven one dataset at a time, and it
+still cannot be told where the bytes are by anything but its caller. One `--encoding` covers the
+whole run because all four layouts that ship an extract for a money column (`ACCOUNT`,
+`DALYTRAN`, `DISGROUP`, `TCATBAL`) ship in **both** seed forms, so no corpus requires a
+mixed-form run; the per-pairing third component exists for a corpus that one day does.
+
+Assumptions: `--dataset` carries exactly one meaning on every verb that takes it — the
+dataset, named in either of the two spellings [§5.4](#54-dataset-identifiers) publishes.
+It is emphatically **not** `decode-record`'s `--record`, which is a one-based ORDINAL
+within an extract; an earlier draft of these four commands spelled the selector `--record`
+and so gave one flag two unrelated meanings, which the "change only the verb" path above
+would have run straight into.
 
 > **Cipher boundary — three columns are sealed, never written in the clear.**
 > `account.customers.ssn_encrypted`, `account.customers.govt_issued_id_encrypted` and
@@ -468,26 +586,39 @@ tabulates are deliberately **not** printed: they have no representation in this
 distribution's code, and giving them one here would create a second source for a table
 §6.1 already owns, free to disagree with it. §6.1 remains where those two are read.
 
-Assumptions: `--domain` is **required**, not optional. It is the bounded-context
-segment of the object prefix, and this distribution holds no dataset-to-context mapping
-— the owning schema is tabulated in §6.1 and nowhere in code — so a default would have
-to invent that mapping. An invented default that is wrong writes a real extract to a
-prefix nothing reads, which is worse than requiring the caller to be explicit. It
-becomes optional when the mapping has an authoritative home in code.
+Refactoring Rationale: `stage-dataset` took `--domain`, `--generation` and
+`--object-name`, and all three are **withdrawn**. `--domain` was required on the stated
+grounds that this distribution held no dataset-to-context mapping, so a default would have
+had to invent one — and the stated condition for withdrawing it was that the mapping gain
+an authoritative home in code. It has: the seed registry names each dataset's bounded
+context, its prefix segment and its extract file, so all three coordinates are derived from
+the one token the caller already passes. They are withdrawn rather than left as optional
+overrides because an override is a second authority: a caller who passes a domain that
+disagrees with the registry writes a real extract to a prefix nothing reads, and the write
+succeeds. The generation is likewise reserved rather than named ([§5.5](#55-the-business-date-is-a-parameter-never-a-clock-read)).
+
+Alternatives Considered: documenting the three as OPTIONAL arguments carrying derived defaults,
+which is how a competing draft of this section described them. Rejected on measurement rather than
+on preference: `build_parser()` gives `stage-dataset` exactly `--business-date`, `--dataset`,
+`--dataset-segment` and `--retain`, so the three are not accepted at all and a table of their
+defaults would describe flags an operator cannot pass. The same draft attributed `--source` to this
+subcommand, where it in fact belongs to `refresh-dataset`.
 
 | Subcommand | What it writes | Non-zero exit when |
 |---|---|---|
 | `list-datasets` | The contract table on standard output. Touches no database, no object store and no credential | the requested format is unknown |
 | `decode-record` | One record's field map as JSON on standard output, every value rendered as a string and every sensitive field redacted. Touches no database, no object store and no credential | the layout name is unknown, the ordinal is below one or past the end of the dataset, the source is unreadable, the dataset does not divide into whole records, or a field fails to decode |
-| `stage-dataset` | One object at `<domain>/<dataset>/dt=YYYY-MM-DD/gen=NNNN/<object-name>` in the dataset bucket, carrying a service-verified `ChecksumSHA256` plus the digest and byte count as object metadata, then permanently scratches generations that roll off. The bucket, deployment and effective region are logged before the write, and the digest beside the key after it | the source cannot be staged — absent, a symbolic link, not a regular file, unreadable, or modified while it was being transferred — the dataset identifier is unknown, the generation is outside 1–9999, or the write or the scratch fails |
+| `stage-dataset` | One object at `<domain>/<dataset>/dt=YYYY-MM-DD/gen=NNNN/<object-name>` in the dataset bucket — every segment derived from the registry and the reserved generation — carrying a service-verified `ChecksumSHA256` plus the digest and byte count as object metadata, then permanently scratches generations that roll off. The bucket, deployment and effective region are logged before the write, and the digest beside the key after it | the source cannot be resolved beneath the staging root, cannot be staged — absent, reached through a symbolic link, not a regular file, unreadable, or modified while it was being transferred — the dataset identifier is unknown, the generation already holds DIFFERENT bytes, or the write or the scratch fails |
 | `load-dataset` | Rows in the owning schema's table, inside one transaction; a per-dataset summary on standard output | a record fails the width contract, a field fails to decode, or the load transaction cannot commit |
-| `apply-credentials` | A SCRAM verifier on each of the service login roles. The plaintext credential never crosses the connection | any role is missing, cannot be given its verifier, or cannot then log in |
+| `refresh-dataset` | Everything `stage-dataset`, `load-dataset` and the three per-dataset verification passes write, in that order, for one dataset — plus, for the transaction master only, whatever `reconcile-sequences` writes. The fetched extract lives in a scratch directory that is removed when the step ends, whatever the outcome | the token is not registered (2), the dataset bucket cannot be resolved (16), or the **first** step that did not succeed did not — and the exit status is that step's own, so a fetch or verification failure is 8 and a usage fault stays 2 |
+| `apply-credentials` | A SCRAM verifier on each of the **sixteen** login roles — eight runtime, seven migration and the read-only `carddemo_verifier` — read from that role's own secret and applied inside one transaction. The plaintext credential never crosses the connection | any role is unrecognised or missing, cannot be given its verifier, or cannot then log in |
 | `reconcile-sequences` | At most one `setval` on `ledger.transaction_id_seq`, issued as the schema owner reached by `SET ROLE`; both allocator positions and the largest stored identifier on standard output | the owner cannot be assumed, the sequence or the table cannot be read, or the advance is refused — in which case writes must not be enabled |
 | `verify-row-counts` | A per-dataset expected-versus-actual table | any dataset's counts differ |
-| `verify-checksum` | The two whole-dataset digests, then one line per located difference giving the differing record's position in the extract and the differing field's name, byte interval and storage regime — never either value. The lines are bounded and the withheld count is stated, so a wholly-wrong load reports a diagnostic rather than a file; the position, differing-record and one-sided-position counts are exact whatever the bound | any record differs, or either side has a position the other does not |
-| `verify-money-parity` | A per-column source-versus-loaded total table | any total differs by any amount |
-| `verify-row-count-report` | The whole-migration row-count report — one line per declared dataset and one verdict line — rendered so that two runs over unchanged data diff to nothing. Writes nothing anywhere and cannot: the session it runs on holds `SELECT` on the two aggregate verification views and nothing else | any line's baseline and actual count differ, the session is not the reporting role, the shipped query cannot be located, or the report omits a declared dataset |
-| `verify-all` | The three tables above, in order | any one pass fails |
+| `verify-checksum` | The two whole-dataset digests, then one line per located difference giving the differing record's position, its **key** where the two sides are paired by one, and the differing field's name, byte interval and storage regime — never either value; then one line per sealed column reporting how many envelopes were expected, how many are stored and how many are malformed, and nothing of their contents. The lines are bounded and the withheld count is stated, so a wholly-wrong load reports a diagnostic rather than a file; the compared, differing-record and one-sided counts are exact whatever the bound | any record differs, either side holds a record the other does not, or a sealed column is short of a well-formed envelope |
+| `verify-money-parity` | A per-column source-versus-loaded total table, naming both the copybook field and the target column | any total differs by any amount |
+| `verify-row-count-report` | The whole-migration row-count report — one line per declared dataset and one verdict line — rendered so that two runs over unchanged data diff to nothing. Writes nothing anywhere and cannot: the session it runs on holds `SELECT` on the two aggregate verification views and nothing else | any line's baseline and actual count differ, a dataset that ships no extract holds rows, the session is not the reporting role, the shipped query cannot be located, or the report omits a declared dataset |
+| `verify-money-total-report` | The whole-migration money-total report — one line per declared money column giving the source and loaded totals and both negative-row counts, then one verdict line — rendered so that two runs over unchanged data diff to nothing. A column whose layout ships no extract is held to being empty rather than waved through, and every sign discrepancy is additionally logged on its own line. Writes nothing anywhere and cannot, for the same reason as the row-count report | any column's totals or negative-row counts differ, a column whose layout ships no extract holds money, the session is not the reporting role, the shipped query cannot be located or breaches its published result-set contract, an extract cannot be read or decoded, or a money column whose layout ships an extract was left unnamed |
+| `verify-all` | One numbered heading per pass, each followed by that pass's own report for every covered dataset, then a single verdict line naming how many of the three ran and how many verified. A pass that did not run because an earlier one failed is stated as not run rather than omitted | any one pass of any covered dataset fails, or a supplied manifest is absent, unreadable, empty or malformed — the last four as a usage error rather than a data failure |
 
 ### 5.3 Applying the DDL is deliberately not a subcommand
 
@@ -515,27 +646,91 @@ only the cluster's administrative secret for the duration of a single invocation
 because the module that implements it asks to be reached through the command line
 rather than reimplemented.
 
-### 5.4 Dataset identifiers
+### 5.4 Dataset identifiers — there are TWO vocabularies
 
-`--dataset` accepts exactly these eleven values, and no others:
+**`--dataset` accepts two spellings of the same set, and every verb that takes the flag
+accepts both.** Twenty-five names are accepted in total, and no others:
 
 ```text
-usrsec  acctdata  carddata  custdata  cardxref  dalytran
-transact  discgrp  trancatg  tcatbalf  trantype
+# the eleven orchestrator tokens -- what a Step Functions Map branch passes
+accounts  cards  customers  card_xref  transactions  daily_transactions
+disclosure_groups  transaction_category_balances  transaction_types
+transaction_categories  users
+
+# the fourteen record-layout names -- what list-datasets prints
+ACCOUNT  CARD  CUSTOMER  XREF  TRAN  DALYTRAN  DISGROUP  TCATBAL
+TRANTYPE  TRANCAT  SECUSER  TRNX  REJECT  INTTRAN
 ```
 
-Each identifier is the baseline dataset name from
-[§6.1](#61-the-eleven-datasets), lowercased with the `.PS` suffix dropped, so the
-accepted set is derivable from that one table and there is no second list to keep in
-step. `list-datasets` prints the same set at run time, which is what the batch chain's
-per-dataset staging step enumerates its branches from.
+Assumptions: the two vocabularies are provably DISJOINT — the tokens are lower
+snake_case and the layout names are upper — so one resolver accepts both with no
+ambiguity to arbitrate, and the module that owns the registry asserts the disjointness at
+import time rather than trusting it. The eleven tokens resolve onto eleven of the
+fourteen layouts, which is why the counts differ: the three derived layouts `TRNX`,
+`REJECT` and `INTTRAN` are written BY the batch pipeline, so no extract is ever staged for
+them and no token names them.
+
+Assumptions: a name being accepted by the flag is not the same as being loadable, and the
+two are deliberately separated. `list-datasets` and `decode-record` serve all fourteen
+layouts, because both only read a declared geometry. `load-dataset` and the three
+per-dataset verify verbs serve the ELEVEN with a load target, and naming a derived layout
+to one of them is refused with the reason — written by the batch chain rather than
+migrated — rather than with an unknown-name error, because the name is perfectly well
+known and it is the request that does not apply.
+
+Refactoring Rationale: this section published a THIRD vocabulary — `usrsec`, `acctdata`,
+`carddata`, `custdata`, `cardxref`, `dalytran`, `transact`, `discgrp`, `trancatg`,
+`tcatbalf`, `trantype` — the baseline dataset names lowercased with `.PS` dropped. No verb
+ever accepted any of them. The orchestrator's Map branches passed the plural snake_case
+tokens while the command validated `--dataset` against the layout registry's upper-case
+names, so `accounts` and `card_xref` were each refused; documenting a third spelling on
+top made all three disagree. The resolution unified the two that exist in code rather than
+adding a translation table: the seed registry owns the token half, `layouts.py` owns the
+layout half, and the command resolves either.
+
+Assumptions: the token is the vocabulary that crosses the PROCESS boundary, because it is
+what the Terraform `seed_datasets` variable lists and what a container command override
+carries. The layout name is the vocabulary that crosses the FILE boundary, because it is
+what `list-datasets` prints and what a copybook is named after. Both are published because
+an operator reading a `list-datasets` table and an orchestrator author reading a tfvars
+file would otherwise be looking at two sets they had no way to relate.
 
 Alternatives Considered: naming the identifiers after the internal reader modules
 instead — the singular domain words for account, customer and transaction. Rejected,
 because the caller's request, the JCL that produced the extract and the object key all
 name the **dataset**, so tying the public vocabulary to an internal module layout
-would turn a file rename into a breaking change to the command line, and would leave
-two vocabularies for one set of eleven things.
+would turn a file rename into a breaking change to the command line.
+
+**The mapping, stated once.** Every staging token names the layout it stages, so the two
+vocabularies are joined rather than parallel. The owning context and the registered source object
+are the two coordinates `stage-dataset` derives from the token, so they are published beside it:
+
+| Staging token | Layout identifier | Owning context | Registered source object |
+|---|---|---|---|
+| `accounts` | `ACCOUNT` | `account` | `AWS.M2.CARDDEMO.ACCTDATA.PS` |
+| `cards` | `CARD` | `card` | `AWS.M2.CARDDEMO.CARDDATA.PS` |
+| `customers` | `CUSTOMER` | `account` | `AWS.M2.CARDDEMO.CUSTDATA.PS` |
+| `card_xref` | `XREF` | `account` | `AWS.M2.CARDDEMO.CARDXREF.PS` |
+| `daily_transactions` | `DALYTRAN` | `ledger` | `AWS.M2.CARDDEMO.DALYTRAN.PS` |
+| `transactions` | `TRAN` | `ledger` | `AWS.M2.CARDDEMO.DALYTRAN.PS.INIT` |
+| `disclosure_groups` | `DISGROUP` | `reference` | `AWS.M2.CARDDEMO.DISCGRP.PS` |
+| `transaction_types` | `TRANTYPE` | `reference` | `AWS.M2.CARDDEMO.TRANTYPE.PS` |
+| `transaction_categories` | `TRANCAT` | `reference` | `AWS.M2.CARDDEMO.TRANCATG.PS` |
+| `transaction_category_balances` | `TCATBAL` | `ledger` | `AWS.M2.CARDDEMO.TCATBALF.PS` |
+| `users` | `SECUSER` | `auth` | `AWS.M2.CARDDEMO.USRSEC.PS` |
+
+⚠️ Assumptions: one row of that table is deliberately surprising and is printed rather than
+described. **`transactions` stages a `DALYTRAN`-named object**, and the suffix is the tell: the
+transaction master is pipeline-produced and no `TRANSACT` extract ships, so the registry stages the
+baseline's own substitute — the `.INIT` object that
+[`app/jcl/TRANFILE.jcl`](../app/jcl/TRANFILE.jcl) REPROs the `TRANSACT` KSDS from. `DALYTRAN` is a
+separate token in its own right, staging the unsuffixed object into
+`ledger.daily_transactions`, so the two are not two spellings of one delivery.
+
+Refactoring Rationale: a competing draft of this table had TEN rows and stated that `DALYTRAN` has
+no staging token at all. `seed_datasets.SEED_DATASETS` holds ELEVEN and `daily_transactions` is one
+of them, so the row is restored rather than the claim repeated; a reader who believed it would have
+concluded the nightly chain could not stage the daily feed.
 
 ### 5.5 The business date is a parameter, never a clock read
 
@@ -546,15 +741,39 @@ attempt under a different `dt=` prefix and leave the first one orphaned. This mi
 the baseline exactly, where the business date arrives as `PARM='2022071800'` on the
 job step rather than from the system time.
 
-`--generation NNNN` is likewise explicit and is validated into 1–9999, the four-digit
-range the prefix convention encodes. Assumptions: one generation number is computed
-once per execution and passed to every step that touches the family. Two steps each
-deriving "the next generation" for themselves resolve to two different prefixes, and
-a later step then reads an empty location while the earlier step's output sits
-elsewhere.
+`--dataset-segment` names the generation family the bytes are staged **under**, where
+`--dataset` names the record layout they are decoded **as**. Assumptions: the two are
+separate because one extract can legitimately reach two prefixes. The baseline's
+[`DEFGDGD.jcl`](../app/jcl/DEFGDGD.jcl) defines a backup generation base for each of
+the three reference datasets and immediately creates its first generation with an
+`IEBGENER` verbatim copy of the same sequential file the load reads — `TRANTYPE.BKUP`
+from `TRANTYPE.PS` at L36–L43, `TRANCATG.PS.BKUP` from `TRANCATG.PS` at L59–L66 and
+`DISCGRP.BKUP` from `DISCGRP.PS` at L82–L89 — so the same bytes are both loaded and
+retained. Without the option the segment defaults to the dataset's own, which is
+every other case. Alternatives Considered: a separate `stage-backup` subcommand.
+Rejected because it would duplicate the whole staging surface — the reservation, the
+retention, the checksum and the metadata — to vary one path segment.
 
-Where a caller does **not** hold a generation number, `stage_family_file` will
-reserve one through `reserve_generation` instead of computing it. Trade-offs: that
+Assumptions: this is the one staging coordinate an operator may still state, and the asymmetry
+with the withdrawn `--domain` is measured rather than stylistic. A wrong dataset segment lands
+inside the SAME bounded context's prefix, so it cannot cross the per-prefix least-privilege
+boundary a wrong owning context crosses; and no other argument can express what three baseline
+families require, which is one dataset's bytes under another family's segment.
+
+**The generation number is reserved, never passed.** ⚠️ Refactoring Rationale:
+`stage-dataset` took `--generation NNNN`, validated into 1–9999, on the reasoning that one
+number should be computed once per execution and handed to every step that touches the
+family — because two steps each deriving "the next generation" for themselves resolve to
+two different prefixes, and a later step then reads an empty location while the earlier
+step's output sits elsewhere. That reasoning was right about the hazard and wrong about the
+remedy: passing the number moved the derivation to the caller, where the orchestrator had
+to compute it in HCL and every branch of a parallel Map had to be given the same value —
+and a number supplied out of sequence makes the retention sweep, which keeps the newest five
+BY NUMBER, scratch a generation that is not the oldest. Reservation gives the same property
+without the parameter, so the flag is withdrawn and `--business-date` is the only
+date-shaped input.
+
+`stage_family_file` reserves the number through `reserve_generation`. Trade-offs: that
 costs an extra conditional write per staging step and it buys two properties a
 computed number cannot have. The reservation is a conditional create keyed by
 execution token, family and business date, so two writers racing for the same number
@@ -591,9 +810,10 @@ No non-zero value is ever a pass.
 No connection string, endpoint, account identifier or credential appears anywhere in
 this repository. Every runtime value is resolved when a command runs, from AWS
 Systems Manager Parameter Store and AWS Secrets Manager, by
-[`config.py`](src/carddemo_migration/config.py). Six of the seven variables below carry
-only **names and modes** — never values. **The seventh, `CARDDEMO_MASK_HMAC_KEY`, is the
-one exception and it carries secret VALUE material**; §5.7.1 states what that obliges.
+[`config.py`](src/carddemo_migration/config.py). Ten of the eleven variables below carry
+only **names, modes and locations** — never values. **The eleventh,
+`CARDDEMO_MASK_HMAC_KEY`, is the one exception and it carries secret VALUE material**;
+§5.7.1 states what that obliges.
 
 | Variable | Carries | Meaning | Default |
 |---|---|---|---|
@@ -604,6 +824,23 @@ one exception and it carries secret VALUE material**; §5.7.1 states what that o
 | `CARDDEMO_DB_MASTER_SECRET` | name | Name of the cluster's administrative secret, used only by `apply-credentials` | none |
 | `CARDDEMO_DB_ALTERNATE_USERS` | names | Additional database user names permitted to act for a schema's role | none |
 | `CARDDEMO_MASK_HMAC_KEY` | ⚠ **secret value** | The HMAC-SHA256 **key** that the redaction tag in [`copybook/layouts.py`](src/carddemo_migration/copybook/layouts.py) is derived with | none — **omitting** the variable selects a process-scoped random key; setting it blank is refused (§5.7.1) |
+| `CARDDEMO_DATASET_STAGING_ROOT` | location | Where the seed extracts are read from — either a local directory or an `s3://` prefix. `stage-dataset` resolves each dataset's registered source object beneath it, and `verify-all` reads it unless `--source-root` overrides | none — required by `stage-dataset` and `verify-all`, unused by every other verb |
+| `CARDDEMO_BATCH_RUN_ID` | name | The execution token a generation reservation is keyed by, so a retried staging step rewrites one key instead of consuming a second generation | none — a staging step run without it reserves unconditionally |
+| `CARDDEMO_SECURITY_CVV_KEY_ID` | parameter name | Parameter Store name, beneath the `card` context, holding the key alias the card-verification envelopes are sealed under | the published per-environment path; resolved only when a record with that sealed column is loaded |
+| `CARDDEMO_SECURITY_CUSTOMER_IDENTIFIER_KEY_ID` | parameter name | Parameter Store name, beneath the `account` context, holding the key alias the customer-identifier envelopes are sealed under | the published per-environment path; resolved only when a record with those sealed columns is loaded |
+
+Refactoring Rationale: the table listed seven variables while the package reads eleven.
+The four added above — the staging root, the execution token and the two key-alias
+parameter names — were omitted while the staging loader and the protected-column ciphers
+were newer than this section, and an operator provisioning a task definition from this
+table alone would have produced one that could not stage an extract and could not load
+either record with a sealed column. Neither omission would have surfaced at start-up: both
+are resolved at the point of first use, so the task would have started cleanly and failed
+mid-load.
+
+Assumptions: none of the four added rows carries a VALUE. Three carry names and the fourth
+carries a location, which is why the one-exception statement above still holds with eleven
+rows rather than seven.
 
 #### 5.7.1 `CARDDEMO_MASK_HMAC_KEY` is key material, not a name
 
@@ -1403,9 +1640,16 @@ without a money-total check proves nothing about the money.
 | 3. Money-total parity | `verify/money_parity.py` | `sql/verify/money_totals.sql` | That the money agrees. **This is the only pass that catches a systematically mis-decoded sign** — a whole column of negatives read as positives changes no row count and can survive a symmetric round trip, but it cannot survive a total | Nothing about which individual rows are wrong when a total differs; pass 2 localises that |
 
 **None of the three may be skipped or weakened.** Assumptions: each one is blind to
-the failure mode the next one catches, which is why the set is three rather than one,
-and why `verify-all` exists as a single indivisible invocation — so that "verified"
-cannot come to mean "two of the three passed".
+the failure mode the next one catches, which is why the set is three rather than one.
+Assumptions: the contracted `verify-all` subcommand — which
+[§5.2](#52-subcommands-and-their-arguments) marks **not registered**, and which the parser
+refuses as a usage error (exit `2`) — is the interface intended to make "verified" mean all
+three rather than two of the three. Until it is registered, that guarantee is the
+[data-migration runbook](../docs/runbooks/data-migration.md)'s to enforce, by running the
+three registered passes in the order above and stopping at the first failure. Trade-offs: this
+is stated as the contract it is rather than as a capability the distribution has, because a
+reader who believed one invocation covered all three would run it, receive exit `2`, and have
+no verification at all.
 
 **Both SQL passes run as `carddemo_reporting`, the least-privilege read-only role, and
 name no base table.** They read the two aggregate-only views
@@ -1420,26 +1664,94 @@ balance, card number and identity record in the system. The output of both files
 byte-identical across the change — same columns, same eleven and nine rows, same exact
 totals — because the aggregates were moved rather than rewritten.
 
-**Measured coverage today: passes 1 and 3 serve all eleven loadable records; pass 2 serves
-three of them.** The three are the reference records `TRANTYPE`, `TRANCAT` and
-`DISGROUP`. Pass 2 digests the decoded source against the rows read back, so both sides
-must be constructed identically, and the digest accepts characters, an exact decimal or
-raw bytes only. Every comparable column of those three records is `CHAR`, `VARCHAR` or
-`NUMERIC`, so the two sides agree. Each of the other eight carries at least one
-`BIGINT`, `DATE`, `SMALLINT`, `TIMESTAMP` or `UUID` comparable column, which the driver
-returns as an `int`, a `date` or a `UUID`; and for an identifier the two sides also
-disagree in representation, because a reader publishes the declared full width with its
-leading zeros where the column holds a number. Extending the pass to all eleven is a
-matter of rendering those columns back into the reader's published shape at the
-read-back boundary.
+**Measured coverage today: passes 1 and 2 serve all eleven loadable records; pass 3
+serves the five that carry a money column.** Those five are `ACCOUNT` (five columns),
+`DALYTRAN`, `TRAN`, `TCATBAL` and `DISGROUP` (one each) — nine money columns over five
+tables, which is every `NUMERIC(p,2)` column the migration writes, so pass 3's reach is
+not a subset of the money but the whole of it. The other six records carry no money at
+all, so there is nothing for the pass to total and it declines rather than passing
+vacuously.
 
-Assumptions: this is recorded here, in the section that states the requirement, rather
-than left for an operator to meet as a type error mid-cutover. Pass 2 does not report a
-difference for those eight — it fails on a value it cannot digest — so the
-[data-migration runbook](../docs/runbooks/data-migration.md) prescribes it for the three
-it serves and names the gap at its cutover gate. A verification requirement that
-overstates its own reach is the failure mode this whole section exists to prevent, so it
-would be self-defeating to state the requirement and omit the measurement.
+⚠️ Refactoring Rationale: pass 2 served **three** of the eleven, and this paragraph
+measured that shortfall rather than hiding it. The three were the reference records
+`TRANTYPE`, `TRANCAT` and `DISGROUP`, whose every comparable column is `CHAR`, `VARCHAR`
+or `NUMERIC`. Each of the other eight carries at least one `BIGINT`, `DATE`, `SMALLINT`,
+`TIMESTAMP` or `UUID` comparable column, which the driver returns as an `int`, a `date`,
+a `datetime` or a `UUID` — and the renderer accepted characters, an exact decimal or raw
+bytes only, so the pass **raised** on such a column instead of reporting a difference. For
+an identifier the two sides disagreed in representation as well, because a reader
+publishes the declared full width with its leading zeros where the column holds a number.
+
+What closed it: every persisted type now canonicalises under its own one-byte type tag with a
+length prefix, and the comparison canonicalises **both sides by the form each field is
+actually stored in**, rather than by the type that happens to carry it. The rule per field
+is derived from the copybook's declared regime and then narrowed by the form the column
+returned, so an identifier compares as a number against a `BIGINT` — `00000000011` and `11`
+digest identically where the layout says the field is `PIC 9(11)` and only there — a date
+compares as its ten characters against a `DATE`, a stamp compares as its twenty-six against a
+`TIMESTAMP`, a subject compares as a parsed identifier against a `UUID`, and an unset column
+compares as a null distinct from an empty string. The narrowing is not a refinement for its own
+sake: five fields are declared `PIC 9(04)` and stored as `CHAR(4)` — the transaction category
+code, whose leading zeros are part of the value under specification rule T1 — and comparing
+those as numbers would have passed a corruption that changed only their padding. Trading a
+false failure for a false pass would have been a worse outcome than the defect.
+
+The pass also pairs the two sides by the target's **own key** rather than by position. The
+source arrives in physical extract order and the read-back is put in key order in this process,
+so a sequential extract such as `DALYTRAN` was previously reported as wholly different for
+arriving in a different order — and a single row missing from the target shifted every
+later pair by one, reporting one absent row as an absent row plus a tail of differences
+that did not exist. A missing row is now reported once, at its own key.
+
+Assumptions: the measurement stays in the section that states the requirement, because a
+verification requirement that overstates its own reach is the failure mode this section
+exists to prevent. The [data-migration runbook](../docs/runbooks/data-migration.md) now
+prescribes all three passes for every dataset, and a test asserts that it does — so the
+coverage cannot narrow again without failing the suite. The combined `verify-all` gate runs
+them over the ten datasets that ship a committed extract — every registered dataset except
+`TRAN`, which no extract seeds because posting is what fills it.
+
+Assumptions: two further properties of pass 2 are worth stating here, because both are
+invisible in its output when they hold and both are load-bearing when they do not. Its framing
+is **type-and-length prefixed** rather than delimiter-joined, so no field content can forge a
+field or record boundary — a value carrying U+001F or U+001E, which both the cp037 and ASCII
+decode paths admit, previously could. And the two sides are put in **one order** before they are
+walked: a keyed record is ordered on the key window the descriptor declares, in this process
+rather than through an `ORDER BY`, so a linguistic server collation cannot sort the two sides by
+two different rules; the sequential daily-transaction feed, whose table keys on an identity
+column no extract supplies, is ordered by that persisted ingest sequence, which is its insertion
+order. A key one side carries and the other does not is reported as an unpaired position at its own
+key rather than compared through, so "the two sides do not hold the same records" cannot be
+mistaken for a field defect.
+
+**Pass 2 additionally audits the three sealed columns.** For each of `CARD` and `CUSTOMER`
+it counts how many source records hold a value the load must seal, reads back only the
+`*_encrypted` column, and asserts one well-formed envelope per such value — the framing
+marker, the minimum envelope length, and nothing of the contents. Assumptions: this is
+part of pass 2 rather than a fourth pass because it answers pass 2's own question about the
+three columns pass 2 cannot digest: a sealed column is excluded from the record digest by
+construction, since ciphertext differs on every write, so without the audit those three
+columns were the only ones no pass looked at. A plaintext value stored in a column whose
+name asserts ciphertext would satisfy every count and every total.
+
+**What the reporting role may actually read, stated in full.** Refactoring Rationale: this
+package used to describe that role as holding `SELECT` on "the two aggregate verification
+views and nothing else", in a schema that "owns no table". Neither half was true, and the
+overstatement made the security claim weaker than the one that holds, because a reader who
+checked the topology and found it wrong had no way to tell whether the read-only conclusion had
+been checked either. The `reporting` schema holds **nine views, one table and one function**:
+the seven product views [`sql/V1__reporting_views.sql`](sql/V1__reporting_views.sql) creates for
+`reporting-service`, the two aggregate verification views
+[`sql/V3__verification_surfaces.sql`](sql/V3__verification_surfaces.sql) creates for the two SQL
+passes, the `card_grouping_key` table that holds the statement view's grouping secret, and the
+`resolve_card` lookup function. `carddemo_reporting` holds `USAGE` on the schema, `SELECT` on all
+nine views and `EXECUTE` on the function — and **nothing on the table**, which `V0` and `V1` each
+revoke explicitly. Assumptions: the read-only guarantee rests on the privileges the role does
+**not** hold rather than on the schema being empty — no privilege on any base table, no
+`INSERT`, `UPDATE`, `DELETE` or `TRUNCATE` anywhere, no `CREATE` even here, and every privilege it
+might have inherited on `ledger`, `account`, `card` and `reference`, present and future,
+explicitly revoked in [`sql/V0__schemas_and_roles.sql`](sql/V0__schemas_and_roles.sql). That
+argument stays true when a tenth view is added; an inventory does not.
 
 The two existing verification scripts,
 [`alternate_database_users.sql`](sql/verify/alternate_database_users.sql) and
@@ -1510,13 +1822,26 @@ Two consequences of that ordering are worth stating because they look like defec
   applies it on a later run. Trade-offs: reporting an outstanding grant is the right
   direction to fail in, because an outstanding grant is named in the output whereas an
   over-broad one is invisible.
-- The fifteen login roles — eight runtime and seven migration — are created with
+- The sixteen login roles — eight runtime, seven migration and one read-only
+  verification — are created with
   **no** credential clause, because a credential written into a committed SQL file
   is the defect this migration is correcting. The eight `carddemo_<context>_owner`
   roles get no credential clause either, and for them it is permanent: they are
   `NOLOGIN`, so schema ownership is unreachable by authentication. `apply-credentials` ([§5.2](#52-subcommands-and-their-arguments)) is the
   delivered mechanism that makes them able to authenticate, and it must run
   immediately after this script and before any loader.
+
+  The sixteenth role, `carddemo_verifier`, holds `USAGE` and `SELECT` on the five
+  loaded schemas and nothing else — no write privilege, no `CREATE`, no sequence
+  privilege, no ownership — and carries `default_transaction_read_only = on`.
+  Assumptions: the three per-dataset verification passes read loaded rows back and
+  compare them against the extract, and they used to obtain that read as the bounded
+  context's own runtime role — the credential the load step immediately before them
+  writes with. A verification able to alter what it certifies certifies nothing, so
+  the passes now connect through
+  [`verify/session.py`](src/carddemo_migration/verify/session.py), which resolves this
+  role's own credential, asks the server who the session is, and reads
+  `transaction_read_only` back before any pass runs.
 
 The same ordering constraint is what makes
 [`sql/V2__runtime_delete_grants.sql`](sql/V2__runtime_delete_grants.sql) a separate file
@@ -1592,7 +1917,7 @@ mkdir -p data-migration-reports
 python -m pytest data-migration/tests --junitxml=data-migration-reports/pytest.xml
 ```
 
-All **35** modules are delivered — **34** test modules plus the shared `conftest.py`:
+All **39** modules are delivered — **38** test modules plus the shared `conftest.py`:
 
 <!-- carddemo:test-module-roster:begin -->
 [`conftest.py`](tests/conftest.py),
@@ -1602,6 +1927,7 @@ All **35** modules are delivered — **34** test modules plus the shared `confte
 [`test_cli.py`](tests/test_cli.py),
 [`test_config_name_contract.py`](tests/test_config_name_contract.py),
 [`test_corpus_disclosure.py`](tests/test_corpus_disclosure.py),
+[`test_credentials.py`](tests/test_credentials.py),
 [`test_database_trust.py`](tests/test_database_trust.py),
 [`test_declaration_shadowing.py`](tests/test_declaration_shadowing.py),
 [`test_docstring_gate.py`](tests/test_docstring_gate.py),
@@ -1626,9 +1952,12 @@ All **35** modules are delivered — **34** test modules plus the shared `confte
 [`test_seed_user_subjects.py`](tests/test_seed_user_subjects.py),
 [`test_shared_doubles.py`](tests/test_shared_doubles.py),
 [`test_source_hardening.py`](tests/test_source_hardening.py),
+[`test_step_functions_asl_contract.py`](tests/test_step_functions_asl_contract.py),
 [`test_symbol_uniqueness.py`](tests/test_symbol_uniqueness.py),
 [`test_timestamp.py`](tests/test_timestamp.py),
-[`test_verification.py`](tests/test_verification.py) and
+[`test_verification.py`](tests/test_verification.py),
+[`test_verification_authority.py`](tests/test_verification_authority.py),
+[`test_verify.py`](tests/test_verify.py) and
 [`test_zoned.py`](tests/test_zoned.py).
 <!-- carddemo:test-module-roster:end -->
 
@@ -1657,7 +1986,7 @@ and there are several — would be swept into the roster, and the check would fa
 document.
 
 Trade-offs: the **test total** is deliberately not stated here. It was "**741 tests**", a
-figure the suite passed years of edits ago; the current run collects **924**. A total changes
+figure the suite passed years of edits ago; the current run collects **1599**. A total changes
 on every test added, so pinning it in prose guarantees a stale number and pinning it in a test
 guarantees a failing build on every legitimate addition. What a reader wanting the number
 should do instead is run
@@ -1673,13 +2002,22 @@ one-byte-per-character post-condition that no real page can violate. Keeping tha
 registry manipulation in its own module is what stops a failure there being read as a
 failure of the corpus assertions next door.
 
-Assumptions: `test_cli.py` asserts the ABSENCE of the one contracted subcommand as well as
-the presence of each registered one, and it states both sets as literal tuples rather than
-reading them back from the parser. A test that only checked the ones that work would pass
-equally well if another were added that could not, which is the regression the absence
-assertion exists to catch; and a test that read the parser back would have accepted the
-four commands this checkpoint added silently, and would equally have accepted their
-disappearance.
+Assumptions: `test_cli.py` states the registered set as a literal tuple in registration
+order rather than reading it back from the parser, and it keeps an empty denial tuple beside
+it. A test that read the parser back would have accepted a command added silently and would
+equally have accepted one disappearing. The denial tuple is kept empty rather than deleted
+because it is the mechanism by which a future documented-but-unbacked verb is refused
+explicitly — an unimplemented command reaching `--help` is how an orchestrator comes to be
+wired to a state that cannot run. The case that consumed it was replaced rather than left
+parameterised over an empty sequence — a parameterised case over nothing collects nothing and
+reports green, which is the vacuous pass this suite refuses everywhere else. What replaced it
+asserts the emptiness directly and still exercises the refusal path with a name that is not a
+command.
+
+Refactoring Rationale: that tuple held `verify-all` for as long as the verb was
+unregistered, and this paragraph described asserting its absence. Both changed together:
+the verb is registered, the tuple is empty, and the assertion it once carried is now the
+positive one in the registered tuple's last position.
 
 Assumptions: the two codec modules assert their vectors as LITERAL BYTES rather than by
 round-tripping each codec through its own inverse. A round trip agrees with itself
@@ -1861,12 +2199,26 @@ against the source, and a published layer can never contain cardholder data.
 > not an accident: a container whose default command exits non-zero looks like a broken
 > image to every platform that runs it once as a check.
 >
-> Assumptions: a subcommand [§5.2](#52-subcommands-and-their-arguments) marks
-> **contracted** is refused by the parser as a usage error (exit `2`), so
-> `docker run ... verify-all` reports an unrecognised subcommand rather than starting a
-> pass it cannot finish. `load-dataset` and the three individual `verify-*` passes are
-> registered and reachable from this image; what they still require is a provisioned
-> cluster and a resolvable credential, neither of which the image carries.
+> Assumptions: every one of the thirteen subcommands
+> [§5.2](#52-subcommands-and-their-arguments) tabulates is reachable from this image,
+> including `verify-all` — which is what the nightly chain's `VerifyMigration` state
+> invokes as a container command override, so an image that refused it would fail the
+> chain at its gate. Refactoring Rationale: this note stated that `docker run ...
+> verify-all` reports an unrecognised subcommand, which was true while the verb was
+> unregistered and is now false; it is restated rather than deleted because an operator
+> who had learned to expect the refusal would otherwise read the new behaviour as a
+> misconfiguration. What `load-dataset`, the three individual `verify-*` passes and the
+> aggregate over them still require is a provisioned cluster and a resolvable credential,
+> neither of which the image carries — and an aggregate driven by a `--manifest`
+> additionally requires the manifest and the extracts it names to be reachable INSIDE the
+> container, which is a mount rather than an argument.
+>
+> Assumptions: `verify-all`, `verify-row-count-report` and `verify-money-total-report`
+> additionally need the `sql` tree, which the image copies into its `/opt/carddemo` working
+> directory — so each takes an explicit `--sql-root` here, either `.` or the absolute
+> `/opt/carddemo` the nightly chain passes, where a source checkout omits the flag entirely.
+> The package-relative default resolves the tree beside the package, which is correct in a
+> checkout and in an editable install and cannot work from a plain wheel.
 
 ---
 
@@ -1911,8 +2263,10 @@ proves only that a row arrived: a sign-overpunch or packed-nibble decode defect 
 the count identical, and so does a whole column of negatives read as positives.
 Checksums localise byte-level drift to a named record; money-total parity is the only
 one of the three that catches a systematically mis-decoded sign. Each pass is blind to
-what the next one catches, which is why `verify-all` runs them as one indivisible
-invocation.
+what the next one catches, which is why the contracted `verify-all` subcommand would run
+them as one indivisible invocation — and why, until that command is registered, the
+runbook sequences the three registered passes itself
+([§10](#10-verification), [§5.2](#52-subcommands-and-their-arguments)).
 
 **5. Test vectors are reused from the existing suite's fixtures.** Rejected
 alternative: authoring fresh fixtures for this package. A fresh vector proves only

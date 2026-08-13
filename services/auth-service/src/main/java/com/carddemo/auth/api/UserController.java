@@ -700,9 +700,15 @@ public class UserController {
         //       shared advice's own conflict renderer passes when it has no version to report. The
         //       contract declares this status with a message and no field array, and an entry naming the
         //       identifier would attribute the failure to a value that is well formed.
+        // WHY : Assumptions: NO subordinate code is published for this refusal, and the constant states
+        //       that rather than a bare empty literal. This context's contract declares one conflict
+        //       condition -- the identifier is taken -- so there is nothing for a subordinate code to
+        //       discriminate, and auth-api.yaml's conflict example shows the empty value accordingly. The
+        //       card context, which publishes three conditions under one status, is the one that supplies
+        //       a discriminator here.
         ApiError body = ApiError.ofConflict(UserService.MESSAGE_USER_ID_EXISTS,
-                ApiError.Subsystem.RELATIONAL, correlationId(), request.getRequestURI(), List.of(),
-                this.clock);
+                ApiError.NO_SECONDARY_CODE, ApiError.Subsystem.RELATIONAL, correlationId(),
+                request.getRequestURI(), List.of(), this.clock);
 
         return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
     }

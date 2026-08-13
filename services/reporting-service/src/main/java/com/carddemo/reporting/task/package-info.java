@@ -7,23 +7,39 @@
  * Spring bean lookup by that exact name and invokes {@code ReportingTask.run}. Its accepted-name list is
  * therefore a bean-name contract with this package, and every name on it must resolve to a component here
  * or the run exits with the task-unresolved code having produced nothing. This package holds one class
- * per name, plus the one collaborator two of them share:</p>
+ * per name, plus three collaborators the tasks share:</p>
  *
  * <ul>
  *   <li>{@code GenerateStatementsTask} -- registered as {@code generate-statements}. The nightly
  *       statement run over one business date, producing the plain-text and markup datasets.</li>
- *   <li>{@code GenerateReportsTask} -- registered as {@code generate-reports}. The nightly transaction
- *       report, whose range is that one business date treated as an inclusive one-day period.</li>
+ *   <li>{@code GenerateReportsTask} -- registered as {@code generate-reports}. The nightly run of BOTH
+ *       reports: the transaction report, whose range is that one business date treated as an inclusive
+ *       one-day period, and the category-balance report, which takes no range because
+ *       {@code app/jcl/PRTCATBL.jcl:44-45} feeds its sort the whole unloaded file with no
+ *       {@code INCLUDE} condition.</li>
  *   <li>{@code GenerateAdHocReportTask} -- registered as {@code generate-report}, singular. The
  *       on-demand run a request submits, whose range arrives with the request.</li>
- *   <li>{@code ReportArtifactPublisher} -- not a task. The shared report-artifact publication path the
- *       two report tasks both drive.</li>
+ *   <li>{@code ReportArtifactPublisher} -- not a task. The shared transaction-report publication path
+ *       the two report tasks both drive. The nightly path publishes to TWO keys from one generation
+ *       pass: the request-scoped key a range-addressed request resolves, and the generation key of the
+ *       {@code tranrept} family, which is what carries the {@code LIMIT(5)} analogue.</li>
+ *   <li>{@code CategoryBalanceArtifactPublisher} -- not a task. The category-balance report's
+ *       publication path, driven only by the nightly task. It is a second publisher rather than a
+ *       method on the first because the two artifacts share no key rule, no record length and no
+ *       source relation.</li>
+ *   <li>{@code GenerationKeys} -- not a task. The generation-key convention and the number a new write
+ *       is allocated, read by listing the date partition. Retention is NOT performed here: the bucket's
+ *       object-created notification drives {@code infra/lambda/dataset_generation_retention.py}, which
+ *       prunes past the newest five.</li>
  * </ul>
  *
- * <p>Assumptions: the roster is closed at four and is a MEASUREMENT of the directory rather than an
- * assignment -- all four classes have landed. Three of the entries are pinned by the runner's own
- * accepted-name list, so the roster cannot grow or shrink here without that list changing too, and the
- * agreement between the two is asserted by a test rather than left to a reader.</p>
+ * <p>Assumptions: the roster is closed at six and is a MEASUREMENT of the directory rather than an
+ * assignment -- all six classes have landed. Three of the entries are pinned by the runner's own
+ * accepted-name list, so the roster cannot grow or shrink in its TASK half without that list changing
+ * too, and the agreement between the two is asserted by a test rather than left to a reader.
+ * Refactoring Rationale: the roster was four. The three collaborators arrived with the
+ * category-balance report and the generation key it and the transaction report are both numbered
+ * under; the task half is unchanged at three, which is why the runner's list did not move.</p>
  *
  * <h2>Why singular and plural names both appear</h2>
  *
@@ -36,7 +52,7 @@
  * this package's names out of step with the state machine and the runbooks that already quote them.</p>
  *
  * <p>Trade-offs: the two report tasks differ only in how they arrive at a range, so their bodies are
- * short and the substance sits in {@code ReportArtifactPublisher}. That is intentional: the object key
+ * short and the substance sits in the publishers. That is intentional: the object key
  * rule and the sink lifecycle stated twice would let two copies of the key rule disagree about where an
  * artifact lives, and a reader discovers that kind of disagreement by finding no artifact rather than by
  * reading two files.</p>

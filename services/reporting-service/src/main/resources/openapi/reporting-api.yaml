@@ -295,10 +295,14 @@ paths:
       responses:
         '200':
           description: >-
-            Nothing was started and no error occurred: the caller declined the
-            confirmation. The body's submitted member is false and both its
-            message and its submission member are present and null, because a
-            declined request has nothing to say and no run to describe.
+            Nothing was started and no error occurred, which happens on two
+            distinct turns and the body's outcome member says which. DECLINED is
+            the caller answering no: message and submission are both present and
+            null, because the baseline writes nothing into the message line at
+            L480 to L483 and there is no run to describe. UNANSWERED is a
+            confirmation not yet answered: submission is null and message carries
+            the baseline's own prompt from L464 to L474, which is a question being
+            asked rather than a mistake being reported.
           headers:
             X-Correlation-Id:
               $ref: '#/components/headers/CorrelationId'
@@ -308,7 +312,7 @@ paths:
                 $ref: '#/components/schemas/ReportSubmissionOutcome'
         '201':
           description: >-
-            An execution was started. The body's submitted member is true and
+            An execution was started. The body's outcome member is STARTED and
             its submission member carries the handle to poll with.
           headers:
             X-Correlation-Id:
@@ -323,6 +327,14 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -390,6 +402,10 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -448,6 +464,174 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/reports/executions/{executionName}:
+
+    description: >-
+      One accepted report submission: what became of it, and where its output is.
+
+    get:
+      operationId: readReportExecution
+      tags:
+        - reports
+      x-required-authority: carddemo-user
+      summary: Reports what became of one submitted report.
+      description: >-
+        Answers the handle a submission returned. Reports whether the run is
+        still going, has succeeded or has failed; echoes the report type and the
+        resolved bounds the run received, which matters because two of the three
+        report types resolve bounds the caller never supplied; and, once the run
+        has succeeded and its artifact is stored, carries the path the produced
+        report is collected from.
+
+
+        Refactoring Rationale: this operation is what the submission handle was
+        for, and its absence was a defect. The submission returned an
+        orchestration handle that NO operation consumed, so a caller could not
+        tell a run still going from one that had failed and could not reach the
+        document it produced. Reading the two range operations instead reports the
+        CURRENT contents of the ledger, which is not the same thing as the report
+        a particular run rendered. The baseline has the same gap for a different
+        reason -- it writes card images to the transient data queue at
+        app/csd/CARDDEMO.CSD L499 to L505 and receives no identity back at all --
+        so this is a documented improvement rather than a port, registered as
+        D-REPORT-LIFECYCLE-OBSERVABLE.
+
+
+        Assumptions: the run is named by its NAME and never by an orchestration
+        handle in full. The service composes the handle from the state machine it
+        is configured with, so nothing a caller sends can reach another state
+        machine, another account or another environment. A name of the wrong
+        SHAPE is refused with 400, since the shape is published below; a
+        well-formed name the orchestration does not know is answered with 404,
+        which is also the answer for a name it has forgotten -- a completed run is
+        retained for ninety days -- so neither reveals which names exist.
+
+
+        Assumptions: the result location is present only where the store HOLDS
+        the artifact, so a location this operation returns always resolves. A run
+        that succeeded and whose artifact a lifecycle rule has since expired
+        reports its status with no location.
+      parameters:
+        - $ref: '#/components/parameters/ExecutionNamePath'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '200':
+          description: >-
+            What the orchestration reports about the run, with the artifact's
+            location and write instant when one is stored.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportExecutionStatusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/reports/transaction-report/artifact:
+
+    description: >-
+      The rendered transaction report a run produced, for one type and range.
+
+    get:
+      operationId: collectReportArtifact
+      tags:
+        - reports
+      x-required-authority: carddemo-user
+      summary: Collects the rendered transaction report for one type and range.
+      description: >-
+        Streams the 133-column report a run wrote -- the width fixed by
+        FD-REPTFILE-REC PIC X(133) at app/cbl/CBTRN03C.cbl L85 -- for the type and
+        the inclusive range that identify it. Take the location from the
+        execution-status operation, or compose it from coordinates already held.
+
+
+        Refactoring Rationale: the artifact a run writes was reachable by
+        nothing. The dataset bucket admits only the VPC endpoint, so even an
+        operator holding the object key could not fetch it over HTTPS, and no
+        operation served it. Streaming it here keeps collection inside the same
+        bearer token, the same authority check and the same audit trail as every
+        other read of this contract. A pre-signed URL was rejected: it is a
+        bearer credential in a query string that outlives the session, is
+        recorded in browser history and in every intermediary's access log,
+        cannot be revoked, and carries none of this surface's rules.
+
+
+        Assumptions: the artifact is addressed by its COORDINATES rather than by
+        an opaque selector, which is the opposite of how a statement artifact is
+        addressed, and the difference is the subject matter. A statement selector
+        protects a card identity; a report type and a date range describe a query
+        and name no person. An opaque token would also stop an operator from
+        constructing the location of a run whose coordinates they know, which is
+        what a runbook does when a report is chased after the fact. What replaces
+        the token as a safeguard is validation: the type is admitted only from the
+        closed domain below and each bound is parsed as a calendar date, so no
+        caller-supplied text reaches an object key uninterpreted.
+
+
+        Trade-offs: the body is an opaque attachment rather than declared text,
+        for the same reason the statement artifacts are. The report is a
+        fixed-width document compared byte for byte against the golden masters,
+        and declaring a text media type invites a client to re-encode it.
+      parameters:
+        - $ref: '#/components/parameters/ReportTypeQuery'
+        - $ref: '#/components/parameters/StartDateQuery'
+        - $ref: '#/components/parameters/EndDateQuery'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '200':
+          description: >-
+            The report's bytes, as an attachment. The length is declared from the
+            store's own record of the stored object and the body is streamed
+            rather than assembled.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            Content-Disposition:
+              $ref: '#/components/headers/AttachmentDisposition'
+            X-Content-Type-Options:
+              $ref: '#/components/headers/ContentTypeOptions'
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                description: >-
+                  The report exactly as it was written: 133-column fixed-width
+                  records, one per line, with the page and account banding the
+                  reference emits.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -517,6 +701,14 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -616,9 +808,113 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
 
+
+  /api/v1/reports/statements/artifacts/{selector}:
+
+    description: >-
+      One stored statement rendering, collected by the opaque selector a
+      statement response published for it.
+
+    get:
+      operationId: collectArtifact
+      tags:
+        - statements
+      x-required-authority: carddemo-user
+      summary: Collects one stored statement rendering.
+      description: >-
+        Streams the bytes of the artifact the selector names: the 80-byte plain
+        text of FD-STMTFILE-REC at app/cbl/CBSTM03A.CBL L45 or the 100-byte
+        markup of FD-HTMLFILE-REC at its L47, whichever the selector was minted
+        for. Take the selector from the plainTextUri or htmlUri of a statement
+        response and pass the whole path back unchanged.
+
+
+        Refactoring Rationale: this operation exists because the two statement
+        operations published artifact locations that NOTHING SERVED. The dataset
+        bucket admits only the VPC endpoint, so a caller holding a location could
+        not open it, and the locations named per-card objects that no writer
+        produces at all. Two alternatives were rejected before this one. Widening
+        the bucket policy would make every artifact of every run reachable from
+        the internet on the strength of a key name, with no authorization rule
+        between a caller and a statement. A pre-signed URL is a bearer credential
+        carried in a query string: it outlives the session, is recorded in browser
+        history and in every intermediary's access log, cannot be revoked, and
+        carries none of this surface's own rules. Serving the bytes here keeps
+        collection inside the same token, the same authority check and the same
+        audit trail as every other read of this contract.
+
+
+        Trade-offs: BOTH renderings are returned as application/octet-stream with
+        an attachment disposition, and the markup is deliberately NOT returned as
+        text/html. The markup is built from cardholder data, and declaring it
+        renderable invites a browser to execute it in this origin -- exactly the
+        case the content-security policy and the attachment disposition on every
+        response of this surface exist to prevent. A caller that wants to display
+        it saves it and opens it itself.
+
+
+        Assumptions: an unknown selector, a selector this deployment did not mint
+        and an artifact the store does not hold are all reported as 404 and are
+        not distinguished. Distinguishing them would let a caller discover which
+        selectors are real, and no caller can act on the difference. A selector of
+        the wrong SHAPE is refused with 400 instead, before the store is consulted:
+        the shape is published as ArtifactSelector in this document, so refusing it
+        discloses nothing, and it cannot name an artifact.
+      parameters:
+        - $ref: '#/components/parameters/ArtifactSelectorPath'
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '200':
+          description: >-
+            The artifact's bytes, as an attachment. The length is declared from
+            the store's own record of the stored object, and the body is streamed
+            rather than assembled, so a statement run covering a large portfolio
+            is not held in memory to be served.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+            Content-Disposition:
+              $ref: '#/components/headers/AttachmentDisposition'
+            X-Content-Type-Options:
+              $ref: '#/components/headers/ContentTypeOptions'
+            Content-Security-Policy:
+              $ref: '#/components/headers/StatementContentSecurityPolicy'
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                description: >-
+                  The artifact exactly as it was written: fixed-length records,
+                  one per line, at the width of the rendering the selector names.
+                  The plain-text form is the byte-for-byte parity artifact
+                  compared against the golden masters, which is why it is served
+                  unencoded and unmodified.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '500':
+          $ref: '#/components/responses/InternalError'
 
 components:
 
@@ -647,6 +943,42 @@ components:
       schema:
         $ref: '#/components/schemas/CorrelationId'
 
+    # WHY : Assumptions: the three headers below are declared as COMPONENTS even
+    #       though one operation returns them, because the operation that returns
+    #       them is the one whose body a browser could render and a header omitted
+    #       from a document is a header a client does not know to expect. They are
+    #       set together by one helper in StatementController for the same reason.
+    AttachmentDisposition:
+      description: >-
+        Instructs a browser to save the body rather than display it. Stated
+        WITHOUT a filename: a filename derived from a card or an account would
+        put an identifier into a value the browser writes to the file system.
+      required: true
+      schema:
+        type: string
+        enum:
+          - attachment
+
+    ContentTypeOptions:
+      description: >-
+        Forbids content-type sniffing, so a body served as an opaque attachment
+        cannot be re-interpreted as markup by a browser that guesses.
+      required: true
+      schema:
+        type: string
+        enum:
+          - nosniff
+
+    StatementContentSecurityPolicy:
+      description: >-
+        Denies every fetch and sandboxes the document, so statement markup opened
+        from this origin can load nothing and execute nothing.
+      required: true
+      schema:
+        type: string
+        enum:
+          - "default-src 'none'; sandbox"
+
   parameters:
 
     # WHY : Assumptions: the width is twenty-four characters because that is what
@@ -667,8 +999,18 @@ components:
         shared filter in common-lib mints one in the same shape. At most
         twenty-four characters, enforced before any handler runs. It must never
         carry a credential, because it is written to logs by design.
+      # WHY : Measured: the shared CorrelationId schema admits the EMPTY string, because
+      #       ApiError normalises an absent identity to "" at L619 and every problem
+      #       document carries the member, so the schema a BODY member names has to admit
+      #       it. A REQUEST header must not: conformsWithin in CorrelationIdFilter
+      #       declines an empty value and the filter then answers 400. This parameter
+      #       therefore narrows the shared schema by one facet instead of restating its
+      #       alphabet and width, which would be a second statement of both. Omitting the
+      #       header entirely stays valid -- that is governed by required above.
       schema:
-        $ref: '#/components/schemas/CorrelationId'
+        allOf:
+          - $ref: '#/components/schemas/CorrelationId'
+          - minLength: 1
 
     # WHY : Assumptions: the key travels as a header rather than as a member of
     #       the request body because it describes the submission ATTEMPT and not
@@ -705,6 +1047,44 @@ components:
         maxLength: 40
         pattern: '^[A-Za-z0-9_-]+$'
         example: monthly-2022-07-retry-1
+
+    ExecutionNamePath:
+      name: executionName
+      in: path
+      required: true
+      description: >-
+        The name identifying one accepted run, taken verbatim from the
+        executionName a submission returned. The service composes the
+        orchestration handle from this name and the state machine it is configured
+        with, so a name cannot reach another state machine or another environment.
+      schema:
+        $ref: '#/components/schemas/ExecutionName'
+
+    ReportTypeQuery:
+      name: type
+      in: query
+      required: true
+      description: >-
+        Which report the artifact belongs to. The nightly scheduled run publishes
+        under daily -- it is the reference's app/jcl/TRANREPT.jcl output over one
+        business date and is deliberately not one of the three the request surface
+        offers -- and an on-demand run publishes under the lower-cased form of its
+        own type.
+      schema:
+        $ref: '#/components/schemas/ReportTypeToken'
+
+    ArtifactSelectorPath:
+      name: selector
+      in: path
+      required: true
+      description: >-
+        The opaque selector naming one stored statement artifact, taken verbatim
+        from the plainTextUri or htmlUri of a statement response. It is resolved
+        against the two artifacts this service publishes and is never treated as
+        an object key, so no selector -- however manipulated -- can address
+        another object of the dataset bucket.
+      schema:
+        $ref: '#/components/schemas/ArtifactSelector'
 
     StartDateQuery:
       name: startDate
@@ -771,6 +1151,17 @@ components:
         array names each failing property and carries the verbatim message the
         baseline raises for it, and its first entry is the field a client should
         move focus to.
+      # WHY : Assumptions: every shared refusal declares the correlation header, and these six did
+      #       not while the four protocol refusals beside them did. The identifier is set by
+      #       services/common-lib/src/main/java/com/carddemo/common/web/CorrelationIdFilter.java on
+      #       the way in and echoed on EVERY response, refusals included, so a component that
+      #       omitted it described a header the runtime sends anyway -- across thirty-eight of this
+      #       document's published responses, since each of these six is referenced many times.
+      #       Declared on the component rather than at each reference so the sixty references state
+      #       it once.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/CorrelationId'
       content:
         application/json:
           schema:
@@ -781,6 +1172,9 @@ components:
         No usable token was presented. Decided by the filter chain before any
         handler runs, and rendered with a body because config/SecurityConfig.java
         installs the shared refusal handlers precisely so that it carries one.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/CorrelationId'
       content:
         application/json:
           schema:
@@ -791,6 +1185,9 @@ components:
         A valid token was presented that carries neither group authority. Decided
         after the credential has been accepted, which is what distinguishes it
         from the 401 above.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/CorrelationId'
       content:
         application/json:
           schema:
@@ -801,6 +1198,9 @@ components:
         No card or account matches the selector. The response names no digit of
         the value that was searched for, so a caller cannot use the refusal
         itself to confirm a number.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/CorrelationId'
       content:
         application/json:
           schema:
@@ -829,6 +1229,9 @@ components:
         retry hint is sent, because the window is reopened by a state machine
         whose remaining work this service cannot see, so any value would be a
         guess a client would then schedule against.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/CorrelationId'
       content:
         application/json:
           schema:
@@ -839,6 +1242,150 @@ components:
         An unexpected failure. The body carries a correlation identifier and a
         code; it never carries the text of the underlying throwable, so nothing
         about the internal call path is disclosed to a caller.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    # WHY : Refactoring Rationale: a SECOND definition of MethodNotAllowed, NotAcceptable and
+    #   UnsupportedMediaType stood here and all three are withdrawn. They were a whole earlier
+    #   generation of the same three components, merged alongside the surviving generation, and a
+    #   duplicate mapping key is the most deceptive shape this can take: YAML resolves a repeated
+    #   key to the LAST definition, so one of every pair was dead text that still read as the
+    #   contract, and no schema-shaped test could tell -- both copies were well formed and both
+    #   carried the correlation header. The survivors are the generation that states the Allow
+    #   header's composition rule with an example and attributes the pinned content type to the
+    #   shared advice rather than to a per-service handler; the withdrawn copies said only that
+    #   Allow is 'comma separated'. Detected with a duplicate-key-aware composer, because
+    #   yaml.safe_load hides the condition by construction.
+    PayloadTooLarge:
+      description: >-
+        The request body exceeds the byte ceiling this service accepts, and
+        carries the machine code CARDDEMO-0413. The ceiling is 65536 bytes unless
+        the deployment names another under carddemo.web.max-request-body-bytes,
+        and it is enforced by a servlet filter ordered ahead of the security
+        chain rather than by a handler -- which is why it applies to every
+        operation that accepts a body and why the refusal reaches a caller that
+        presented no token at all.
+
+
+        Assumptions: the body of this response carries no fieldErrors entry and
+        cannot. The refusal is raised before any member is parsed, so there is no
+        bound object to have fields; the message names the ceiling and the size
+        the request declared, which is what distinguishes a misconfigured client
+        from a deliberate flood.
+
+
+        Assumptions: a body that declares no length is not refused for that alone.
+        It is read up to the ceiling and refused only if it exceeds it, and the
+        bytes already read are forwarded to the handler when it does not, so a
+        chunked request within the bound is served normally. For that case the
+        message states that the body declares no length and exceeds the bound,
+        because the exact size is the one thing that was never learned.
+
+
+        Assumptions: this response carries the correlation identifier like every
+        other, and that is a property of filter ORDER rather than of this filter.
+        The correlation filter is registered one position ahead of it and has
+        already put the identifier on the response before the body is written.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+
+    # WHY : Refactoring Rationale: the transport refusals below were UNDECLARED while the shared
+    #       advice in services/common-lib produces every one of them, so each was reachable on
+    #       every operation of this contract with no published shape. A client had no branch for
+    #       them: ui/src/api/client.ts could only treat each as an unrecognised body. Declaring
+    #       them here and handling them there are two halves of one correction, and declaring one
+    #       half alone would have documented a response no caller could recognise.
+    # WHY : Assumptions: each carries the same ApiError shape as every other refusal of this
+    #       contract, with its own machine code -- CARDDEMO-0405, CARDDEMO-0406 and
+    #       CARDDEMO-0415. A distinct code per condition is what lets a client branch without
+    #       reading the sentence, which is the same reason the 400 and the 401 do not share one.
+    # WHY : Assumptions: the body is declared application/json because that is what the shared
+    #       advice writes -- it returns a plain ApiError record and this build registers no
+    #       problem+json converter -- and because the 406 arm pins MediaType.APPLICATION_JSON
+    #       explicitly, which is the single call that lets a body be produced at all for a caller
+    #       whose Accept header matched nothing.
+    MethodNotAllowed:
+      description: >-
+        The route addressed does not publish the method the request named. The response
+        carries an Allow header naming the methods it does publish, which is where a client
+        reads them; the body does not repeat that list, so the two cannot disagree.
+
+
+        Assumptions: this has no reference counterpart. A 3270 terminal cannot address a
+        transaction with a verb the program did not define, so no reference literal or
+        condition name corresponds to this outcome. It exists because a target route is
+        addressed by callers this system does not control.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/CorrelationId'
+        Allow:
+          description: >-
+            The methods the addressed route publishes, joined with a comma and a space.
+            Composed from the methods the framework's handler mapping reports, which are
+            server-authored; the method the caller USED is echoed nowhere. It is omitted
+            rather than sent empty when the framework reported no supported set, because an
+            empty Allow states that the route supports no method at all, which would be a
+            different and false claim.
+          required: false
+          schema:
+            type: string
+            example: 'GET, PUT'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    UnsupportedMediaType:
+      description: >-
+        The request carried a body in a media type this route does not accept, or carried a
+        body with no Content-Type at all. Every operation of this contract that accepts a
+        body accepts application/json and nothing else.
+
+
+        The body carries no fieldErrors entry and cannot: the refusal is raised before any
+        member has been parsed, so there is no bound object to have fields. That is why this
+        is a distinct code from CARDDEMO-0400 rather than a 400 with an empty array, which a
+        caller could not tell from a body it had mis-spelled.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    NotAcceptable:
+      description: >-
+        The request's Accept header names no media type this route can produce. Every
+        operation of this contract produces application/json, EXCEPT the two artifact
+        collections -- the transaction-report artifact and the statement artifacts -- which
+        produce application/octet-stream and nothing else. An Accept naming a renderable type
+        is refused there deliberately, because the markup artifact is composed from cardholder
+        data and is delivered as an attachment rather than as a page.
+
+
+        Assumptions: the body of this response is itself application/json, which is a type
+        the caller has just said it will not accept. That is deliberate. The alternative is
+        an empty 406, which carries neither the machine code nor the correlation identifier
+        a support enquiry needs and tells the caller nothing about which header to change.
+        The content type is set explicitly by the shared advice for a second reason recorded
+        there: a body left to content negotiation would be negotiated against the same
+        Accept header that already matched nothing, and the request would then be forwarded
+        to the container error path, which this service publishes no route for.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/CorrelationId'
       content:
         application/json:
           schema:
@@ -862,17 +1409,33 @@ components:
     #       decimal with sign overpunch rather than packed, which
     #       app/jcl/PRTCATBL.jcl L50 corroborates by declaring
     #       TRAN-CAT-BAL,18,11,ZD.
+    # WHY : ⚠️ Refactoring Rationale: the bound is NINE integer digits, and this
+    #       schema published ten while its own description named the nine-digit
+    #       pictures underneath -- so the document contradicted itself in adjacent
+    #       lines and the wider half was the one a client would generate from. Ten
+    #       digits is not a harmless slack: a ten-digit total cannot be encoded by
+    #       either report total mask, both of which provide nine integer positions
+    #       at app/cpy/CVTRA07Y.cpy L54 and L60, so a value this schema admitted
+    #       would be refused by the encoder that has to print it. Publishing the
+    #       true bound makes the overflow a refused REQUEST rather than a report
+    #       that stops mid-band.
+    # WHY : Assumptions: maxLength is thirteen and is derived, not chosen -- one
+    #       optional minus, nine integer digits, the point and two fractional
+    #       digits. minLength stays four, which is the shortest conforming value
+    #       0.00. The width and the pattern therefore agree by construction, where
+    #       fourteen agreed with a ten-digit pattern that no longer exists.
     MonetaryAmount:
       type: string
-      pattern: '^-?[0-9]{1,10}\.[0-9]{2}$'
+      pattern: '^-?[0-9]{1,9}\.[0-9]{2}$'
       minLength: 4
-      maxLength: 14
+      maxLength: 13
       description: >-
         An exact fixed-point amount at scale 2, always carrying both fractional
         digits and a leading minus when negative. Never a JSON number. Both
         report accumulators and the statement amount are PIC S9(09)V99 in the
         reference, at app/cbl/CBTRN03C.cbl L134 to L136 and app/cpy/COSTM01.CPY
-        L29 respectively.
+        L29 respectively, so nine integer digits is the whole domain and not a
+        cautious subset of it.
 
     # WHY : Alternatives Considered: constraining this to sixteen characters and
     #       nothing more, which is the obvious reading of the X(16) width that
@@ -931,6 +1494,178 @@ components:
     #       is modelled by StatementProcessingTimestamp26 below instead, so the
     #       exception is declared exactly where it applies and is legible as an
     #       exception rather than as the general rule.
+    # WHY : Assumptions: the selector's shape is DERIVED and not chosen. It is
+    #       exactly what common-lib OpaqueIdentifier emits -- TOKEN_LENGTH is 22 and
+    #       the encoding is unpadded URL-safe base64, so the alphabet is letters,
+    #       digits, underscore and hyphen -- and publishing the derived facets lets a
+    #       client reject a malformed selector without a round trip. Trade-offs: the
+    #       facets couple this document to that token width, which is the intended
+    #       coupling: a change of width has to be a change of contract, because a
+    #       location a caller already holds is composed from it.
+    ExecutionName:
+      type: string
+      minLength: 1
+      maxLength: 80
+      pattern: '^[A-Za-z0-9_-]{1,80}$'
+      description: >-
+        The name of one report execution. Eighty characters is the orchestration's
+        own limit on an execution name, and the alphabet is the one this service
+        composes names from. Treat it as opaque: take it from a submission and
+        pass it back unchanged.
+
+    ReportTypeToken:
+      type: string
+      enum:
+        - daily
+        - monthly
+        - yearly
+        - custom
+      description: >-
+        The closed set of report types this service publishes artifacts for. The
+        three on-demand tokens are the lower-cased report names the submission
+        surface resolves; daily is the scheduled nightly run, which is a report
+        over one business date rather than any of the three.
+
+    ReportExecutionStatusResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - executionName
+        - status
+        - startedAt
+        - stoppedAt
+        - reportType
+        - startDate
+        - endDate
+        - resultUri
+        - resultGeneratedAt
+      description: >-
+        What became of one accepted submission. The component list of
+        com.carddemo.reporting.dto.ReportExecutionStatusResponse name for name.
+
+
+        SIX MEMBERS ARE NULLABLE AND THEY MOVE IN GROUPS. stoppedAt is absent
+        while the run is still going. The report type and the two bounds are
+        absent only for a run started outside this surface -- the nightly schedule
+        starts the same state machine -- because their values are recovered from
+        the execution's own input, which such a run does not carry in the shape
+        this service composes. The result location and its write instant are
+        present exactly when the store holds the artifact, so a location here
+        always resolves.
+
+
+        It carries NO monetary value and no cardholder value of any kind: a run
+        name, a status, two instants, a type, a date range and a served path.
+      properties:
+        executionName:
+          allOf:
+            - $ref: '#/components/schemas/ExecutionName'
+          description: >-
+            The run this status is about, echoed from the request.
+        status:
+          type: string
+          enum:
+            - RUNNING
+            - SUCCEEDED
+            - FAILED
+            - TIMED_OUT
+            - ABORTED
+            - PENDING_REDRIVE
+          description: >-
+            Which state the orchestration reports the run in, carried across by
+            name rather than reduced to a smaller set. The distinctions are ones
+            an operator acts on: a timed-out run is retried, an aborted run was
+            stopped deliberately, and a run awaiting redrive is one an operator
+            has already been told about. Only SUCCEEDED can have an artifact.
+        startedAt:
+          allOf:
+            - $ref: '#/components/schemas/Timestamp26'
+          description: >-
+            When the orchestration started the run.
+        stoppedAt:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp26'
+            - type: 'null'
+          description: >-
+            When the run stopped, or null while it is still going.
+        reportType:
+          oneOf:
+            - $ref: '#/components/schemas/ReportTypeToken'
+            - type: 'null'
+          description: >-
+            Which report the run produces, or null for a run started outside this
+            surface.
+        startDate:
+          oneOf:
+            - $ref: '#/components/schemas/IsoDate'
+            - type: 'null'
+          description: >-
+            Inclusive lower bound of the range the run covered, as the run
+            received it -- which for the two preset types is a bound the caller
+            never supplied. Null on the same terms as the report type.
+        endDate:
+          oneOf:
+            - $ref: '#/components/schemas/IsoDate'
+            - type: 'null'
+          description: >-
+            Inclusive upper bound of that range, null on the same terms. It is
+            also the date the run is attributed to, which is what the on-demand
+            task passes as its run date.
+        resultUri:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 256
+          description: >-
+            WHERE TO COLLECT the produced report: the collect operation's path
+            with the run's own type and bounds as query parameters. Follow it with
+            the same bearer token. Null whenever no artifact is stored -- while
+            the run is going, after it failed, and after a lifecycle rule has
+            expired what it wrote -- so a location present here always resolves.
+          examples:
+            - /api/v1/reports/transaction-report/artifact?type=monthly&startDate=2022-06-01&endDate=2022-06-30
+        resultGeneratedAt:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp26'
+            - type: 'null'
+          description: >-
+            When the stored artifact was written, taken from the object store's
+            own record of the completed object. Null on exactly the same terms as
+            the location: the two describe one stored artifact and neither is
+            usable alone.
+
+    ArtifactSelector:
+      type: string
+      minLength: 22
+      maxLength: 22
+      pattern: '^[A-Za-z0-9_-]{22}$'
+      description: >-
+        The opaque, keyed selector naming ONE stored statement artifact. It is
+        derived from the artifact's name under a server-held key, so it spells out
+        no account identifier, no card number and no object key, which is what
+        makes it safe to place in a response body, a browser history entry and an
+        intermediary's access log. It is STABLE, so the same artifact answers to
+        the same selector across runs. Treat it as opaque: take it from a statement
+        response and pass it back unchanged, and do not compose one.
+      examples:
+        - 0oL2fQ8xVn4tKpR7wZbY1s
+
+    ArtifactLocation:
+      type: string
+      minLength: 59
+      maxLength: 59
+      pattern: '^/api/v1/reports/statements/artifacts/[A-Za-z0-9_-]{22}$'
+      description: >-
+        The path one stored statement artifact is collected from: the collect
+        operation's own path with a selector appended. It is a path served by this
+        deployment rather than an object-store location, because the dataset bucket
+        admits only the VPC endpoint and an s3:// location is therefore unusable by
+        every caller of this contract. Follow it with the same bearer token used
+        for the operation that returned it.
+      examples:
+        - /api/v1/reports/statements/artifacts/0oL2fQ8xVn4tKpR7wZbY1s
+
     Timestamp26:
       type: string
       minLength: 26
@@ -1042,16 +1777,50 @@ components:
         than the firstKey descending. The two values are spelled in lower case
         because that is the wire vocabulary the shared request types accept.
 
+    # WHY : ⚠️ Refactoring Rationale: the facets below are the shared filter's own
+    #       accepted domain, and this schema previously published a NARROWER one --
+    #       pattern ^[0-9A-Za-z-]{1,24}$ with minLength 1 -- which disagreed with the
+    #       filter and with the six sibling contracts in two ways that both reached a
+    #       caller. It forbade the full stop and the underscore, which
+    #       CorrelationIdFilter accepts, so a caller propagating a conforming
+    #       upstream identity such as order.1234 had it accepted by the filter,
+    #       echoed on the response header, and then rejected by a client validating
+    #       against this document. And it forbade the EMPTY value, which is exactly
+    #       what an error body carries for a failure raised before any identity was
+    #       established -- so the one response a caller most needs to parse was the
+    #       one this document declared invalid.
+    # WHY : Assumptions: the pattern is copied character for character from the
+    #       sibling contracts rather than re-derived, because seven documents
+    #       describing one shared filter must describe it identically; a
+    #       cross-contract gate compares them.
+    # WHY : Trade-offs: a canonical form is described but not mandated by the
+    #       pattern, so a caller may propagate an identity minted elsewhere as long
+    #       as it fits. The cost is that two callers may use different spellings;
+    #       what it buys is that a caller already carrying a conforming identity
+    #       from an upstream system need not mint a second one, which would break
+    #       the correlation this value exists to preserve.
     CorrelationId:
       type: string
-      pattern: '^[0-9A-Za-z-]{1,24}$'
-      minLength: 1
       maxLength: 24
+      pattern: '^$|^(?!(?:[._-]*[0-9]){13,}[._-]*$)[A-Za-z0-9_.-]{1,24}$'
       description: >-
-        A request-scoped identifier of at most twenty-four characters; a longer
-        or otherwise malformed value is refused with 400 before any handler runs.
-        It must never carry a credential, because it is written to logs by
-        design.
+        Identity of one unit of work. At most twenty-four characters drawn from
+        the ASCII letters, the digits, the hyphen, the underscore and the full
+        stop. A value the service mints is exactly the two-character prefix CD
+        followed by twenty-two upper-case hexadecimal characters over eleven
+        bytes of entropy; a value a caller supplies need only fit the bound and
+        the set. The empty string appears only inside an error body, and only for
+        a failure raised before any identity had been established. The pattern
+        additionally refuses one narrow class the character set alone admits: a
+        value made up only of digits and the three separators, carrying thirteen
+        or more digits. That is the shape of a primary account number, in
+        contiguous form and in every separated form, and the shared correlation
+        filter refuses it because this identity is echoed on the response and
+        written to every log line for the request -- so accepting one would copy a
+        card number into both. Ordinary values are unaffected: a timestamp-like
+        2022-07-18-0930 carries nine digits and is accepted, and any value
+        containing a letter is accepted whatever its digits. It must never carry a
+        credential, because it is written to logs by design.
 
     # -----------------------------------------------------------------------
     # Report submission
@@ -1209,7 +1978,7 @@ components:
       #       the nullable-and-required members of AccountViewResponse and of
       #       every keyset page in this repository are declared to avoid.
       required:
-        - submitted
+        - outcome
         - message
         - submission
       description: >-
@@ -1223,16 +1992,39 @@ components:
         a status and this member preserves the suppression the flag existed for
         while giving the caller the feedback a single flag could not carry.
       properties:
-        submitted:
-          type: boolean
+        outcome:
+          type: string
+          enum:
+            - STARTED
+            - DECLINED
+            - UNANSWERED
           description: >-
-            Whether a run was accepted for execution. False only for a
-            deliberate cancellation, which answers 200; true only alongside 201.
-            An unanswered confirmation reaches neither state: it is refused with
-            400 and the shared problem document, carrying a field error on
-            confirm, because the baseline answers an absent answer at L464 and an
-            unrecognised one at L484 separately and this service keeps them
-            separate.
+            WHICH OF THE THREE TURNS this was. STARTED means a run was accepted,
+            and only that value accompanies 201. DECLINED means the caller
+            answered no, and UNANSWERED means the confirmation has not been
+            answered yet; both accompany 200, and both start nothing.
+
+
+            Refactoring Rationale: this member REPLACES a boolean named
+            submitted, and the replacement closes a defect. There are three
+            outcomes and the baseline distinguishes all three -- at L478, L480
+            and L464 of app/cbl/CORPT00C.cbl -- while a boolean carries two, so
+            an unanswered confirmation was reported exactly like a decline and
+            the two were separable only by whether message happened to be null.
+            This document additionally described the unanswered turn as a 400
+            with a problem document, which the service does not emit: it answers
+            200 carrying the baseline's own prompt, because the baseline treats
+            an unanswered confirmation as a question being asked rather than a
+            mistake being reported. The member and the description are corrected
+            together.
+
+
+            Assumptions: the discriminator is a member and not only a status.
+            The status separates a started run from a turn that started nothing;
+            what it cannot do is separate the two turns that share 200, and
+            inferring that from the presence of another member is exactly the
+            inference that produced a caller being told it had cancelled when it
+            had merely not answered.
         message:
           type:
             - string
@@ -1249,16 +2041,17 @@ components:
             writes nothing into the message at L480 to L483 and the turn's
             opening MOVE SPACES at L169 has already blanked the field the screen
             is sent from at L560.
-          # WHY : Refactoring Rationale: the paragraph describing this member on an
-          #       unanswered confirmation, and the three prompt examples under it,
-          #       were withdrawn. That state is not reachable on this response:
-          #       ReportExecutionService.isConfirmed refuses an absent answer with
-          #       the shared problem document, so the prompt the baseline composes
-          #       at L465 to L469 is carried by a 400 rather than by this member,
-          #       and describing it here promised a 200 body this service does not
-          #       emit. The two prompt strings still differ from the submitted one
-          #       by the space before the three dots and are still never merged;
-          #       that ruling now lives only where the refusal is raised.
+          # WHY : Refactoring Rationale: the unanswered turn is described here again,
+          #       and the paragraph that withdrew it was wrong. It claimed the
+          #       prompt was carried by a 400 problem document because an absent
+          #       answer was refused; the service answers 200 with the prompt in
+          #       THIS member, and has done since the refusal was corrected -- the
+          #       baseline composes a question at L464 to L474 rather than
+          #       reporting a fault. So the member carries three states: the
+          #       submitted sentence on a started run, the prompt on an unanswered
+          #       turn, and null on a decline, where the baseline writes nothing.
+          #       The prompt strings differ from the submitted one by the space
+          #       before the three dots and are never merged with it.
           examples:
             - 'Monthly report submitted for printing ...'
             - 'Yearly report submitted for printing ...'
@@ -1268,9 +2061,11 @@ components:
             - $ref: '#/components/schemas/ReportSubmissionResponse'
             - type: 'null'
           description: >-
-            The accepted run and its execution handle, present only when
-            submitted is true and null otherwise. Its absence is what a client
-            checks to know that nothing was started.
+            The accepted run and its execution handle, present only when outcome
+            is STARTED and null otherwise. Poll the run with the executionName it
+            carries, through the execution-status operation of this contract, and
+            collect the produced report from the location that operation reports
+            once the run has succeeded.
 
     ReportSubmissionResponse:
       type: object
@@ -1489,8 +2284,19 @@ components:
         ordinal the reference keeps on the terminal and not by any member of this
         window. Nothing here is addressed by a counted row position.
       properties:
+        # WHY : Assumptions: the upper bound is declared on the ARRAY and not left as
+        #       prose above it, and it is the value ReportController.PAGE_SIZE
+        #       carries -- the report's own page length, which that constant takes from
+        #       TransactionReportService.LINE_COUNTER_MODULUS so one window of this
+        #       operation holds exactly one printed page of the 133-column report.
+        #       A page carrying one row more would be a defect in this service, which
+        #       is worth failing a contract check rather than reaching a client that
+        #       had sized its rendering for the published bound. No lower bound is
+        #       declared: an empty page is legitimate for an exhausted set and for a
+        #       filter that removed every row it read.
         items:
           type: array
+          maxItems: 20
           items:
             $ref: '#/components/schemas/TransactionReportLineResponse'
           description: >-
@@ -1661,11 +2467,21 @@ components:
         - plainTextUri
         - htmlUri
         - generatedAt
+        - firstRecord
+        - recordCount
       description: >-
-        The summary of one rendered statement and the locations of its two
-        renderings. The component list of
+        The summary of one statement and, where the store holds them, the
+        locations the two renderings are collected from. The component list of
         com.carddemo.reporting.dto.StatementResponse name for name, with widths
         from the statement layout block at app/cbl/CBSTM03A.CBL L85 to L146.
+
+
+        FIVE MEMBERS ARE NULLABLE AND THEY MOVE TOGETHER. Each location is
+        present exactly when that artifact is stored, the instant is present
+        exactly when at least one of them is, and the two artifact positions are
+        present exactly when the run's index names this card -- so a response
+        describes a statement that has been rendered or one that has not, and
+        never claims both.
 
 
         It is a METADATA ENVELOPE POINTING AT THE ARTIFACTS rather than a
@@ -1720,38 +2536,130 @@ components:
             limits. The row ceiling that does exist bounds the transaction
             ARRAY of the sibling operation, where it is declared as maxItems.
         plainTextUri:
-          type: string
-          minLength: 1
+          oneOf:
+            - $ref: '#/components/schemas/ArtifactLocation'
+            - type: 'null'
           description: >-
-            Where the 80-byte plain-text rendering was written -- the width fixed
+            WHERE TO COLLECT the 80-byte plain-text rendering -- the width fixed
             by FD-STMTFILE-REC PIC X(80) at app/cbl/CBSTM03A.CBL L45 and by
             app/jcl/CREASTMT.JCL L89. Returned by reference rather than inline
             because that rendering is the byte-for-byte parity artifact compared
             against the golden masters, and inlining it would require an encoding
-            step that no longer preserves those bytes. Treat it as opaque; no
-            example appears here because a real location embeds a bucket name.
+            step that no longer preserves those bytes.
+
+
+            The value is a PATH THIS DEPLOYMENT SERVES, always beneath
+            /api/v1/reports/statements/artifacts/, ending in an opaque selector.
+            Follow it with the collect-artifact operation of this contract and the
+            same bearer token. It is null exactly when no such artifact is stored,
+            which is the state before the statement run of the current period has
+            produced one.
+
+
+            Refactoring Rationale: two things changed together and both were
+            defects rather than preferences. This was an s3:// location naming the
+            dataset bucket, which no caller of this contract can open -- the
+            bucket policy admits only the VPC endpoint -- and which named an
+            object no writer produces, because the run publishes two artifacts for
+            the whole run rather than one pair per card. And it was REQUIRED, which
+            forced a location to be asserted whether or not an artifact existed, so
+            a caller could not tell a rendered statement from an unrendered one.
+            The value is now followable when it carries a location and null when
+            there is nothing to follow. It is null rather than omitted: the member
+            is written on every response, so a caller reads one state, not two.
           examples:
-            - REDACTED_ARTIFACT_LOCATION_TEXT
+            - /api/v1/reports/statements/artifacts/0oL2fQ8xVn4tKpR7wZbY1s
         htmlUri:
-          type: string
-          minLength: 1
+          oneOf:
+            - $ref: '#/components/schemas/ArtifactLocation'
+            - type: 'null'
           description: >-
-            Where the 100-byte markup rendering was written -- the width fixed by
+            WHERE TO COLLECT the 100-byte markup rendering -- the width fixed by
             FD-HTMLFILE-REC PIC X(100) at app/cbl/CBSTM03A.CBL L47 and by
             app/jcl/CREASTMT.JCL L94. Every variable cell in it is contextually
             escaped, so a merchant name or description carrying markup is
-            rendered as text rather than interpreted. Treat it as opaque.
+            rendered as text rather than interpreted.
+
+
+            A path of the same shape as the plain-text location, null on the same
+            terms, and described independently of it: a run interrupted between
+            its two writes leaves one artifact stored, and this contract reports
+            the one that exists rather than both or neither. The collect operation
+            returns it as a binary attachment and never as text/html, for the
+            reason recorded there.
           examples:
-            - REDACTED_ARTIFACT_LOCATION_MARKUP
+            - /api/v1/reports/statements/artifacts/9tB4mE7kXw2pQzA5nR8vLj
         generatedAt:
-          allOf:
+          oneOf:
             - $ref: '#/components/schemas/Timestamp26'
+            - type: 'null'
           description: >-
-            When the pair was rendered, as an opaque twenty-six-character stamp.
-            A rerun REPLACES both artifacts rather than appending to them -- the
-            delete step at app/jcl/CREASTMT.JCL L66 removes both before the
-            generator step recreates them -- so this value moves while the two
-            locations stay stable.
+            WHEN THE STORED ARTIFACT WAS WRITTEN, as an opaque
+            twenty-six-character stamp taken from the object store's own record of
+            the completed object. A rerun REPLACES both artifacts rather than
+            appending to them -- the delete step at app/jcl/CREASTMT.JCL L66
+            removes both before the generator step recreates them -- so this value
+            moves with each run while the two locations stay stable.
+
+
+            It is null exactly when no artifact is stored, and where both are
+            stored it is the plain-text artifact's instant, that being the one the
+            reference job writes first at app/jcl/CREASTMT.JCL L87.
+
+
+            Refactoring Rationale: this field carried twenty-six BLANKS on every
+            response from these operations. The value was defended as not
+            inventing a clock reading, which was true and still published a fixed
+            placeholder in a field this contract calls an instant -- so a caller
+            reading it learned nothing and could not tell that it had learned
+            nothing.
+        firstRecord:
+          type:
+            - integer
+            - 'null'
+          format: int64
+          minimum: 0
+          description: >-
+            WHERE THIS CARD'S STATEMENT BEGINS inside the plain-text artifact, as
+            a zero-based RECORD ORDINAL. The artifact covers the whole run rather
+            than this card alone -- app/jcl/CREASTMT.JCL L79 runs one generator
+            step over every cross-reference row, writing one plain-text data set
+            at L87 and one markup data set at L92 -- so this pair is what makes
+            the artifact usable from a per-card response: seek to this record and
+            read recordCount records.
+
+
+            It is an ordinal and not a byte offset because the records are fixed
+            width, FD-STMTFILE-REC PIC X(80) at app/cbl/CBSTM03A.CBL L45, so an
+            ordinal locates a statement exactly while a byte offset would also
+            encode how the artifact is framed in transport -- a framing detail
+            this contract deliberately does not publish.
+
+
+            Null when no plain-text artifact is stored, and null when the run's
+            index does not name this card, which is the state for a card added
+            after the last statement run.
+          examples:
+            - 240
+        recordCount:
+          type:
+            - integer
+            - 'null'
+          format: int64
+          minimum: 0
+          description: >-
+            HOW MANY CONSECUTIVE RECORDS this card's statement occupies from
+            firstRecord. Null on exactly the same terms as firstRecord: the two
+            locate one statement together and neither is usable alone, so a
+            response carries both or neither.
+
+
+            It is not the transaction count. A statement carries heading,
+            transaction and trailer records, so this figure exceeds
+            transactionCount by the fixed banding the layout at
+            app/cbl/CBSTM03A.CBL L85 to L146 declares.
+          examples:
+            - 27
 
     # WHY : Assumptions: thirteen properties, matching the THIRTEEN ELEMENTARY
     #       NAMED FIELDS of the 350-byte TRNX-RECORD at app/cpy/COSTM01.CPY L20 to
@@ -2005,8 +2913,23 @@ components:
       # WHY : Alternatives Considered: suppressing the two keys when null, with an inclusion setting, so
       #       the omission became true. Rejected because the aggregate sentence is the reference's own
       #       75-character message field and a client renders the band from it unconditionally, so a
-      #       key that comes and goes moves that decision into every client; and because the services
-      #       set `default-property-inclusion: always`, which the money contract depends on.
+      #       key that comes and goes moves that decision into every client; and because
+      #       always-inclusion is PINNED for every service in
+      #       services/common-lib/src/main/resources/carddemo-common-defaults.yml, which the
+      #       money contract SEPARATELY depends on -- a money member with no value must be
+      #       present and null rather than absent, because absent reads as "no balance" where
+      #       null reads as "no amount applies". That is a second consumer of the same pin and
+      #       NOT the reason these two keys are required here: the reason is the record shape
+      #       above, and this schema carries no monetary member at all. An earlier revision ran
+      #       the two together, which read as though a problem document's nullability followed
+      #       from a money rule.
+      # WHY : ⚠️ Refactoring Rationale: that last clause used to read "the services set
+      #       default-property-inclusion: always" and it named no place, which is how it came
+      #       to be inaccurate -- exactly one of the seven services actually set the key, and
+      #       the other six, this one included, rested a published contractual promise on the
+      #       serialiser's own default. The key is now set once in the shared defaults every
+      #       service imports, so the claim is true for all of them and is verifiable by
+      #       reading one file. The reasoning is unchanged; only its subject is now real.
       required:
         - code
         - secondaryCode
@@ -2031,9 +2954,18 @@ components:
             clients rather than parsed out of the message. For a date-edit
             refusal it carries the four-character severity the reference date
             routine returns.
+          # WHY : ⚠️ Refactoring Rationale: the bound is 22 and was 13. Thirteen is the width of
+          #       `code` above -- `CARDDEMO-` and four digits -- and this member is NOT drawn from that
+          #       vocabulary: it carries a subordinate condition name, and the widest the shared writer
+          #       can emit is 22, measured on CARD-LOCK-NOT-ACQUIRED and CARD-WRITE-NOT-APPLIED in
+          #       services/card-service/src/main/java/com/carddemo/card/api/CardController.java. This
+          #       service emits only the empty string today, so 13 was not violated here -- but one
+          #       generated client type reads a problem document from any of the seven services, and a
+          #       bound that differs between them is a type that differs between them. Bounding it at
+          #       the writer's own maximum is what makes the seven agree.
         secondaryCode:
           type: string
-          maxLength: 13
+          maxLength: 22
           description: >-
             The subordinate machine-readable identifier qualifying code, and the
             empty string when there is none. For a date-edit refusal it carries
@@ -2083,7 +3015,6 @@ components:
             reporting the problem.
         path:
           type: string
-          maxLength: 2048
           description: >-
             The request path that failed, so a client reporting a problem need not
             reconstruct it. It never carries a primary account number, because no
@@ -2147,7 +3078,6 @@ components:
         field:
           type: string
           minLength: 1
-          maxLength: 64
           description: >-
             The response-field identity a client attaches the help text to,
             spelled as the property name of the request schema. A consolidated

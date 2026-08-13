@@ -19,6 +19,10 @@ import java.time.LocalDate;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Locale;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeParseException;
+import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -29,6 +33,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.services.sfn.SfnClient;
+import software.amazon.awssdk.services.sfn.model.DescribeExecutionRequest;
+import software.amazon.awssdk.services.sfn.model.DescribeExecutionResponse;
+import software.amazon.awssdk.services.sfn.model.ExecutionDoesNotExistException;
 import software.amazon.awssdk.services.sfn.model.ExecutionAlreadyExistsException;
 import software.amazon.awssdk.services.sfn.model.StartExecutionRequest;
 import software.amazon.awssdk.services.sfn.model.StartExecutionResponse;
@@ -373,6 +380,34 @@ public class ReportExecutionService {
      * Request field naming the report-type selection as a whole.
      */
     private static final String REPORT_TYPE_FIELD = "reportType";
+
+    /**
+     * Execution-input member naming which report type a run was started for.
+     *
+     * <p>⚠️ Refactoring Rationale: the three members below are named constants shared by the two halves of
+     * ONE contract in this file -- the input {@link #start} composes and the input
+     * {@link #describeExecution} reads back -- so a rename cannot land on one half and leave the other
+     * reading a member that is no longer written. Both halves previously spelled the names as literals, and
+     * a measured mutation of the name on the reading half alone returned no coordinates for every
+     * successful run while the case asserting the written document still passed.</p>
+     *
+     * <p>⚠️ Assumptions: these are deliberately NOT the {@code *_FIELD} constants above, even where the
+     * spelling coincides. Those name fields of the published request, which the contract may rename; these
+     * name members of the document the state machine reads, which {@code infra/modules/step-functions-batch}
+     * declares. Sharing one constant between the two would make an API rename silently change the
+     * orchestration input.</p>
+     */
+    private static final String INPUT_REPORT_TYPE_MEMBER = "reportType";
+
+    /**
+     * Execution-input member naming the lower bound of the range a run covers.
+     */
+    private static final String INPUT_START_DATE_MEMBER = "startDate";
+
+    /**
+     * Execution-input member naming the upper bound of the range a run covers.
+     */
+    private static final String INPUT_END_DATE_MEMBER = "endDate";
 
     /**
      * The sentence the reference displays when no report type was marked.
@@ -1103,9 +1138,10 @@ public class ReportExecutionService {
         //       the shape of the execution input under a module-wide serialisation configuration
         //       this class does not own. The state machine reads these 3 names, so the shape is a
         //       contract between this method and the infrastructure code that declares the machine.
-        String executionInput = "{\"reportType\":\"" + reportName.toLowerCase(Locale.ROOT)
-                + "\",\"startDate\":\"" + startDate
-                + "\",\"endDate\":\"" + endDate + "\"}";
+        String executionInput = "{\"" + INPUT_REPORT_TYPE_MEMBER + "\":\""
+                + reportName.toLowerCase(Locale.ROOT)
+                + "\",\"" + INPUT_START_DATE_MEMBER + "\":\"" + startDate
+                + "\",\"" + INPUT_END_DATE_MEMBER + "\":\"" + endDate + "\"}";
 
         // WHY : Assumptions: the key is resolved ONCE, before the call, and the same value is used
         //       for the name and for the log line that reports a duplicate, so that an operator
@@ -1341,6 +1377,289 @@ public class ReportExecutionService {
 
         return stateMachineArn.substring(0, marker) + EXECUTION_ARN_SEGMENT + machineName
                 + ":" + executionName;
+    }
+
+    /**
+     * Reports what became of one accepted submission, and where its artifact is when there is one.
+     *
+     * <p>⚠️ Refactoring Rationale: this is the operation the submission handle existed for and did not have.
+     * A review found that {@code executionArn} was returned to a caller and consumed by nothing: there was
+     * no way to learn whether a run was still going, had succeeded or had failed, and no way to reach the
+     * document it produced. The reference has the same gap for the same reason -- it writes card images to a
+     * transient data queue and receives no identity back at all -- so this is a documented improvement
+     * rather than a port, registered as D-REPORT-LIFECYCLE-OBSERVABLE.
+     *
+     * <p>Assumptions: the caller names the execution by its NAME and never by an ARN, and the ARN is
+     * composed here from the configured state machine. That is a security property rather than a
+     * convenience: a caller cannot describe an execution of another state machine, of another account or of
+     * another environment, because no part of what it sends reaches the ARN except the final name segment.
+     * Alternatives Considered: accepting the whole ARN and validating its prefix, which is the same
+     * guarantee expressed as a check that has to be got right rather than as a composition that cannot be
+     * got wrong.
+     *
+     * <p>Measured: taking the caller's value as the handle instead of composing one -- the shape the
+     * rejected alternative starts from -- fails exactly one case of {@code ReportExecutionServiceTest},
+     * {@code theDescribedHandleIsComposedFromTheConfiguredMachine}, with {@code expected:
+     * "arn:aws:states:us-east-1:000000000000:execution:carddemo-transaction-report-dev:some-run-name" but
+     * was: "some-run-name"}. Every other case of that class and all 27 of
+     * {@code ReportControllerTest} still passed, so the composition is asserted on its own and not as a
+     * side effect of some other property.
+     *
+     * <p>Assumptions: the three coordinates are recovered from the execution's own INPUT rather than being
+     * asked of the caller again. The input is the three-name document this class composes at submission, so
+     * reading it back is symmetric with writing it; a caller re-supplying them could describe a run under
+     * coordinates it did not have, and the artifact location would then name a document belonging to a
+     * different range.
+     *
+     * <p>Assumptions: the artifact location is published ONLY where the store holds the object, on the same
+     * terms as a statement location, so a location this method returns always resolves. A run that has
+     * succeeded but whose artifact has been expired by a lifecycle rule reports the status and no location,
+     * which is the truth rather than a link to nothing.
+     *
+     * @param executionName the execution name a submission returned; must not be {@code null}
+     * @return what the orchestrator reports about the run, together with the artifact's location and write
+     *     instant when the store holds it; never {@code null}
+     * @throws NullPointerException if {@code executionName} is {@code null}
+     * @throws NoSuchElementException if this deployment's state machine has no execution of that name, which
+     *     is also the answer for a name that was never issued
+     * @throws IllegalStateException if the configured state machine ARN is qualified by a version or an
+     *     alias, so an execution ARN cannot be composed from it
+     */
+    public ExecutionState describeExecution(String executionName) {
+        Objects.requireNonNull(executionName, "executionName must not be null");
+        String executionArn = executionArnOf(executionName);
+        if (executionArn == null) {
+            throw new IllegalStateException(
+                    "the configured state machine is qualified by a version or an alias, so an"
+                            + " execution handle cannot be composed from it");
+        }
+
+        DescribeExecutionResponse described;
+        try {
+            described = sfnClient.describeExecution(DescribeExecutionRequest.builder()
+                    .executionArn(executionArn)
+                    .build());
+        } catch (ExecutionDoesNotExistException absent) {
+            // WHY : Assumptions: an unknown execution is reported as an absent RECORD and not as an
+            //       orchestration failure, because that is what it is from the caller's side -- and because
+            //       a name the orchestrator has forgotten (it retains a completed run for ninety days) is
+            //       indistinguishable from a name that was never issued. Both are answered alike so that
+            //       neither tells a caller which names exist.
+            LOG.debug("event=report.execution.absent execution={} outcome={}", executionName,
+                    ThrowableDigest.of(absent));
+            throw new NoSuchElementException("no report execution of that name is known");
+        } catch (SdkException refused) {
+            // WHY : Assumptions: the guard is the software development kit's own supertype and nothing
+            //       wider, matching the submission path in this class, so an invariant failure raised by
+            //       this method's own assembly is not reported as an orchestration outage.
+            LOG.error("event=report.execution.describe.refused execution={} failure={}", executionName,
+                    ThrowableDigest.of(refused));
+            throw new IllegalStateException(
+                    "the report orchestration could not be asked about this run", refused);
+        }
+
+        ExecutionCoordinates coordinates = coordinatesOf(described.input());
+        return new ExecutionState(
+                executionName,
+                ExecutionStatus.of(described.statusAsString()),
+                TimestampFormatter.format(LocalDateTime.ofInstant(
+                        described.startDate(), ZoneOffset.UTC)),
+                described.stopDate() == null ? null : TimestampFormatter.format(
+                        LocalDateTime.ofInstant(described.stopDate(), ZoneOffset.UTC)),
+                coordinates);
+    }
+
+    /**
+     * Recovers the three coordinates from an execution input document.
+     *
+     * <p>Assumptions: the three values are read by NAME with an explicit reader rather than through a
+     * mapper, which is the mirror image of the decision recorded where the input is composed: the shape is a
+     * contract between this class and the state machine, and routing it through a mapper would put it under
+     * a module-wide serialisation configuration this class does not own. Reading it back the same way keeps
+     * the two halves of one contract in one file.
+     *
+     * <p>Assumptions: a missing or malformed input yields NO coordinates rather than a failure. An input
+     * this class did not compose can only come from an execution started outside this surface -- the nightly
+     * schedule starts the same machine -- and the honest answer for such a run is its status without an
+     * artifact location, not a refusal to report the status at all.
+     *
+     * <p>Measured: the reading half and the writing half were mutated separately and fail different
+     * cases, which is why both are asserted. Renaming the member this side reads fails
+     * {@code theCoordinatesAreRecoveredFromTheInput} and {@code theWrittenInputIsTheReadInput}, both with
+     * {@code NullPointerException} on a {@code null} coordinates. Renaming the member the WRITING half
+     * emits instead leaves {@code theCoordinatesAreRecoveredFromTheInput} passing -- it stubs a
+     * hand-written document, so it cannot see writer drift at all -- and fails
+     * {@code aConfirmedStartPassesTheResolvedRange} with {@code expected:
+     * "{"reportType":"monthly",...}" but was: "{"report_type":"monthly",...}"} together with
+     * {@code theWrittenInputIsTheReadInput}. The round trip is therefore the only case that holds the two
+     * halves to each other.</p>
+     *
+     * @param input the execution input as the orchestrator recorded it, which may be {@code null}
+     * @return the coordinates, or {@code null} when the input is not the document this class composes
+     */
+    private static ExecutionCoordinates coordinatesOf(String input) {
+        if (input == null) {
+            return null;
+        }
+        String reportType = quotedValue(input, INPUT_REPORT_TYPE_MEMBER);
+        String startDate = quotedValue(input, INPUT_START_DATE_MEMBER);
+        String endDate = quotedValue(input, INPUT_END_DATE_MEMBER);
+        if (reportType == null || startDate == null || endDate == null) {
+            return null;
+        }
+        try {
+            return new ExecutionCoordinates(reportType,
+                    LocalDate.parse(startDate), LocalDate.parse(endDate));
+        } catch (DateTimeParseException malformed) {
+            // WHY : Assumptions: a bound that is not a calendar date is treated as no coordinates rather
+            //       than propagated, for the reason above -- and parsing it is what stops an arbitrary
+            //       string from reaching an object key through the artifact location.
+            LOG.warn("event=report.execution.input.unreadable failure={}",
+                    ThrowableDigest.of(malformed));
+            return null;
+        }
+    }
+
+    /**
+     * Reads one quoted string member out of the flat execution-input document.
+     *
+     * <p>Assumptions: the reader is deliberately narrow. It matches the exact {@code "name":"value"} shape
+     * this class writes, with no whitespace tolerance and no nesting, so it cannot half-understand a
+     * document of another shape -- it either finds the member as written or reports nothing.</p>
+     *
+     * @param input the input document
+     * @param name the member name to read
+     * @return the member's value, or {@code null} when the member is not present in that exact shape
+     */
+    private static String quotedValue(String input, String name) {
+        String marker = "\"" + name + "\":\"";
+        int start = input.indexOf(marker);
+        if (start < 0) {
+            return null;
+        }
+        int from = start + marker.length();
+        int end = input.indexOf('"', from);
+        return end < 0 ? null : input.substring(from, end);
+    }
+
+    /**
+     * The coordinates identifying which report an execution produced.
+     *
+     * @param reportType the report type token the run was started for
+     * @param rangeStart the inclusive lower bound of the reported range
+     * @param rangeEnd the inclusive upper bound
+     */
+    public record ExecutionCoordinates(String reportType, LocalDate rangeStart, LocalDate rangeEnd) {
+
+        /**
+         * Validates that every coordinate is present.
+         *
+         * @param reportType the report type token; must not be {@code null}
+         * @param rangeStart the inclusive lower bound; must not be {@code null}
+         * @param rangeEnd the inclusive upper bound; must not be {@code null}
+         * @throws NullPointerException if any coordinate is {@code null}
+         */
+        public ExecutionCoordinates {
+            Objects.requireNonNull(reportType, "reportType must not be null");
+            Objects.requireNonNull(rangeStart, "rangeStart must not be null");
+            Objects.requireNonNull(rangeEnd, "rangeEnd must not be null");
+        }
+    }
+
+    /**
+     * What the orchestrator reports about one accepted submission.
+     *
+     * @param executionName the execution name the submission returned
+     * @param status which of the orchestrator's terminal or running states the run is in
+     * @param startedAt when the run started, in the twenty-six-character form
+     * @param stoppedAt when the run stopped, or {@code null} while it is still running
+     * @param coordinates which report the run produces, or {@code null} when the run was started outside
+     *     this surface and its input is not the document this service composes
+     */
+    public record ExecutionState(
+            String executionName,
+            ExecutionStatus status,
+            String startedAt,
+            String stoppedAt,
+            ExecutionCoordinates coordinates) {
+
+        /**
+         * Validates the components that are never absent.
+         *
+         * @param executionName the execution name; must not be {@code null}
+         * @param status the run's state; must not be {@code null}
+         * @param startedAt when the run started; must not be {@code null}
+         * @param stoppedAt when it stopped, which is absent while it runs
+         * @param coordinates which report it produces, which is absent for a run started elsewhere
+         * @throws NullPointerException if the name, the status or the start instant is {@code null}
+         */
+        public ExecutionState {
+            Objects.requireNonNull(executionName, "executionName must not be null");
+            Objects.requireNonNull(status, "status must not be null");
+            Objects.requireNonNull(startedAt, "startedAt must not be null");
+        }
+
+        /**
+         * Reports whether the run finished successfully, which is the only state with an artifact.
+         *
+         * @return {@code true} when the orchestrator reports success
+         */
+        public boolean succeeded() {
+            return status == ExecutionStatus.SUCCEEDED;
+        }
+    }
+
+    /**
+     * The states the orchestrator reports a run in.
+     *
+     * <p>Assumptions: the six constants are the orchestrator's own execution statuses, carried across by
+     * name rather than collapsed into a smaller set. Collapsing them would lose exactly the distinctions an
+     * operator acts on: a run that timed out is retried, a run that was aborted was stopped deliberately,
+     * and a run awaiting redrive is one an operator has already been told about.</p>
+     */
+    public enum ExecutionStatus {
+
+        /** The run is still going. */
+        RUNNING,
+
+        /** The run finished and produced its artifact. */
+        SUCCEEDED,
+
+        /** The run failed; no artifact was published for it. */
+        FAILED,
+
+        /** The run exceeded its timeout. */
+        TIMED_OUT,
+
+        /** The run was stopped deliberately. */
+        ABORTED,
+
+        /** The run failed and is awaiting a redrive. */
+        PENDING_REDRIVE;
+
+        /**
+         * Maps the orchestrator's own status token onto this domain.
+         *
+         * <p>Assumptions: an unrecognised token is refused rather than mapped to a nearby state. A status
+         * this service does not know is a status it cannot report accurately, and answering {@code FAILED}
+         * for a state the orchestrator added later would tell an operator a run had failed when it had
+         * not.</p>
+         *
+         * @param token the status as the orchestrator names it; must not be {@code null}
+         * @return the matching constant, never {@code null}
+         * @throws NullPointerException if {@code token} is {@code null}
+         * @throws IllegalStateException if the token is not one of the six
+         */
+        public static ExecutionStatus of(String token) {
+            Objects.requireNonNull(token, "token must not be null");
+            for (ExecutionStatus candidate : values()) {
+                if (candidate.name().equals(token)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalStateException(
+                    "the orchestration reported an execution status this service does not publish");
+        }
     }
 
     /**

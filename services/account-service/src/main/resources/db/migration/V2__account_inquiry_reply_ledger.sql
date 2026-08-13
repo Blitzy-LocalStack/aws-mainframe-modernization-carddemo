@@ -58,23 +58,33 @@
 
 CREATE TABLE IF NOT EXISTS account.inquiry_reply_ledger (
 
-    -- WHY : Assumptions: the key is the REQUESTER's own identity for its
-    --       request -- the message identifier it supplied, or its
-    --       correlation identifier when it supplied no message identifier --
-    --       and never a value this service invents. A redelivery carries
-    --       the requester's identity unchanged, which is the only reason
-    --       this row can be found again; a locally minted key would differ
-    --       on every delivery and the table would record one row per
-    --       delivery while suppressing nothing.
+    -- WHY : Assumptions: the key is the QUEUE SERVICE's own identifier for
+    --       the delivery, and never a value this service invents. It is
+    --       stable across every redelivery of one message -- only the
+    --       receipt handle changes -- which is the only reason this row can
+    --       be found again, and it is unique per accepted send, which is
+    --       what stops two distinct requests colliding onto one row. A
+    --       locally minted key would differ on every delivery and the table
+    --       would record one row per delivery while suppressing nothing.
+    -- WHY : Refactoring Rationale: the key was the identity the PRODUCER
+    --       supplied -- its message attribute, or its correlation
+    --       identifier when it supplied no message attribute. Neither is
+    --       authenticated or constrained, so a producer reusing one
+    --       correlation identifier across several questions had its second,
+    --       genuine inquiry suppressed as a redelivery of the first. The
+    --       producer-supplied values are retained as legacy fallbacks in
+    --       the consumer, below the broker identifier, for a request that
+    --       never passed the broker.
     -- WHY : Assumptions: 128 characters, which is the width the sibling
     --       outbox uses for its deduplication identity in
-    --       V1__authorization.sql. The baseline's descriptor fields are 24
-    --       bytes each -- MQMD-MSGID and MQMD-CORRELID -- so the declared
-    --       width is far wider than any conforming value, and it is stated
-    --       generously on purpose: a requester rendering 24 bytes as
-    --       hexadecimal needs 48 characters and one rendering it as a
-    --       hyphenated identifier needs more, and a value refused for width
-    --       would be a request this consumer could not answer at all.
+    --       V1__authorization.sql. Every value that can reach this column
+    --       is bounded ABOVE by the consumer's intake rule -- the shared
+    --       queue-identity bound of 64 characters in
+    --       com.carddemo.common.messaging.MessagingCorrelationId -- or is a
+    --       broker identifier of the same order, so the width is a ceiling
+    --       nothing approaches rather than a limit a request can discover
+    --       on an insert. The baseline's own descriptor fields are 24 bytes
+    --       each, MQMD-MSGID and MQMD-CORRELID.
     request_key      VARCHAR(128) NOT NULL,
 
     -- WHY : Assumptions: two states and no third. PENDING means the reply is
@@ -110,11 +120,18 @@ CREATE TABLE IF NOT EXISTS account.inquiry_reply_ledger (
     --       a different queue from the first.
     reply_to_queue_url VARCHAR(1024) NOT NULL,
 
-    -- WHY : Assumptions: the two echoed identities are recorded as
-    --       supplied, because the re-sent reply must carry the same
-    --       attributes as the original. They are nullable because a request
-    --       may supply either, both or neither, and the row is keyed on
-    --       whichever one was present.
+    -- WHY : Assumptions: the two echoed identities are recorded exactly as
+    --       the request supplied them, because the re-sent reply must carry
+    --       the same attributes as the original. They are nullable because a
+    --       request may supply either, both or neither.
+    -- WHY : Assumptions: an identity the consumer refused at intake is
+    --       recorded as NULL rather than truncated to this width.
+    --       Truncation would store a value that is neither the requester's
+    --       nor absent, so a requester pairing on it would match the answer
+    --       to nothing while believing it had matched; a null says plainly
+    --       that the exchange carried no usable identity of that kind. The
+    --       refusal itself is reported to the error sink as a protocol
+    --       diagnostic naming the attribute and its length.
     correlation_id   VARCHAR(128),
     message_id       VARCHAR(128),
 
@@ -169,4 +186,4 @@ CREATE INDEX IF NOT EXISTS idx_inquiry_reply_ledger_claimed_at
 --       concatenation -- which reads naturally and is what a first draft of this
 --       file used -- is a syntax error the migration fails on, and the failure
 --       surfaces as a service that cannot start rather than as a missing comment.
-COMMENT ON TABLE account.inquiry_reply_ledger IS 'One row per answered account-inquiry request, keyed by the requester''s own identity, so that a redelivered request is answered once. Recorded and committed before the reply is sent; marked SENT afterwards.';
+COMMENT ON TABLE account.inquiry_reply_ledger IS 'One row per answered account-inquiry request, keyed by the queue service''s own identifier for the delivery, so that a redelivered request is answered once. Recorded and committed before the reply is sent; marked SENT afterwards.';

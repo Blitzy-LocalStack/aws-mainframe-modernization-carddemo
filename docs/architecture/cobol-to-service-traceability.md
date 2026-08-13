@@ -1583,7 +1583,7 @@ which carries the same citations at its update method.
 ### 7.4 Divergences claimed by shipped code
 
 Every entry below is claimed as registered by a comment or docstring in shipped
-source, and all **eighty** are cited **by identifier**, the identifier here being the
+source, and all **ninety-one** are cited **by identifier**, the identifier here being the
 identifier used there character for character. They reached that state by three routes,
 recorded because the routes explain the difference in tone between them. Some were cited
 by identifier from the outset. Others were cited generically as "registered" or
@@ -1593,22 +1593,27 @@ a claim of registration that names nothing cannot be checked, and a difference t
 nothing cannot be found. The `D-REFDATA-*` entries that close the section were authored
 the other way round — identifier first, then cited from the published reference contract —
 which is the discipline this section asks of everything added after them. Assumptions:
-ninety is a measured count of the `####` headings in **the whole document** and not a
+ninety-eight is a measured count of the `####` headings in **the whole document** and not a
 running tally kept by hand, so a reader adding an entry updates one number here and nothing
 else. Count them document-wide and not within `## 7` alone: the register
 continues past the horizontal rule that follows *Related documents*, where entries were
 appended after this section had already been closed, so a count confined to `## 7` -- its
 five subsections 7.1 through 7.5, which is the quantity the paragraph after next calls the
-section-confined one -- omits those eleven and returns **seventy-nine**. Refactoring Rationale:
+section-confined one -- omits those twelve and returns **eighty-six**. Refactoring Rationale:
 that instruction read "the body between this heading and `## 8`", which is a THIRD quantity
-again and returns sixty-five, because it excludes the seven headings in 7.1 and 7.2. The
+again and returns seventy-seven, because it excludes the seven headings in 7.1 and 7.2.
+Refactoring Rationale: that third figure was quoted as sixty-five, which was never a count of
+any population in this document -- 7.1 and 7.2 hold three and four headings between them, so
+excluding them from eighty-four leaves seventy-seven. It is restated as the measured value for
+the same reason the others are: a figure carried forward without being re-measured is how the
+first two came to be wrong. The
 figure quoted beside it was always the whole of `## 7`, so the instruction is corrected to
 name the population the figure counts rather than the figure being changed to match a
 population nobody meant. Count the `####`
 headings themselves rather than the ones beginning `D-`: one entry is identified
 `C-ROUNDING`, so a count restricted to a `D-` identifier is short by one and returns
-**eighty-nine**. Assumptions: a literal search for lines beginning `#### D-` returns
-**eighty-eight** rather than eighty-nine, because two headings carry their identifier in
+**ninety-seven**. Assumptions: a literal search for lines beginning `#### D-` returns
+**ninety-six** rather than ninety-seven, because two headings carry their identifier in
 backticks -- `C-ROUNDING` and `D-REJECT-109-DURABLE` -- so the second is a `D-` entry that
 the naive pattern misses. The two figures are stated together so that the search result a
 reader gets is predicted here rather than read as drift.
@@ -1626,7 +1631,7 @@ population cannot prevent: entries continued to be appended, and an appender who
 heading without recounting leaves every figure here behind. All three numbers are therefore
 re-measured together rather than adjusted by the number of entries anyone believes was added,
 and the two derived figures are stated so that they check the first — the document-wide count
-less the eleven appended after *Related documents* is the section-confined count, and less
+less the twelve appended after *Related documents* is the section-confined count, and less
 the single `C-ROUNDING` heading is the count of `D-`-identified entries. A figure that disagrees with its own
 two subtractions is wrong on its face, which is the closest a prose count can come to being
 self-checking. It went stale a fourth time at sixty-five while the document held
@@ -1637,9 +1642,9 @@ figure was recounted. All four were re-measured a fifth time when
 `D-EXPORT-STAGED-THROUGH-A-FILE` were added, and this time the recount was performed as part
 of adding them rather than afterwards. All four were re-measured a sixth time, and this
 time the measurement was taken from the file rather than adjusted: the population of this
-subsection reads eighty-one, the document-wide count ninety, the section-confined count
-seventy-nine and the count of `D-`-identified entries eighty-nine. Assumptions: a naive
-search for `^#### D-` returns eighty-eight rather than eighty-nine, because two headings
+subsection reads eighty-four, the document-wide count ninety-three, the section-confined count
+eighty-two and the count of `D-`-identified entries ninety-two. Assumptions: a naive
+search for `^#### D-` returns ninety-one rather than ninety-two, because two headings
 carry their identifier inside backticks; the figure stated is the count of entries a
 `D-` identifier NAMES, not the count of lines a literal search matches. Assumptions: the
 recount was needed because several entries landed at once from independent work -- two register
@@ -1651,15 +1656,16 @@ section's own body**, immediately after the last entry there, rather than append
 *Related documents* as the previous eight were. That is deliberate and it is the cheap half of
 the trade-off this paragraph closes with: placing an entry in the body keeps "this section"
 true of it, grows the section-confined count and this section's population by one each so the
-two stay in step, and adds nothing to the eight the first subtraction has to discount. Every
+two stay in step, and adds nothing to the eleven the first subtraction has to discount. Every
 figure above is therefore still checkable by the same two subtractions, and the population of
-the appended continuation is unchanged at eight because nothing was appended to it. All four numbers here — this section's own population, the document-wide
+the appended continuation was unchanged at eleven at that recount, because nothing had been
+appended to it. All four numbers here — this section's own population, the document-wide
 count, the section-confined count and the `D-`-prefixed count — were re-measured together
 against the current file when `D-EXPORT-RECORD-TYPES` and `D-IMPORT-TRUNCATED-ARTEFACT` were
 appended, and the two subtractions above were
 evaluated to confirm they agree. Assumptions: this section's population and the
-section-confined count are DIFFERENT quantities and they have now DIVERGED, at eighty-one
-against seventy-nine, exactly as the sentence after next predicts they would: the two entries
+section-confined count are DIFFERENT quantities and they have now DIVERGED, at eighty-four
+against eighty-two, exactly as the sentence after next predicts they would: the two entries
 named above were appended after *Related documents*, so they join this section's population
 without joining the whole of `## 7`. The gap has stayed at two while both figures moved,
 because the entries added after them — `D-BILLPAY-AMOUNT-WIDTH-REFUSED` and
@@ -1678,12 +1684,89 @@ every anchor a reader may have bookmarked, to fix a sentence rather than a fact 
 would leave the same trap for the next appender, whereas naming the population removes the
 trap whether or not the entries are ever moved. All four figures were re-measured together
 against the file a seventh time when `D-AUTH-SUMMARY-MONEY-DOMAIN` was added, and the two
-subtractions were evaluated to confirm they still agree: ninety less the eleven appended after
-*Related documents* is seventy-nine, and ninety less the single `C-ROUNDING` heading is
-eighty-nine. Assumptions: that entry was placed INSIDE this section's body, so it joins both this
-section's population and the section-confined count and the gap between them stays at two --
-which is the cheap half of the trade-off recorded above, taken deliberately rather than by
-default.
+subtractions were evaluated to confirm they still agree. They were re-measured an eighth time
+when `D-TRAN-PAD-PROVENANCE` was added, and a ninth time when
+`D-INTEREST-ROW-DISPLAY-WITHHELD` was added, taken from the file rather than adjusted on both
+occasions, and the two subtractions were evaluated again: ninety-three less the eleven appended
+after *Related documents* is eighty-two, and ninety-three less the single `C-ROUNDING` heading is
+ninety-two. Assumptions: both entries were placed INSIDE this section's body, so each joins
+both this section's population and the section-confined count and the gap between them stays at
+two -- which is the cheap half of the trade-off recorded above, taken deliberately rather than
+by default. Refactoring Rationale: the ninth re-measurement also corrected the population of the
+appended continuation, which this paragraph twice stated as eight while the file held ELEVEN
+headings past *Related documents*. The figure was stale in precisely the way this paragraph
+predicts of any figure nobody recounts -- three entries were appended after it was written -- and
+the first subtraction beside it had already been re-measured to eleven, so the two statements
+contradicted each other. Both are now the measured value. All four were re-measured a tenth time,
+from the file, when `D-PREFLIGHT-LOOKUP-PAST-END-OF-FILE` was added inside this section's body, and
+the two subtractions were evaluated again: ninety-three less the eleven appended after *Related
+documents* is eighty-two, and ninety-three less the single `C-ROUNDING` heading is ninety-two.
+Assumptions: that entry was added for a reason this paragraph has no counterpart for, and it is
+worth distinguishing. Every previous recount followed an entry that registered a difference nobody
+had registered before. This one followed a difference that shipped source **claimed** was
+registered here and was not: two citations named `D-7`, which is a §7.3 heading belonging to a
+different program, so the claim resolved to the wrong entry and the difference itself appeared
+nowhere. A dangling citation is worse than a missing one, because the reader who follows it stops
+looking. All five figures were re-measured an eleventh time, from the file, when a batch of
+entries authored independently of one another landed together and one entry was WITHDRAWN from this
+section's body -- `D-COMBINE-DESC-PAD`, whose difference another change closed while it stood. The
+measured values are: this section's population **ninety**, the document-wide count **ninety-nine**,
+the section-confined count **eighty-six**, the count of `D-`-identified entries **ninety-eight** and
+the literal `^#### D-` search result **ninety-seven**. Both subtractions were evaluated and agree:
+ninety-nine less the thirteen appended after *Related documents* is eighty-six, and ninety-nine less
+the single `C-ROUNDING` heading is ninety-eight. Assumptions: the gap between this section's
+population and the section-confined count has GROWN from two to four, exactly as this paragraph
+warned it would and for both of the reasons it named -- two more entries were appended past *Related
+documents*, which join this section's population without joining the whole of `## 7`, and §7.5 was
+opened with two withdrawn identifiers, which join the whole of `## 7` without joining this section.
+Neither figure is a check on the other and the two subtractions above are; a reader wanting one
+number from this paragraph should take the document-wide count, because it is the only one a single
+search reproduces. Assumptions: the third quantity this paragraph corrects above -- the body between
+the 7.4 heading and `## 8` -- now returns eighty rather than the seventy-seven recorded there,
+because §7.5's two entries sit inside that span; the earlier figure is left standing as the record of
+what was corrected and this one states what the same instruction measures today.
+All five figures were re-measured a TWELFTH time, from the file, when
+`D-POSTING-GENERATION-DATE` was added inside this section's body. The measured values are:
+this section's population **ninety-one**, the document-wide count **one hundred**, the
+section-confined count **eighty-seven**, the count of `D-`-identified entries **ninety-nine**
+and the literal `^#### D-` search result **ninety-eight**. Both subtractions were evaluated and
+agree: one hundred less the thirteen appended after *Related documents* is eighty-seven, and one
+hundred less the single `C-ROUNDING` heading is ninety-nine. Assumptions: the gap between this
+section's population and the section-confined count is unchanged at four, because the entry was
+placed inside this section's body and therefore joined both counts together -- which is the
+cheap half of the trade-off recorded above, taken deliberately rather than by default.
+
+All five figures were re-measured a THIRTEENTH time, from the file, when the `C-ROUNDING`
+entry that closes this register landed together with the twelfth pass's own edits. The measured
+values are: this section's population **ninety**, the document-wide count **ninety-eight**, the
+section-confined count **eighty-six**, the count of `D-`-identified entries **ninety-seven** and
+the literal `^#### D-` search result **ninety-six**. Both subtractions were evaluated and agree:
+ninety-eight less the twelve appended after *Related documents* is eighty-six, and ninety-eight
+less the single `C-ROUNDING` heading is ninety-seven. ⚠️ Refactoring Rationale: the twelfth pass's
+figures are left standing above as the record of what that pass measured, and they are the first
+in this paragraph's history to have been stated for a tree the file never held: they counted a
+`C-ROUNDING` heading and a thirteenth appended entry while the file carried neither, so the
+subtraction `one hundred less the single C-ROUNDING heading` was arithmetic over a heading that
+was not present. That is the failure mode this paragraph exists to catch, reached from a
+direction it had not been exercised against -- not a figure left behind by an appender, but a
+figure written AHEAD of the entry it counted. The entry has since landed, which is why the
+subtraction is now sound; the figures are measured rather than deduced from that fact.
+
+Assumptions: this was also the first recount in which a heading was REMOVED as well as added,
+and the distinction is worth recording because a remover who decrements instead of recounting
+reintroduces exactly the drift the fourth and fifth failures above record: a removal can take
+one heading out of this section's body and another out of the appended continuation, and only a
+measurement distinguishes that from two out of either. Every figure above is taken from the file
+for that reason.
+
+Assumptions: the gap between this section's population and the section-confined count is four,
+and it decomposes exactly: the population is the seventy-eight headings in §7.4's body plus the
+twelve appended past *Related documents*, while the confined count is the seven headings that
+precede §7.4 plus that same seventy-eight plus the ONE heading in §7.5 -- so the gap is the
+twelve appended less those eight, which is four. §7.5 holds one withdrawn identifier and not
+two; an earlier statement of this reasoning above said two, and the mechanism it described is
+right while the count was not. Neither figure is a check on the other and the two subtractions
+are, which is why a reader wanting a single number should take the document-wide count.
 
 Assumptions: several entries carry TWO identifiers in one heading, and both are the
 identifier used in shipped source character for character. The four purge entries that
@@ -1791,6 +1874,40 @@ rewritten in the same change rather than left pointing at a missing heading —
 and
 `services/transaction-service/src/test/java/com/carddemo/transaction/dto/TransactionApiContractTest.java`,
 each of which now pins the inclusive rule and says so.
+
+Refactoring Rationale: a `D-COMBINE-DESC-PAD` entry stood here and has been withdrawn,
+because the difference it registered has been REMOVED rather than re-argued. It recorded that
+the combined generation pads the description behind an accrual-written row with blanks where
+[`CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) leaves the seventy-six low values the `STRING`
+verb at **L485-L489** never wrote, and it accepted that difference on the ground that the
+distinction is not recoverable from a relational row -- a description column remembers nothing
+about how its writer padded it. That ground was half right: it holds of the pad BYTES and fails
+of the PRODUCER. The accrual pass attributes every row it generates at **L484** with the
+`System` source and gives it the `Int. for a/c ` prefix at **L485**, which is how the reference
+itself tells its two writers apart, so `CombineTransactionsJob.layoutOf` recovers the producer
+from those two fields, `TransactionRecordMapper.Layout` declares the byte each producer leaves
+behind the description it wrote -- the blank under `TRAN`, the low value under `INTTRAN` -- and
+the encoder pads the tail with it. A posted row of the artefact now carries blanks and an
+accrual row carries the reference's low values, on exactly the bytes the withdrawn entry said
+differed. Its rejection of inferring the producer from the description's leading text SURVIVES,
+as the reason the recogniser requires the closed-domain source field as well rather than the
+prefix alone. What is left of the mechanism -- a producer recovered from the record rather than
+from the dataset it arrived in, with a posted row carrying both marks as the residual hazard --
+is registered as
+[`D-TRAN-PAD-PROVENANCE`](#d-tran-pad-provenance--a-re-emitted-records-padding-is-recovered-from-its-own-attribution),
+which is the entry a reader looking for the withdrawn one wants. Assumptions: the anchor this
+heading published is now dead, so both sites that cited it have been rewritten in the same
+change rather than left pointing at a missing heading --
+`services/batch-service/src/main/java/com/carddemo/batch/job/CombineTransactionsJob.java`,
+whose class comment had asserted blanks for EVERY row, and
+`services/batch-service/src/test/java/com/carddemo/batch/job/CombineTransactionsJobTest.java`,
+whose case asserts each producer's own pad under the name `emitEachProducersOwnDescriptionPad`
+and records the withdrawal beside it. Assumptions: the withdrawn entry's verification citation
+named a case asserting that the two row classes carried the SAME pad, and that case no longer
+exists -- a register entry whose only evidence has been deleted is the clearest signal
+available that the difference went with it. The reason for withdrawing rather than keeping it is
+the one this section applies to every withdrawal: a divergence registered against a difference
+that has been closed tells a reader the target still has it.
 
 Assumptions: not every reference to this document from shipped source is a claim of the kind
 above, and the difference matters when auditing them. Most name the register as the place
@@ -2010,6 +2127,91 @@ a register of this size stays true.
   directions, beside the case that asserts the same column refuses a twelve-digit insert.
   `PurgeJobTest` asserts the sweep passes the segment's own bound and not the detail table's
   wider one.
+* **Files.**
+  `services/authorization-service/src/main/java/com/carddemo/authorization/domain/PendingAuthSummary.java`,
+  `services/authorization-service/src/main/java/com/carddemo/authorization/repository/PendingAuthSummaryRepository.java`,
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/AuthorizationRequestListener.java`,
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/PurgeJob.java`.
+
+#### D-SUMMARY-COUNTER-SATURATION — the summary's two counters saturate where the baseline truncates
+
+* **Baseline behaviour.** `PA-APPROVED-AUTH-CNT` and `PA-DECLINED-AUTH-CNT` are
+  `PIC S9(04) COMP` at **L27** and **L28** of
+  [`app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy)
+  — signed, four decimal digits, so −9999 through 9999 —
+  and [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) advances them
+  with `ADD 1 TO PA-APPROVED-AUTH-CNT` at **L815** and `ADD 1 TO PA-DECLINED-AUTH-CNT` at
+  **L821**. Neither statement carries an `ON SIZE ERROR` clause, and neither counter is reset
+  anywhere in the program. The expiry sweep subtracts from the same two members with the same
+  absence of a size clause, at **L288** and **L291** of
+  [`CBPAUP0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl). A COBOL `ADD`
+  without `ON SIZE ERROR` into a field too narrow to hold the sum discards the **high-order**
+  digits and reports nothing, so the ten-thousandth authorization on an account stores a count of
+  **0** and the program carries on as though nothing had happened.
+* **Target behaviour.** Each counter is reduced to the same four-digit domain by **saturation** —
+  held at 9999 on the way up and at −9999 on the way down, sign preserved — and the reduction is
+  reported as `event=auth.summary.counter-narrowed` on the decision path and
+  `event=authorization.purge.counter-narrowed` on the expiry sweep, each naming the account and
+  the member. The two bounds are published once, as `PendingAuthSummary.COUNTER_MAX` and
+  `PendingAuthSummary.COUNTER_MIN`, and are passed into the three arithmetic statements that
+  advance a counter, so the reduction holds whether the write goes through the entity or through a
+  statement the database evaluates. This mirrors exactly what
+  `D-AUTH-SUMMARY-MONEY-DOMAIN` above does for the same row's money members, and the two entries
+  are deliberately the same shape: one row, one policy.
+* **Category.** Documented divergence — narrowing arithmetic at a width boundary the copybook
+  itself declares.
+* **Why the difference is accepted.** Truncation is not merely imprecise, it is undetectable. It
+  maps 10000 to 0, and a count of zero on an account holding nine thousand nine hundred and
+  ninety-nine live authorizations is a value no reader of the summary screen can recognise as
+  wrong — it reads as a fresh account. Saturation is monotone in its input and leaves the counter
+  resting on a published bound, which is recognisable **as** saturation; and because it is
+  reported at both writers, the account and the member are named in a log line at the moment the
+  information is lost. The lost information is real and is the price: a saturated counter
+  understates the number of authorizations, and no later reversal restores the excess, which is
+  why the expiry sweep's floor exists at all — a saturated root can legitimately be driven to
+  −9999 by reversing children it never counted.
+* **What the divergence replaced, which was worse than either.** The entity raised
+  `IllegalStateException` at the bound, and the statements that actually write the row carried no
+  clamp at all, so the out-of-domain value reached the database and the check constraint
+  `ck_pending_auth_summary_counts` at **L266-L268** of
+  `services/authorization-service/src/main/resources/db/migration/V1__authorization.sql`
+  refused the whole statement. Either way the refusal was **invisible**: nothing on the
+  authorization path presents it to a requester. It aborted the message's unit of work, the queue
+  redelivered, and after five receives the request dead-lettered **unanswered** — so an account
+  that reached 9999 approvals stopped being answerable at all, permanently, and no operator
+  looking at a decline would find one, because there was no decline. On the expiry sweep the same
+  raise abended the run mid-table, leaving the rows already deleted deleted and the rows behind
+  them not, a state neither the reference nor a rerun reconstructs. So this entry registers a
+  divergence chosen over a state the baseline does not have, exactly as its money sibling does.
+* **Why the entity's refusal and the statements' silence were one defect, not two.** The aggregate
+  is used on the insert arm, where a new root is composed in memory and saved; the three
+  statements are used on every subsequent arm, where the row is updated in the database. A policy
+  that stopped at the aggregate therefore governed only the first authorization an account ever
+  had, and the arm that reached 9999 was never the arm the policy covered. Publishing the bounds
+  and passing them into the statements is what makes the two arms agree; the `case when` guards in
+  `PendingAuthSummaryRepository` are evaluated by the engine inside the same statement that
+  advances the counter, so no read-modify-write window exists for a concurrent decision to slip
+  through.
+* **Why the columns are not widened instead.** Transformation rule T1 makes the copybook picture
+  normative, and `SMALLINT` with a ±9999 check constraint is exactly what `PIC S9(04) COMP`
+  derives to — the mapping is published in
+  [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md). A wider column would
+  hold counts that no extract of the reference segment could round-trip and no reference reader
+  could represent, which is the same reason the money members were not widened.
+* **What is deliberately *not* affected.** The **decision** does not read either counter, so a
+  saturated count never changes an approve into a decline. `pending_auth_detail` holds one row per
+  authorization and is not bounded by this, so the authorizations themselves remain individually
+  countable by query even when the summary's aggregate has saturated — which is the recovery path
+  an operator has, and the reason saturation is tolerable rather than merely less bad.
+* **Where it is verified.** `PendingAuthSummaryReversalTest` asserts saturation in both directions
+  through the aggregate — that the counter rests exactly on the bound rather than wrapping, that
+  the money member of the same arm still moves, that the ten-thousandth approval is recorded
+  rather than refused, and that the classifier the writers consult agrees with the narrowing.
+  `PendingAuthSummaryRepositoryIT` asserts the clamp against a real engine on all three
+  statements, so the guard is proven where the check constraint actually lives.
+  `AuthorizationRequestListenerTest` asserts the approve and decline arms pass the published
+  ceiling and that the narrowing is reported. `PurgeJobTest` asserts the sweep passes the floor
+  and reports its own narrowing with the stored sign.
 * **Files.**
   `services/authorization-service/src/main/java/com/carddemo/authorization/domain/PendingAuthSummary.java`,
   `services/authorization-service/src/main/java/com/carddemo/authorization/repository/PendingAuthSummaryRepository.java`,
@@ -3527,6 +3729,94 @@ a register of this size stays true.
   `infra/modules/cognito/main.tf`, `infra/modules/cognito/README.md` and
   `docs/architecture/context-and-container-diagrams.md`, each citing this identifier.
 
+#### D-USER-ID-CANONICAL-DOMAIN — the logon identifier is held to a canonical form the baseline never checked
+
+* **Baseline behaviour.** `SEC-USR-ID` is `PIC X(08)` at **L18** of
+  [`app/cpy/CSUSR01Y.cpy`](../../app/cpy/CSUSR01Y.cpy), so every character the terminal can
+  send is storable, and no program validates which characters arrive.
+  [`COUSR01C.cbl`](../../app/cbl/COUSR01C.cbl) tests the field at **L134** for absence only,
+  and [`COUSR02C.cbl`](../../app/cbl/COUSR02C.cbl) does the same at **L184**; the mapset field
+  is `ATTRB=(FSET,NORM,UNPROT)` at **L111** of
+  [`app/bms/COUSR01.bms`](../../app/bms/COUSR01.bms) — unprotected and alphanumeric, with no
+  `NUM` attribute to restrict it. So a leading blank, an interior blank, a lower-case letter or
+  a control character would all be accepted and stored as typed.
+* **Target behaviour.** The service derives ONE canonical key —
+  `UserService#canonicalKey`, which trims, folds under the root locale, and then refuses the
+  result when it is empty, when it is wider than eight characters, or when it draws on a
+  character outside the 94 printable invariant code points `0x21`–`0x7E`. The refusal names
+  the `userId` field and precedes every side effect. The same two conditions are enforced by
+  the database, as `ck_users_user_id_canonical` in
+  `services/auth-service/src/main/resources/db/migration/V6__auth_canonical_user_id.sql`, so
+  they hold for a writer that does not go through the service.
+* **Category.** Documented divergence — input validation narrowed so that one identifier has
+  exactly one canonical spelling.
+* **Why the width check is not merely defensive.** Java's upper-case mapping is **not
+  length-preserving**: the sharp s folds to two characters, so a submission of five such
+  characters — admitted by the request record's own eight-character bound — canonicalises to
+  ten. Before this entry nothing checked the canonical width, so the expanded key was probed
+  for, handed to the identity provider, and refused only afterwards by the `CHAR(8)` column;
+  the compensation that unwound the provider account then reported the integrity failure as a
+  duplicate-key **409**. A caller was told an identifier already existed when no such row had
+  ever been written, and a provider account had been created and withdrawn in the meantime.
+  The four-sharp-character case, which canonicalises to exactly eight, is admitted — the check
+  is a width bound and not a rejection of expansion.
+* **Why the character domain is narrowed at all.** Two independent reasons, and neither is
+  tidiness. First, the fold has to mean the same thing in two places: the service folds under
+  the root locale while the column's guard folds through the engine's `upper()`, which is
+  collation-dependent, and the two are only guaranteed to agree inside the invariant set.
+  Measured on the engine, `'ÄBC'` satisfies `user_id = upper(btrim(user_id))` and is refused
+  only by the domain term — so without that term the service's definition of the key and the
+  column's could disagree on the same input, which is precisely the single-definition property
+  the guard exists to provide. Second, the **space** is excluded because the reference itself
+  cannot carry an identifier containing one: `COUSR01C.cbl` **L256**,
+  [`COUSR02C.cbl`](../../app/cbl/COUSR02C.cbl) **L373** and
+  [`COUSR03C.cbl`](../../app/cbl/COUSR03C.cbl) **L319** each render it with
+  `STRING ... DELIMITED BY SPACE`, so the confirmation a user reads names the identifier
+  truncated at its first blank — a different identifier from the one stored.
+* **What the predecessor guard got wrong, which this entry also corrects.**
+  `V4__auth_folded_user_id.sql` guarded the key with `CHECK (user_id = upper(user_id))` and its
+  `COMMENT` described the stored key as "upper-case and blank-trimmed". Only the first half was
+  enforced. Measured on the engine, `' ABC'` and `'  ABC'` both satisfy that predicate; the
+  service resolves a request naming `' ABC'` to `ABC`, so a bypass writer could store a row
+  addressable by no request, and `ABC` could then be inserted beside it as a second row for one
+  logical identity with its own identity-pool account. V4's own comment recorded the omission
+  and argued for it on two grounds — that a leading blank is "a different property from the
+  fold" and that the identifier's shape "is already asserted at the adapter where it arrives" —
+  and both are withdrawn in V5: the service's derivation is one expression, trim-then-fold, and
+  an assertion at the adapter is exactly what a bypass writer does not pass through, which is
+  the reason V4 gave for adding a database guard in the first place.
+* **Why the domain is not narrowed further.** Restricting to the letters and digits the
+  committed extract uses was considered and rejected. Every one of the ten identifiers in
+  [`app/data/EBCDIC/AWS.M2.CARDDEMO.USRSEC.PS`](../../app/data/EBCDIC/AWS.M2.CARDDEMO.USRSEC.PS)
+  draws on `[A-Z0-9]` alone, so that domain would fit the parity oracle exactly — and it would
+  refuse punctuation the reference terminal can send and on which the two fold definitions
+  already agree, which is a behavioural loss this correction has no reason to take.
+* **What this costs, stated plainly.** A create or a keyed lookup naming an identifier outside
+  the canonical domain now answers **400** with a `userId` field error where the baseline would
+  have stored the row, and where the target previously answered 404 for a lookup. The values
+  affected are exactly those for which "the row this key names" has no single answer. Nothing
+  in the committed extract is affected, so the golden-master comparison is unchanged.
+* **Why the constraint is `NOT VALID`.** A database on which the defective create path ran may
+  hold an unfolded row and one on which a bypass writer ran may hold a blank-prefixed row; a
+  validating `ADD` scans the table, fails on either, and a failed migration stops the service
+  from starting — replacing a data defect a query can find with an outage. `NOT VALID` skips
+  only the initial scan, so the invariant holds from the migration forward. The detection,
+  remediation and `VALIDATE` steps are in the migration's own header, and its collision query
+  supersedes V4's, which joined on `upper(u.user_id)` and therefore looked for a partner of
+  `' ABC'` under `' ABC'` rather than under `'ABC'` — missing every whitespace drift.
+* **Where it is verified.** `UserServiceTest` asserts the expansion refusal for four submitted
+  forms and the two stores having NO interaction, which is the substance of the correction — a
+  refusal at the column existed before, a refusal before the provider call did not — plus the
+  at-the-bound admission that an off-by-one width check would fail, and the domain refusal in
+  four shapes. `UserRepositoryIT` asserts the engine's own refusals through a native insert
+  that bypasses the service: the leading blank, the unfolded key, the interior blank, the
+  control character and the non-invariant letter, beside the admitted trailing-padded and
+  punctuated keys, and it asserts from the catalogue that exactly one guard names the
+  identifier and that the superseded one is retired.
+* **Files.**
+  `services/auth-service/src/main/java/com/carddemo/auth/service/UserService.java`,
+  `services/auth-service/src/main/resources/db/migration/V6__auth_canonical_user_id.sql`.
+
 #### D-REFDATA-ACTION-TOKEN — an unrecognised action token is refused, not soft-rejected
 
 * **Baseline behaviour.**
@@ -3684,17 +3974,224 @@ a register of this size stays true.
   keeping a load-back for symmetry with the job stream, rejected because a step that changes
   no value while bumping every version is worse than absent — it would make optimistic
   concurrency conflicts appear in unrelated services for the duration of the batch window.
-* **What is preserved.** The combined generation itself, byte for byte in the record layout
-  and in the same order the reference's sort produced; the two `(0)` input resolutions, which
-  remain and still fail the step by name when an input family holds no generation, so a
-  missing upstream generation is reported exactly as the reference's allocation failure
-  reported it.
+* **What is preserved.** The record LAYOUT of the combined generation — 350 bytes per record,
+  every field on the offset [`CVTRA05Y.cpy`](../../app/cpy/CVTRA05Y.cpy) declares, the amount
+  carrying its sign as an overpunch — and the order the reference's sort produced, ascending on
+  the sixteen-byte transaction identifier; and the two `(0)` input resolutions, which remain and
+  still fail the step by name when an input family holds no generation, so a missing upstream
+  generation is reported exactly as the reference's allocation failure reported it.
+* **What is NOT preserved, and where each is registered.** Refactoring Rationale: this bullet
+  read "the combined generation itself, **byte for byte** in the record layout", which claimed
+  more than the code delivers and more than the paragraph above it argues. Two differences
+  reach the SET the generation carries, and each has an entry of its own rather than being
+  absorbed into a preservation claim: the generation's rows come from the RELATION and not from
+  the two named objects ([`D-COMBINE-GENERATION-BYPASS`](#d-combine-generation-bypass--the-two-named-input-generations-are-a-precondition-and-not-a-source)),
+  and the backup generation those inputs include is a superset of the reference's
+  ([`D-COMBINE-BACKUP-SUPERSET`](#d-combine-backup-superset--the-backup-generation-already-holds-the-interest-rows)).
+  A claim of byte-for-byte equality is checkable, so stating one that is false is worse than
+  stating none: it tells a reader comparing this generation against a reference extract that any
+  difference they find is their own error.
+* **A third difference stood in that list and no longer does.** Refactoring Rationale: the
+  description pad behind an accrual-written row was recorded here as blanks where the reference
+  leaves low values, and registered as `D-COMBINE-DESC-PAD`. It is not a difference any more, so
+  it is neither listed above nor left in the register: `CombineTransactionsJob` names the
+  PRODUCER of each row from the attribution the reference's own accrual pass writes -- the
+  `System` source at [`CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) **L484** and the
+  `Int. for a/c ` description prefix at **L485-L489** -- and `TransactionRecordMapper` pads the
+  description tail with the byte that named layout's producer leaves, so a posted row of this
+  artefact carries blanks and an accrual row carries the reference's seventy-six low values. The
+  withdrawal is recorded with the others in the preamble to
+  [§7.4](#74-divergences-claimed-by-shipped-code), and what survives of the mechanism -- a
+  producer recovered from the record rather than from the dataset it arrived in -- is registered
+  as [`D-TRAN-PAD-PROVENANCE`](#d-tran-pad-provenance--a-re-emitted-records-padding-is-recovered-from-its-own-attribution).
 * **Where it is verified.** `GenerationStagingJobsTest` asserts that the job resolves both
   current inputs before allocating, that it stages under the coordinate it allocated, and
   that a missing input fails the step by name with nothing allocated or staged;
   `BatchJobRosterTest` asserts the job is reachable under its advertised token.
+  `CombineTransactionsJobTest` drives the job against a real PostgreSQL engine and is what
+  carries the two claims above that the other two cannot reach — that the staged generation
+  matches the reference's sort, and that no load-back occurs:
+  * *the order* — `orderTheRecordsByteWiseAscendingByIdentifier` compares the emitted sequence
+    against an expectation computed from the raw bytes, which is the contract
+    [`COMBTRAN.jcl`](../../app/jcl/COMBTRAN.jcl) **L28** states as `TRAN-ID,1,16,CH`;
+    `proveTheSeededIdentifiersDiscriminateByteOrderFromLinguisticOrder` keeps that case from
+    holding vacuously by showing the same rows order differently under a punctuation-shifted
+    collation; `theDeployedIdentifierColumnIsCollatedByteWise` reads the ordered column's
+    collation out of the catalogue, because the job walks a derived finder that names no
+    `COLLATE` clause and the pinned Alpine image's default is byte-wise while the deployed
+    engine's is not; and `theEmittedOrderFollowsTheKeyColumnsPinnedCollation` closes the last
+    gap between those two by re-pinning the column to a linguistic collation and re-running the
+    job, so the emitted order is shown to FOLLOW the declared collation rather than merely to
+    coexist with it.
+  * *the absence of a load-back* — `leaveEveryRowOfTheRelationExactlyAsItWas` is the direct
+    executable statement of this divergence: it reads every column of every row before and
+    after the run and requires them identical, which is what distinguishes "no load-back" from
+    "a load-back that happens to write the same values".
+  * *the record image* — `emitFixedLengthRecordsWithNoDelimiter`,
+    `placeEveryFieldOnItsDeclaredCopybookOffset`, `roundTripANegativeAmountThroughTheSignOverpunch`
+    and `emitEachProducersOwnDescriptionPad` together carry the
+    "byte for byte in the record layout" half of the preservation claim, and
+    `emitAnIdenticalImageOnARerunOverTheSameRows` carries its determinism. The pad case asserts
+    each producer's OWN pad rather than one shared pad, because the per-row layout selection the
+    staging path performs makes the two row classes' padding a property of the row and not of
+    the step — the reason the earlier `D-COMBINE-DESC-PAD` entry was withdrawn from this
+    register rather than restated here.
+  * *the image is composed from the baseline, not from the code* —
+    `theStagedRecordMatchesAnIndependentlyComposedImage` asserts the layout claim above against
+    an expected image composed from the copybook's own field widths rather than from the
+    production layout registry, so the preservation this entry claims is measured against the
+    baseline and not against the code that produces it.
+  * *both inputs, each once* — `carryEveryCommittedRowExactlyOnceWhicheverPassWroteIt`
+    and `readBothInputsCurrentAndAllocateOnlyTheOutput` state that the combined
+    extract is assembled from the one relation that already holds both row classes, which is
+    the premise the acceptance rests on.
 * **Files.** `services/batch-service/src/main/java/com/carddemo/batch/job/CombineTransactionsJob.java`,
-  `services/batch-service/src/test/java/com/carddemo/batch/job/GenerationStagingJobsTest.java`.
+  `services/batch-service/src/test/java/com/carddemo/batch/job/GenerationStagingJobsTest.java`,
+  `services/batch-service/src/test/java/com/carddemo/batch/job/CombineTransactionsJobTest.java`,
+  `services/transaction-service/src/main/resources/db/migration/V3__ledger_bytewise_collation.sql`,
+  `services/batch-service/src/test/resources/db/testharness/test-harness-schemas-and-foreign-tables.sql`.
+
+#### D-COMBINE-GENERATION-BYPASS — the two named input generations are a precondition and not a source
+
+* **Baseline behaviour.** [`COMBTRAN.jcl`](../../app/jcl/COMBTRAN.jcl) concatenates two physical
+  datasets as the sort's input — `TRANSACT.BKUP(0)` at **L24** and `SYSTRAN(0)` at **L26** — so
+  every byte of the combined output came out of one of those two files. The sort reads them; the
+  contents of the master at that instant are irrelevant to it.
+* **Target behaviour.** `CombineTransactionsJob` resolves both current generations and then reads
+  NEITHER. It calls `requireCurrentGeneration` on each, logs the two generation numbers, and
+  composes its output from `ledger.transactions` ordered by transaction identifier. The two
+  resolutions are a **precondition assertion** — the step fails by family name when either family
+  holds no generation — and nothing more.
+* **Category.** Documented divergence — input provenance.
+* **Why the difference is accepted.** AAP section 0.4.1.7 specifies state 7 as "Fargate task using
+  SQL ordering", and section 0.4.1.3 places both producers' rows in one relation, so reading the
+  relation is what the plan prescribes rather than a shortcut taken against it. It is also the only
+  correct reading available: because interest rows are committed to `ledger.transactions` rather
+  than to a separate dataset, the target's `transact-bkup` generation already contains them
+  (registered separately as `D-COMBINE-BACKUP-SUPERSET`), so concatenating the two objects the way
+  the reference does would emit every interest row **twice**. The precondition is kept rather than
+  dropped because it preserves the reference's own failure mode: a night whose posting or accrual
+  step produced no generation stops here, by name, instead of quietly combining a stale relation.
+* **Consequence for an external reader.** The combined generation is **not** the concatenation of
+  the two objects named in the log line. An operator who reads `transact-bkup` and `systran`,
+  merges them, and compares the result against the combined generation will find the interest rows
+  duplicated in their merge and once in ours. The log line names the two generations because they
+  were resolved, not because they were read.
+* **Consequence for a restore.** Editing or replacing either input object changes nothing about the
+  next combined generation. A correction has to be applied to `ledger.transactions`; a corrected
+  object staged under an input family will be resolved, counted in the log, and ignored.
+* **Where it is verified.** `CombineTransactionsJobTest.theCombinedImageIsIndependentOfTheTwoNamedGenerations`
+  runs the job twice with the two input families resolving to **different** generation numbers and
+  asserts the staged bytes are identical, and asserts that `DatasetGenerationService` publishes no
+  operation that returns a payload at all — so the independence is a property of the seam's surface
+  and not only of this job's body. `GenerationStagingJobsTest` asserts the precondition half: a
+  missing input fails the step by name with nothing allocated and nothing staged.
+* **Files.** `services/batch-service/src/main/java/com/carddemo/batch/job/CombineTransactionsJob.java`,
+  `services/batch-service/src/main/java/com/carddemo/batch/service/DatasetGenerationService.java`,
+  `services/batch-service/src/test/java/com/carddemo/batch/job/CombineTransactionsJobTest.java`.
+
+
+#### D-COMBINE-BACKUP-SUPERSET — the backup generation already holds the interest rows
+
+* **Baseline behaviour.** [`TRANBKP.jcl`](../../app/jcl/TRANBKP.jcl) unloads
+  `AWS.M2.CARDDEMO.TRANSACT.VSAM.KSDS` at **L26-L27** into `TRANSACT.BKUP(+1)` at **L33**. The
+  master it copies **never holds the interest rows at that point**, whenever the job runs:
+  [`INTCALC.jcl`](../../app/jcl/INTCALC.jcl) writes accrual output to `SYSTRAN(+1)` and not to the
+  master, and those rows enter the master only through the `IDCAMS REPRO` at
+  [`COMBTRAN.jcl`](../../app/jcl/COMBTRAN.jcl) **L41-L48**. So in the baseline
+  `TRANSACT.BKUP` and `SYSTRAN` are **disjoint**, which is exactly why the sort can concatenate
+  them.
+* **Target behaviour.** `CalculateInterestJob` commits each generated interest row to
+  `ledger.transactions` **and** appends it to the `SYSTRAN` generation. `BackupTransactionsJob`
+  then runs as state 6 and stages the whole relation, so the `transact-bkup` generation it
+  produces is a **superset** of the reference's — the difference being precisely the night's
+  interest rows, which also appear in `systran`.
+* **Category.** Documented divergence — dataset content, following from
+  [`D-COMBINE-NO-LOADBACK`](#d-combine-no-loadback--the-combine-flow-stages-its-output-and-does-not-copy-it-back).
+* **Why the difference is accepted.** It is the direct consequence of interest rows living in the
+  master from the moment they are written, which is the same decision that removes the load-back
+  step, and that decision is argued at that entry. Alternatives Considered: staging the backup
+  BEFORE the interest state so the generation matches the reference's content. Rejected because the
+  chain's order is what makes the backup useful — a backup taken before the night's accrual is not
+  a backup of the night — and because the reference's own disjointness is an artefact of the
+  interest rows having nowhere else to live, not a property anyone chose. Also considered:
+  excluding interest-originated rows from the backup extract, rejected because the extract would
+  then be a backup of nothing that ever existed, and because identifying them would mean guessing a
+  producer from a description literal alone -- the objection
+  [`D-TRAN-PAD-PROVENANCE`](#d-tran-pad-provenance--a-re-emitted-records-padding-is-recovered-from-its-own-attribution)
+  answers for the pad by requiring the closed-domain source field as well, and which is not
+  answerable here because a row's membership in a backup generation is not a property the row
+  carries at all.
+* **Consequence for an external reader.** `transact-bkup` ∪ `systran` **double-counts** the
+  interest rows. The two objects are not disjoint in the target and are in the baseline, so any
+  tool that concatenates them — including one written against the reference's job stream — produces
+  duplicates on the transaction identifier.
+* **Consequence for a restore.** Restoring `ledger.transactions` from `transact-bkup` alone yields
+  a master that **already includes** the night's interest, so the combine step must not then be
+  treated as the step that folds them in; there is no such step, and applying `systran` on top
+  would duplicate them. Restoring the reference's backup required the opposite: the interest rows
+  were still outside and had to be merged.
+* **Where it is verified.** `BackupTransactionsJobTest` stages the full copy from the whole relation
+  and asserts the image carries every committed row, whichever pass wrote it, so the superset is
+  measured rather than described; `CombineTransactionsJobTest.carryEveryCommittedRowExactlyOnceWhicheverPassWroteIt`
+  asserts the combined generation carries one record per relation row, so the duplication an
+  external concatenation would produce is demonstrably absent from ours.
+* **Files.** `services/batch-service/src/main/java/com/carddemo/batch/job/BackupTransactionsJob.java`,
+  `services/batch-service/src/main/java/com/carddemo/batch/job/CalculateInterestJob.java`,
+  `services/batch-service/src/main/java/com/carddemo/batch/job/CombineTransactionsJob.java`.
+
+#### D-POSTING-GENERATION-DATE — the posting step is told its output generation at launch, where the reference resolved one at allocation
+
+* **Baseline behaviour.** [`POSTTRAN.jcl`](../../app/jcl/POSTTRAN.jcl) runs one step,
+  `//STEP15 EXEC PGM=CBTRN02C` at **L23**, and that `EXEC` carries **no `PARM=`** — the only
+  `PARM=` anywhere in the batch chain is the interest job's, at
+  [`INTCALC.jcl`](../../app/jcl/INTCALC.jcl) **L22**. The step is nevertheless told which
+  generation of the reject stream to write, in a data definition rather than in a parameter:
+  **L34-L38** allocate `DSN=AWS.M2.CARDDEMO.DALYREJS(+1)` with `DISP=(NEW,CATLG,DELETE)` and
+  `LRECL=430`, and the catalog resolves that relative reference to the next generation at
+  allocation time. So the step itself is unparameterised, and resubmitting the identical job
+  stream allocates a further generation.
+* **Target behaviour.** `PostTransactionsJob` requires the `businessDate` job parameter and
+  reads it through `BatchConfig.generationDateOf`, using it for one purpose only: the `dt=`
+  component of the reject stream's generation coordinate. It reaches no field of any posted or
+  rejected record. Because the parameter is declared identifying, the date also names the job
+  INSTANCE, so a second launch for the same date is a restart of the same instance rather than a
+  new one, and a launch that omits the parameter is refused before the step opens.
+* **Category.** Documented divergence — orchestration surface, no behavioural change to output
+  content.
+* **Why the difference is accepted.** There is no cloud analogue of a catalog that resolves
+  `(+1)` on the operator's behalf, so the generation the step writes has to be named by
+  something. The migration plan's rule T6 turns a `DD DSN=` into an object-store location and a
+  GDG `(+1)` into a new generation prefix, and §0.4.1.7 fixes the prefix as
+  `dt=YYYY-MM-DD/gen=NNNN`; §0.7.5 forbids deriving the date component from a clock, because a
+  generation keyed off the clock is one a rerun cannot land in again and the golden-master
+  comparison depends on a rerun reproducing its output. Passing the date the whole chain is
+  already running for is therefore the narrowest available mechanism: the state machine supplies
+  one `$.businessDate` to every state, so no new value is introduced and no two steps of one
+  night can disagree about the day. Alternatives Considered: a distinct `generationDate`
+  parameter, so the orchestration role would have its own carrier as well as its own accessor —
+  rejected because the two roles always carry the same value, so a second parameter would add a
+  way for one run to contradict itself and would then need validating back into agreement.
+  Alternatives Considered: deriving the prefix from the run identifier alone and dropping the
+  date — rejected because the `dt=` segment is what makes a generation listable and comparable by
+  day, which is the property the five-generation retention rule at
+  [`DALYREJS.jcl`](../../app/jcl/DALYREJS.jcl) **L24-L26** is applied over.
+* **What is preserved.** Every byte of both outputs. The 430-byte reject record, the four reason
+  codes, the aggregate return code and the three posted writes are all independent of this
+  parameter; a run for any date over one feed produces identical content, differing only in the
+  object key it lands under. The `(+1)` semantic is preserved too: each launch allocates a NEW
+  generation rather than overwriting the current one, and the retained window stays five.
+* **Where it is verified.** `PostTransactionsJobTest`'s `aMissingGenerationDateIsRefused` asserts
+  the job's validator refuses a launch without the parameter;
+  `aCleanPassStillStagesAnEmptyRejectGeneration` asserts a new generation is allocated and staged
+  under the date supplied even when nothing was rejected, which is the `(+1)` semantic rather than
+  an overwrite of the current generation; and `agedOutRejectGenerationsAreScratched` asserts the
+  retained window. `DatasetGenerationServiceTest` pins the
+  `dt=`/`gen=` prefix composition and the five-generation retention rule that the coordinate is
+  listed under.
+* **Files.** `services/batch-service/src/main/java/com/carddemo/batch/job/PostTransactionsJob.java`,
+  `services/batch-service/src/main/java/com/carddemo/batch/config/BatchConfig.java`,
+  `services/batch-service/src/test/java/com/carddemo/batch/job/PostTransactionsJobTest.java`.
 
 #### D-INTEREST-ORPHAN-ROW — a balance row whose account cannot be read is skipped, not abended
 
@@ -4370,12 +4867,17 @@ this register for the identifier learns why it is absent rather than concluding 
   record. Meanwhile the transaction write at **L564** and the category-balance change at
   **L526** have already happened and both stand. The net baseline result is a **posted
   transaction whose account was never updated, with no record anywhere of why.**
-* **Target behaviour.** The three posting writes are one ACID commit, so a failed account
-  update discards the transaction row and the category-balance change with it. **Nothing is
-  written to the reject stream for this failure**, and reason **109** is as unreachable in
-  the target as it is in the reference: `PostTransactionsJob` declares the boundary for the
-  whole pass and catches nothing around the account write, so the failure propagates, the
-  transaction rolls back and the step fails into the orchestrator's per-state `Retry`.
+* **Target behaviour.** The three posting writes of ONE FEED RECORD are one ACID commit, so a
+  failed account update discards that record's transaction row and category-balance change
+  with it. **Nothing is written to the reject stream for this failure**, and reason **109** is
+  as unreachable in the target as it is in the reference: `PostTransactionsJob` declares one
+  boundary per record — its tasklet is `PROPAGATION_NOT_SUPPORTED` and each record's decisions
+  and writes run inside a `TransactionTemplate` — and it catches nothing around the account
+  write, so the failure propagates, that record's transaction rolls back and the step fails
+  into the orchestrator's per-state `Retry`. **Records committed before the failing one are not
+  undone**, which is the reference's own behaviour rather than a weakening of it: the reference
+  commits each record as it goes, and the durable step ledger records the failure so a redrive
+  resumes rather than repeats.
   `RejectReason.isPersistedToRejectStream()` answers `false` for
   `ACCOUNT_NOT_FOUND_ON_REWRITE` alone, `PostingValidationResult` refuses to accept it as a
   validation outcome, and `TransactionRejectRecordMapper` declares the persisted reason-code
@@ -4389,7 +4891,9 @@ this register for the identifier learns why it is absent rather than concluding 
   failure except a console line. Any downstream reader — a statement, a report, a balance
   enquiry — sees a posted transaction the account does not reflect, and no query can
   distinguish that from a data-entry error. The single commit removes that state outright,
-  which is the whole of the difference being registered here. Alternatives Considered:
+  which is the whole of the difference being registered here. Note the scope precisely: the
+  state removed is a posted transaction whose OWN account update failed, and removing it needs
+  only that one record's writes to be atomic. Alternatives Considered:
   discarding the partial writes AND writing a durable reason-109 row from outside the
   rolled-back unit of work, so that the failure were queryable from
   `ledger.transaction_rejects` as well as being undone. **Rejected on three grounds.** It
@@ -4406,6 +4910,14 @@ this register for the identifier learns why it is absent rather than concluding 
   That is accepted because the transaction is not posted either — there is no inconsistent
   row for the reject row to explain, which was the whole reason the durable-row design was
   attractive while the partial post still stood.
+* Refactoring Rationale: the *Target behaviour* above previously described the boundary as
+  spanning the WHOLE PASS. That was accurate when written and is no longer: a pass-wide
+  boundary discarded every correct posting that preceded a late failure, held every touched row
+  locked for the batch window, and made the durable step ledger's resume promise untrue, so the
+  boundary was narrowed to one transaction per record. The divergence being registered here is
+  unaffected — within one record the target is still strictly more atomic than the baseline, and
+  it is that intra-record atomicity, not any cross-record atomicity, that removes the
+  unreconcilable state described below.
 * Refactoring Rationale: this entry replaces `D-REJECT-109-DURABLE`, whose *Target
   behaviour* described the durable-row design above as shipped. No code ever wrote such a
   row: no main source anywhere names `ACCOUNT_NOT_FOUND_ON_REWRITE` except the constant, the
@@ -4517,52 +5029,6 @@ this register for the identifier learns why it is absent rather than concluding 
   capitalised failed-read sentence rather than as a contention refusal.
 * **Files.**
   `services/transaction-service/src/main/java/com/carddemo/transaction/service/TransactionViewService.java`.
-
-#### D-REJECT-109-DURABLE — a failed account rewrite is recorded, and the partial post is discarded
-
-* **Baseline behaviour.** [`CBTRN02C.cbl`](../../app/cbl/CBTRN02C.cbl) assigns reason
-  **109** when the account rewrite hits `INVALID KEY`, at **L556** inside
-  `2800-UPDATE-ACCOUNT-REC` at **L545**. That paragraph is performed at **L441** from
-  `2000-POST-TRANSACTION` at **L424**, which the record loop enters at **L212** only after
-  **L211** found the reason to be zero. The assignment therefore happens *after* the branch
-  toward the reject write has already not been taken: the `ELSE` arm at **L213-L215** does
-  not run, so no reject row is written and `WS-REJECT-COUNT` is not incremented; **L226-L228**
-  leaves the return code unchanged; **L208-L209** clear the reason at the top of the next
-  record. Meanwhile the transaction write at **L564** and the category-balance change at
-  **L526** have already happened and both stand. The net baseline result is a **posted
-  transaction whose account was never updated, with no record anywhere of why.**
-* **Target behaviour.** The three posting writes are one ACID commit, so a failed account
-  update discards the transaction row and the category-balance change with it; and one row
-  is written to `ledger.transaction_rejects` under reason code **109** with the description
-  `ACCOUNT RECORD NOT FOUND`, carrying the 350-byte source record, so the failure is
-  durable. The reject row is written outside the rolled-back unit of work, because a row
-  written inside it would be discarded by the same rollback it exists to explain.
-* **Category.** Documented divergence — posting atomicity and reject durability.
-* **Why the difference is accepted.** The baseline state is not reconcilable from the data:
-  a ledger row exists, a balance moved, the account did not, and nothing records the
-  failure except a console line. Any downstream reader — a statement, a report, a balance
-  enquiry — sees a posted transaction the account does not reflect, and no query can
-  distinguish that from a data-entry error. Two candidate designs were weighed. Discarding
-  the partial writes and recording nothing was rejected: it removes the inconsistency but
-  loses the event, so an operator has no way to learn a record failed to post. Leaving the
-  partial writes and adding a reject row was rejected for the opposite reason: it records
-  the event while keeping the inconsistency. Doing both is the only combination in which
-  the ledger is explicable and the failure is known. The cost is stated plainly: the reject
-  stream carries a row the baseline's stream does not, so a byte comparison of the two
-  streams differs on exactly the records whose account rewrite failed — which is why this
-  is registered rather than treated as parity.
-* **Where it is verified.** `TransactionRejectRepositoryIT`'s
-  `aFailingAccountRewriteIsRecordedAsADurableReasonOneHundredAndNineRow` asserts the row is
-  an addition to the stream and carries code 109 with 101's description, and
-  `theColumnDomainAdmitsReasonOneHundredAndNine...` asserts the column admits the code. The
-  fixture and its reasoning are
-  `services/transaction-service/src/test/resources/fixtures/reject_109_rewrite_invalid_key`.
-  `RejectReason.ACCOUNT_NOT_FOUND_ON_REWRITE` keeps the code distinct from
-  `ACCOUNT_NOT_FOUND_ON_READ` even though their descriptions are byte-identical.
-* **Files.**
-  `services/batch-service/src/main/java/com/carddemo/batch/dto/RejectReason.java`,
-  `services/transaction-service/src/main/java/com/carddemo/transaction/domain/TransactionReject.java`,
-  `services/transaction-service/src/main/resources/db/migration/V1__ledger.sql`.
 
 #### D-REFERENCE-UPSERT-NOT-EXPOSED — the maintenance screen's insert-on-miss has no single operation
 
@@ -4801,84 +5267,256 @@ this register for the identifier learns why it is absent rather than concluding 
   `services/transaction-service/src/main/java/com/carddemo/transaction/dto/TransactionAddRequest.java`,
   `services/transaction-service/src/main/resources/openapi/transaction-api.yaml`.
 
+#### `C-ROUNDING` — the interest accrual rounds half up where the baseline discards the surplus digits
+
+* **Baseline behaviour.** [`CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) computes the monthly
+  accrual at **L464-L465**, `COMPUTE WS-MONTHLY-INT = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200`,
+  and stores the quotient into `05 WS-MONTHLY-INT PIC S9(09)V99` declared at **L168**. The
+  statement carries **no `ROUNDED` phrase**, and neither does any other statement in the
+  program — a search for that phrase across all 652 lines returns no match — so the store
+  discards the surplus fraction digits rather than rounding them, which is truncation toward
+  zero.
+* **Target behaviour.** `Money.monthlyInterest(rate)` forms the product at full precision and
+  reduces the quotient once, at the division, with `Money.GENERAL_ROUNDING` — `HALF_UP`. The
+  type declares that ONE mode and exposes no way to select another, so the accrual, general
+  multiplication, general division and the reduction of a supplied amount all reduce
+  identically.
+* **The difference.** One cent, and only on a quotient landing exactly on a half cent. A
+  category balance of `1000.80` at a rate of `2.50` forms the scale-4 product `2502.0000`,
+  whose quotient is `2.0850` exactly: the baseline stores `2.08` and the target returns
+  `2.09`. Away from the half the two agree — `1000.00` at `2.50` gives `2.08333...` and both
+  return `2.08` — so the difference is unreachable on every vector the shipped interest
+  fixtures carry, all of which drive `1000.00` at `15.00` for an exact `12.5000`.
+* **Why the difference is accepted rather than removed.** Transformation rule T3 states the
+  money path as an exact decimal at scale 2 with `RoundingMode.HALF_UP` in Java and states no
+  exception for any operation; rule T4 constrains the accrual's operand ORDER and leaves its
+  mode to T3, naming only "an explicit scale and rounding mode". The plan is frozen, and it
+  admits a behavioural difference from the reference when the difference is registered — which
+  is what this entry does — while admitting a departure from a transformation rule only where
+  the plan states an exception. Reducing the accrual by discarding digits would satisfy parity
+  by breaking the rule; reducing it half up satisfies the rule and registers the parity
+  difference, which is the order the plan sets.
+* Trade-offs: the cent does not stay local, and the register states so rather than
+  understating the cost: **L467** adds each already-reduced term into the account total and
+  **L352** adds that total to the account balance once per account, so a cent gained on a
+  transaction category reaches the balance that the next over-limit comparison is made
+  against, and that comparison is inclusive (`app/cbl/CBTRN02C.cbl` **L407**). An operator
+  reconciling a migrated balance against a baseline balance should expect a difference of at
+  most one cent per accrued category per accrual run, in the target's favour.
+* Alternatives Considered: a second rounding constant fixed at `DOWN` and applied to the
+  accrual alone, which is what the code carried for a time and which reduced this difference to
+  nothing. Rejected on precedence: it put a parity argument above a frozen transformation rule,
+  and it left the type with two money contracts a reader had to keep apart. Alternatives
+  Considered: a rounding-mode parameter on the accrual entry point so a parity caller could ask
+  for truncation. Rejected because two call sites computing the same accrual could then
+  disagree by a cent with nothing in either one signalling that they had chosen differently.
+  Alternatives Considered: amending the plan to admit truncation. Rejected outright — the plan
+  is the agreed contract and is not editable from inside the migration.
+* **Where it is verified.** `MoneyTest` asserts both discriminating vectors against the API,
+  against an independently computed half-up counterfactual, and against the baseline's
+  truncating arithmetic which must DIFFER — so a silent revert to truncation and a silent
+  disappearance of this difference both fail. The negative side is asserted with two vectors
+  because no single negative input separates half up from both truncation and flooring. The
+  exact-quotient claim is asserted with `RoundingMode.UNNECESSARY`, so it throws rather than
+  passing if a future edit makes the vector inexact.
+  `InterestCalculationServiceTest.theNamedModeIsTheAppliedMode` and the sibling case in
+  `BatchServicesTest` hold `InterestCalculationService.ACCRUAL_ROUNDING` and
+  `Money.GENERAL_ROUNDING` to the same value, so the constant that names the mode beside the
+  accrual cannot drift from the mode the kernel applies. The fixture-driven golden comparison
+  in `CalculateInterestJobTest` is unaffected, which is itself evidence for the reachability
+  claim above.
+* **Files.** `services/common-lib/src/main/java/com/carddemo/common/money/Money.java`,
+  `services/common-lib/src/main/java/com/carddemo/common/money/package-info.java`,
+  `services/common-lib/src/test/java/com/carddemo/common/money/MoneyTest.java`,
+  `services/batch-service/src/main/java/com/carddemo/batch/service/InterestCalculationService.java`,
+  `services/batch-service/src/main/java/com/carddemo/batch/job/CalculateInterestJob.java`,
+  `services/batch-service/src/main/java/com/carddemo/batch/dto/InterestRateLookup.java`.
+
 <sub>Apache-2.0 · Authoritative artifact-to-target matrix, retirement register and
 behavioural-divergence register for CardDemo. The baseline under `app/**` is cited
 throughout and never modified. Convention:
 [`docs/CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md).</sub>
 
+#### D-TRAN-PAD-PROVENANCE — a re-emitted record's padding is recovered from its own attribution
+
+* **Baseline behaviour.** The padding bytes of a fixed-width record are a property of the record
+  area the writing program filled, and the two producers of the 350-byte transaction record fill
+  theirs differently. [`CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) **L485-L489** builds
+  `TRAN-DESC` with `STRING ... DELIMITED BY SIZE`, which writes only the twenty-four characters it
+  was handed and leaves the remaining seventy-six bytes at the low values the record area held,
+  while [`CBTRN02C.cbl`](../../app/cbl/CBTRN02C.cbl) **L429** performs a plain `MOVE` of a feed
+  field that is already blank-padded. Neither program names the trailing `FILLER` at all, so it
+  keeps low values in both. The reference never has to RECOGNISE which producer wrote a record,
+  because the two write to two different datasets: the posting step to the transaction master and
+  the accrual step to `SYSTRAN`, the generation [`INTCALC.jcl`](../../app/jcl/INTCALC.jcl)
+  **L37-L41** allocates. The backup step copies one of those datasets as a byte image, and the
+  combine step concatenates both, so each record's bytes travel unchanged.
+* **Target behaviour.** Both producers commit to `ledger.transactions`, which stores a
+  description's TEXT and not the bytes behind it, so the backup and combine states re-render each
+  record rather than copying bytes. They therefore choose the pad per row:
+  `InterestCalculationService.isAccrualGenerated` reports whether a row carries BOTH marks the
+  accrual pass writes — the `System` source of **L484** and the `Int. for a/c ` description prefix
+  of **L485** — and the two jobs name `TransactionRecordMapper.Layout.INTEREST_GENERATED` for such
+  a row and `POSTED_MASTER` for every other. The mapper then writes that layout's measured
+  description pad, and the trailing pad as low values under both.
+* **Category.** Documented divergence — mechanism, byte-for-byte output preserved.
+* **Why the difference is accepted.** There is no third option that keeps the bytes. Storing the
+  pad would mean a column on a table `transaction-service` owns, carrying no information the record
+  does not already carry; and leaving the codec's blank in place was measured as a twenty-byte
+  difference per posted record and a ninety-six-byte difference per accrual record against the
+  committed expectations, on spans that carry no data — so every field matched and the comparison
+  failed anyway. Alternatives Considered: recognising the producer from the description text alone,
+  rejected because a description is free text a feed record may hold anything in; and requiring only
+  the source label, rejected because the conjunction means a row must match BOTH marks to be
+  misclassified. Trade-offs: the residual difference is that a POSTED row that carried the `System`
+  source and a description beginning `Int. for a/c ` would be padded as an accrual row. No feed
+  record in the corpus does — the two source values in
+  [`dailytran.txt`](../../app/data/ASCII/dailytran.txt) are `OPERATOR` and `POS TERM` — and the
+  cost of the alternative is a wrong pad on every accrual row rather than on a hypothetical one.
+* **What is preserved.** The emitted bytes. The staged interest generation now equals
+  `tests/golden/interest/*/transact.expected` with only the two run-generated timestamp spans
+  masked, including the seventy-six low values behind the description and the twenty in the
+  trailing pad; the posted image equals `tests/golden/posting/*/tranfile.expected` in the same
+  way. The category-balance record follows the same rule from the other direction: its plain encode
+  writes the low values the create arm leaves, measured in
+  `tests/golden/posting/zero_balance/tcatbal.expected`, and its source-image overload reproduces the
+  ASCII zeros the update arm writes back.
+* **Where it is verified.** `CalculateInterestJobTest` compares the staged generation against all
+  three committed interest expectations byte for byte, with only the two stamps masked, and a guard
+  asserts that every low value in each committed record lies inside one of the two pad regions — so
+  a third region would fail rather than pass silently. `BackupTransactionsJobTest` and
+  `CombineTransactionsJobTest` each assert the two row classes SIDE BY SIDE in one artefact, the
+  accrual tail low-valued and the posting tail blank, with both trailing pads low-valued.
+  `TransactionRecordMapperTest` asserts the plain encode now reproduces the committed parity record
+  including its pad, and that the layout argument reaches exactly one span.
+  `FixedWidthCodecTest` asserts the shared codec drops an inert low-value pad and keeps a printable
+  one, which is what keeps the mapper package's "filler is dropped on decode" contract true for these
+  records.
+* **Files.** `services/batch-service/src/main/java/com/carddemo/batch/mapper/TransactionRecordMapper.java`,
+  `services/batch-service/src/main/java/com/carddemo/batch/mapper/TransactionCategoryBalanceRecordMapper.java`,
+  `services/batch-service/src/main/java/com/carddemo/batch/service/InterestCalculationService.java`,
+  `services/batch-service/src/main/java/com/carddemo/batch/job/BackupTransactionsJob.java`,
+  `services/batch-service/src/main/java/com/carddemo/batch/job/CombineTransactionsJob.java`,
+  `services/common-lib/src/main/java/com/carddemo/common/codec/FixedWidthCodec.java`.
+
+#### D-INTEREST-ROW-DISPLAY-WITHHELD — the per-row observation is kept, its record image is not
+
+* **Baseline behaviour.** [`CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) **L193** executes
+  `DISPLAY TRAN-CAT-BAL-RECORD` inside the read loop, on the line immediately after **L192**
+  increments `WS-RECORD-COUNT`, so the program writes **one line per input category balance** to
+  `SYSOUT`, in the key order the indexed read returns, and the line is the record's fifty bytes
+  verbatim. [`CVTRA01Y.cpy`](../../app/cpy/CVTRA01Y.cpy) **L4-L10** lays those bytes out as
+  `TRANCAT-ACCT-ID PIC 9(11)`, `TRANCAT-TYPE-CD PIC X(02)`, `TRANCAT-CD PIC 9(04)`,
+  `TRAN-CAT-BAL PIC S9(09)V99` and a twenty-two-byte `FILLER` — so each displayed line carries an
+  account identifier and a money balance in the clear. The program displays no counter pair and
+  declares no reject stream; the per-row lines and the two framing banners at **L181** and **L230**
+  are the whole of its operator output.
+* **Target behaviour.** `CalculateInterestJob.accrueOneRow` emits one structured event per input
+  row, `event=batch.interest.row-read`, at the same point in the walk — immediately after the row is
+  counted, before the control break is evaluated — so the cardinality and the ordering of **L193**
+  are reproduced exactly. What the event CARRIES is the row's disclosable identity only: its ordinal
+  in this pass's ordered read, its transaction type code and its category code. The account
+  identifier and the balance are omitted, and no abbreviation or digest stands in for either.
+* **Category.** Documented divergence — observable operator output narrowed by a disclosure rule.
+* **Why the difference is accepted.** The omission is not a choice made at this statement.
+  [`observability.md`](observability.md) states the rule in three parts and the first is that **a
+  prohibited value is OMITTED, not abbreviated**, naming the account identifier and every monetary
+  amount, "not its content, not its length, and not a digest of it"; the third part names what may
+  remain, and "a type or category code" is on that list. A displayed
+  `TRAN-CAT-BAL-RECORD` holds one value from each of those two sets, so the record image cannot
+  travel and the codes can. Alternatives Considered: emitting the fifty bytes at a lower log level,
+  rejected because the rule governs what a retained line HOLDS rather than which level wrote it —
+  every level lands in the same log group under the same retention, so a debug-level dump is the
+  same disclosure with a smaller audience. Alternatives Considered: rendering the account through
+  `OpaqueIdentifier`, which is the sanctioned control for a queue group identity; rejected because
+  the same page refuses a digest of an account identifier explicitly, and an eleven-digit domain is
+  small enough to enumerate against a keyed token an operator can also read. Trade-offs: a reader
+  can no longer name the account a given line describes without re-reading the input in the same
+  order, which the pass's deterministic key order makes reproducible; and the balance, which the
+  reference put on the line for an operator inspecting a tape, is now read from the input or from
+  `ledger.transaction_category_balances` instead.
+* Refactoring Rationale: the migrated job previously emitted NO per-row line at all and reported
+  only the closing total, on the argument that the count was the parity-bearing part of **L193**.
+  That was wrong in one direction and right in the other: the disclosure rule does bar the record
+  image, but it bars only two of the record's four data fields, and dropping the statement entirely
+  gave up the two properties a total cannot carry — that each row was visited exactly once, and that
+  the walk read in key order, which is what makes the control break at **L195** correct. The event
+  was added and this entry registers what it withholds, rather than the statement staying absent and
+  the difference staying unregistered.
+* **What is preserved.** One observation per input row, in read order, at the same position in the
+  loop, plus the two framing banners verbatim and the closing total. What is not preserved is the
+  content of the line: four fields become three, and neither omitted field is represented.
+* **Where it is verified.** `CalculateInterestJobTest` filters the emitted events to the per-row
+  ones, asserts there is exactly one per staged input row, asserts their ORDER by reading the
+  ordinal, type code and category code out of each in turn, and asserts that the account identifier
+  at its full declared width and the staged balance appear in NO emitted line — so a regression that
+  restored either value fails rather than passing as extra detail.
+* **Files.** `services/batch-service/src/main/java/com/carddemo/batch/job/CalculateInterestJob.java`.
+
+#### D-PREFLIGHT-LOOKUP-PAST-END-OF-FILE — the reference inspects one record it did not read
+
+* **Baseline behaviour.** [`CBTRN01C.cbl`](../../app/cbl/CBTRN01C.cbl) **L164**-**L186** guards too
+  little. The outer test at **L165** opens a block closing at **L185**, but the inner test at
+  **L167** closes with its own `END-IF` at **L169** and so guards **only** the record display at
+  **L168**. The two `MOVE` statements at **L170**-**L171** and the cross-reference lookup at
+  **L172** sit outside that inner guard. On the iteration whose read at **L166** reaches end of file
+  and sets the terminating flag, the program therefore moves a card number out of a record it did
+  not read and performs one further cross-reference lookup against the stale record buffer — and,
+  when that lookup resolves, one further account read at **L176**. A run over N records performs
+  N+1 lookup pairs. When the last real record happened to be unresolvable, the stale card is looked
+  up a second time and the diagnostic at **L181**-**L183** is emitted twice for one record.
+* **Target behaviour.** `PreflightDailyTransactionsJob` drives its inspection from the batch the
+  keyset query returned, which makes an iteration with no record unrepresentable. A run over N
+  records performs exactly N lookup pairs and emits no trailing diagnostic.
+* **Category.** Documented divergence — a reference defect of guard placement, not reproduced.
+* **Why the difference is accepted.** The cost is bounded to counters and never reaches output data:
+  the extra pair produced no record and changed no file, its only visible effect being one
+  duplicated diagnostic line. What makes the divergence safe rather than merely defensible is that
+  **no byte comparison can observe it** — `tests/golden/` holds no `prepost` or `preflight` tree, so
+  there is no golden master for `CBTRN01C` for a read count to be compared against, and the program
+  writes nothing and sets no `RETURN-CODE` at all. Reproducing the extra lookup would have preserved
+  a read count nothing measures at the price of shipping a known defect.
+* Refactoring Rationale: this entry exists because the divergence was previously **claimed to be
+  registered and was not**. `PreflightDailyTransactionsJob`'s class documentation and
+  `PreflightDailyTransactionsJobTest` both stated it was "registered as D-7 in" this document, but
+  §7.3's [D-7](#d-7--the-header-clock-and-the-zone-it-is-read-in) is the online header clock,
+  belonging to a different program — so the citation resolved to the wrong entry and the preflight
+  behaviour appeared in no entry at all. Both citations now name this identifier. The numeric label
+  **D-7** remains correct where it is used, as the class-local numbering inside that job's own
+  documentation, exactly as `ImportJob` numbers its own **D-8** and **D-9**; the collision was
+  between a class-local number and a register heading, which is why the register-side identifier is
+  a name rather than a number.
+* **What is preserved.** Every diagnostic the reference emits for a record it genuinely read, with
+  its message text, and the order in which records are inspected. What is not preserved is the
+  trailing lookup pair and the duplicate diagnostic it could produce.
+* **Where it is verified.** `PreflightDailyTransactionsJobTest` seeds three records and asserts three
+  lookups rather than four, and asserts that no trailing diagnostic follows the last real record.
+* **Files.** `services/batch-service/src/main/java/com/carddemo/batch/job/PreflightDailyTransactionsJob.java`.
+
 ### 7.5 Withdrawn divergence identifiers
 
-Two identifiers have been withdrawn, for two different reasons: one because the difference
-it described was closed, and one because the difference it described was never built. Both
-are recorded here, outside §7.4, so that the register above contains only live differences
-while each identifier still resolves to something for a reader who meets it in an older
-comment or commit message. Assumptions: the heading level and the placement are both
-deliberate — a withdrawn identifier kept as a `####` entry inside §7.4 would be counted by
-that section's own measured heading count, and the first of the two would reintroduce the
-non-`D-` heading the count note there had to warn about. Assumptions: the two entries are
-kept apart rather than merged into a list of dead names, because the reason an identifier
-died is what a reader arriving from an old citation actually needs: the first tells them the
-target no longer differs, the second tells them the target never did.
+ONE identifier has been withdrawn, because the behaviour it registered was never built. It is
+recorded here, outside §7.4, so that the register above contains only live differences while
+the identifier still resolves to something for a reader who meets it in an older comment or
+commit message. Assumptions: the heading level and the placement are both deliberate — a
+withdrawn identifier kept as a `####` entry inside §7.4 would be counted by that section's own
+measured heading count as though it registered a live difference, which is the one thing it
+must not be read as.
 
-#### `C-ROUNDING` — interest accrual now truncates as the baseline does
-
-This is not a divergence and is recorded here only so that the identifier resolves to
-something. **There is no longer any behavioural difference to register**, and the entry that
-described one has been removed from the register above rather than reworded, because an
-entry in a divergence register asserts that the target behaves differently, and this one no
-longer would.
-
-* **What it claimed.** That [`CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) computes the
-  monthly interest at **L464-L465** and stores the quotient into a fixed-scale field with
-  **no `ROUNDED` phrase** — a search for that phrase across all 652 lines of the program
-  returns no match, so the store discards the surplus digits and the baseline behaviour is
-  truncation toward zero — while `Money` reduced the accrual with a single half-up contract,
-  differing by one cent on a quotient landing on a half cent.
-* **What changed.** `Money` now declares **two** rounding modes, each fixed to its
-  operation and neither reachable from any signature. `GENERAL_ROUNDING` is `HALF_UP` and
-  governs the reduction of a supplied amount, general multiplication and general division —
-  three operations with no reference statement to be faithful to. `BASELINE_INTEREST_ROUNDING`
-  is `DOWN` and governs `Money.monthlyInterest(rate)` alone, which is the one monetary
-  computation the baseline performs. The multiply-before-divide order is unchanged.
-* **Why the divergence was closed rather than kept.** The reasoning that accepted it read
-  transformation rule T3's "half up for the whole money path" as covering the accrual. That
-  put the letter of a transformation rule above the requirement it exists to serve: the plan
-  requires observable behaviour to be unchanged, names the exact interest formula among the
-  rules that must be preserved, and admits a behavioural change only as an authorised
-  divergence. The accrual is also one of the business rules the reference test suite asserts
-  verbatim, so the cent was a parity failure in the most heavily asserted computation in the
-  system rather than a rounding preference. It did not stay confined to one accrual either:
-  the accrual paragraph reduces every term before accumulating it (**L467**) and adds the
-  accumulated total to the account balance once per account (**L352**), so a cent gained per
-  transaction category reached the balance the next over-limit comparison is made against,
-  and that comparison is inclusive. What T3 forbids — binary floating point, and a
-  caller-selectable mode — remains forbidden: the mode is fixed at the type and applied to an
-  exact decimal.
-* Alternatives Considered: a rounding-mode parameter on the accrual entry point, so a
-  parity caller could ask for truncation while others kept half up. Rejected for the reason
-  the original entry gave and which still holds: two call sites computing the same accrual
-  could then disagree by a cent with nothing in either one signalling that they had chosen
-  differently. Fixing the mode per operation yields the same arithmetic with none of that
-  exposure. Also considered: leaving the entry in place with its text rewritten to say the
-  divergence was closed. Rejected because a reader scanning the register for real differences
-  would have to read each entry to discover which ones are live, which is the property a
-  register exists to remove.
-* **Where the new behaviour is verified.** `MoneyTest` asserts both discriminating vectors
-  against the API, against independently computed reference truncation, and against a half-up
-  counterfactual that must differ; the negative vector is asserted against both a half-up and
-  a floor counterfactual, because `DOWN` and `FLOOR` agree on every positive input and part
-  company only there; and the exact-quotient claim is asserted with `RoundingMode.UNNECESSARY`
-  so it throws rather than passing if a future edit makes the vector inexact.
-* **Files.** `services/common-lib/src/main/java/com/carddemo/common/money/Money.java`,
-  `services/common-lib/src/main/java/com/carddemo/common/money/package-info.java`,
-  `services/common-lib/src/test/java/com/carddemo/common/money/MoneyTest.java`.
+Refactoring Rationale: this subsection held TWO entries and now holds one. `C-ROUNDING`, the
+interest-accrual rounding difference, was withdrawn here on the reading that the accrual should
+reduce as the baseline does; that disposition is reversed and the entry is LIVE again in §7.4,
+because transformation rule T3 states half up for the money path with no exception for the
+accrual and the plan is frozen. A reader arriving from a comment that describes `C-ROUNDING` as
+withdrawn is reading a citation from that intervening period; the live entry in §7.4 is
+authoritative, and it records the reversal in its own reasoning rather than leaving the two
+readings to be reconciled from the outside.
 
 #### `D-REJECT-109-DURABLE` — the durable reason-109 reject row was never built
 
 This identifier is withdrawn because the behaviour it registered **does not exist and was
-never implemented**, which is the opposite failure from the entry above: `C-ROUNDING`
-described a real difference that has since been closed, while this one described a design
-that no code ever carried. The live difference at that paragraph is registered as
+never implemented**, which is a different failure from a difference that was registered and
+then reversed: this one described a design that no code ever carried. The live difference at that paragraph is registered as
 [`D-POSTING-ATOMIC-NO-REJECT-109`](#d-posting-atomic-no-reject-109--a-failed-account-rewrite-discards-the-whole-post-and-reason-109-still-reaches-no-stream),
 which states the atomicity that IS shipped and states plainly that no reject row is written.
 
@@ -4886,9 +5524,9 @@ which states the atomicity that IS shipped and states plainly that no reject row
   wrote one row to `ledger.transaction_rejects` under reason code **109** with the
   description `ACCOUNT RECORD NOT FOUND`, from outside the rolled-back unit of work so the
   rollback could not take it away.
-* **What is actually shipped.** The first half only. `PostTransactionsJob` owns one
-  transaction boundary for the whole pass and wraps the account write in no handler, so the
-  failure propagates and everything rolls back; there is no second boundary and no writer
+* **What is actually shipped.** The first half only. `PostTransactionsJob` owns one transaction
+  boundary PER FEED RECORD and wraps the account write in no handler, so the failure propagates
+  and that record's three writes roll back together; there is no second boundary and no writer
   outside it. Reason 109 is written nowhere:
   `RejectReason.isPersistedToRejectStream()` returns `false` for
   `ACCOUNT_NOT_FOUND_ON_REWRITE` alone, `PostingValidationResult` refuses to accept it, and
@@ -4902,6 +5540,22 @@ which states the atomicity that IS shipped and states plainly that no reject row
   producer existed, which is exactly what happened. That test is deleted rather than
   repaired: what it could honestly assert is that the reason-code COLUMN admits the value,
   and the case beside it already asserts precisely that, under a name that says so.
+* **What was still carrying the claim, and is not any more.** This record and the case that
+  survived the deletion both described the withdrawal in the past tense before the artifacts
+  matched it. Three things did not: the test named above was still present and still running;
+  and section 7.4 -- whose subject is divergences CLAIMED BY SHIPPED CODE -- still carried a
+  full live entry under this identifier, once in its own body and once again in the
+  continuation appended after *Related documents*, the two byte-identical to each other and
+  both citing the deleted test as where the behaviour was verified. All three are now gone,
+  and section 7.4's four heading counts were re-measured rather than decremented, which that
+  section's own count paragraph records as its eighth pass. Refactoring Rationale: prose that
+  describes a deletion is not a deletion, and the gap between the two is invisible to every
+  gate this repository runs -- the test compiled, passed and proved nothing, and the stale
+  entry read as authoritative to anyone who reached section 7.4 before reaching this one.
+  Assumptions: the entry removed is not replaced, because the difference that IS shipped at
+  that paragraph already has its own entry,
+  [`D-POSTING-ATOMIC-NO-REJECT-109`](#d-posting-atomic-no-reject-109--a-failed-account-rewrite-discards-the-whole-post-and-reason-109-still-reaches-no-stream),
+  and a second entry beside it would recreate exactly the contradiction being removed.
 * **Why it is withdrawn rather than implemented.** The three grounds are recorded in full in
   the live entry: a second transaction boundary would qualify the atomicity that the same
   file exists to guarantee; a row the baseline's stream does not carry would break the
@@ -5317,52 +5971,6 @@ trees.
 * **Files.**
   `services/transaction-service/src/main/java/com/carddemo/transaction/service/TransactionViewService.java`.
 
-#### D-REJECT-109-DURABLE — a failed account rewrite is recorded, and the partial post is discarded
-
-* **Baseline behaviour.** [`CBTRN02C.cbl`](../../app/cbl/CBTRN02C.cbl) assigns reason
-  **109** when the account rewrite hits `INVALID KEY`, at **L556** inside
-  `2800-UPDATE-ACCOUNT-REC` at **L545**. That paragraph is performed at **L441** from
-  `2000-POST-TRANSACTION` at **L424**, which the record loop enters at **L212** only after
-  **L211** found the reason to be zero. The assignment therefore happens *after* the branch
-  toward the reject write has already not been taken: the `ELSE` arm at **L213-L215** does
-  not run, so no reject row is written and `WS-REJECT-COUNT` is not incremented; **L226-L228**
-  leaves the return code unchanged; **L208-L209** clear the reason at the top of the next
-  record. Meanwhile the transaction write at **L564** and the category-balance change at
-  **L526** have already happened and both stand. The net baseline result is a **posted
-  transaction whose account was never updated, with no record anywhere of why.**
-* **Target behaviour.** The three posting writes are one ACID commit, so a failed account
-  update discards the transaction row and the category-balance change with it; and one row
-  is written to `ledger.transaction_rejects` under reason code **109** with the description
-  `ACCOUNT RECORD NOT FOUND`, carrying the 350-byte source record, so the failure is
-  durable. The reject row is written outside the rolled-back unit of work, because a row
-  written inside it would be discarded by the same rollback it exists to explain.
-* **Category.** Documented divergence — posting atomicity and reject durability.
-* **Why the difference is accepted.** The baseline state is not reconcilable from the data:
-  a ledger row exists, a balance moved, the account did not, and nothing records the
-  failure except a console line. Any downstream reader — a statement, a report, a balance
-  enquiry — sees a posted transaction the account does not reflect, and no query can
-  distinguish that from a data-entry error. Two candidate designs were weighed. Discarding
-  the partial writes and recording nothing was rejected: it removes the inconsistency but
-  loses the event, so an operator has no way to learn a record failed to post. Leaving the
-  partial writes and adding a reject row was rejected for the opposite reason: it records
-  the event while keeping the inconsistency. Doing both is the only combination in which
-  the ledger is explicable and the failure is known. The cost is stated plainly: the reject
-  stream carries a row the baseline's stream does not, so a byte comparison of the two
-  streams differs on exactly the records whose account rewrite failed — which is why this
-  is registered rather than treated as parity.
-* **Where it is verified.** `TransactionRejectRepositoryIT`'s
-  `aFailingAccountRewriteIsRecordedAsADurableReasonOneHundredAndNineRow` asserts the row is
-  an addition to the stream and carries code 109 with 101's description, and
-  `theColumnDomainAdmitsReasonOneHundredAndNine...` asserts the column admits the code. The
-  fixture and its reasoning are
-  `services/transaction-service/src/test/resources/fixtures/reject_109_rewrite_invalid_key`.
-  `RejectReason.ACCOUNT_NOT_FOUND_ON_REWRITE` keeps the code distinct from
-  `ACCOUNT_NOT_FOUND_ON_READ` even though their descriptions are byte-identical.
-* **Files.**
-  `services/batch-service/src/main/java/com/carddemo/batch/dto/RejectReason.java`,
-  `services/transaction-service/src/main/java/com/carddemo/transaction/domain/TransactionReject.java`,
-  `services/transaction-service/src/main/resources/db/migration/V1__ledger.sql`.
-
 #### D-REFERENCE-UPSERT-NOT-EXPOSED — the maintenance screen's insert-on-miss has no single operation
 
 * **Baseline behaviour.** Three baseline programs write `TRANSACTION_TYPE` with three
@@ -5757,6 +6365,102 @@ trees.
   `infra/modules/sqs/outputs.tf`, `infra/modules/ecs-service/main.tf`,
   `infra/envs/dev/main.tf`, `infra/envs/prod/main.tf`.
 
+
+
+#### D-DALY-CARD-TIE-BREAK — the daily-subset ordering carries a tie-break the reference sort does not
+
+* **Baseline behaviour.** [`TRANREPT.jcl`](../../app/jcl/TRANREPT.jcl) unloads the
+  transaction master to `TRANSACT.BKUP(+1)` at **L29-L33** and then sorts it at
+  **L37-L55**. The sort declares exactly **one** control field —
+  `SORT FIELDS=(TRAN-CARD-NUM,A)` at **L46**, resolved through the `SYMNAMES` entry
+  `TRAN-CARD-NUM,263,16,ZD` at **L41** — and writes the selected subset to
+  `TRANSACT.DALY(+1)` at **L55**. With a single control field the relative order of two
+  records carrying the **same** card number is not determined by the job: DFSORT preserves
+  input order only when the `EQUALS` option is in effect, and whether it is comes from the
+  installation default rather than from anything in this JCL. So the byte order of the
+  reference's own output is not a property a reader of the baseline can establish, and it
+  is not necessarily the same from one installation to the next.
+* **Target behaviour.** `TransactionRepository.streamProcessedInWindowOrderedByCard`
+  orders by `cardNum ASC, transactionId ASC`. The first key is the reference's; the second
+  is added. `BackupTransactionsJob` walks that stream to stage the `TRANSACT.DALY`
+  generation, so the staged artifact is byte-identical between two runs over the same rows.
+* **Category.** Documented divergence — output ordering made total.
+* **Why the difference is accepted.** The alternative is an ordering that is only partial,
+  and a partial ordering has no defensible target behaviour at all: two runs over identical
+  data could stage different bytes, which would make the generation unusable as a
+  comparison baseline and would make any byte-level parity assertion over it non-repeatable.
+  Adding the primary key as a second key cannot change which records appear or how they
+  are grouped — every record with one card number still forms one contiguous run, which is
+  the only property `CBTRN03C` depends on, since it breaks its per-card total on a change of
+  card number and never on adjacency within a card. The tie-break decides only the order
+  **inside** a run, where the reference decides nothing.
+* **Alternatives considered.** Reproducing the unspecified order was rejected because there
+  is nothing to reproduce — an installation default is not a contract, and picking one of
+  its two outcomes would be inventing a baseline rather than transcribing one. Ordering by
+  `procTs` inside a card was also rejected: `TRAN-PROC-DT` is only the first ten characters
+  of a `TIMESTAMP(6)`, so two transactions posted in the same microsecond would tie again
+  and the ordering would still not be total.
+* **Where it is verified.** In two places, because the two halves need different evidence.
+  `BackupTransactionsJobTest.theDailySubsetIsOrderedByCardThenIdentifier` stages a window
+  holding two cards with two transactions each, presented out of order, and asserts the
+  staged bytes carry the four records grouped by card and ascending by identifier within
+  each card — that is the JOB honouring what the finder returns.
+  `PostingUnitOfWorkIT.theDailySubsetFinderOrdersAndBoundsAtTheDatabase` then asserts the
+  FINDER itself against a real PostgreSQL: the composite ordering resolves in the declared
+  sequence, and rows seeded one microsecond outside each edge of the half-open window are
+  excluded while rows one microsecond inside are included. A stubbed repository can model an
+  `ORDER BY` but cannot evaluate one, and the strict upper bound on a `TIMESTAMP(6)` is a
+  boundary only an engine decides, which is why the unit case alone would not have closed this.
+* **Files.**
+  `services/batch-service/src/main/java/com/carddemo/batch/repository/TransactionRepository.java`,
+  `services/batch-service/src/main/java/com/carddemo/batch/job/BackupTransactionsJob.java`.
+
+
+#### D-PRTCATBL-LRECL — the category-balance line is forty bytes, not the forty-one its OUTREC composes
+
+* **Baseline behaviour.** [`PRTCATBL.jcl`](../../app/jcl/PRTCATBL.jcl) sorts the
+  category-balance backup at **L43-L56** and writes the result to
+  `AWS.M2.CARDDEMO.TCATBALF.REPT` at **L59-L63**. Its `OUTREC` at **L53-L56** composes,
+  in order: the eleven-digit account identifier, one blank, the two-character type code,
+  one blank, the four-digit category code, one blank, the balance under
+  `EDIT=(TTTTTTTTT.TT)`, and nine further blanks. The edit mask emits **twelve**
+  characters — nine integer digit positions, a period, two decimal positions — so the
+  composed length is `11 + 1 + 2 + 1 + 4 + 1 + 12 + 9 = 41`. The `SORTOUT` DD at **L61**
+  declares `DCB=(LRECL=40,RECFM=FB,BLKSIZE=0)`. The two disagree by one byte, and the
+  baseline is internally inconsistent as written.
+* **Target behaviour.** `CategoryBalanceLineLayout` renders a line of exactly **forty**
+  bytes, composing the same seven fields in the same order and emitting **eight** trailing
+  blanks rather than nine. `CategoryBalanceReportService` writes those lines in
+  `account_id, type_cd, category_cd` order — the order **L52** declares — and
+  `CategoryBalanceArtifactPublisher` publishes them as `category-balance.txt`.
+* **Category.** Documented divergence — record length, resolved in favour of the declared
+  length.
+* **Why the difference is accepted.** The two candidate resolutions differ only in padding:
+  the byte in dispute is the last of the nine trailing blanks, so honouring `LRECL=40`
+  truncates padding and never data. Every value-bearing field, its width, its position and
+  its edit mask are identical under either reading. Choosing the declared length also
+  matches what the reference itself would produce, because a fixed-blocked dataset defined
+  at forty bytes does not grow to accept a forty-one-byte record — DFSORT would either
+  fail the step or truncate to the declared length, and truncation removes exactly the
+  blank in question.
+* **Why the tie is broken differently here than for the statements.** The comparable
+  disagreement in `CREASTMT.JCL` is settled by a COBOL program: `CBSTM03A.CBL` declares
+  its statement lines as `PIC X(80)` and `PIC X(100)`, so the program's own record
+  declaration outranks the JCL. `PRTCATBL.jcl` has **no** program — the whole report is a
+  DFSORT `OUTREC` — so there is no third statement to appeal to and the only two
+  candidates are the composition and the declaration. The declaration wins for the reason
+  above, and the asymmetry between the two resolutions is recorded here so a reader does
+  not read it as inconsistency.
+* **Where it is verified.** `CategoryBalanceLineLayoutTest` asserts the rendered length is
+  forty for every case, asserts the field offsets and the single-blank separators, asserts
+  the edit mask against the reference's `EDIT=(TTTTTTTTT.TT)` for positive, negative, zero
+  and nine-integer-digit balances, asserts the identifier and category code are
+  zero-padded while the type code is blank-padded, and asserts a value too wide for its
+  field is refused rather than silently truncated into its neighbour.
+* **Files.**
+  `services/reporting-service/src/main/java/com/carddemo/reporting/mapper/CategoryBalanceLineLayout.java`,
+  `services/reporting-service/src/main/java/com/carddemo/reporting/service/CategoryBalanceReportService.java`,
+  `services/reporting-service/src/main/java/com/carddemo/reporting/task/CategoryBalanceArtifactPublisher.java`.
 
 <sub>Apache-2.0 · Authoritative artifact-to-target matrix, retirement register and
 behavioural-divergence register for CardDemo. The baseline under `app/**` is cited

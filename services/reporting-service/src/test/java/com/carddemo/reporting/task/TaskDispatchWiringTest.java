@@ -11,6 +11,9 @@ import static org.mockito.Mockito.when;
 import com.carddemo.common.money.Money;
 import com.carddemo.reporting.ReportingTask;
 import com.carddemo.reporting.ReportingTaskRunner;
+import com.carddemo.reporting.service.CategoryBalanceReportService;
+import com.carddemo.reporting.service.ReportArtifactLocator;
+import com.carddemo.reporting.service.StatementRunOutcome;
 import com.carddemo.reporting.service.StatementService;
 import com.carddemo.reporting.service.TransactionReportService;
 import com.carddemo.reporting.sink.S3StatementSink;
@@ -28,8 +31,11 @@ import org.springframework.context.annotation.Configuration;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectResponse;
+import software.amazon.awssdk.services.s3.model.S3Object;
 
 /**
  * Pins that every task name the orchestrator dispatches resolves to a bean that can actually run, and
@@ -73,6 +79,9 @@ class TaskDispatchWiringTest {
     /** The report key prefix, matching the base configuration document. */
     private static final String REPORT_PREFIX = "reports/transaction-detail/";
 
+    /** The category-balance report key prefix, matching the base configuration document. */
+    private static final String CATEGORY_BALANCE_PREFIX = "reports/category-balance/";
+
     /**
      * The context under test: the task package scanned, its collaborators mocked, its values supplied.
      *
@@ -85,11 +94,20 @@ class TaskDispatchWiringTest {
             .withUserConfiguration(TaskScanConfiguration.class)
             .withBean(StatementService.class, () -> mock(StatementService.class))
             .withBean(TransactionReportService.class, () -> mock(TransactionReportService.class))
+            .withBean(CategoryBalanceReportService.class,
+                    () -> mock(CategoryBalanceReportService.class))
             .withBean(S3Client.class, () -> mock(S3Client.class))
+            // WHY : Assumptions: the key locator is registered as a REAL instance rather than a mock,
+            //       because the key it composes is what one case below asserts -- a mocked locator would
+            //       answer null and the assertion would be comparing a key against nothing. It lives in
+            //       the service package, which this slice does not scan, so it is supplied here.
+            .withBean(ReportArtifactLocator.class, () -> new ReportArtifactLocator(REPORT_PREFIX))
             .withPropertyValues(
                     StatementService.OUTPUT_BUCKET_PROPERTY + "=" + BUCKET,
                     StatementService.STATEMENT_PREFIX_PROPERTY + "=" + STATEMENT_PREFIX,
-                    ReportArtifactPublisher.REPORT_PREFIX_PROPERTY + "=" + REPORT_PREFIX);
+                    ReportArtifactPublisher.REPORT_PREFIX_PROPERTY + "=" + REPORT_PREFIX,
+                    CategoryBalanceArtifactPublisher.CATEGORY_BALANCE_PREFIX_PROPERTY + "="
+                            + CATEGORY_BALANCE_PREFIX);
 
     /**
      * Asserts that each accepted task name resolves to exactly one runnable task bean.
@@ -138,7 +156,7 @@ class TaskDispatchWiringTest {
         ReportArtifactPublisher publisher = mock(ReportArtifactPublisher.class);
         when(publisher.publishDaily(any())).thenReturn(published());
 
-        new GenerateReportsTask(publisher).run(Map.of(
+        new GenerateReportsTask(publisher, balancePublisher()).run(Map.of(
                 ReportingTaskRunner.BUSINESS_DATE_PARAMETER, DATE_TOKEN));
 
         // WHY : Refactoring Rationale: the nightly task is verified against publishDaily rather than
@@ -148,6 +166,58 @@ class TaskDispatchWiringTest {
         //       satisfy this case.
         LocalDate businessDate = LocalDate.parse(DATE_TOKEN);
         verify(publisher).publishDaily(businessDate);
+    }
+
+    // WHY : Assumptions: the nightly state is asserted to produce BOTH reports, because the state it
+    //       runs stands in for two reference jobs -- app/jcl/TRANREPT.jcl and app/jcl/PRTCATBL.jcl --
+    //       and a task producing only the first would satisfy every other case in this class while a
+    //       night's category-balance report silently never appeared.
+    /**
+     * Asserts that the nightly state produces the category-balance report as well as the transaction one.
+     *
+     * @throws Exception if either publication raises, which the assertions below would not reach
+     */
+    @Test
+    @DisplayName("the nightly state produces both the transaction and the category-balance report")
+    void theNightlyStateProducesBothReports() throws Exception {
+        ReportArtifactPublisher publisher = mock(ReportArtifactPublisher.class);
+        when(publisher.publishDaily(any())).thenReturn(published());
+        CategoryBalanceArtifactPublisher balances = balancePublisher();
+
+        new GenerateReportsTask(publisher, balances).run(Map.of(
+                ReportingTaskRunner.BUSINESS_DATE_PARAMETER, DATE_TOKEN));
+
+        verify(publisher).publishDaily(LocalDate.parse(DATE_TOKEN));
+        // WHY : Assumptions: the category-balance publication is verified to take NO argument, which is
+        //       the whole content of its contract. app/jcl/PRTCATBL.jcl:44-45 feeds its sort the entire
+        //       unloaded file with no INCLUDE condition, unlike app/jcl/TRANREPT.jcl:47-48 -- so a task
+        //       that narrowed it to a business date would report a period the reference never reports.
+        verify(balances).publish();
+    }
+
+    // WHY : Assumptions: a failing category-balance publication is asserted to FAIL THE STATE rather
+    //       than to be absorbed, and the transaction report is asserted to have been published first.
+    //       A state that swallowed the second failure would report a night complete having produced one
+    //       of its two reports, which is exactly the class of silent gap this finding was raised over.
+    /**
+     * Asserts that a category-balance failure fails the state after the first report is published.
+     *
+     * @throws Exception if the mock setup raises, which the assertions below would not reach
+     */
+    @Test
+    @DisplayName("a category-balance failure fails the state, after the first report is published")
+    void aCategoryBalanceFailureFailsTheState() throws Exception {
+        ReportArtifactPublisher publisher = mock(ReportArtifactPublisher.class);
+        when(publisher.publishDaily(any())).thenReturn(published());
+        CategoryBalanceArtifactPublisher balances = mock(CategoryBalanceArtifactPublisher.class);
+        when(balances.publish())
+                .thenThrow(new IOException("the category-balance artifact could not be published"));
+
+        assertThatExceptionOfType(IOException.class)
+                .isThrownBy(() -> new GenerateReportsTask(publisher, balances).run(Map.of(
+                        ReportingTaskRunner.BUSINESS_DATE_PARAMETER, DATE_TOKEN)));
+
+        verify(publisher).publishDaily(LocalDate.parse(DATE_TOKEN));
     }
 
     /**
@@ -200,7 +270,8 @@ class TaskDispatchWiringTest {
         ReportArtifactPublisher publisher = mock(ReportArtifactPublisher.class);
 
         assertThatExceptionOfType(IllegalArgumentException.class)
-                .isThrownBy(() -> new GenerateReportsTask(publisher).run(Map.of()))
+                .isThrownBy(() -> new GenerateReportsTask(publisher, balancePublisher())
+                        .run(Map.of()))
                 .withMessageContaining(ReportingTaskRunner.BUSINESS_DATE_OPTION);
     }
 
@@ -223,7 +294,7 @@ class TaskDispatchWiringTest {
 
         LocalDate runDate = LocalDate.parse(DATE_TOKEN);
         ReportArtifactPublisher.PublishedArtifact result =
-                new ReportArtifactPublisher(reports, s3, BUCKET, REPORT_PREFIX)
+                new ReportArtifactPublisher(reports, s3, BUCKET, new ReportArtifactLocator(REPORT_PREFIX))
                         .publish("Custom", LocalDate.of(2022, 7, 1), runDate, runDate);
 
         ArgumentCaptor<PutObjectRequest> put = ArgumentCaptor.forClass(PutObjectRequest.class);
@@ -265,7 +336,7 @@ class TaskDispatchWiringTest {
         when(reports.generateReport(any(), any(), any())).thenReturn(summary());
         S3Client s3 = storageAnsweringVersion(null);
         ReportArtifactPublisher publisher =
-                new ReportArtifactPublisher(reports, s3, BUCKET, REPORT_PREFIX);
+                new ReportArtifactPublisher(reports, s3, BUCKET, new ReportArtifactLocator(REPORT_PREFIX));
 
         LocalDate runDate = LocalDate.parse(DATE_TOKEN);
         String nightly = publisher.publishDaily(runDate).key();
@@ -292,7 +363,7 @@ class TaskDispatchWiringTest {
         TransactionReportService reports = mock(TransactionReportService.class);
         S3Client s3 = mock(S3Client.class);
         ReportArtifactPublisher publisher =
-                new ReportArtifactPublisher(reports, s3, BUCKET, REPORT_PREFIX);
+                new ReportArtifactPublisher(reports, s3, BUCKET, new ReportArtifactLocator(REPORT_PREFIX));
         LocalDate runDate = LocalDate.parse(DATE_TOKEN);
 
         for (String rejected : List.of("", "   ", "quarterly",
@@ -321,7 +392,7 @@ class TaskDispatchWiringTest {
         when(reports.generateReport(any(), any(), any())).thenReturn(summary());
         S3Client s3 = storageAnsweringVersion(null);
         ReportArtifactPublisher publisher =
-                new ReportArtifactPublisher(reports, s3, BUCKET, REPORT_PREFIX);
+                new ReportArtifactPublisher(reports, s3, BUCKET, new ReportArtifactLocator(REPORT_PREFIX));
         LocalDate runDate = LocalDate.parse(DATE_TOKEN);
 
         for (String accepted : List.of("MONTHLY", "Yearly", " custom ",
@@ -349,13 +420,86 @@ class TaskDispatchWiringTest {
 
         LocalDate runDate = LocalDate.parse(DATE_TOKEN);
         ReportArtifactPublisher.PublishedArtifact result =
-                new ReportArtifactPublisher(reports, s3, BUCKET, REPORT_PREFIX)
+                new ReportArtifactPublisher(reports, s3, BUCKET, new ReportArtifactLocator(REPORT_PREFIX))
                         .publishDaily(runDate);
 
         assertThat(result.versionId()).isNull();
         assertThat(result.locator())
                 .isEqualTo("s3://" + BUCKET + "/" + result.key())
                 .doesNotContain("versionId");
+    }
+
+    // WHY : Assumptions: the nightly publication is asserted to write TWO keys, and the second is
+    //       asserted by its exact generation coordinate. The reference writes TRANREPT(+1) against a
+    //       generation base defined at app/jcl/DEFGDGB.jcl:37-39, and until this publication existed
+    //       that family had no production writer -- so the prefix and the five-generation lifecycle rule
+    //       infra/modules/s3-datasets provisions for it governed nothing at all.
+    /**
+     * Asserts that the nightly report lands on both its request-scoped key and its generation key.
+     *
+     * @throws Exception if the publication raises, which the assertions below would not reach
+     */
+    @Test
+    @DisplayName("the nightly report lands on both its request-scoped key and its generation key")
+    void theNightlyReportIsPublishedToBothKeys() throws Exception {
+        TransactionReportService reports = mock(TransactionReportService.class);
+        when(reports.generateReport(any(), any(), any())).thenReturn(summary());
+        S3Client s3 = storageAnsweringVersion(null);
+
+        LocalDate runDate = LocalDate.parse(DATE_TOKEN);
+        ReportArtifactPublisher.PublishedArtifact result =
+                new ReportArtifactPublisher(reports, s3, BUCKET,
+                        new ReportArtifactLocator(REPORT_PREFIX)).publishDaily(runDate);
+
+        ArgumentCaptor<PutObjectRequest> put = ArgumentCaptor.forClass(PutObjectRequest.class);
+        verify(s3, org.mockito.Mockito.times(2)).putObject(put.capture(), any(RequestBody.class));
+        String generationKey = ReportArtifactPublisher.TRANREPT_DOMAIN + "/"
+                + ReportArtifactPublisher.TRANREPT_DATASET + "/dt=" + DATE_TOKEN + "/gen=0001/"
+                + ReportArtifactPublisher.TRANREPT_GENERATION_OBJECT;
+        assertThat(put.getAllValues().stream().map(PutObjectRequest::key).toList())
+                .as("one generation pass publishes the request-scoped key and the generation key")
+                .containsExactlyInAnyOrder(result.key(), generationKey);
+
+        // WHY : Assumptions: the returned locator is asserted to remain the REQUEST-SCOPED key, because
+        //       every existing caller and every runbook addresses a nightly report by its range. Widening
+        //       the return to the generation key would have moved a published contract while the finding
+        //       being closed asked only for the missing family to gain a writer.
+        assertThat(result.key()).startsWith(REPORT_PREFIX);
+    }
+
+    // WHY : Assumptions: an occupied date is exercised as its own case, because allocating over a
+    //       generation that already holds bytes is the failure a numbering scheme exists to prevent, and
+    //       the empty-listing case above cannot detect it -- it allocates the first number either way.
+    /**
+     * Asserts that the nightly generation is numbered above the highest one the date already holds.
+     *
+     * @throws Exception if the publication raises, which the assertion below would not reach
+     */
+    @Test
+    @DisplayName("the nightly generation is numbered above the highest one already present")
+    void theNightlyGenerationFollowsTheHighestPresent() throws Exception {
+        TransactionReportService reports = mock(TransactionReportService.class);
+        when(reports.generateReport(any(), any(), any())).thenReturn(summary());
+        S3Client s3 = storageAnsweringVersion(null);
+        String datePrefix = ReportArtifactPublisher.TRANREPT_DOMAIN + "/"
+                + ReportArtifactPublisher.TRANREPT_DATASET + "/dt=" + DATE_TOKEN + "/";
+        when(s3.listObjectsV2(any(ListObjectsV2Request.class)))
+                .thenReturn(ListObjectsV2Response.builder()
+                        .contents(
+                                S3Object.builder().key(datePrefix + "gen=0001/tranrept.txt").build(),
+                                S3Object.builder().key(datePrefix + "gen=0003/tranrept.txt").build(),
+                                S3Object.builder().key(datePrefix + "not-a-generation").build())
+                        .build());
+
+        new ReportArtifactPublisher(reports, s3, BUCKET, new ReportArtifactLocator(REPORT_PREFIX))
+                .publishDaily(LocalDate.parse(DATE_TOKEN));
+
+        ArgumentCaptor<PutObjectRequest> put = ArgumentCaptor.forClass(PutObjectRequest.class);
+        verify(s3, org.mockito.Mockito.times(2)).putObject(put.capture(), any(RequestBody.class));
+        assertThat(put.getAllValues().stream().map(PutObjectRequest::key).toList())
+                .as("the next generation follows the highest present, and an unnumbered key is ignored")
+                .contains(datePrefix + "gen=0004/"
+                        + ReportArtifactPublisher.TRANREPT_GENERATION_OBJECT);
     }
 
     // WHY : Assumptions: the statement task's two artifacts are asserted by KEY and by COUNT, because
@@ -368,13 +512,13 @@ class TaskDispatchWiringTest {
      * @throws Exception if the run raises, which the assertions below would not reach
      */
     @Test
-    @DisplayName("a statement run publishes exactly the two run-wide artifacts")
+    @DisplayName("a statement run publishes exactly the three run-wide artifacts")
     void aStatementRunPublishesTwoArtifacts() throws Exception {
         StatementService statements = mock(StatementService.class);
         when(statements.generateStatements(any())).thenAnswer(invocation -> {
             StatementService.StatementSink sink = invocation.getArgument(0);
             sink.replaceArtifacts();
-            return 0;
+            return new StatementRunOutcome(0, List.of());
         });
         S3Client s3 = storageAnsweringVersion(null);
 
@@ -382,9 +526,9 @@ class TaskDispatchWiringTest {
                 .run(Map.of(ReportingTaskRunner.BUSINESS_DATE_PARAMETER, DATE_TOKEN));
 
         ArgumentCaptor<PutObjectRequest> put = ArgumentCaptor.forClass(PutObjectRequest.class);
-        verify(s3, org.mockito.Mockito.times(2)).putObject(put.capture(), any(RequestBody.class));
+        verify(s3, org.mockito.Mockito.times(3)).putObject(put.capture(), any(RequestBody.class));
         assertThat(put.getAllValues().stream().map(PutObjectRequest::key).toList())
-                .as("a run publishes the two run-wide datasets and no per-statement object")
+                .as("a run publishes the three run-wide datasets and no per-statement object")
                 .containsExactlyInAnyOrderElementsOf(expectedStatementKeys());
     }
 
@@ -402,13 +546,13 @@ class TaskDispatchWiringTest {
     @DisplayName("the statement task runs without a business date, because the reference takes none")
     void theStatementTaskRunsWithoutABusinessDate() throws Exception {
         StatementService statements = mock(StatementService.class);
-        when(statements.generateStatements(any())).thenReturn(0);
+        when(statements.generateStatements(any())).thenReturn(new StatementRunOutcome(0, List.of()));
         S3Client s3 = storageAnsweringVersion(null);
 
         new GenerateStatementsTask(statements, s3, BUCKET, STATEMENT_PREFIX).run(Map.of());
 
         verify(statements).generateStatements(any());
-        verify(s3, org.mockito.Mockito.times(2))
+        verify(s3, org.mockito.Mockito.times(3))
                 .putObject(any(PutObjectRequest.class), any(RequestBody.class));
     }
 
@@ -425,7 +569,7 @@ class TaskDispatchWiringTest {
                 .thenThrow(new IOException("the artifact could not be published"));
 
         assertThatExceptionOfType(IOException.class)
-                .isThrownBy(() -> new GenerateReportsTask(publisher).run(Map.of(
+                .isThrownBy(() -> new GenerateReportsTask(publisher, balancePublisher()).run(Map.of(
                         ReportingTaskRunner.BUSINESS_DATE_PARAMETER, DATE_TOKEN)));
     }
 
@@ -476,7 +620,7 @@ class TaskDispatchWiringTest {
         TransactionReportService reports = mock(TransactionReportService.class);
         S3Client s3 = mock(S3Client.class);
         ReportArtifactPublisher publisher =
-                new ReportArtifactPublisher(reports, s3, BUCKET, REPORT_PREFIX);
+                new ReportArtifactPublisher(reports, s3, BUCKET, new ReportArtifactLocator(REPORT_PREFIX));
 
         assertThatExceptionOfType(IllegalArgumentException.class)
                 .isThrownBy(() -> new GenerateAdHocReportTask(publisher).run(Map.of(
@@ -515,6 +659,12 @@ class TaskDispatchWiringTest {
      * answers {@code null} for the response object and the writer reads a member off it -- so a default
      * would fail with a null dereference rather than exercising the version capture.</p>
      *
+     * <p>Assumptions: the generation listing is stubbed to an EMPTY page, so every nightly publication
+     * driven through this helper allocates the first generation of its date. The listing is what the
+     * nightly path reads to number its generation coordinate, and a Mockito default answers {@code null}
+     * there -- so leaving it unstubbed would fail on a null response rather than on the property each
+     * case is about.</p>
+     *
      * @param versionId the version to answer, or {@code null} to stand for an unversioned bucket
      * @return the client
      */
@@ -522,7 +672,31 @@ class TaskDispatchWiringTest {
         S3Client s3 = mock(S3Client.class);
         when(s3.putObject(any(PutObjectRequest.class), any(RequestBody.class)))
                 .thenReturn(PutObjectResponse.builder().versionId(versionId).build());
+        when(s3.listObjectsV2(any(ListObjectsV2Request.class)))
+                .thenReturn(ListObjectsV2Response.builder().build());
         return s3;
+    }
+
+    // WHY : Assumptions: the stand-in publisher answers a real summary rather than being left at its
+    //       Mockito default. The nightly task reads the returned locator and line count into its journal
+    //       line, so a default null answer would fail every nightly case with a null dereference from a
+    //       collaborator none of them is about.
+    /**
+     * Builds a stand-in category-balance publisher answering one completed publication.
+     *
+     * @return the publisher
+     * @throws IOException never, and declared only because the stubbed member does
+     */
+    private static CategoryBalanceArtifactPublisher balancePublisher() throws IOException {
+        CategoryBalanceArtifactPublisher publisher = mock(CategoryBalanceArtifactPublisher.class);
+        when(publisher.publish()).thenReturn(
+                new CategoryBalanceArtifactPublisher.PublishedCategoryBalanceReport(
+                        new CategoryBalanceReportService.CategoryBalanceReportSummary(
+                                3L, Money.of("40.50")),
+                        BUCKET,
+                        CATEGORY_BALANCE_PREFIX + CategoryBalanceArtifactPublisher.REPORT_OBJECT,
+                        null));
+        return publisher;
     }
 
     /**
@@ -531,9 +705,14 @@ class TaskDispatchWiringTest {
      * @return the two expected keys, in the order the reference declares its two datasets
      */
     private static List<String> expectedStatementKeys() {
+        // WHY : ⚠️ Refactoring Rationale: a run publishes THREE objects, where it published two. The
+        //       third is the run index, and it is asserted here rather than in a case of its own because
+        //       the property worth pinning is the WHOLE set a run writes -- a case naming only the index
+        //       would pass while one of the two artifacts silently stopped being written.
         return List.of(
                 STATEMENT_PREFIX + S3StatementSink.PLAIN_TEXT_OBJECT,
-                STATEMENT_PREFIX + S3StatementSink.HTML_OBJECT);
+                STATEMENT_PREFIX + S3StatementSink.HTML_OBJECT,
+                STATEMENT_PREFIX + StatementService.INDEX_OBJECT);
     }
 
     /**

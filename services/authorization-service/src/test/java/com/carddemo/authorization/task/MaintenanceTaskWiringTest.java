@@ -182,7 +182,7 @@ class MaintenanceTaskWiringTest {
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the export requires both destinations and defaults its record form")
+    @DisplayName("the export requires both destinations and a business date, and defaults its form")
     void theExportRequiresBothDestinationsAndDefaultsItsRecordForm() {
         assertThatThrownBy(() -> MaintenanceTaskRunner.taskParameters(
                 MaintenanceTaskRunner.UNLOAD_JOB, new String[] {"--root-extract=s3://bucket/roots"}))
@@ -191,17 +191,53 @@ class MaintenanceTaskWiringTest {
 
         Map<String, String> defaulted = MaintenanceTaskRunner.taskParameters(
                 MaintenanceTaskRunner.UNLOAD_JOB,
-                new String[] {"--root-extract=s3://bucket/roots", "--child-extract=s3://bucket/children"});
+                new String[] {"--root-extract=s3://bucket/roots",
+                        "--child-extract=s3://bucket/children", "--business-date=2022-07-18"});
         assertThat(defaulted)
                 .as("an omitted form leaves the parameter absent so the exporter applies its own default")
                 .containsOnlyKeys(MaintenanceTaskRunner.ROOT_EXTRACT_PARAMETER,
-                        MaintenanceTaskRunner.CHILD_EXTRACT_PARAMETER);
+                        MaintenanceTaskRunner.CHILD_EXTRACT_PARAMETER,
+                        MaintenanceTaskRunner.BUSINESS_DATE_PARAMETER);
 
         Map<String, String> sequential = MaintenanceTaskRunner.taskParameters(
                 MaintenanceTaskRunner.UNLOAD_JOB,
                 new String[] {"--root-extract=/staged/roots", "--child-extract=/staged/children",
-                        "--extract-form=sequential"});
+                        "--business-date=2022-07-18", "--extract-form=sequential"});
         assertThat(sequential).containsEntry(MaintenanceTaskRunner.EXTRACT_FORM_PARAMETER, "sequential");
+    }
+
+    /**
+     * The export refuses an absent or unparseable business date before a container starts.
+     *
+     * <p>⚠️ Refactoring Rationale: the export took NO business date while the orchestrator composed
+     * both of its destination keys from one, and the only check that value met was the state machine's
+     * {@code ????-??-??} shape match -- which admits {@code abcd-ef-gh} and the impossible
+     * {@code 2022-02-30} alike. An export then landed under a prefix no later run could find by date.
+     * This case pins the parse that replaced that hope, and it pins it at the argument boundary so the
+     * refusal reaches an operator as a usage message naming the option rather than as a job failure
+     * after a Fargate task has started.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the export refuses an absent or impossible business date")
+    void theExportRefusesAnAbsentOrImpossibleBusinessDate() {
+        assertThatThrownBy(() -> MaintenanceTaskRunner.taskParameters(
+                MaintenanceTaskRunner.UNLOAD_JOB,
+                new String[] {"--root-extract=/r", "--child-extract=/c"}))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(MaintenanceTaskRunner.BUSINESS_DATE_OPTION);
+
+        for (String rejected : new String[] {"abcd-ef-gh", "2022-02-30", "18/07/2022",
+                "2022-07-18T00:00:00", ""}) {
+            assertThatThrownBy(() -> MaintenanceTaskRunner.taskParameters(
+                    MaintenanceTaskRunner.UNLOAD_JOB,
+                    new String[] {"--root-extract=/r", "--child-extract=/c",
+                            "--business-date=" + rejected}))
+                    .as("%s must be refused before any destination is opened", rejected)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining(MaintenanceTaskRunner.BUSINESS_DATE_OPTION);
+        }
     }
 
     /**
@@ -217,8 +253,12 @@ class MaintenanceTaskWiringTest {
     @Test
     @DisplayName("an unpublished record form is refused and the published forms are named")
     void anUnpublishedRecordFormIsRefusedAndThePublishedFormsAreNamed() {
+        // WHY : Assumptions: the business date is supplied in both vectors below so this case keeps
+        //       measuring the FORM refusal. The export requires a date, and it is validated before
+        //       the optional form, so an argument list without one would now be refused for the
+        //       missing date and this case would pass while asserting nothing about forms.
         String[] withForm = {"--root-extract=/staged/roots", "--child-extract=/staged/children",
-                "--extract-form=PREFIXED"};
+                "--business-date=2022-07-18", "--extract-form=PREFIXED"};
         assertThatThrownBy(() ->
                 MaintenanceTaskRunner.taskParameters(MaintenanceTaskRunner.UNLOAD_JOB, withForm))
                 .as("the constant NAME is not a wire value, so it is refused like any other unknown form")
@@ -227,7 +267,8 @@ class MaintenanceTaskWiringTest {
                 .hasMessageContaining("sequential");
         assertThatThrownBy(() -> MaintenanceTaskRunner.taskParameters(
                 MaintenanceTaskRunner.UNLOAD_JOB,
-                new String[] {"--root-extract=/r", "--child-extract=/c", "--extract-form="}))
+                new String[] {"--root-extract=/r", "--child-extract=/c",
+                        "--business-date=2022-07-18", "--extract-form="}))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining(MaintenanceTaskRunner.EXTRACT_FORM_OPTION);
     }

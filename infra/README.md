@@ -206,7 +206,7 @@ resources yet.
 | `api-gateway-http` | HTTP API, Cognito JWT authorizer, VPC Link to the internal ALB | *(net-new)* |
 | `cognito` | User pool, app client, the groups `carddemo-admin` and `carddemo-user`, seed users | `app/cpy/CSUSR01Y.cpy:L22` — `SEC-USR-TYPE PIC X(01)` with its `'A'`/`'U'` values — and `app/cbl/COSGN00C.cbl` |
 | `sqs` | Two FIFO and four standard queues, each with a dead-letter queue at `maxReceiveCount` 5, all SSE-KMS | the five message-queue names in the extension trees: `AWS.M2.CARDDEMO.PAUTH.REQUEST`, `AWS.M2.CARDDEMO.PAUTH.REPLY`, `CARDDEMO.REQUEST.QUEUE`, `CARDDEMO.RESPONSE.QUEUE`, `CARD.DEMO.ERROR`; the shared request queue becomes separate account/date request queues so competing consumers cannot steal each other's messages |
-| `step-functions-batch` | The **eleven-state** `carddemo-daily-batch` state machine, its IAM role and task-definition wiring, plus a **second, smaller** state machine for ad-hoc reports | all 38 files in `app/jcl/`; the ad-hoc path from `app/csd/CARDDEMO.CSD:L499-L505`, where `DEFINE TDQUEUE(JOBS)` maps to `DDNAME(INREADER)` |
+| `step-functions-batch` | The **twelve-state** `carddemo-daily-batch` state machine, its IAM role and task-definition wiring, plus a **second, smaller** state machine for ad-hoc reports | all 38 files in `app/jcl/`; the ad-hoc path from `app/csd/CARDDEMO.CSD:L499-L505`, where `DEFINE TDQUEUE(JOBS)` maps to `DDNAME(INREADER)` |
 | `eventbridge-scheduler` | The nightly cron schedule, with a dead-letter target | `app/scheduler/CardDemo.ca7` and `app/scheduler/CardDemo.controlm` — their **intent**, not their syntax |
 | `s3-datasets` | A versioned bucket, with prefixes and lifecycle configuration for **ten** generation-dataset families | `app/jcl/DEFGDGB.jcl:L25-L56` (six), `app/jcl/DEFGDGD.jcl:L28-L75` (three), `app/jcl/DALYREJS.jcl:L25-L26` (one) |
 | `cloudfront-spa` | S3 origin with an origin access control, the distribution, and single-page-application error routing | `app/bms/*.bms` — the delivery path that replaces the 3270 terminal |
@@ -846,10 +846,10 @@ contract.
 ## 11. Batch orchestration and datasets
 
 The target `step-functions-batch` module is specified to provision the
-**eleven-state** `carddemo-daily-batch` state machine, invoked by the authored
+**twelve-state** `carddemo-daily-batch` state machine, invoked by the authored
 EventBridge Scheduler module. The state-machine resource graph is not yet
 authored. Its contract calls for each work state to run a Fargate task
-synchronously with timeout, retry and catch handling, while states 1 and 11
+synchronously with timeout, retry and catch handling, while states 1 and 12
 bracket the run with a read-only flag. `docs/architecture/batch-orchestration.md`
 maps the target states to the JCL jobs they replace.
 
@@ -1017,7 +1017,7 @@ merely a note that it was:
 | Multi-region and disaster-recovery topology | Single region, three availability zones. No module provisions a second region or a global database |
 | Blue-green and canary deployment | Rolling ECS service deployment only — see the roll-forward note in [§6](#6-deploy) |
 | Kafka, Kinesis, Redis, ElastiCache, read replicas | See the rejection reasoning in [§12](#12-messaging) |
-| Mainframe-side artifacts with no cloud analogue | The CSD deployment deck, the operator quiesce mechanism, the job-submission tunnel and the scheduler syntax are documented as retired. Their **behaviour** is preserved — the quiesce bracket as states 1 and 11, the schedule as an EventBridge cron — but the mechanisms themselves are not reproduced |
+| Mainframe-side artifacts with no cloud analogue | The CSD deployment deck, the operator quiesce mechanism, the job-submission tunnel and the scheduler syntax are documented as retired. Their **behaviour** is preserved — the quiesce bracket as states 1 and 12, the schedule as an EventBridge cron — but the mechanisms themselves are not reproduced |
 
 **What this package never touches.** The migration is purely **additive**: it adds
 a deployment path beside the existing one and removes nothing.

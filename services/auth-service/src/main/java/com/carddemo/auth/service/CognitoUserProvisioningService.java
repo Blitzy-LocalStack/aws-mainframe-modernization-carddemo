@@ -1,6 +1,9 @@
 package com.carddemo.auth.service;
 
 import com.carddemo.common.observability.ThrowableDigest;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -250,6 +253,60 @@ public class CognitoUserProvisioningService {
      * document and typed once.</p>
      */
     private static final String PASSWORD_SYMBOLS = "!#%*+-:=?@^_~";
+
+    /**
+     * The member name the credential payload carries the provider username under.
+     *
+     * <p>Assumptions: {@code username} and {@code password}, in that order, because
+     * {@code infra/modules/cognito/seed_user_bootstrap.py} writes exactly those two members in
+     * exactly that order for a seeded identity, and a collector must not have to know which of the
+     * two paths minted the credential it is opening.</p>
+     */
+    private static final String CREDENTIAL_MEMBER_USERNAME = "username";
+
+    /** The member name the credential payload carries the one-time password under. */
+    private static final String CREDENTIAL_MEMBER_PASSWORD = "password";
+
+    /**
+     * Writes the two-member credential payload.
+     *
+     * <p>Refactoring Rationale: this replaces string concatenation, and the paragraph that
+     * concatenation carried was wrong rather than merely terse. It asserted that no value in the
+     * payload can carry a quote or a backslash; that holds for the password, whose alphabet is the
+     * four constants above and contains neither, but NOT for the identifier.
+     * {@code com.carddemo.auth.dto.CreateUserRequest} constrains {@code userId} with
+     * {@code @NotBlank}, {@code @Size(max = 8)} and a {@code @Schema(pattern = "\S")} facet -- and that
+     * facet is a PRESENCE assertion, unanchored and satisfied by any single non-whitespace character,
+     * so it bounds neither the character set nor where a character may appear. Nothing downstream
+     * narrows it either: {@code UserService.foldedKey} only trims and upper-cases. So {@code A"B} and
+     * {@code ABCDEFG\} are both admissible eight-character identifiers that reached the document
+     * unescaped -- the first closing the username member early, the second escaping the quote that
+     * closes it. Neither
+     * was caught downstream either: {@code credentialSecretName} DIGESTS the identifier, so the entry
+     * name is always well formed and the provider never refused the call on the name's account. The
+     * stored value was simply not JSON, and the account it belonged to therefore had a credential
+     * nobody could collect -- the exact condition the handover exists to prevent.</p>
+     *
+     * <p>Alternatives Considered: constraining the identifier's character set at the request boundary
+     * instead, with a pattern admitting only letters and digits. Rejected on the migration plan's rule
+     * T1: {@code SEC-USER-ID PIC X(08)} at {@code app/cpy/CSUSR01Y.cpy} L18 declares a width and no
+     * value set, and no baseline program narrows it, so a pattern here would invent a domain the
+     * reference does not have and would refuse identifiers the reference accepts. Escaping the two
+     * characters by hand was also considered and rejected: it is the same decision as this one taken
+     * less completely, since a hand-written escaper has to be right about control characters and
+     * about surrogate pairs as well.</p>
+     *
+     * <p>Assumptions: a mapper PRIVATE to this class rather than the module-wide bean, which is why
+     * it is constructed here and not injected. The shape of this document is a contract between this
+     * method and whoever collects the credential, and injecting the shared mapper would put that
+     * shape under a serialisation configuration this class does not own -- an inclusion or a naming
+     * strategy set for the HTTP surface would silently change what is stored in a secret. A default
+     * mapper writing an explicit two-member node emits the compact
+     * {@code {"username":"...","password":"..."}} form the seed bootstrap's
+     * {@code separators=(",", ":")} also produces, so the stored shape is unchanged for every
+     * identifier that was already safe.</p>
+     */
+    private static final ObjectMapper CREDENTIAL_WRITER = new ObjectMapper();
 
     /**
      * The source of randomness a temporary password is drawn from.
@@ -514,12 +571,15 @@ public class CognitoUserProvisioningService {
      * than naming it in a resource name any principal with list permission can read. This is the same
      * pairing and the same reasoning as the seed bootstrap's own payload.</p>
      *
-     * <p>Trade-offs: the payload is composed by concatenation rather than by a serialiser. It is two
-     * fixed keys and two values that are a generated password from a known alphabet and an identifier
-     * the request boundary has already constrained to eight non-blank characters, so no value here can
-     * carry a quote or a backslash to escape; a serialiser would add a dependency and an object graph to
-     * emit a two-member document. The alphabet is fixed by this class, which is what makes that safe --
-     * a wider alphabet would need escaping and would need a serialiser with it.</p>
+     * <p>Refactoring Rationale: the payload is SERIALISED and no longer concatenated, and the
+     * paragraph that used to sit here claimed no value in it could carry a quote or a backslash. That
+     * was true of the password and false of the identifier, which the request boundary bounds by
+     * length alone. The reasoning, the two identifiers that defeated it and the alternative that was
+     * rejected are recorded on {@link #CREDENTIAL_WRITER}; the writer is private to this class so the
+     * stored shape cannot be changed by a serialisation setting made for the HTTP surface. No
+     * dependency was added -- Jackson is already on this module's compile path through
+     * {@code spring-boot-starter-web}, which is what made the old paragraph's cost argument wrong as
+     * well as its safety argument.</p>
      *
      * @param userId the row identifier and provider username the credential belongs to; must not be
      *     {@code null}
@@ -531,7 +591,7 @@ public class CognitoUserProvisioningService {
      */
     private void publishCredential(String userId, String temporaryPassword) {
         String secretName = credentialSecretName(userId);
-        String payload = "{\"username\":\"" + userId + "\",\"password\":\"" + temporaryPassword + "\"}";
+        String payload = credentialPayload(userId, temporaryPassword);
 
         try {
             this.secrets.createSecret(CreateSecretRequest.builder()
@@ -592,6 +652,48 @@ public class CognitoUserProvisioningService {
             //       never created already satisfies it. Every other store failure propagates, because an
             //       entry that could not be removed holds a value for an account that no longer exists.
             LOG.info("event=auth.identity.credential-discard-noop userId={}", userId);
+        }
+    }
+
+    /**
+     * Renders one identity's credential as the two-member JSON document its collector reads.
+     *
+     * <p>Assumptions: both values are written through {@link #CREDENTIAL_WRITER}, so every character
+     * either of them can hold is escaped by the serialiser rather than by this method. That is the
+     * whole point of the method existing: the identifier's only declared constraints are non-blankness
+     * and a width of eight, so it can hold a quote or a backslash, and the reasoning is recorded on
+     * the writer.</p>
+     *
+     * <p>Assumptions: the member order is fixed by building an explicit node rather than by passing a
+     * map, because a {@code Map.of} has no defined iteration order and would let the stored document's
+     * key order vary between two publications of the same credential. Nothing should depend on that
+     * order -- a JSON object is unordered -- but a stable rendering is what makes two stored values
+     * comparable by eye during an incident.</p>
+     *
+     * @param userId the provider username the credential opens; must not be {@code null}
+     * @param temporaryPassword the generated one-time value; must not be {@code null}
+     * @return the compact JSON document to store as the entry's protected value, never {@code null}
+     * @throws IllegalStateException if the document cannot be written, which for a node holding two
+     *     strings means a broken Jackson runtime rather than anything about the values -- raised
+     *     rather than falling back to concatenation, because a fallback would reintroduce exactly the
+     *     defect this method exists to remove, and silently
+     */
+    private static String credentialPayload(String userId, String temporaryPassword) {
+        ObjectNode document = CREDENTIAL_WRITER.createObjectNode();
+        document.put(CREDENTIAL_MEMBER_USERNAME, userId);
+        document.put(CREDENTIAL_MEMBER_PASSWORD, temporaryPassword);
+        try {
+            return CREDENTIAL_WRITER.writeValueAsString(document);
+        } catch (JsonProcessingException unwritable) {
+            // WHY : Assumptions: the message names NEITHER value. This exception surfaces in a log and
+            //       in a stack trace, and the password is one of the two members -- so a message that
+            //       echoed the document would move a live credential from an encrypted secret into
+            //       plain text, which is the one outcome worse than the failure being reported. The
+            //       cause is chained because Jackson's own message for a two-string node cannot
+            //       contain either value.
+            throw new IllegalStateException(
+                    "a credential payload of two string members could not be written as JSON",
+                    unwritable);
         }
     }
 

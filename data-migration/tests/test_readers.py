@@ -1605,6 +1605,99 @@ def test_the_withheld_character_path_set_matches_the_readers_that_publish_none()
             list(reader.iter_ascii(""))
 
 
+def test_each_corpus_registry_holds_its_owning_readers_own_whole_extract_entry_point() -> None:
+    """Require both dispatch registries to name the entry point each owning module publishes.
+
+    :returns: nothing; a registry naming a foreign or absent callable is reported as a failure.
+    """
+    # WHY : Refactoring Rationale: the CHARACTER registry is what makes the reader package
+    #   dispatchable for both corpora. Before it existed a caller honouring `--encoding ascii`
+    #   could reach nothing through this boundary and built a GENERIC reader from the layout
+    #   instead -- which carries the geometry and none of the per-record policy, so the card
+    #   verification value came back as bare text rather than a `ProtectedValue`. Asserting the
+    #   registry value IS the owning module's own function, by identity, is what stops a future
+    #   registry from being repopulated with generic readers that would pass a callable check.
+    expected_ebcdic = {
+        case.layout.name: getattr(case.module, f"read_ebcdic_{case.plural}")
+        for case in _FLAT_READERS
+    }
+    expected_ebcdic[layouts.EXPORT_HEADER_LAYOUT.name] = export_record.read_ebcdic_export_records
+    expected_ascii = {
+        case.layout.name: getattr(case.module, f"read_ascii_{case.plural}")
+        for case in _FLAT_READERS
+        if hasattr(case.module, f"read_ascii_{case.plural}")
+    }
+
+    assert dict(readers_package.DATASET_READERS) == expected_ebcdic
+    assert dict(readers_package.ASCII_DATASET_READERS) == expected_ascii
+    # WHY : Assumptions: the derived absence set is compared against the two registries rather than
+    #   against a literal pair of names. A literal would be a fourth statement of one fact -- beside
+    #   the two registries and the factory's policy set -- and the copy would keep reading plausibly
+    #   after a reader gained or lost a character path.
+    assert readers_package.CHARACTER_PATH_ABSENT_RECORDS == frozenset(expected_ebcdic) - frozenset(
+        expected_ascii
+    )
+    assert readers_package.CHARACTER_PATH_ABSENT_RECORDS == frozenset({"SECUSER", "EXPORT"})
+    # WHY : Assumptions: the factory's POLICY set must be a subset of the readers' absence set, not
+    #   equal to it. The two records without a character path are absent for unlike reasons --
+    #   `SECUSER` is denied one because every transcode is another copy of a plaintext password, and
+    #   `EXPORT` cannot have one because three of its five payload regimes are not characters in any
+    #   code page -- and only the first is a policy the factory has to enforce on the generic route.
+    #   Asserting equality would demand the factory refuse a record it can already only refuse on
+    #   geometry, which would say the reason no longer mattered.
+    withheld_by_policy = factory.CHARACTER_PATH_WITHHELD_RECORDS
+    assert withheld_by_policy <= readers_package.CHARACTER_PATH_ABSENT_RECORDS
+
+
+@pytest.mark.parametrize("encoding", ["ebcdic", "ascii"])
+def test_the_dispatcher_answers_with_the_registered_entry_point(encoding: str) -> None:
+    """Resolve every layout in a corpus's registry to that registry's own callable.
+
+    :param encoding: the corpus name the dispatcher is asked for.
+    :returns: nothing; a resolution that differs from the registry is reported as a failure.
+    """
+    registry = (
+        readers_package.DATASET_READERS
+        if encoding == "ebcdic"
+        else readers_package.ASCII_DATASET_READERS
+    )
+    for name, reader in registry.items():
+        assert readers_package.dataset_reader(name, encoding) is reader
+
+
+def test_the_dispatcher_refuses_an_unknown_corpus() -> None:
+    """Refuse a corpus name that is neither of the two this package reads.
+
+    :returns: nothing; a resolution for an unknown corpus is reported as a failure.
+    :raises LayoutError: expected of the dispatcher asked for a third corpus.
+    """
+    # WHY : Assumptions: an unknown corpus RAISES rather than falling back to the EBCDIC form. A
+    #   fallback would read a text seed through the cp037 tables -- or the reverse -- and both
+    #   produce values of the right width and the wrong content, which every downstream length check
+    #   then passes. That silent class of defect is the one this whole layer exists to catch.
+    with pytest.raises(LayoutError, match="unknown extract encoding"):
+        readers_package.dataset_reader("ACCOUNT", "utf8")
+
+
+def test_the_dispatcher_distinguishes_a_readerless_layout_from_a_withheld_corpus() -> None:
+    """Report the two refusals separately, because they send a maintainer to different places.
+
+    :returns: nothing; a shared or swapped diagnosis is reported as a failure.
+    :raises LayoutError: expected of both refusals.
+    """
+    derived = sorted(set(layouts.names()) - set(readers_package.DATASET_READERS))
+    assert derived, "the derived layouts are the readerless ones this refusal exists for"
+    with pytest.raises(LayoutError, match="no reader owns layout"):
+        readers_package.dataset_reader(derived[0], "ebcdic")
+    # WHY : Assumptions: the second refusal is asserted for a record that HAS a reader, so the two
+    #   messages cannot both be produced by the same condition. A single shared message would send
+    #   half of each audience to the wrong file: one is looking for an extract that does not exist,
+    #   the other for a corpus this record deliberately ships without.
+    for name in sorted(readers_package.CHARACTER_PATH_ABSENT_RECORDS):
+        with pytest.raises(LayoutError, match="publishes no character entry point"):
+            readers_package.dataset_reader(name, "ascii")
+
+
 def test_the_security_user_password_is_absent_from_every_decoded_record(
     seed_corpus: SeedCorpus,
 ) -> None:
@@ -4525,3 +4618,59 @@ def test_every_decoded_row_holds_exactly_the_fields_its_reader_publishes(
     #   makes "the pad is dropped" a complete statement rather than a claim about one field. A field
     #   in none of the three would be silently unread, and nothing in a decoded row could reveal it.
     assert published | dropped | suppressed == {field.name for field in spec.fields}
+
+
+def test_the_committed_extract_declaration_is_published_and_single_sourced() -> None:
+    """Publish one authority for whether a layout has an extract that can be read.
+
+    Purpose
+    -------
+    The combined verification gate and the money-total pass must agree about which layouts ship a
+    committed extract: the gate decides which datasets to read one for, and the pass decides which
+    columns it requires a source total for. Two copies of that rule is how the gate comes to offer
+    an extract the pass refuses -- or to read a file that is not a whole record.
+
+    Parameters
+    ----------
+    None
+        Reads the published function and every reader's own declaration.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    None
+    """
+    assert "ships_committed_extract" in readers_package.__all__
+    # WHY : Assumptions: the answer is asserted against each reader module's OWN attribute rather
+    #   than against a list of layout names written here. That is the property being pinned -- the
+    #   function must be a delegation and not a second table -- and a name list would be exactly the
+    #   duplicate this publication exists to prevent.
+    for layout_name, entry_point in readers_package.DATASET_READERS.items():
+        module = readers_package.reader_module(layout_name)
+        expected = bool(getattr(module, "HAS_COMMITTED_SEED_DATASET", True))
+        assert readers_package.ships_committed_extract(layout_name) is expected, layout_name
+        assert entry_point.__module__ == module.__name__
+
+    # WHY : Assumptions: exactly one layout is declared unseeded, and it is named here because the
+    #   count is the load-bearing fact: the default is True, so a reader that forgot the attribute
+    #   would look seeded, and a wrong default would make every layout look unseeded -- which reads
+    #   as a passing not-comparable line for every money column.
+    unseeded = {
+        layout_name
+        for layout_name in readers_package.DATASET_READERS
+        if not readers_package.ships_committed_extract(layout_name)
+    }
+    assert unseeded == {"TRAN"}
+
+
+def test_an_unknown_layout_is_refused_by_the_committed_extract_declaration() -> None:
+    """Refuse an unowned layout rather than answering the permissive default for it."""
+    # WHY : Assumptions: an unknown layout RAISES rather than returning True. The default exists
+    #   for a reader that says nothing, not a layout no reader owns; answering True for the latter
+    #   would send the gate to read an extract for a record nothing can decode.
+    with pytest.raises(KeyError, match="no reader owns layout"):
+        readers_package.ships_committed_extract("DEFINITELY-NOT-A-LAYOUT")

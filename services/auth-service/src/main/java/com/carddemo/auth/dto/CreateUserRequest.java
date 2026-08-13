@@ -318,19 +318,25 @@ import jakarta.validation.constraints.Size;
  * annotation refuses an absent value, an empty string and a string of whitespace alike, so the three
  * states the reference treats as empty are the three it refuses.
  *
- * <p>Assumptions: that choice makes this type stricter than one facet of the published contract, and
- * the gap is recorded here rather than left for someone to discover as a surprise. The contract
- * declares a minimum length of one on the two names and the identifier, and a minimum length of one
- * admits a value of nothing but spaces, which the non-blank constraint above refuses. The reference
- * settles which of the two is right: its branches treat {@code SPACES} as empty, so a name of three
- * spaces is a blank name to the screen this operation replaces, and refusing it is parity rather
- * than added strictness. Where the contract expresses the same rule it does so with an unanchored
- * non-whitespace pattern beside the minimum length, as the sign-on request schema does for its two
- * properties; the create schema currently states the minimum length alone, so a body carrying a
- * whitespace-only name satisfies the schema and is then refused here. That belongs to the schema to
- * express and is named here so the asymmetry is attributable, not silently absorbed. Loosening this
- * constraint to close it is the wrong direction, because it would accept into storage a blank name
- * the reference never accepted.
+ * <p>⚠️ Refactoring Rationale: this paragraph recorded an asymmetry between the constraint above and
+ * the published contract, and the asymmetry no longer exists -- the description is corrected here
+ * rather than deleted, because a reader who met the old wording elsewhere needs to know which of the
+ * two states is current. The claim was that the create schema declared a minimum length of one alone,
+ * that a minimum length of one admits a value of nothing but spaces, and that such a body therefore
+ * satisfied the schema and was refused only here. The schema now states the rule the same way this
+ * type enforces it: {@code CreateUserRequest} in {@code auth-api.yaml} carries an unanchored
+ * non-whitespace pattern beside the minimum length on {@code firstName}, {@code lastName} and
+ * {@code userId}, which is the form the sign-on request schema uses for its own properties. A
+ * whitespace-only name is now refused by the contract and by this type alike, so no body is admitted
+ * by one and rejected by the other.
+ *
+ * <p>Assumptions: the reference is what settles that the strict reading is the correct one, and it is
+ * recorded because the constraint would otherwise look like added strictness. Each reference branch
+ * treats {@code SPACES} as empty, so a name of three spaces is a blank name to the screen this
+ * operation replaces; refusing it is parity. Loosening the constraint to admit it would be the wrong
+ * direction whatever the contract said, because it would accept into storage a blank name the
+ * reference never accepted -- which is why the schema was brought to this type rather than this type
+ * to the schema.
  *
  * <p>Trade-offs: the type carries three constraints where two would refuse the same values, and the
  * cost is paid deliberately. A value of two characters breaches both the exact-length constraint and
@@ -400,7 +406,15 @@ import jakarta.validation.constraints.Size;
  *     {@code app/cpy-bms/COUSR01.CPY} L72. That it is the key is settled by
  *     {@code RIDFLD (SEC-USR-ID)} at {@code app/cbl/COUSR01C.cbl} L244, inside the write spanning
  *     L240 to L248. It is required and must not be blank, is checked third at L130, and must not
- *     already be in use: a collision is refused with a 409 rather than overwriting the stored row
+ *     already be in use: a collision is refused with a 409 rather than overwriting the stored row.
+ *     The size constraint below bounds the value as SUBMITTED, and the service adds two rules about the
+ *     key it DERIVES from it -- the value trimmed and upper-cased. A character outside the printable
+ *     single-byte range {@code PIC X(08)} means is refused, and so is a derived key of more than eight
+ *     positions. The first is what makes this component's own bound sufficient for the second, because
+ *     upper-casing is length-preserving only inside that range: eight sharp-s characters satisfy the
+ *     bound below and fold to sixteen positions, so they are refused for their characters rather than
+ *     for their width. Both refusals are a 400 keyed to this component, raised before the duplicate
+ *     check and before any pool account is created for it
  * @param userType the new user's role, one character, as {@code SEC-USR-TYPE PIC X(01)} declares at
  *     {@code app/cpy/CSUSR01Y.cpy} L22, byte position 56 of that record, and as
  *     {@code USRTYPEI PIC X(1)} presents it at {@code app/cpy-bms/COUSR01.CPY} L84. It is

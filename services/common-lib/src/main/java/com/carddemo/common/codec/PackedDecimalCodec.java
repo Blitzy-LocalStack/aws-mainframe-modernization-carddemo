@@ -483,7 +483,38 @@ public final class PackedDecimalCodec {
                         + " sign, which may happen only at zero");
             }
         }
-    }
+    
+        /**
+         * Renders the SIGN and the scale, never the decoded value.
+         *
+         * <p>Purpose. The decoded value of a packed field is whatever the field held, and in this migration
+         * a packed field is almost always money -- the export record and both authorization segments are
+         * where {@code COMP-3} appears -- so a rendering that printed it would put an account's balance or
+         * an approved amount into a codec log line. {@code docs/architecture/observability.md} L1093 to
+         * L1112 withholds monetary values, and a codec cannot know which field it was handed, so it must
+         * treat every value as one.</p>
+         *
+         * <p>Assumptions: the sign nibble and the scale are kept, and they are precisely the diagnostic
+         * content this type exists to carry. The documented failure mode of this format is a sign
+         * convention read the wrong way -- the reference test harness records that the default convention
+         * silently corrupts negative balances -- and that fault is visible in the nibble and the sign of
+         * the value without the magnitude ever being printed.</p>
+         *
+         * <p>Alternatives Considered: rendering the value's precision as well as its scale. Rejected
+         * because precision is the digit COUNT of the magnitude, which narrows a balance to a decade and
+         * is an abbreviation of a withheld value rather than metadata about it.</p>
+         *
+         * @return a rendering naming the sign nibble in hexadecimal, whether the value is negative and its
+         *     scale, with the magnitude omitted; never {@code null}
+         */
+        @Override
+        public String toString() {
+            return "SignedPacked[signNibble=0x" + Integer.toHexString(this.signNibble).toUpperCase(
+                    java.util.Locale.ROOT)
+                    + ", negative=" + (this.value.signum() < 0)
+                    + ", scale=" + this.value.scale() + ']';
+        }
+}
 
     /**
      * Decodes a packed field, keeping the literal sign nibble its final byte carried.

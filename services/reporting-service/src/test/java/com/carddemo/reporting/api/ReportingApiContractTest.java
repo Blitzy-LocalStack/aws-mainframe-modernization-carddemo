@@ -194,7 +194,7 @@ class ReportingApiContractTest {
     }
 
     /**
-     * Pins the published surface to exactly the five paths and five operation identifiers this
+     * Pins the published surface to exactly the eight paths and eight operation identifiers this
      * context declares.
      *
      * <p>Refactoring Rationale: the surface is pinned by an exact set rather than by a lower bound,
@@ -207,7 +207,7 @@ class ReportingApiContractTest {
      * @throws Exception if the packaged document is absent or unreadable
      */
     @Test
-    @DisplayName("the contract publishes exactly the five declared operations")
+    @DisplayName("the contract publishes exactly the eight declared operations")
     void thePublishedSurfaceIsPinned() throws Exception {
         Map<String, Object> paths = mapping(contractRoot(), "paths");
 
@@ -217,14 +217,20 @@ class ReportingApiContractTest {
                         ROUTED_PREFIX + "/transaction-report/lines",
                         ROUTED_PREFIX + "/transaction-report/totals",
                         ROUTED_PREFIX + "/statements",
-                        ROUTED_PREFIX + "/statements/transactions");
+                        ROUTED_PREFIX + "/statements/transactions",
+                        ROUTED_PREFIX + "/statements/artifacts/{selector}",
+                        ROUTED_PREFIX + "/executions/{executionName}",
+                        ROUTED_PREFIX + "/transaction-report/artifact");
         assertThat(operationIdentifiers())
                 .containsExactlyInAnyOrder(
                         "submitTransactionReport",
                         "listTransactionReportLines",
                         "readTransactionReportTotals",
                         "generateStatement",
-                        "listStatementTransactions");
+                        "listStatementTransactions",
+                        "collectArtifact",
+                        "readReportExecution",
+                        "collectReportArtifact");
     }
 
     /**
@@ -646,5 +652,81 @@ class ReportingApiContractTest {
      */
     private static String suffix(String[] declared) {
         return declared.length == 0 ? "" : declared[0];
+    }
+
+    /**
+     * Asserts that every published operation declares the transport refusals this service can produce,
+     * and that each of the three has a shape a client can bind to.
+     *
+     * <p>⚠️ Refactoring Rationale: all three were reachable and UNDECLARED. The shared advice in
+     * {@code services/common-lib} answers a wrong method with 405, a body in the wrong media type with
+     * 415 and an unsatisfiable {@code Accept} header with 406, on every route of every service, and this
+     * contract declared none of them. A client generated from it had no branch for any of the three and a
+     * hand-written one, {@code ui/src/api/client.ts}, could only report each as an unrecognised body. The
+     * census is written as a loop rather than as a list of paths so that an operation added later is
+     * covered without this case being edited.</p>
+     *
+     * <p>Assumptions: the operation count is asserted so the loop cannot pass vacuously. A scanner that
+     * matched nothing -- because a path item gained a member, or because the document was restructured --
+     * would otherwise assert nothing at all while reading as though it had checked every route.</p>
+     *
+     * @throws Exception if the packaged contract is absent from the classpath or does not parse, either
+     *     of which means this census had nothing to examine
+     */
+    @Test
+    @DisplayName("every operation declares the transport refusals the shared advice can produce")
+    void theTransportRefusalsAreDeclaredWhereTheyCanOccur() throws Exception {
+        Map<String, Object> document = contractRoot();
+        Map<String, Object> paths = mapping(document, "paths");
+        int operations = 0;
+
+        for (String path : paths.keySet()) {
+            Map<String, Object> methods = mapping(paths, path);
+            for (String method : methods.keySet()) {
+
+                // WHY : Assumptions: a path item carries members that are not operations -- a shared
+                //       description, a shared parameter list -- so an operation is identified by carrying
+                //       an operationId rather than by the key not being one of those. Naming the
+                //       exclusions instead would need amending every time a path item gained a member.
+                if (!(methods.get(method) instanceof Map)) {
+                    continue;
+                }
+                Map<String, Object> operation = mapping(methods, method);
+                if (!operation.containsKey("operationId")) {
+                    continue;
+                }
+                operations++;
+                Map<String, Object> responses = mapping(operation, "responses");
+                assertThat(responses)
+                        .as("%s %s must declare both refusals every route can produce", method, path)
+                        .containsKeys("405", "406");
+                if (operation.containsKey("requestBody")) {
+                    assertThat(responses)
+                            .as("%s %s accepts a body, so it can refuse the body's media type",
+                                    method, path)
+                            .containsKey("415");
+                }
+            }
+        }
+
+        assertThat(operations)
+                .as("the census is not vacuous; every published operation was examined")
+                // WHY : Refactoring Rationale: EIGHT, measured from the published document rather than
+                //       carried forward. This figure was 5 and the contract has since grown three
+                //       operations -- the statement transaction projection, the statement artifact
+                //       selector and the execution status read -- each of which declares the refusals
+                //       the loop above requires, so the only thing that was stale was the count. It is
+                //       stated as an equality rather than a floor because that is the idiom every
+                //       sibling contract test in this reactor uses, and because an equality is what
+                //       makes an operation added without a published refusal shape fail here.
+                .isEqualTo(8);
+
+        Map<String, Object> declared = mapping(mapping(document, "components"), "responses");
+        assertThat(declared)
+                .as("each refusal is declared once and referenced, so the three cannot drift apart")
+                .containsKeys("MethodNotAllowed", "NotAcceptable", "UnsupportedMediaType");
+        assertThat(mapping(mapping(declared, "MethodNotAllowed"), "headers"))
+                .as("a 405 names the methods the route does publish, which is what a client acts on")
+                .containsKey("Allow");
     }
 }

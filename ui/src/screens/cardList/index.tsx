@@ -310,12 +310,18 @@ export function CardListScreen(): ReactElement {
      *       query has. The two reach the service identically, because `JSON.stringify` omits a member
      *       holding `undefined`, so this is not a behaviour fix; it is the compiler being allowed to
      *       enforce that the opening read carries NO cursor rather than a cursor whose value is nothing.
+     * WHY : ⚠️ Refactoring Rationale: the DIRECTION is now spread in on the same condition, and that IS a
+     *       behaviour fix. `listCards` refuses a direction supplied without a cursor -- the combination
+     *       every contract answers with a 400 keyed on the direction -- so the opening read, which has no
+     *       cursor, must not name one either. Sending `direction: 'next'` with no cursor used to be
+     *       accepted and silently dropped by the client; it would now raise, and the screen's first load
+     *       is exactly the call that would have raised.
      * WHY : Trade-offs: a conditional spread is more to read than an object literal naming both members.
      *       It is accepted because the alternative is to widen the contract type to admit `undefined`,
      *       which would turn the setting off for every consumer of that shape in order to shorten one
      *       call site.
      */
-    listCards({ ...(cursor === undefined ? {} : { cursor }), direction }).then(
+    listCards(cursor === undefined ? {} : { cursor, direction }).then(
       /**
        * Publishes the retrieved page, including its sealed cursors.
        * @param {PageResponse<CardSummary>} nextPage - The page the service returned.
