@@ -269,7 +269,8 @@ data-migration/
     ├── test_timestamp.py               delivered -- the two admitted stamp forms, round-tripped
     ├── test_verification.py            delivered -- the three passes and their two queries
     ├── test_verification_authority.py  delivered -- the read-only role the passes run as
-    ├── test_verify.py                  delivered -- the checksum pass's own mechanism
+    ├── test_verify.py                  delivered -- all three passes, each failing on injected
+    │                                   corruption, plus the checksum pass's own mechanism
     └── test_zoned.py                   delivered
 ```
 
