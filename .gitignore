@@ -56,6 +56,21 @@ batch-app/markers/*
 /build/
 # JUnit XML and coverage reports (CARDDEMO_REPORTS_DIR default).
 /reports/
+# Report and scan directories the migration workflows create IN THE WORKSPACE:
+# .github/workflows/services-ci.yml creates data-migration-reports/ before the ETL
+# pytest run, and .github/workflows/infra-ci.yml creates infra-reports/ and
+# secret-scan/ before the policy and secret scans. Running those documented commands
+# locally therefore leaves three untracked directories behind.
+# Assumptions: each holds only generated output, so no rule here can mask a source
+#   file -- the same narrowness the block above states.
+# WHY : secret-scan/ is the consequential one. The workflow populates it by COPYING
+#   every tracked non-reference file into it, so an accidental `git add .` would
+#   commit a second copy of the entire migration tree under a new path. The other two
+#   would commit machine-specific JUnit, SARIF and policy-scan output whose contents
+#   change on every run.
+/data-migration-reports/
+/infra-reports/
+/secret-scan/
 # gcov artifacts from the GnuCOBOL-transpiled C (--coverage build).
 # Assumptions: kept global rather than scoped to /build/, so a manual gcov run in a
 #   source tree is covered too. The mutable per-run test workspace and its loaded VSAM
