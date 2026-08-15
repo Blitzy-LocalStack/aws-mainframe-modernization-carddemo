@@ -381,19 +381,19 @@ class BatchFixtureContractTest {
     }
 
     /**
-     * Asserts that both expiry-boundary scenarios pin the same expiration date and account.
+     * Asserts that the expiry-boundary pair straddles the expiration date by exactly one day.
      *
      * @throws IOException if a fixture cannot be read
      */
     @Test
-    @DisplayName("both expiry-boundary scenarios pin the same expiration date and account")
+    @DisplayName("the expiry boundary is a one-day pair straddling the expiration date")
     void bothExpiryBoundaryScenariosPinTheSameDate() throws IOException {
         for (String scenario : List.of("posting/boundary_expiry_equal", "posting/reject_103_expired")) {
-            // WHY : Assumptions: neither directory holds the transaction that dates onto or past the
-            //       boundary -- each scenario README section 4.1 names that absence -- so what these
-            //       two files can pin is the ACCOUNT side: the expiry the comparison is made against,
-            //       and the cross-reference that resolves the seed card to that account. If either
-            //       moved, several READMEs in this domain would become wrong at once.
+            // WHY : Assumptions: the ACCOUNT side is held EQUAL across both halves, because it is the
+            //       right-hand operand of :414 and the pair only isolates the date if everything except
+            //       the transaction date is identical. Both halves therefore pin the same expiry and the
+            //       same cross-reference resolving the seed card to that account. If either moved,
+            //       several READMEs in this domain would become wrong at once.
             assertThat(raw(scenario, "acctdata.txt", 0, "ACCT-EXPIRAION-DATE"))
                     .as("%s pins the expiry the boundary pair is stated against", scenario)
                     .isEqualTo(SEED_EXPIRY);
@@ -401,6 +401,49 @@ class BatchFixtureContractTest {
             assertThat(raw(scenario, "cardxref.txt", 0, "XREF-ACCT-ID"))
                     .isEqualTo(raw(scenario, "acctdata.txt", 0, "ACCT-ID"));
         }
+
+        String equalDate = raw("posting/boundary_expiry_equal", "dailytran.txt", 0,
+                "DALYTRAN-ORIG-TS").substring(0, 10);
+        String lateDate = raw("posting/reject_103_expired", "dailytran.txt", 0,
+                "DALYTRAN-ORIG-TS").substring(0, 10);
+
+        // WHY : Assumptions: ten characters are sliced because :414 applies the reference modifier
+        //       (1:10) to a twenty-six-byte field, so the trailing time takes no part in the verdict.
+        //       Comparing the whole timestamp against the ten-byte expiration date is the specific
+        //       defect this pair is shaped to catch: the longer operand sorts greater once the shorter
+        //       is blank-extended, so the equal-date half would reject and the boundary would invert.
+        assertThat(equalDate)
+                .as("boundary_expiry_equal must sit exactly ON the expiry, so :414's '>=' posts it")
+                .isEqualTo(SEED_EXPIRY);
+        assertThat(lateDate)
+                .as("reject_103_expired must sit exactly one day PAST the expiry, so :414 rejects it")
+                .isEqualTo("2024-12-14");
+
+        // WHY : Assumptions: the comparison is lexical on zero-padded ISO YYYY-MM-DD, where lexical
+        //       and chronological order coincide -- the property the baseline relies on, since both
+        //       operands are PIC X(10) character fields and no date arithmetic occurs anywhere.
+        assertThat(lateDate).isGreaterThan(equalDate);
+
+        // WHY : Alternatives Considered: asserting only the two dates, which the two assertions above
+        //       already do. Rejected because it would let any OTHER field drift apart between the two
+        //       halves while both dates stayed correct, and a pair that differs in the amount as well
+        //       as the date no longer isolates the operator -- master section 7.1.4 records that an
+        //       over-limit amount silently converts an expiry scenario into a 103-by-overwrite one.
+        //       Pinning the difference to a single byte is what makes the pair discriminating: it is
+        //       the day digit at one-based 288, and nothing else in 350 bytes may vary.
+        byte[] onBoundary = bytes("posting/boundary_expiry_equal", "dailytran.txt");
+        byte[] pastBoundary = bytes("posting/reject_103_expired", "dailytran.txt");
+        assertThat(pastBoundary).hasSameSizeAs(onBoundary);
+
+        List<Integer> differingPositions = new ArrayList<>();
+        for (int index = 0; index < onBoundary.length; index++) {
+            if (onBoundary[index] != pastBoundary[index]) {
+                differingPositions.add(index + 1);
+            }
+        }
+        assertThat(differingPositions)
+                .as("the boundary pair must differ in exactly the day digit of DALYTRAN-ORIG-TS")
+                .containsExactly(288);
     }
 
     /**

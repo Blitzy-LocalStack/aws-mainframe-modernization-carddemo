@@ -49,6 +49,7 @@ from the file.
 | File | Descriptor | Copybook | Record length | Key | Rows | Keys |
 |---|---|---|---|---|---|---|
 | `acctfile.txt` | `ACCOUNT` | [`app/cpy/CVACT01Y.cpy`](../../../../../../app/cpy/CVACT01Y.cpy) | 300 | 11 bytes at offset 0 | 4 | `00000000007`, `00000000050`, `00000000101`, `00000000102` |
+| `carddata.txt` | `CARD` | [`app/cpy/CVACT02Y.cpy`](../../../../../../app/cpy/CVACT02Y.cpy) | 150 | 16 bytes at offset 0 | 5 | `0500024453765740`, `0500024453765741`, `1010000000000001`, `3714496353984312`, `4859452612877065` |
 | `custfile.txt` | `CUSTOMER` | [`app/cpy/CUSTREC.cpy`](../../../../../../app/cpy/CUSTREC.cpy) | 500 | 9 bytes at offset 0 | 4 | `000000007`, `000000050`, `000000101`, `000000102` |
 | `trantype.txt` | `TRANTYPE` | [`app/cpy/CVTRA03Y.cpy`](../../../../../../app/cpy/CVTRA03Y.cpy) | 60 | 2 bytes at offset 0 | 7 | `01` through `07` |
 | `trancatg.txt` | `TRANCAT` | [`app/cpy/CVTRA04Y.cpy`](../../../../../../app/cpy/CVTRA04Y.cpy) | 60 | 6 bytes at offset 0 | 9 | `010001`, `010002`, `010005`, `020001`, `030001`, `040001`, `050001`, `060001`, `070001` |
@@ -117,6 +118,7 @@ under `app/data/ASCII/`, measured rather than assumed:
 | Fixture | Descriptor | `FILLER` span | Pad character | Reference extract |
 |---|---|---|---|---|
 | `acctfile.txt` | `ACCOUNT` | 122–300 (178) | **blank** | `acctdata.txt` pads with blanks |
+| `carddata.txt` | `CARD` | 91–150 (59) | **blank** | `carddata.txt` pads with blanks |
 | `custfile.txt` | `CUSTOMER` | 332–500 (168) | **blank** | `custdata.txt` pads with blanks |
 | `tcatbal.txt` | `TCATBAL` | 28–50 (22) | **ASCII zero** | `tcatbal.txt` pads with zeroes |
 | `trantype.txt` | `TRANTYPE` | 52–60 (8) | **ASCII zero** | `trantype.txt` pads with zeroes |

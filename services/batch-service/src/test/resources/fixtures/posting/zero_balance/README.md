@@ -17,10 +17,13 @@
 > [master contract](../../README.md) for every encoding rule, which this document cites by section
 > rather than restating (master section 1.3).
 >
-> **Label form.** Rationales below are tagged `Alternatives Considered:`, `Assumptions:` and
-> `Trade-offs:` -- plain, plural, colon retained, no emphasis markup, per
-> `docs/CODE_DOCUMENTATION_STANDARD.md` and master section 1.4. This whole file is pure ASCII for
-> the reason that section gives.
+> **Label form.** Rationales below are tagged `Alternatives Considered:`, `Assumptions:`,
+> `Trade-offs:` and, once in section 10, `Refactoring Rationale:` -- plain, plural, colon retained,
+> no emphasis markup, per `docs/CODE_DOCUMENTATION_STANDARD.md` and master section 1.4. All four are
+> permitted forms; `config/rule1/rule1_gate.py` is the mechanism that decides the spelling. This
+> whole file is pure ASCII for the reason that section gives, and the constraint binds the labels
+> most of all: a non-ASCII byte inside one is invisible on screen and defeats the literal search the
+> standard relies on.
 
 **This README is the mandatory Explainability carrier for the four record files beside it.**
 Master section 1.2 records why: a fixed-width record file cannot carry a comment of any kind,
@@ -52,6 +55,18 @@ such a fixture would not say **which** part of the key the program composed. An 
 the miss unambiguous, and it additionally proves that an empty indexed dataset opens I-O
 successfully rather than abending on the open -- which is a second thing that could go wrong and
 which no populated fixture tests.
+
+Alternatives Considered: giving this folder a category-balance row that is **present but carries a
+zero balance**, which is the reading the folder's name most invites and the change a maintainer is
+most likely to propose. Rejected because a present row is **found**: the read at `:474` succeeds,
+`:478` never runs, the flag stays `'N'` from `:473`, and `:498` takes the update arm at `:526`. The
+scenario would then assert nothing whatever about `:503`, while still producing `+504.77` and still
+looking correct, because both arms are additive and `0.00 + 504.77` is the same sum either way. That
+shape is not hypothetical and is not missing from the domain -- `../boundary_exact_limit` already
+ships exactly it, a row under this same composed key `00000000007 / 01 / 0001` opening at `+0.00`
+with ASCII-zero padding -- so authoring it here a second time would delete the domain's only
+create-arm coverage and leave a duplicate in its place. The distinction is therefore between an
+absent **row** and a zero **value**, which is the same distinction section 4 draws for the account.
 
 Assumptions: this folder's emptiness is **not** the `empty_input` semantic of master section
 3.11. That semantic is about the **primary** input: `posting/empty_input` ships a zero-byte
@@ -89,13 +104,19 @@ whose three writes are `:440` the category balance, `:441` the account and `:442
 to `ACCT-CURR-BAL`, and `:548-549`, adding it to `ACCT-CURR-CYC-CREDIT` because the amount is not
 negative. `:229-230` leaves the return code at 0 because nothing was rejected.
 
-**The two arms differ in exactly two statements**, which is worth stating precisely because it is
-the reason the arms are hard to tell apart: the create arm has `INITIALIZE` and `WRITE` where the
-update arm (`:526-542`) has neither an initialise nor a rewrite of an existing image -- it has
-`ADD` and `REWRITE`. Both arms are **additive**; `:508` and `:527` are the same statement. Master
-section 7.1.5 fixes this, and it is why `posting/happy_path` opens its category balance at
-`+100.00`: with a `+0.00` opening balance the update arm would produce the same number the create
-arm does, and the arms would be indistinguishable.
+**The two arms differ in exactly three things, and share the statement that does the arithmetic.**
+Stating it precisely matters, because the shared statement is why the arms are hard to tell apart
+from a balance alone. The create arm (`:503-524`) has `INITIALIZE` at `:504`, the three key moves
+at `:505-507` and `WRITE` at `:510`; the update arm (`:526-542`) has none of those five statements
+and reaches the file with `REWRITE` at `:528` instead. What the two share is the addition: `:508`
+and `:527` are the same statement against the same field, so **both arms are additive**. Master
+section 7.1.5 fixes this.
+
+It is also why `posting/happy_path` opens its category balance at `+100.00` rather than at zero:
+with a `+0.00` opening row the update arm would compute `0.00 + 504.77` and land on precisely the
+number the create arm lands on, so the two arms would be indistinguishable by balance and the
+domain would have no evidence which one ran. The arms are separated here by the presence of the
+row, and in the golden by the padding byte of section 3 -- never by the balance.
 
 ---
 
@@ -115,10 +136,26 @@ verdict, which is precisely what this half of the scenario asserts.
 
 | Output | Before | Arithmetic | After | Encoded |
 |---|---|---|---|---|
-| `TRAN-CAT-BAL` for `00000000007 / 01 / 0001` | **absent** | created, then `0.00 + 504.77` | **`+504.77`** in a new row | `0000050477G` |
-| `ACCT-CURR-BAL` | `+0.00` | `0.00 + 504.77` | **`+504.77`** | `00000050477G` |
-| `ACCT-CURR-CYC-CREDIT` | `+0.00` | `0.00 + 504.77` | **`+504.77`** | `00000050477G` |
+| `TRAN-CAT-BAL` for `00000000007 / 01 / 0001` | **absent** | created, then `0.00 + 504.77` | **`+504.77`** in a new row | `0000005047G` |
+| `ACCT-CURR-BAL` | `+0.00` | `0.00 + 504.77` | **`+504.77`** | `00000005047G` |
+| `ACCT-CURR-CYC-CREDIT` | `+0.00` | `0.00 + 504.77` | **`+504.77`** | `00000005047G` |
 | `ACCT-CURR-CYC-DEBIT` | `+0.00` | untouched -- `:551` runs only for a negative amount | **`+0.00`** | `00000000000{` |
+
+**The same amount appears above in two widths, and the pair is the cheapest available check on
+this table.** `TRAN-CAT-BAL` is `S9(09)V99`, so eleven bytes; the three account money fields are
+`S9(10)V99`, so twelve. `+504.77` is therefore `0000005047G` in the category row and
+`00000005047G` in the account row -- the same digits behind one further leading zero, with the
+identical `G` overpunch carrying `+7` in the final position, per master sections 3.3 and 3.7.
+Because a zero opening balance makes every result equal the transaction amount, the eleven-byte
+form above must be **byte-identical to `DALYTRAN-AMT` in section 5.3**, which is the one
+comparison that catches a mistranscribed digit here without opening the golden.
+
+Assumptions: the encodings above are quoted from the golden records rather than composed by hand
+-- `tests/golden/posting/zero_balance/tcatbal.expected` slice `[17:28]` and
+`acctdat.expected` slices `[12:24]`, `[78:90]` and `[90:102]`. A hand-composed zoned literal is
+the most error-prone thing this document contains, because a transposed digit still reads as a
+plausible balance and still carries the correct sign byte, so it survives inspection and fails
+only at comparison. The snippet in section 5.2 prints these four slices for exactly that reason.
 
 **The created category-balance row's padding bytes are NUL, and this is the folder's most
 distinctive byte-level expectation.** `tests/golden/posting/zero_balance/tcatbal.expected` is 51
@@ -133,16 +170,18 @@ area already held -- low values -- while every named field is set. The eight upd
 carry `0x30` because their record image was **read from the file** at `:474`, so its padding is
 the seed's own ASCII zeros, which `:527` and `:528` never touch.
 
-Assumptions: this is an **additional measurement** under master section 6.1 rather than a
-correction of it, and the distinction matters. Master section 6.1 records the TCATBAL `FILLER`
-byte as `0x30` on the evidence of the seed's fifty rows and of the posting golden it measured, and
-master section 6 opens by stating that the byte a `FILLER` carries depends on the record and, for
-output records, on the job that wrote it. This folder extends that same principle one level
-finer: for the category-balance record it depends on the **arm** that wrote it, because only one
-of the two arms builds the record from scratch. Master section 6.2's ruling that the measured byte
-wins is what makes the extension admissible, and master section 6.2 explicitly invites
-re-measuring any row of the table -- the snippet in section 5.2 below does exactly that for both
-arms.
+Assumptions: this is **not** a local finding and must not be read as one. Master section 6.1
+carries TCATBAL as **two** rows rather than one -- "input and rewritten output" at `0x30`, and
+"created output" at `0x00` -- and cites this folder's own
+`tests/golden/posting/zero_balance/tcatbal.expected` as the evidence for the second, naming it the
+one tree whose input holds no row for the key. Master section 6.2.1 then fixes the general rule the
+two rows express: the byte belongs to the **arm** that wrote the record, not to the record type,
+because only one of the two arms builds the image from scratch. That section requires a scenario
+README to say which arm produced the category row it expects, which is what this section 3 does,
+and it warns that applying the `0x30` row to a created expectation differs from the golden in
+twenty-two bytes while the key and the balance both read correctly. This document therefore cites
+that ruling rather than restating it (master section 1.3), and the snippet in section 5.2 below
+re-measures both arms so the claim is checkable in one command.
 
 **The written transaction record**, one row of 350 bytes: identifier `0000000000683580`, type
 `01`, category `0001`, source `POS TERM`, amount `+504.77`, card `4859452612877065`,
@@ -232,15 +271,20 @@ read at `:474` **hit nothing while the file is non-empty**, so the create arm wo
 and the fixture would appear to pass while testing something else.
 
 ```bash
-# WHAT: assert the byte geometry, and re-measure the category-balance FILLER byte on both arms --
-#       this scenario's create-arm golden against a sibling update-arm golden. Run from this
-#       directory.
+# WHAT: assert the byte geometry, print the four money slices section 3 quotes, and re-measure the
+#       category-balance FILLER byte on both arms -- this scenario's create-arm golden against a
+#       sibling update-arm golden. Run from this directory.
 # WHY : Assumptions: the padding byte is a measured property, not a consequence of the PICTURE
 #       clause (master section 6.2), and this folder is the one place in the domain where the two
 #       arms of one branch produce two different bytes in the same slice of the same record type.
 #       Printing both byte-sets side by side is what turns section 3's claim into something a
 #       reader can check in one command instead of taking on trust; a single-element set is the
 #       proof that the whole slice is uniform.
+# WHY : Trade-offs: the money slices are printed as raw bytes and compared to the input amount
+#       rather than decoded to a number. Decoding would need the overpunch alphabet inlined here,
+#       which master section 1.3 forbids duplicating; comparing the created balance against
+#       DALYTRAN-AMT byte for byte needs no alphabet and still catches a transposed digit, which is
+#       the failure this scenario's zero opening balance makes detectable at all.
 python3 - <<'PY'
 EXPECTED = {"dailytran.txt": (351, 350), "cardxref.txt": (51, 50),
             "acctdata.txt": (301, 300), "tcatbal.txt": (0, None)}
@@ -253,6 +297,16 @@ for name, (size, width) in EXPECTED.items():
           "| OK" if len(raw) == size and raw.count(b"\r") == 0
           and widths == ([width] if width else []) else "| MISMATCH")
 ROOT = "../../../../../../../.."
+amount = open("dailytran.txt", "rb").read().rstrip(b"\n")[132:143]
+balance = open(f"{ROOT}/tests/golden/posting/zero_balance/tcatbal.expected", "rb").read()
+account = open(f"{ROOT}/tests/golden/posting/zero_balance/acctdat.expected", "rb").read()
+print("DALYTRAN-AMT[132:143]      ", amount)
+print("TRAN-CAT-BAL[17:28]        ", balance[17:28],
+      "| equals the amount:", balance[17:28] == amount)
+for label, lo, hi in (("ACCT-CURR-BAL       [12:24]", 12, 24),
+                      ("ACCT-CURR-CYC-CREDIT[78:90]", 78, 90),
+                      ("ACCT-CURR-CYC-DEBIT [90:102]", 90, 102)):
+    print(label, account[lo:hi])
 for arm, golden in (("create", "zero_balance"), ("update", "happy_path")):
     raw = open(f"{ROOT}/tests/golden/posting/{golden}/tcatbal.expected", "rb").read()
     record = raw.rstrip(b"\n")
@@ -289,6 +343,15 @@ for the decimal point, per master sections 3.3 and 3.7.
 `XREF-ACCT-ID` `00000000007` at 25 -- the value `:469` moves into the category key -- and `FILLER`
 14 spaces at 36.
 
+Assumptions: this one 50-byte row carries **two** independent responsibilities, and a reader who
+sees only the first will not understand why the file is required at all. It resolves the card, so
+reject 100 cannot fire; and its `XREF-ACCT-ID` at offset 25 is the account id the composed
+category-balance key is built from, because `:469` moves `XREF-ACCT-ID` -- **not** a field of the
+feed record. The daily transaction layout of `app/cpy/CVTRA06Y.cpy` contains no account id at any
+offset, so the cross-reference is the only source for that key part, and deleting or altering this
+row would change the created row's key rather than merely provoking a reject. The same value
+therefore appears twice by necessity: at offset 25 here, and at offset 0 of `acctdata.txt`.
+
 `acctdata.txt`, one `ACCOUNT-RECORD`:
 
 | Field | Offset | Width | Bytes | Decoded |
@@ -313,6 +376,16 @@ own zeros, as they are in every other posting scenario. The distinction matters 
 boundary test at `:403-405` reads the two that were **not** reshaped, so the projected-balance
 identity of master section 7.1.3 still holds here unchanged.
 
+Assumptions: all three are written `00000000000{` and **not** as twelve blanks, and the difference
+is not cosmetic. A signed zoned field folds its sign into the final byte, so the twelfth position
+must hold a signed digit rather than a digit or a space; `{` is the `+0` overpunch, which makes
+these fields **positive zero** -- a real, decodable value. Twelve spaces would not be a valid zoned
+number at all: the decoder that reads every record under its declared layout would reject the row,
+and a decoder lenient enough to accept it would have to invent a value the bytes do not carry.
+This is the one place where "the field is empty" and "the field is zero" must not be conflated,
+because `:403-405` performs arithmetic on two of these three fields and arithmetic on a blank is
+undefined. The overpunch alphabet itself is master section 3.3 and is not reproduced here.
+
 `ACCT-EXPIRAION-DATE` is spelled exactly as `app/cpy/CVACT01Y.cpy` line 11 spells it, preserved
 verbatim because this is copybook-side naming; master section 9.3 confines the three spelling
 corrections to target column names.
@@ -327,7 +400,7 @@ the row the job writes: `TRANCAT-ACCT-ID` at 0, `TRANCAT-TYPE-CD` at 11, `TRANCA
 |---|---|---|
 | `tcatbal.txt` is zero bytes while the primary input is populated | master section 3.11 | Not the `empty_input` semantic, which concerns the primary input. Emptying the category-balance file is the only unambiguous way to reach the create arm, per section 1 |
 | `cardxref.txt` is 50 bytes, not the seed's 36 | master section 3.10 | The copybook sums to 50; the seed omits the trailing `FILLER X(14)`. Authored at full copybook width with that `FILLER` space-padded |
-| The created row's `FILLER` is NUL where the seed's and the other eight goldens' is ASCII `'0'` | master sections 6.1, 6.2 | An additional measurement under section 6's own per-writer principle, traced to `INITIALIZE` at `:504` in section 3. Not a contradiction: the measured byte wins |
+| The created row's `FILLER` is NUL where the seed's and the other eight goldens' is ASCII `'0'` | master sections 6.1, 6.2.1 | Not a departure at all once the right row is read: section 6.1 carries a separate "created output" row at `0x00` and section 6.2.1 makes the byte a property of the writing arm. Listed here because a reader checking only the `0x30` row would score it as one, and traced to `INITIALIZE` at `:504` in section 3 |
 | `ACCT-CURR-BAL` carries `+0.00` where the seed row carries `+193.00` | master section 11.1 | A business-rule field reshaped deliberately -- it is half the scenario. Attested in section 9 |
 
 There is **no** category-balance line-ending normalization to declare in this folder, because
@@ -349,6 +422,16 @@ produces and the meaning cannot be recovered from the bytes. It is the same reas
 output by `:436`, and therefore **asserted** rather than masked. In the golden's output record the
 *processing* stamp appears as 26 spaces, and there those spaces are the product of normalisation
 -- the other of the two meanings.
+
+Assumptions: the input `DALYTRAN-PROC-TS` is left blank rather than carrying a plausible stamp
+because the program **overwrites** it unconditionally -- `:437-438` calls
+`Z-GET-DB2-FORMAT-TIMESTAMP` and moves the result into `TRAN-PROC-TS`, so the field is generated at
+run time and any value authored here would be discarded on the way through while still varying
+between runs if it were ever compared. Blank is therefore the only value that cannot mislead: it
+decodes to SQL `NULL` in the nullable `ledger.daily_transactions.proc_ts` column, which is the
+target-side statement that this feed row has not been processed yet. `TRAN-ORIG-TS` takes the
+opposite treatment for the opposite reason -- `:436` is a plain copy, so it is a function of the
+input alone and masking it would discard a real assertion.
 
 The empty file introduces no non-determinism of its own. A zero-byte dataset is the same zero
 bytes on every run, and the created row's contents are a function of the key and the amount alone.
@@ -406,12 +489,21 @@ key exists at the end of this scenario, not a hundred. The two loader-geometry c
 -- `_ACCT = (300, 11)` and `_TCAT = (50, 17)` match this folder's account record and the category
 key the job writes.
 
-### 8.3 The complementary folder
+### 8.3 The complementary folders
 
-`posting/happy_path` is the update arm: the same card, the same account and the same composed key,
-with a **populated** category-balance row opening at `+100.00`. Read the two together -- master
-section 7.1.5 requires both partitions of the branch to be non-empty across the domain and
-separately tested, and these two folders are how that requirement is met.
+Two siblings share this folder's composed key `00000000007 / 01 / 0001`, and reading the three
+together is what makes the branch legible:
+
+| Folder | Category-balance input | Arm taken | What it settles |
+|---|---|---|---|
+| **this folder** | zero-byte file, no row | `2700-A-CREATE`, `:503` | that a missing row is created rather than fatal |
+| [`../happy_path`](../happy_path) | one row opening at `+100.00` | `2700-B-UPDATE`, `:526` | that an existing row is added to, not replaced |
+| [`../boundary_exact_limit`](../boundary_exact_limit) | one row opening at `+0.00` | `2700-B-UPDATE`, `:526` | that a zero **value** is still a found **row** |
+
+Master section 7.1.5 requires both partitions of the branch to be non-empty across the domain and
+separately tested, and the first two rows are how that requirement is met. The third row is the
+one that keeps this folder honest: it is the reason a zero balance alone does not reach the create
+arm, and the reason this folder's `tcatbal.txt` has to be empty rather than merely zeroed.
 
 ---
 
@@ -484,11 +576,16 @@ transaction master, category balances, account master and reject stream against
 values that make the scenario discriminating, so a layout mistake is caught in this module rather
 than surfacing later as a comparison failure.
 
-⚠️ Refactoring Rationale: this section stated that no test in this module opened the folder and that
+Refactoring Rationale: this section stated that no test in this module opened the folder and that
 the corpus was a reference mirror. That was accurate when it was written and is no longer -- the
 parity class now seeds from here. It is corrected rather than deleted, because a reader who had been
 told these bytes drive nothing would edit them expecting no consequence, which is the most expensive
-mistake this folder admits.
+mistake this folder admits. The correction is recorded under this category rather than dropped
+because Rule 1 scopes it to replacing an existing approach and saying what was wrong with it, and
+what was wrong here was a claim about consequence, not a wording. Master section 1.5 still lists
+this domain among the scenarios no job in this module opens, so the two documents disagree and the
+measured consumer is the tie-breaker: `PostTransactionsJobParityIT` names `/fixtures/posting/` as
+its fixture root and this folder among its committed scenarios.
 
 Assumptions: the sibling `preflight/**` and `interest/**` families are still mirrors -- no test
 declares either as a seed root -- so the tree serves two different purposes and only this one changes

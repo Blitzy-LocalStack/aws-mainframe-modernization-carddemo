@@ -17,14 +17,18 @@
 >
 > **Label form.** Rationales below are tagged `Alternatives Considered:`, `Assumptions:` and
 > `Trade-offs:` -- plain, plural, colon retained, no emphasis markup, per
-> `docs/CODE_DOCUMENTATION_STANDARD.md` and master section 1.4. This whole file is pure ASCII for
-> the reason that section gives.
+> `docs/CODE_DOCUMENTATION_STANDARD.md` and master section 1.4. Rule 1's fourth category is
+> **factually unavailable here** and is not used; section 11 records why, and records which automated
+> gates do and do not read this file. This whole file is pure ASCII for the reason master section 1.4
+> gives.
 
 **This README is the mandatory Explainability carrier for the four record files beside it.** Master
 section 1.2 records why: a fixed-width record file cannot carry a comment of any kind, because every
 byte position is meaningful and a comment on its own line is a physical row of the wrong length.
 Master section 10 makes the artifact mandatory rather than courteous, and the section order below is
-the one it fixes.
+the one it fixes. The four elements Rule 1 requires of a docstring map onto sections **1** (purpose),
+**5** (parameters -- the four files and their byte geometry), **3** (returns -- the expected outcome)
+and **4** (errors), so a reader auditing this document against the rule can find each one directly.
 
 ---
 
@@ -124,8 +128,27 @@ parity suite's graded rubric, never to a Java build gate.
 | `[350:354]` | 4 | **`0101`** |
 | `[354:430]` | 76 | **`ACCOUNT RECORD NOT FOUND`** followed by 52 spaces |
 
+**The 430 is arithmetic on declared widths, not a constant to be looked up.** `REJECT-RECORD` is
+declared at `app/cbl/CBTRN02C.cbl:176-178` as `REJECT-TRAN-DATA PIC X(350)` followed by
+`VALIDATION-TRAILER PIC X(80)`; the trailer's own two fields are declared separately, with
+`WS-VALIDATION-FAIL-REASON PIC 9(04)` at `:181` and `WS-VALIDATION-FAIL-REASON-DESC PIC X(76)` at
+`:182`. `2500-WRITE-REJECT-REC`
+fills the two halves in that order -- `:447` moves the whole 350-byte `DALYTRAN-RECORD` into the first
+and `:448` moves the trailer into the second -- and `:451` writes the group. So the record is
+**350 + 4 + 76 = 430**, which is also the `LRECL=430` the job allocates at `app/jcl/POSTTRAN.jcl:36`
+and the width master section 5.4 proves six independent ways.
+
 `ACCOUNT RECORD NOT FOUND` is 24 characters, so 52 spaces follow -- the padding `MOVE` supplies at
 `:398`, per the mechanism master section 6.3 records for the trailer description.
+
+Assumptions: the 350-byte prefix is a **group move**, not a field-by-field re-encode, and that single
+fact decides most of what this section can assert. `:447` moves one group item to another of the same
+declared width, so every byte of the feed record arrives at the same offset it occupied on input --
+which is why the card is still readable at `[262:278]` in the reject image, why the blank
+`DALYTRAN-PROC-TS` at `[304:330]` and the 20-space `FILLER` at `[330:350]` survive unchanged, and why
+no field in the prefix needs its own expectation. The alternative reading -- that the reject writer
+re-serialises the transaction -- would make each of those a separate claim to verify and would leave
+the offsets open to drift; the `MOVE` at `:447` is the evidence that they cannot.
 
 **The reject stream does not carry the account number.** The 350-byte image is the *feed* record,
 and the feed record has no account field; the resolved `00000000007` exists only in working storage
@@ -139,6 +162,25 @@ what the reject stream can be asserted against, and because it is the one respec
 migrated `ledger.transaction_rejects.reason_code` column is `SMALLINT` and holds the integer. Master
 section 7.1.2 fixes both representations and warns that an expectation must name which one it
 asserts.
+
+Assumptions: the two representations are not interchangeable and the difference is a `PICTURE`
+clause, not a formatting preference. `PIC 9(04)` is an unsigned four-position display field, so the
+byte image of 101 is necessarily `0101` -- the leading zero is a character the field must contain,
+not padding a writer chose to add. `SMALLINT` stores a number and has no width at all, so the same
+value round-trips as `101`. An expectation that greps the reject stream for `101` therefore matches
+at the wrong offset, and one that queries the column for `'0101'` compares an integer against a
+string; both fail for a reason that has nothing to do with the business rule under test. Naming
+which representation is being asserted is the only reliable defence, which is why every slice in the
+table above is given as an offset pair rather than as a search string.
+
+The 430-byte composition is corroborated independently by the reference-only parity oracle, which
+is worth citing because it was written from the same COBOL without reference to this document:
+`tests/e2e/test_posting_cycle.py:110-111` declares `_REJ_CODE = slice(350, 354)` and
+`_REJ_MSG = slice(354, 430)`, its `:109` declares `_REJ_CARD = slice(262, 278)` and its `:108`
+declares `_REJ_RECLEN = 430`; `tests/integration/test_cbtrn02c_posting.py:53` restates the trailer
+as `WS-VALIDATION-FAIL-REASON 9(04) @ [350:354]` plus `DESC X(76) @ [354:430]`. Two independent
+derivations agreeing on all three slices is the check; neither is the source, which remains the
+copybook and the `MOVE` statements at `:447-448`.
 
 **Nothing else changes.**
 
@@ -162,6 +204,17 @@ not touch a dataset it opened I-O.
 ---
 
 ## 4. Exceptions and errors -- what must not happen, and why it cannot
+
+**The error path this record takes is a soft reject, and it is not an error condition in the program's
+own terms.** The whole decision is the `IF`/`ELSE` at `:211-216`: validation returned a non-zero
+reason, so the `ELSE` arm at `:213-215` is taken, `:214` increments `WS-REJECT-COUNT` and `:215`
+performs `2500-WRITE-REJECT-REC`, which writes exactly one 430-byte record at `:451` and requires
+status `'00'` at `:452`. The run then grades itself at `:229-230`. **No abend, no exception and no
+non-zero file status is involved anywhere in that path**, and **no posting side effect occurs at
+all** -- not a transaction row, not a category-balance row, not an account update -- because
+`2000-POST-TRANSACTION` is performed only from `:212`, the other arm of the same decision. A reject is
+a business outcome the program is designed to produce, which is why the return code is the warn tier
+rather than a failure tier.
 
 **100 must not be reported.** The card **is** in the cross-reference, so `:385` cannot fire. An
 implementation that reported 100 here would be failing the first lookup for a card that resolves --
@@ -329,15 +382,30 @@ corrections to target column names.
 
 `tcatbal.txt`, one `TRAN-CAT-BAL-RECORD`: `TRANCAT-ACCT-ID` `00000000007` at 0, `TRANCAT-TYPE-CD`
 `01` at 11, `TRANCAT-CD` `0001` at 13, `TRAN-CAT-BAL` `0000000000{` = `+0.00` at 17, and 22 ASCII
-`'0'` of `FILLER` at 28. **It is keyed on account 7 -- the account the master does not hold.** That
-inconsistency between the two files is the scenario, not an authoring slip: the category-balance row
-is never reached, because `2700-UPDATE-TCATBAL` is performed only from the posting path, and it is
-present so that section 3 can assert the file is unchanged.
+`'0'` of `FILLER` at 28. **It is keyed on account 7 -- the account the master does not hold.**
+
+Assumptions: that disagreement with `acctdata.txt`'s account `00000000020` is the scenario itself and
+**not** an authoring slip, so it must not be "corrected". The 17-byte composite key here is the key
+the transaction *would* have used had the account existed -- account, type `01`, category `0001` all
+taken from the feed record's own fields -- so it is the row that would have been updated on the path
+this record never takes. `2700-UPDATE-TCATBAL` is performed only from `:440`, inside
+`2000-POST-TRANSACTION`, which is reached only from `:212`; validation stopped at `:397` and the run
+went to `:215` instead. The row is therefore unreachable by construction, and it is shipped for one
+purpose only: so that section 3 has something to assert is byte-for-byte unchanged. Making the two
+files agree would destroy the scenario, because an account master holding account 7 is the
+`happy_path` precondition, not this one.
 
 **The `FILLER` bytes differ by measurement, not by inconsistency.** Three files pad with `0x20`
-SPACE; `tcatbal.txt` pads with ASCII `'0'`, `0x30`. Both are the bytes master section 6.1 measures,
-and master section 6.2 records the category-balance row as one of the two contradicting the general
-rule of section 3.2, with the measured byte winning.
+SPACE; `tcatbal.txt` pads with ASCII `'0'`, `0x30`.
+
+Assumptions: the padding byte is a measured property of the seed corpus and is not derivable from the
+`PICTURE` clause, so it is copied from the seed rather than reasoned out. Master section 6.1 records
+the measured byte per record and master section 6.2 records the category-balance row as one of
+exactly two that contradict the general padding rule of section 3.2, with the measured byte winning.
+Both tables are cited rather than reproduced, per master section 1.3 -- a second copy of a measured
+table is a second thing to keep true. The practical consequence is that a fixture author who applies
+the general rule uniformly, and space-pads this record's `FILLER`, produces 50 correct-length bytes
+that differ from the golden in 22 positions with every field value right.
 
 ### 5.4 Departures from a tree rule, named
 
@@ -348,8 +416,38 @@ rule of section 3.2, with the measured byte winning.
 | The account master deliberately omits the resolved account | master sections 8, 9.1 | Master section 8 permits a key to be deliberately omitted to trigger a reject and requires the README to name it; master section 9.1 names this scenario as exactly what that omission is for. Account `00000000007` is absent by design |
 | The category-balance row is keyed on an account the master does not hold | master section 8 | The same omission seen from the other file. The row is unreachable and exists only for the unchanged-file assertion of section 3 |
 
-**No business-rule field is reshaped in this folder.** The scenario is created entirely by
-**selecting** a non-matching seed row, which section 9 attests row by row.
+Alternatives Considered: authoring `cardxref.txt` at the seed's 36 bytes instead of the copybook's
+50. The seed row genuinely is 36 bytes -- it stops after `XREF-ACCT-ID` and omits the trailing
+`FILLER X(14)` that `app/cpy/CVACT03Y.cpy` declares -- so both physical widths exist in the corpus
+and either could be defended. Master section 3.10 measured both forms and **ruled for 50** with the
+`FILLER` space-padded, so that the record loaded into the indexed file matches the copybook the
+program was compiled against; that ruling is the tree's, not this folder's, and is cited rather than
+re-argued. The 36-byte alternative is rejected here for the reason the ruling gives, with one
+consequence specific to this scenario worth naming: the key this file must resolve sits at offset 0
+and is 16 bytes wide, so **either** width would resolve the card correctly and the reject reason
+would be 101 in both cases. The choice is therefore invisible in this scenario's outcome, which is
+precisely why it has to be decided by the tree-level contract rather than by whichever width happened
+to make the test pass.
+
+Trade-offs: stripping the `CR` that `tcatbal.txt`'s seed row carries, rather than preserving it as
+master section 3.8 permits a scenario to do when it says so. The asymmetry that forces a choice is
+measured, not assumed: the `tcatbal` seed carries **49 `CR` bytes** across its 50 rows, while the
+`dailytran`, `cardxref` and `acctdata` seeds carry **zero**. Preserving the seed's own line ending
+per file would therefore make this one folder mix two conventions across four files, and the cost of
+that is concrete rather than stylistic -- a `0x0D` at the end of this record is absorbed into the
+22-byte `'0'` `FILLER`, pushing the row to 51 bytes and failing the load with every field value
+correct, which is the failure mode master section 3.9 exists to prevent. What is given up is
+byte-identity with the seed row on that one file; what is bought is a single line-ending convention
+across the folder, so that the geometry check in section 5.2 has one expected answer instead of a
+per-file exception. Section 9 records the strip as a line-ending normalisation so the provenance
+claim stays exact.
+
+**No business-rule field is reshaped in this folder**, measured against each file's own seed row. The
+scenario is created entirely by **selecting** a non-matching seed row rather than by editing a
+matching one, which section 9 attests row by row -- and which section 9 also states the other way
+round, tabulating the seven fields in which the substituted account row differs from the account every
+sibling scenario carries, so that the "none reshaped" claim above cannot be mistaken for a claim that
+this folder's account row looks like theirs.
 
 ---
 
@@ -367,6 +465,19 @@ copies the entire 350-byte input image, so the reject's `[278:304]` carries
 `2022-06-10 19:27:53.000000` and its `[304:330]` carries the same 26 spaces -- still meaning "not
 processed". A reject record contains **no clock reading at all**, which is why `dalyrejs.expected`
 can be compared byte for byte with no field normalised.
+
+Assumptions: those 26 bytes are blank because an input fixture may not contain a wall-clock reading,
+and the group `MOVE` at `:447` is what makes the constraint bite rather than merely tidy. Two
+properties compound. First, determinism: a fixture carrying a timestamp would make the file's meaning
+depend on when it was authored, and the field's purpose is to be empty until the job fills it --
+`Z-GET-DB2-FORMAT-TIMESTAMP` at `:437` writes the processed value into `TRAN-PROC-TS` at `:438`, on
+the posting path only. Second, propagation: `:447` moves the whole 350-byte group rather than
+re-encoding it field by field, so **whatever occupies these 26 bytes reaches the reject image
+verbatim**. Any value here -- even a plausible-looking constant -- would land in `dalyrejs.expected`
+at `[304:330]` and would have to be normalised before comparison, which would forfeit the
+byte-for-byte comparison the golden currently permits. The 20-space `FILLER` at `[330:350]` survives
+the same way and for the same reason, which is why the input record's padding is worth getting right
+even though nothing reads it.
 
 Everything else holds by construction: every byte here is literal, there is no random identifier and
 no environment-derived string, and each test provisions and tears down its own workspace, per master
@@ -398,9 +509,16 @@ folder may expect:
 
 The rows load into the objects the sibling harness declares in
 [`test-harness-schemas-and-foreign-tables.sql`](../../../db/testharness/test-harness-schemas-and-foreign-tables.sql),
-where lines 492 to 494 declare the reject contract by composition -- `raw_record CHAR(350)`,
-`reason_code SMALLINT`, `reason_desc VARCHAR(76)`. That file is the authority for the schema and it
-is deliberately not re-derived here.
+where `ledger.transaction_rejects` is created at `:554` and declares the reject contract by
+composition -- `raw_record CHAR(350)` at `:556`, `reason_code SMALLINT` at `:557` and
+`reason_desc VARCHAR(76)` at `:558`, with `CHECK (reason_code BETWEEN 0 AND 9999)` at `:559-560`.
+That file is the authority for the schema and it is deliberately not re-derived here.
+
+Assumptions: those four line numbers were re-measured against the file rather than carried forward.
+An earlier revision of this paragraph cited lines 492 to 494, which now hold a collation rationale
+and not the table at all -- the declaration moved as the harness grew. A citation is only worth its
+line number if the number is checked at the revision that ships it, and a stale one is worse than a
+bare table name because it sends a reviewer to real text that plausibly discusses the wrong thing.
 
 One target-side note specific to this scenario: the harness declares the cross-reference and the
 account master as separate tables with `idx_card_xref_account_id` available on the first, so a target
@@ -442,6 +560,15 @@ together -- one makes the first lookup fail and the second unreachable, the othe
 succeed and the second fail. Neither on its own shows that the two reasons are distinct, because
 both produce a 430-byte reject, a 350-byte verbatim image and return code 4.
 
+Assumptions: **the feed record is the constant and the masters are the variable**, across this whole
+scenario family. `../happy_path/dailytran.txt` is byte-identical to this folder's, so the single input
+transaction is held fixed while only the two lookup files change -- which is what makes the reject
+reason attributable to the master state rather than to anything about the transaction. That is the
+property to preserve when adding a posting scenario: change a master to move the outcome, and change
+the feed only when the rule under test is a property of the transaction itself, as it is for the
+amount in `../boundary_exact_limit` and the date in `../boundary_expiry_equal`. Editing the feed here
+would make this folder's result incomparable with the rest of the family for no gain.
+
 ---
 
 ## 9. Data governance and synthetic provenance
@@ -467,10 +594,57 @@ resolves to **none** for this folder.
 The cross-reference row is row **21** of its seed rather than row 7 because that file is ordered by
 card number, and account `00000000007` appears there under card `4859452612877065`.
 
+**The substitution delta, stated field by field.** "Nothing reshaped" is the claim against each
+file's **own** seed row, and it is the claim master section 10 item 5 asks for. It is not the whole
+picture for a reviewer, because the account row was substituted **wholesale** rather than edited, so
+measured against account `00000000007` -- the row every other posting scenario in this tree carries
+-- seven fields differ. All seven are named here so that none has to be inferred from a diff:
+
+| Field | Account `00000000007` (seed row 7) | This folder (seed row 20) | Business-rule relevant here |
+|---|---|---|---|
+| `ACCT-ID` | `00000000007` | `00000000020` | **Yes -- this is the entire scenario** |
+| `ACCT-CURR-BAL` | `00000001930{` | `00000003690{` | No |
+| `ACCT-CREDIT-LIMIT` | `00000020650{` | `00000037670{` | No -- never compared, see section 4 |
+| `ACCT-CASH-CREDIT-LIMIT` | `00000002640{` | `00000010400{` | No |
+| `ACCT-OPEN-DATE` | `2012-10-12` | `2014-02-27` | No |
+| `ACCT-EXPIRAION-DATE` | `2024-12-13` | `2024-03-13` | No -- never compared, see section 4 |
+| `ACCT-REISSUE-DATE` | `2024-12-13` | `2024-03-13` | No |
+
+Assumptions: only `ACCT-ID` carries the scenario; the other six differ **as a consequence** of
+substituting a whole seed row rather than as six independent authoring decisions, and none of them is
+read by this job on the path this record takes. They are listed anyway because master section 10 item
+5 warns that the reshaped-field clause is the one most easily skipped and the one that matters most
+for audit -- a reviewer diffing this folder's account row against a sibling's sees seven differences
+and, without this table, cannot tell which one is the scenario and which six are carried freight.
+Stating the same thing two ways deliberately: measured against its own seed row 20 the file is
+byte-identical and nothing is reshaped; measured against the sibling folders' account it differs in
+seven fields, exactly one of which is load-bearing.
+
+**For the other three files, no business-rule field is reshaped at all**, and the two differences
+that do exist are conformance rather than data. `dailytran.txt` is byte-identical to its seed row.
+`cardxref.txt` differs from seed row 21 only by the 14 appended `FILLER` spaces that bring it to the
+copybook's declared width -- a width-conformance change, per section 5.4. `tcatbal.txt` differs from
+seed row 7 only by the removed `CR` -- a line-ending normalisation, per the same section. Neither
+touches a field any rule reads.
+
 **It represents no real person and no real account.** The seeds ship with the upstream open-source
 project as fabricated demonstration data, and master section 11.1 carries the tree-level attestation
 this scenario inherits. Identity and primary-account-number bytes -- including both account numbers
 named in this document -- are taken unchanged from the seed.
+
+Assumptions: provenance is **attested** rather than left to be inferred, because inspection cannot
+establish it. Card `4859452612877065` is sixteen digits and its Luhn check digit is **valid** -- the
+weighted sum is 80, so the number is exactly what a live primary account number looks like. That is a
+property of the whole corpus rather than of this one row: **all 50** primary account numbers in
+`app/data/ASCII/cardxref.txt` pass the Luhn check, measured rather than assumed. So the check digit
+is useless as a provenance signal in either direction, and the two nine- and eleven-digit identifiers
+named above carry no check digit at all. A reviewer therefore has no way to reach a verdict from the
+bytes, and silence would leave a card-shaped string in a repository with nothing recording where it
+came from. The attestation supplies what inspection cannot: a named seed file and a named row, so the
+claim is checkable by comparison rather than by judgement. That is also why the tables above give the
+seed row for every file rather than asserting synthetic origin in the aggregate -- per-row citation is
+what makes the attestation falsifiable, and an attestation that cannot be falsified is not evidence
+of anything.
 
 The two normalizations named in section 5.4 are width and line-ending conformance, **not**
 business-rule field changes, so they do not qualify the "nothing reshaped" statement above.
@@ -491,31 +665,71 @@ COBOL baseline or the parity oracle.
 
 ---
 
-*This README is the mandatory Explainability carrier for the four record files in this directory,
-required by master section 10 and by user-specified Rule 1. `config/rule1/rule1_gate.py` decides the
-form of the rationale labels above, repository-wide and including Markdown, which is why they are
-written plain rather than emphasised. `config/checkstyle/checkstyle.xml` limits its audit set to
-`java`, so no linter reads this prose. Whether each rationale names a real consequence, and whether
-every number and line citation is true, are review obligations no lexical gate can decide.*
-
----
-
 ## 10. What drives this corpus, and what reads it
 
 This corpus is a **driven input**. `PostTransactionsJobParityIT` resolves each scenario under
 `/fixtures/posting/`, seeds the masters from it, launches the posting job and compares the resulting
 transaction master, category balances, account master and reject stream against
-`tests/golden/posting/reject_101_acct_missing` -- so an edit to these bytes changes what the parity run asserts.
-`BatchFixtureContractTest` additionally holds every file here to its declared geometry and to the
-values that make the scenario discriminating, so a layout mistake is caught in this module rather
-than surfacing later as a comparison failure.
+`tests/golden/posting/reject_101_acct_missing` -- so an edit to these bytes changes what the parity
+run asserts. `BatchFixtureContractTest` additionally holds every file here to its declared geometry
+and to the values that make the scenario discriminating, so a layout mistake is caught in this module
+rather than surfacing later as a comparison failure.
 
-⚠️ Refactoring Rationale: this section stated that no test in this module opened the folder and that
-the corpus was a reference mirror. That was accurate when it was written and is no longer -- the
-parity class now seeds from here. It is corrected rather than deleted, because a reader who had been
-told these bytes drive nothing would edit them expecting no consequence, which is the most expensive
-mistake this folder admits.
+Assumptions: the seed root is declared in the test, not inferred from the directory layout, and that
+declaration is what makes these bytes load-bearing. `PostTransactionsJobParityIT` line 223 declares
+`FIXTURE_ROOT = "/fixtures/posting/"`, so this folder is read by a comparison rather than kept as a
+reference copy of one. The distinction is worth stating explicitly and in the strong direction: a
+reader who believed these bytes drove nothing would edit them expecting no consequence, and a silent
+change to a driven input is the most expensive mistake this folder admits. Verify the declaration
+before trusting a claim either way -- a folder's purpose is a property of the classes that name it
+and can change without any byte here changing.
 
 Assumptions: the sibling `preflight/**` and `interest/**` families are still mirrors -- no test
 declares either as a seed root -- so the tree serves two different purposes and only this one changes
 what a run asserts.
+
+Assumptions: Rule 1's fourth category name, the one its line 32 scopes to *replacing existing code*,
+is deliberately absent from this document. Nothing here replaces anything: the four record files are
+net-new derived copies and the COBOL baseline they derive from is untouched and still runs. Master
+section 1.4 rules that category unavailable throughout this tree for exactly that reason and directs
+such reasoning to `Alternatives Considered:` or `Assumptions:` instead, which is why corrections to
+this document's own earlier claims -- the paragraph above is one -- are recorded under `Assumptions:`
+with the contract that decides the matter cited, rather than under a category that would assert a
+code replacement that never happened.
+
+---
+
+## 11. Why this document exists, and what actually checks it
+
+This README is the mandatory Explainability carrier for the four record files in this directory,
+required by master section 10 and by user-specified Rule 1. Section 1.2 of the master contract gives
+the mechanism: a fixed-width record file cannot carry a comment of any kind, because every byte
+position is meaningful and a comment on its own line is a physical row of the wrong length. Rule 1's
+docstring duty for `dailytran.txt`, `cardxref.txt`, `acctdata.txt` and `tcatbal.txt` therefore
+transfers here in full, which is why the four required elements -- purpose, parameters, returns and
+errors -- appear as sections 1, 5, 3 and 4 rather than as a header comment in each file.
+
+Assumptions: **no automated gate reads this file, and the two that might are both verified not to.**
+`config/checkstyle/checkstyle.xml` line 215 sets `fileExtensions` to `java`, so Checkstyle never
+opens Markdown. `config/rule1/rule1_gate.py` does govern Markdown for its `labels` check, but its
+`_is_governed` function at line 528 returns false for any path containing
+`/src/test/resources/fixtures/` -- the segment declared at its line 142 -- so every file in this
+directory is outside its remit by design, the record fixtures because their `.txt` extension is
+incidental and this document because it shares their path. The label form used above is nevertheless
+the one that gate defines and master section 1.4 fixes: plain, plural, unemphasised, colon retained.
+It is adopted here **voluntarily and for a reason** -- a reviewer auditing this repository against
+Rule 1's validation gate finds every rationale by literal string search across seven languages, and a
+label written in an emphasised or parenthesised variant is a rationale that search does not return.
+Consistency with the ninety-odd governed siblings is what keeps one search sufficient.
+
+Trade-offs: the consequence of being ungoverned is that **correctness here rests on construction and
+review, not on a check that fails**. A lexical gate could not decide the things that actually matter
+about this document in any case: whether each rationale names a real consequence rather than a
+plausible-sounding one, whether every byte count matches the file it describes, and whether every
+line citation still points at the statement it claims. Those were established by measurement while
+this revision was written -- the four record files were read and their bytes counted, every cited
+line of `app/cbl/CBTRN02C.cbl` was opened and compared against the claim made about it, the seed rows
+were matched programmatically against their fixtures, and the harness table's column declarations
+were located rather than assumed. A citation that has not been checked at the revision that ships it
+is worse than no citation, because it sends a reviewer to real text that plausibly discusses
+something else.

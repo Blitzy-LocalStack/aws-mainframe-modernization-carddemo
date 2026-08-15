@@ -108,11 +108,14 @@ import org.junit.jupiter.params.provider.MethodSource;
  * the point of use, and each carries a note stating the boundary it reaches.</p>
  *
  * <p>Alternatives Considered: driving them from this module's fixture files. Rejected on measurement.
- * The register at {@code src/test/resources/fixtures/README.md} declares four data record types --
- * {@code ACCOUNT}, {@code CUSTOMER}, {@code TRANTYPE} and {@code TRANCAT} -- and none of them is a
+ * The register at {@code src/test/resources/fixtures/README.md} declares the {@code ACCOUNT},
+ * {@code CARD}, {@code CUSTOMER}, {@code TCATBAL}, {@code TRANTYPE} and {@code TRANCAT} record
+ * types, and none of them is a
  * {@code TRNX} record, so no fixture description exists to carry trailing blanks in the first place;
- * and {@code ReportingFixtureContractTest} asserts that the fixture directory contains EXACTLY its
- * six registered entries, so adding one would fail that sibling rather than help this one. The
+ * and {@code ReportingFixtureContractTest} asserts that the fixture directory contains EXACTLY the
+ * closed set of entries it names, so adding one would fail that sibling rather than help this one.
+ * Trade-offs: this paragraph now names the record types instead of counting them, because a count
+ * goes stale the next time a planned fixture lands while the argument it supports does not. The
  * sibling {@code StatementTextMapperTest} reaches its own four boundaries the same way and for the
  * same recorded reason, so the two emitters are proven against values built by one convention.</p>
  *

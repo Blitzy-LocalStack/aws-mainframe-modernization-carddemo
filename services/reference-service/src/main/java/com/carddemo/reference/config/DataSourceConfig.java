@@ -29,6 +29,18 @@ import org.springframework.context.annotation.Configuration;
  * {@code data-migration/sql/V0__schemas_and_roles.sql} creates the schema, the login role and the
  * grants beforehand. Two independent schema managers could otherwise reshape one table contract after
  * the other deployable had bound to it.</p>
+ *
+ * <p>Assumptions: this type reports failure by throwing rather than by setting a status character,
+ * and that is a deliberate refusal of the baseline's convention because two character flag families
+ * with OPPOSITE polarity both describe this bounded context. In
+ * {@code app/app-transaction-type-db2/cpy/CSDB2RWY.cpy} lines 25 to 27,
+ * {@code WS-DB2-PROCESSING-FLAG} is declared with {@code 88 WS-DB2-OK VALUE '0'} and
+ * {@code 88 WS-DB2-ERROR VALUE '1'}, so there the character {@code '0'} means healthy. The tri-state
+ * {@code FLG-} validation flags this same module carries read {@code '0'} as the not-OK state
+ * instead. One character means the opposite thing in the two families, so any code that carried a
+ * status character between them would invert every branch that tests it while still compiling and
+ * still returning a value. An exception has no polarity available to invert, which is the property
+ * being bought here.</p>
  */
 @Configuration(proxyBeanMethods = false)
 public class DataSourceConfig {
@@ -46,6 +58,16 @@ public class DataSourceConfig {
     //       the engine the test starts, while this callback proves it on the engine the deployment is
     //       actually pointed at -- including a production cluster whose search_path could have been
     //       altered at the role or database level after the image was built and tested.
+    // WHY : Refactoring Rationale: three baseline attachment mechanisms are RETIRED here rather than
+    //       modelled, and naming them is what stops a reader looking for their equivalents. The
+    //       baseline bound its programs to Db2 through PLAN(CARDDEMO), declared at
+    //       app/app-transaction-type-db2/csd/CRDDEMOD.csd L47 and serving both the online
+    //       transactions and the sequential reference update, with the bound package searched
+    //       through a DBRMLIB library and the load modules resolved through STEPLIB. A plan is a
+    //       pre-bound, pre-authorised access path compiled ahead of execution; this context instead
+    //       sends SQL a driver prepares against a login role whose privileges the bootstrap DDL
+    //       grants. There is consequently no plan to name, no package to bind and no library to
+    //       search, so no property below corresponds to any of the three.
 
     /**
      * The query that reports the first existing schema on the connection's effective search path.
@@ -69,15 +91,54 @@ public class DataSourceConfig {
         //       than pooling it. app/app-transaction-type-db2/csd/CRDDEMOD.csd defines one
         //       DB2ENTRY(CARDDEMO) at L45 with THREADLIMIT(1) at L48, and attaches BOTH maintenance
         //       transactions to it through the DB2TRAN definitions at L51-L60, so CTLI and CTTU
-        //       shared a single thread. Binding a pool here records the deliberate move to
-        //       concurrent database sessions instead of inheriting a library default for behaviour
-        //       the baseline never exposed.
-        // WHY : Trade-offs: the ceiling and the idle floor are declared per profile rather than
-        //       here, and are deliberately different in each. The dev profile lets the pool empty
-        //       because Aurora Serverless auto-pause requires every connection to be closed, and it
-        //       accepts a longer first acquisition because a resume takes on the order of fifteen
-        //       seconds; the prod profile holds an idle floor against steady provisioned capacity.
-        //       Keeping both in configuration lets one image serve every environment.
+        //       shared a single thread. THREADWAIT(YES) on that same L48 completes the posture: a
+        //       task arriving while the one thread was busy QUEUED for it rather than being
+        //       refused, so the effective Db2 concurrency of this entire context was one, and the
+        //       queue reached the caller as elapsed time and nothing else. Binding a pool here is a
+        //       MAPPING of that posture onto a driver that has no single-thread equivalent. The
+        //       baseline behaved exactly as its own resource definition specified.
+        // WHY : Alternatives Considered: reproducing that posture literally, with a ceiling and an
+        //       idle floor of one, which is the only sizing that preserves the serialisation
+        //       THREADLIMIT(1) imposed. Rejected on a concrete consequence rather than on taste.
+        //       Every read this context serves is a lookup of seeded rows no caller mutates --
+        //       transaction types, their categories, disclosure rates, and the address tables the
+        //       other services validate against -- so a pool of one would make concurrent readers
+        //       of immutable rows wait behind one another for no gain of any kind, and the address
+        //       validation performed in other services would serialise across the whole deployment
+        //       on this single connection.
+        // WHY : Alternatives Considered: sizing the pool generously instead, on the argument that
+        //       connections are cheap. Rejected because the target cluster is serverless and scales
+        //       its own capacity, which makes an idle connection two separate costs rather than
+        //       none: it holds server state that keeps capacity awake and billed in Aurora Capacity
+        //       Units, and it counts against the server's maximum connection limit, which the sum
+        //       of every service's ceiling has to stay beneath. An oversized ceiling here surfaces
+        //       as a refused connection in some unrelated service, which is a failure diagnosed
+        //       nowhere near the setting that caused it.
+        // WHY : Trade-offs: the numbers settling those two rejections are declared in
+        //       configuration, not here, and they differ per environment, so this factory states
+        //       none of them itself. The base profile carries a ceiling of 10 with an idle floor of
+        //       2; the dev overlay lowers those to 4 and 0, and the prod overlay raises the floor to
+        //       5 while inheriting the ceiling. Each overlay argues its own values at the key it
+        //       sets -- dev that an idle floor would DEFEAT the auto-pause its scale-to-zero cluster
+        //       requires, because a held connection stops the cluster reaching its threshold, and
+        //       prod that its minimum capacity is held above zero precisely so that no request ever
+        //       waits on a resume. Those arguments belong to the files that own the values and are
+        //       referenced here rather than restated. The price of the split is that no single file
+        //       shows the effective sizing; the return is that one image serves every environment.
+        // WHY : Assumptions: pooled concurrent sessions make lock conflict reachable, and its CAUSE
+        //       is recorded in the baseline rather than inferred here. DROLLBACK(YES) at
+        //       app/app-transaction-type-db2/csd/CRDDEMOD.csd L47, in a stanza titled
+        //       DESCRIPTION(DB2 RETRY FOR CARDDEMO PLAN) at L46, directed CICS to back the unit of
+        //       work out when Db2 reported a deadlock or a lock timeout. That setting is why both
+        //       programs carry an SQLCODE -911 branch at all: COTRTLIC.cbl L1870 tests for it and
+        //       L1874 answers 'Deadlock. Someone else updating ?', while COTRTUPC.cbl L1561 tests
+        //       for it and L1564 sets the condition its L181 declares as 'Could not lock record for
+        //       update'. This context reaches the same conclusion from the driver's SQLSTATE, and
+        //       the status that becomes is decided in exactly one place --
+        //       com.carddemo.common.error.GlobalExceptionHandler, which answers HTTP 409 both for a
+        //       lock that could not be taken and for the foreign-key restriction this schema relies
+        //       on. This type therefore declares no handler of its own: a second one would give one
+        //       failure two competing answers, selected by whichever matched.
         // WHY : Alternatives Considered: hard-coding the pool figures or the schema in this factory.
         //       Rejected because either makes an environment-specific value part of compiled code,
         //       so a capacity change would need a rebuild and the two environments could only differ
@@ -164,6 +225,34 @@ public class DataSourceConfig {
             }
             return actualSchema;
         } catch (SQLException failure) {
+            // WHY : Refactoring Rationale: this failure travels on TWO channels -- a stable sentence
+            //       naming what could not be done, and the driver's own exception retained as the
+            //       cause -- replacing a baseline design that had room for only one.
+            //       app/app-transaction-type-db2/cpy/CSDB2RPY.cpy composes the current action, the
+            //       displayable SQLCODE and the vendor-formatted DSNTIAC text into an 800-byte
+            //       WS-LONG-MSG across L74-L83, and its L84 then moves that into the 75-byte
+            //       WS-RETURN-MSG declared at COTRTLIC.cbl L249, so every byte past 75 was
+            //       discarded at the moment it was most needed. The vendor text was already
+            //       partial before that: SQLERRM OF SQLCA sits commented out of the composition at
+            //       L79. Carrying the cause as a separate object keeps the sentence short enough to
+            //       read while discarding nothing.
+            // WHY : Assumptions: the two-channel shape also NORMALISES an asymmetry, which is why
+            //       it is a context-wide contract and not a local preference. COTRTLIC includes
+            //       both Db2 copybooks -- CSDB2RWY at its L304 and CSDB2RPY at its L2055, by
+            //       EXEC SQL INCLUDE rather than COPY, the precompiler dialect of the same
+            //       mechanism -- and so carries both channels; COTRTUPC includes neither, declares
+            //       its own WS-DISP-SQLCODE at L68 and its own 75-byte WS-RETURN-MSG at L167, and
+            //       has no WS-LONG-MSG whatever. Two programs in one bounded context reported the
+            //       same class of failure with different amounts of detail available. The
+            //       truncation and the asymmetry are both registered as documented divergences in
+            //       docs/architecture/cobol-to-service-traceability.md, which is owned elsewhere;
+            //       neither is introduced silently here.
+            // WHY : Assumptions: the stable channel carries exactly ONE sentence per failure, and
+            //       that rule is inherited rather than invented. WS-RETURN-MSG-OFF, declared at
+            //       COTRTLIC.cbl L250 and tested at each compose site -- the deadlock branch's
+            //       guard at L1873 among them -- admitted only the earliest error and suppressed
+            //       every later one. Throwing on the earliest refusal reproduces that
+            //       first-error-wins behaviour with no flag needed to carry it.
             throw new IllegalStateException(
                     "Unable to resolve the effective schema from a pooled connection", failure);
         }

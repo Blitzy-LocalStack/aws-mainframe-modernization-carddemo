@@ -36,21 +36,56 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  *
  * <h2>Purpose</h2>
  *
- * <p>Purpose: this table is the target's replacement for a restart contract the baseline never had.
- * The only {@code RESTART=} anywhere in the reference is COMMENTED OUT, at
- * {@code app/jcl/DEFGDGD.jcl} L2, and no {@code CHKPT=} appears in the tree at all, so a rerun of a
- * mainframe step re-did its work. {@code batch.batch_run} makes a completed step a no-op on a redrive,
- * by carrying one row per {@code (run_id, step_name)} pair with the tier that attempt reached. Because
- * the mechanism is new rather than migrated, nothing in the reference can be compared against it and
- * the only available proof is this one: that the migration creates the table, that the constraints
- * which make a row meaningful actually fire, and that the two finders the ledger reads it through
+ * <p>Purpose: {@code batch.batch_run} makes a completed step a no-op on a redrive, by carrying one row
+ * per {@code (run_id, step_name)} pair together with the tier that attempt reached. Every case below
+ * asserts one property of that row: that the migration which creates it applies, that the constraints
+ * which make it meaningful actually fire, and that the two finders the ledger is read through
  * resolve.</p>
  *
+ * <p>Refactoring Rationale: this ledger is an IMPROVEMENT the target adds rather than a port of an
+ * existing capability, and the reference is unambiguous about which of the two it is. Exactly one
+ * restart directive appears across the thirty-eight members of {@code app/jcl}, at
+ * {@code app/jcl/DEFGDGD.jcl} L2, and it is written {@code //*  RESTART=STEP30} -- the leading
+ * {@code //*} makes it a comment, so no job ever acted on it -- while no {@code CHKPT=} appears in any
+ * of those thirty-eight members at all. What was wrong with the old approach is therefore not that its
+ * restart contract was weak but that it had none: a rerun re-did the work of every step that had
+ * already succeeded. Because the capability is added rather than migrated, its divergence is registered
+ * in {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+ *
+ * <p>Assumptions: no golden master is cited by any case in this class, and the absence is a fact about
+ * the reference rather than an omission here. The {@code tests/golden} tree holds {@code posting},
+ * {@code interest}, {@code provisioning}, {@code reporting} and {@code statement} and no step-ledger
+ * directory of any kind, because a ledger the baseline never kept can have left no expected output to
+ * compare against. A reader looking for the vector that pins these assertions will not find one, and
+ * the citation each case carries instead is the reference line that establishes the ABSENCE of the
+ * mechanism.</p>
+ *
+ * <h2>The line this class does not cross</h2>
+ *
+ * <p>Assumptions: the stored {@code return_code} values below are written and read as data, and their
+ * MEANING is asserted elsewhere. {@code com.carddemo.batch.job.PostTransactionsJobTest} owns the graded
+ * return-code tier itself, the two verbatim counter lines the posting step emits, and the inversion of
+ * a baseline step gate into an orchestrator run predicate; it also owns the business-date job parameter
+ * and the resolution of a job name through the framework's registry. Restating any of that here would
+ * create a second place it could be relaxed while this one still read as intact, so a reader wanting
+ * the semantics of a 4 is pointed at that class rather than served a copy of it. Tier one, under
+ * {@code com.carddemo.batch.service}, owns all validation and arithmetic, and nothing here touches
+ * either.</p>
+ *
+ * <p>Assumptions: no diagnostic in this class may render a whole record or an unmasked primary account
+ * number, and the convention is established here even though this table cannot breach it -- the ledger
+ * carries a run identifier, a step name, a lifecycle state, two instants, a tier and a counter, and no
+ * cardholder data at all. The migration plan's section 0.7.8 masks a primary account number to its last
+ * four digits everywhere it is rendered and never returns a card verification value, so an assertion
+ * description or a failure message that echoed a full record would leak through the one channel that is
+ * exempt from the mapping layer. The sibling classes in this package do hold card numbers, and they
+ * copy this convention.</p>
+ *
  * <p>Refactoring Rationale: every assertion below was previously unreachable. Beside the surrogate
- * primary key, {@code V1__batch.sql} declares five REFUSABLE constraints on this table -- one unique
- * pair and four checks -- and a check constraint that is never violated in a test is indistinguishable
+ * primary key, {@code V1__batch.sql} declares six REFUSABLE constraints on this table -- one unique
+ * pair and five checks -- and a check constraint that is never violated in a test is indistinguishable
  * from a check constraint that was mistyped: PostgreSQL accepts a predicate that can never be false as
- * readily as one that can, and Hibernate validates none of them. So each of the five is asserted by
+ * readily as one that can, and Hibernate validates none of them. So each of the six is asserted by
  * writing the row it must refuse.</p>
  *
  * <h2>What is asserted and why each one needs a database</h2>
@@ -134,6 +169,24 @@ class BatchRunRepositoryIT {
      * other two integration tests depend on are present -- so a broken script reference is reported
      * HERE, by a named assertion, rather than as an undefined-table error inside an unrelated
      * test.</p>
+     *
+     * <p>Assumptions: the ORDER in which the two halves of the schema arrive is load-bearing, and
+     * {@code withInitScript} below is what fixes it. Testcontainers runs this script as the container
+     * becomes ready, which is strictly before the application context opens the connection Flyway
+     * migrates on, so the four foreign schemas already exist when the persistence provider runs its
+     * {@code validate} pass over the mappings that reference them. Re-implementing that ordering in
+     * Java -- a {@code @BeforeAll} issuing the statements, say -- would place it after the context had
+     * already started and failed. The file NAME is therefore part of the contract rather than a
+     * description of the file, and neither renaming nor relocating it is a local change.</p>
+     *
+     * <p>Assumptions: the script deliberately does NOT create {@code batch}, so the one table this
+     * class asserts on arrives from {@code db/migration/V1__batch.sql} through Flyway and from nowhere
+     * else. That asymmetry is easy to misread as an oversight in the harness: an init script runs as the
+     * container's superuser, so a {@code batch} schema created there would be owned by that user, and
+     * the test profile's Flyway {@code init-sqls} then assumes a NOLOGIN role which is refused CREATE on
+     * a schema it does not own. Letting Flyway create the schema under that role instead -- which is why
+     * the profile sets {@code create-schemas} true rather than false -- reproduces the ownership a
+     * deployed environment has, and that ownership is itself asserted below.</p>
      */
     private static final String HARNESS_SCRIPT =
             "db/testharness/test-harness-schemas-and-foreign-tables.sql";
@@ -153,6 +206,15 @@ class BatchRunRepositoryIT {
 
     /** The step name the posting state of the orchestrated chain carries. */
     private static final String STEP_NAME = "PostTransactions";
+
+    /**
+     * The step name of a second state of the same run, used where a case needs one step left open.
+     *
+     * <p>Assumptions: the name is the interest state's, which FOLLOWS posting in the orchestrated
+     * chain, so a run holding this step open while posting has completed is the arrangement a crash
+     * part-way through the chain actually leaves behind rather than an arbitrary pair of rows.</p>
+     */
+    private static final String IN_FLIGHT_STEP_NAME = "CalculateInterest";
 
     /**
      * The instant a step in this class opens at.
@@ -184,6 +246,16 @@ class BatchRunRepositoryIT {
      * package is deprecated; the replacement is not generic, so the declaration carries no type
      * argument.</p>
      */
+    // WHY : Alternatives Considered: an in-memory engine, which would start in milliseconds instead of
+    //       the twenty seconds a container costs. Rejected because every property this class asserts IS
+    //       an engine behaviour and none of them survives a substitute. The schema ownership read from
+    //       pg_namespace, the stored predicate text read from pg_constraint, the five constraints that
+    //       have to REFUSE a row at the statement that writes it, the search_path the datasource pins
+    //       across five schemas and Flyway's own history table are all PostgreSQL facts; an in-memory
+    //       engine implements them differently or not at all, so each assertion would either not
+    //       compile as written or pass while saying nothing about the engine the nightly chain runs
+    //       against. No embedded driver is on this module's classpath, so the substitute is not
+    //       reachable even by accident.
     @Container
     static final PostgreSQLContainer POSTGRES =
             new PostgreSQLContainer(POSTGRES_IMAGE).withInitScript(HARNESS_SCRIPT);
@@ -238,10 +310,23 @@ class BatchRunRepositoryIT {
      * Empties the ledger table and opens a JDBC handle before each case.
      *
      * <p>Assumptions: the table is emptied rather than each case being wrapped in a rolled-back
-     * transaction, and the difference is load-bearing here. Three cases below assert that the DATABASE
-     * refuses a row, and a check-constraint violation inside an outer transaction would surface at
-     * commit rather than at the statement that caused it, moving the failure away from the write and
-     * marking the whole transaction unusable for the assertions that follow.</p>
+     * transaction, and the difference is load-bearing here. Six cases below assert that the DATABASE
+     * refuses a row, and a constraint violation raised inside an enclosing test transaction would
+     * surface at commit rather than at the statement that caused it, moving the failure away from the
+     * write and marking the whole transaction unusable for the assertions that follow. Emptying between
+     * cases keeps each one independent in the spirit the reference suite states at
+     * {@code tests/README.md} section 11, where every test provisions its own workspace and shares no
+     * mutable state, which is what lets any single case here be run alone and still mean something.</p>
+     *
+     * <p>Trade-offs: this per-case truncation is a local convenience of a class whose every write is its
+     * own committed transaction, and it does NOT generalise to the rest of the package. Annotating a
+     * class in this package {@code @Transactional} so that each case rolled back would be the cheaper
+     * habit and is deliberately not adopted, because it silently defeats
+     * {@code PostingUnitOfWorkIT}: that class proves the posting unit of work commits or rolls back as
+     * one, and it proves it by reading the three tables from OUTSIDE the transaction under test, which
+     * an enclosing test transaction makes impossible -- the writes would be invisible to the observer
+     * whether the code was correct or not, and the atomicity proof would pass vacuously. The accepted
+     * cost of truncating instead is one extra statement per case.</p>
      *
      * @param dataSource the pool the context built from the container's coordinates, wrapped here for
      *     the catalog reads; must not be {@code null}
@@ -308,6 +393,12 @@ class BatchRunRepositoryIT {
      * the init script as the container's user. A harness path that had been renamed would fail
      * here.</p>
      *
+     * <p>Assumptions: the artifact this case pins is
+     * {@code data-migration/sql/V0__schemas_and_roles.sql}, whose L713 declares the authorization of the
+     * {@code batch} schema, and no reference line is cited because schema ownership has no baseline
+     * counterpart at all -- a VSAM cluster is a catalog entry with no owning role, so there is nothing in
+     * {@code app/} for this assertion to be faithful to.</p>
+     *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
@@ -348,6 +439,11 @@ class BatchRunRepositoryIT {
      * table rather than about the first-level cache. Reading through the same context would return the
      * instance just written and would keep passing if the column were removed.</p>
      *
+     * <p>Assumptions: the artifact this case pins is the eight-column declaration in
+     * {@code V1__batch.sql} together with the two finders {@code BatchRunRepository} derives from it,
+     * and no reference line is cited because the ledger row itself is target-side -- the baseline kept
+     * no per-step record, so no COBOL statement and no golden file describes one.</p>
+     *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
@@ -386,14 +482,29 @@ class BatchRunRepositoryIT {
      * record was rejected, and {@code app/jcl/TRANBKP.jcl} L51 gates the following step with
      * {@code COND=(4,LT)} -- so the chain continues on a 4. A ledger that recorded a completed step
      * without preserving which tier it reached would let a redriven step report clean and change the
-     * orchestrator's downstream choice.</p>
+     * orchestrator's downstream choice. What that tier MEANS is asserted by
+     * {@code com.carddemo.batch.job.PostTransactionsJobTest}; here it is a stored value that has to
+     * survive the round trip.</p>
+     *
+     * <p>Assumptions: the case walks the whole decision a redriven step takes, in the order a job class
+     * takes it -- open the row, reach a terminal state, then ask the ledger again -- because the skip
+     * decision is the composition of those three and not a property of any one of them. A caller that
+     * finds a terminal row returns without repeating the step's writes, and the tier it reads is the
+     * one the ORIGINAL attempt published rather than a fresh one.</p>
+     *
+     * <p>Assumptions: a second step of the same run is left open, which is what makes the status finder
+     * answer an operationally real question. After a crash the resumed execution has to tell the steps
+     * that finished from the ones that were in flight when the process died, and it has only this table
+     * to tell them apart; a run holding one row of each state is the smallest arrangement in which a
+     * finder that ignored its status argument would be caught.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("a completed step preserves the warn tier the original attempt reached")
+    @DisplayName("a completed step preserves its tier and is distinguished from a step left in flight")
     void aCompletedStepPreservesItsTier() {
         commitOpenStep(RUN_ID, STEP_NAME, STARTED_AT);
+        commitOpenStep(RUN_ID, IN_FLIGHT_STEP_NAME, STARTED_AT.plusMinutes(2));
         this.transactionTemplate.executeWithoutResult(status -> {
             BatchRun open = this.repository.findByRunIdAndStepName(RUN_ID, STEP_NAME).orElseThrow();
             open.markCompleted(FINISHED_AT, RETURN_CODE_WARN);
@@ -406,6 +517,17 @@ class BatchRunRepositoryIT {
         assertThat(stored.getStatus()).isEqualTo(BatchRunStatus.COMPLETED);
         assertThat(stored.getFinishedAt()).isEqualTo(FINISHED_AT);
         assertThat(stored.getReturnCode()).isEqualTo(RETURN_CODE_WARN);
+
+        assertThat(this.repository.findByRunIdAndStatusOrderByIdAsc(RUN_ID, BatchRunStatus.STARTED))
+                .as("a resumed execution reads the steps still recorded as in flight, and the step that"
+                        + " reached a terminal state is not among them")
+                .extracting(BatchRun::getStepName)
+                .containsExactly(IN_FLIGHT_STEP_NAME);
+        assertThat(this.repository.findByRunIdAndStatusOrderByIdAsc(RUN_ID, BatchRunStatus.COMPLETED))
+                .as("and reads the finished steps separately, which is the pair of answers a redrive"
+                        + " needs before it decides what is left to do")
+                .extracting(BatchRun::getStepName)
+                .containsExactly(STEP_NAME);
     }
 
     /**
@@ -414,6 +536,11 @@ class BatchRunRepositoryIT {
      * <p>Assumptions: the failed state is asserted separately from the completed one because the
      * lifecycle constraint admits different column combinations for the two, and a mapping that
      * conflated them would satisfy one arm of that constraint while writing the other's status.</p>
+     *
+     * <p>Assumptions: the tier 8 written here is the FAIL step of the condition-code rubric
+     * {@code tests/README.md} section 8 sets out, and the arm of {@code ck_batch_run_lifecycle} in
+     * {@code V1__batch.sql} that admits a failed row is what this case pins. The rubric is the reference
+     * the value comes from; the row that carries it is target-side, so no golden file is cited.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
@@ -441,12 +568,31 @@ class BatchRunRepositoryIT {
      * <p>Assumptions: this constraint IS the idempotency policy, so it is asserted by provoking it
      * rather than by reading the migration. Without it a redriven step would open a second row, the
      * ledger's keyed lookup would return an arbitrary one of the two, and a completed step could be
-     * re-executed -- which is the single failure the ledger exists to prevent.</p>
+     * re-executed -- which is the single failure the ledger exists to prevent. The reference cannot
+     * supply a vector for this: the only restart directive in {@code app/jcl} is the inert comment at
+     * {@code app/jcl/DEFGDGD.jcl} L2, so a redrive is a behaviour the baseline never had.</p>
+     *
+     * <p>Assumptions: the second half of this case admits the row the constraint must NOT refuse, and
+     * the pairing is what makes the assertion mean something. A constraint declared on
+     * {@code step_name} alone would satisfy the refusal above exactly as the correct one does, and
+     * would then be discovered in production, where the nightly chain runs the same step names under a
+     * new run identifier every night and the second night's run would be unable to open any step at
+     * all. Asserting only the refusal cannot distinguish the two constraints; asserting the permitted
+     * row is what pins the key to the PAIR.</p>
+     *
+     * <p>Assumptions: the single-valuedness of {@code findByRunIdAndStepName} is a property of this
+     * constraint and not of the query. The finder declares no result limit and Spring Data applies
+     * none, so its {@code Optional} return is a claim that at most one row can match -- and the only
+     * thing that makes the claim true is the uniqueness asserted here. Were the constraint dropped, the
+     * signature would be unchanged and the failure would appear as an incorrect-result-size exception
+     * the first time two rows matched, which is why this case is what licenses every keyed read
+     * below.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("a second row for the same run and step is refused by the unique constraint")
+    @DisplayName("a second row for the same run and step is refused, while the same step under another"
+            + " run is admitted")
     void aDuplicateRunAndStepIsRefused() {
         commitOpenStep(RUN_ID, STEP_NAME, STARTED_AT);
 
@@ -458,6 +604,21 @@ class BatchRunRepositoryIT {
         assertThat(this.repository.count())
                 .as("the refused write left the one committed row and added nothing")
                 .isEqualTo(1L);
+
+        String followingRunId = "2022-07-19T02:00:00Z-nightly";
+        commitOpenStep(followingRunId, STEP_NAME, STARTED_AT.plusDays(1));
+
+        assertThat(this.repository.count())
+                .as("the same step name under a different run is a distinct row, so the constraint is"
+                        + " on the pair rather than on the step name")
+                .isEqualTo(2L);
+        assertThat(this.repository.findByRunIdAndStepName(followingRunId, STEP_NAME))
+                .as("each run resolves to its OWN row for that step, which is what keeps one night's"
+                        + " ledger from answering the next night's redrive question")
+                .isPresent()
+                .get()
+                .extracting(BatchRun::getStartedAt)
+                .isEqualTo(STARTED_AT.plusDays(1));
     }
 
     /**
@@ -539,6 +700,12 @@ class BatchRunRepositoryIT {
      * first-level cache and would pass on a column the database never stored. The column, its default
      * and its constraint are what this case is about.</p>
      *
+     * <p>Assumptions: the artifacts this case pins are the {@code DEFAULT 1} on the counter column and
+     * {@code ck_batch_run_attempt} in {@code V1__batch.sql}. No reference line is cited for the counter
+     * because the baseline counted nothing: a rerun of a mainframe step left no trace that it was the
+     * second attempt, which is the gap {@code app/jcl/DEFGDGD.jcl} L2 hints at in a comment and never
+     * closes.</p>
+     *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
@@ -601,6 +768,11 @@ class BatchRunRepositoryIT {
      * one of the three valid statuses -- so no row can isolate this one constraint, and asserting a
      * particular name here would fail on a correctly refused row whenever the engine happened to
      * evaluate the other predicate first. The predicate itself is pinned by the catalog case above.</p>
+     *
+     * <p>Assumptions: the artifact this case pins is {@code ck_batch_run_status} in
+     * {@code V1__batch.sql}, and the three values it closes the domain at are the constants
+     * {@code BatchRun.BatchRunStatus} declares. No reference line is cited because a lifecycle state is
+     * something only the target's ledger records.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
@@ -672,6 +844,10 @@ class BatchRunRepositoryIT {
      * which is the same constraint read from its other arm. Asserting only one arm would pass against
      * a predicate that had lost the other.</p>
      *
+     * <p>Assumptions: the artifact this case pins is {@code ck_batch_run_lifecycle} in
+     * {@code V1__batch.sql}, read from two of its three arms. No reference line is cited because the
+     * coherence being enforced is between columns the baseline never had.</p>
+     *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
@@ -704,6 +880,10 @@ class BatchRunRepositoryIT {
      * inverted pair yields a negative duration rather than an error. The refused row is otherwise
      * entirely valid -- a completed status with a clean tier -- so the case isolates the ordering and
      * nothing else.</p>
+     *
+     * <p>Assumptions: the artifact this case pins is {@code ck_batch_run_finished_after_started} in
+     * {@code V1__batch.sql}. No reference line is cited because the baseline recorded neither instant,
+     * so there is no prior ordering rule for this one to reproduce.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
@@ -777,7 +957,7 @@ class BatchRunRepositoryIT {
      * @param stepName the step name to write under; must not be {@code null}
      * @param startedAt the instant the step opened at; must not be {@code null}
      * @throws org.springframework.dao.DataIntegrityViolationException if the database refuses the row,
-     *     which two cases below provoke deliberately
+     *     which the duplicate-pair case above provokes deliberately
      */
     private void commitOpenStep(String runId, String stepName, LocalDateTime startedAt) {
         this.transactionTemplate.executeWithoutResult(status -> {

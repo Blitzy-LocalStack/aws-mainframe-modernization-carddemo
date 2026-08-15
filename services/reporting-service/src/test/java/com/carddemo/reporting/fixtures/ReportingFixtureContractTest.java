@@ -31,9 +31,10 @@ import org.junit.jupiter.params.provider.MethodSource;
  *
  * <h2>Purpose</h2>
  *
- * <p>Four fixture files sat under {@code src/test/resources/fixtures} with no consumer. Their
+ * <p>Fixture files sat under {@code src/test/resources/fixtures} with no consumer. Their
  * record lengths, field offsets, key domains and synthetic origin were therefore unverified claims,
- * and a fixture that no test reads cannot fail when it drifts. This class reads all four: it pins
+ * and a fixture that no test reads cannot fail when it drifts. This class reads every one of them:
+ * it pins
  * the directory to a closed set of names, decodes every row through the shared codec against the
  * registered descriptor, asserts the field values the reporting mappers actually consume, re-encodes
  * every row to prove byte identity, drives both mappers with fixture rows so the data reaches the
@@ -60,7 +61,7 @@ import org.junit.jupiter.params.provider.MethodSource;
  *
  * <h2>Assumptions: the synthetic-data markers are asserted, not assumed</h2>
  *
- * <p>One of the four fixtures is shaped exactly like a customer master and carries names, street
+ * <p>One of the fixtures is shaped exactly like a customer master and carries names, street
  * addresses, telephone numbers, a national identifier, a government-issued identifier and a date of
  * birth in every row. Its README attests that all of it is fabricated. Three structural markers make
  * that attestation checkable -- an unissued national-identifier area range, a reserved fictional
@@ -94,10 +95,49 @@ class ReportingFixtureContractTest {
      * the paragraph above is built on: an unrelated or accidentally committed file, or a fixture
      * written against no descriptor at all, would then enter this directory silently. Naming each
      * arrival costs one line and keeps the directory's contents an owned decision.</p>
+     *
+     * <p>Assumptions: {@code carddata.txt} is the second such admission. It is the card master of
+     * {@code app/cpy/CVACT02Y.cpy}, whose {@code 01 CARD-RECORD} at line 4 declares six named fields
+     * summing to 91 bytes and a trailing {@code FILLER PIC X(59)} at line 11, giving the 150-byte
+     * length its header comment at line 2 states and {@link CopybookLayout} registers as
+     * {@code CARD}. Its {@code CARD-CVV-CD} at line 7 occupies zero-based offset 27 for three bytes
+     * and is registered SENSITIVE, so the fixture carries the clear synthetic digits the copybook
+     * declares and nothing masks them here; masking and suppression are mapper decisions, and
+     * applying either in a fixture would break the byte-identical round trip asserted below.
+     * {@code CARD-EXPIRAION-DATE} at line 9 carries the second of the three baseline misspellings and
+     * is written at its declared offset under its declared name, because the correction to
+     * {@code cards.expiration_date} belongs to the entity and the mapper rather than to the data.</p>
+     *
+     * <p>Alternatives Considered: leaving this record out of the directory altogether, on the ground
+     * that NO reporting program reads the card master. That ground is real and is worth stating
+     * plainly so no reader infers a dependency that does not exist: {@code app/jcl/TRANREPT.jcl}
+     * declares its inputs at lines 65 to 74 as {@code TRANFILE}, {@code CARDXREF}, {@code TRANTYPE},
+     * {@code TRANCATG} and {@code DATEPARM} with no {@code CARDFILE} among them, matching the six
+     * {@code SELECT} clauses of {@code app/cbl/CBTRN03C.cbl} at lines 28 to 57; and the
+     * {@code EVALUATE LK-M03B-DD} at line 118 of {@code app/cbl/CBSTM03B.CBL} offers only
+     * {@code 'TRNXFILE'}, {@code 'XREFFILE'}, {@code 'CUSTFILE'} and {@code 'ACCTFILE'}, so
+     * {@code app/cbl/CBSTM03A.CBL} cannot reach the card master either. Admitting it anyway was
+     * chosen because {@code ReportingDtoMapperTest} already names {@code carddata.txt} among the ten
+     * records this context reads and binds it to the {@code CARD} descriptor, and a named binding
+     * with no record behind it is a claim rather than a check. The file makes that binding a
+     * decodable exemplar that the three structural cases below actually exercise.</p>
+     *
+     * <p>Alternatively the record could have carried all eighty-eight card numbers the sibling
+     * cross-reference and statement extracts mention. Rejected because nothing in this module joins
+     * against them, so eighty-four further rows would add no coverage and eighty-four chances to
+     * drift out of agreement with the account fixture. Five rows are carried instead, and they are
+     * chosen to make three properties checkable: two of them share account {@code 00000000050} so
+     * that the card-keyed control break of {@code app/cbl/CBTRN03C.cbl} line 181 -- whose band line
+     * 183 labels "Account Total" while keying on {@code WS-CURR-CARD-NUM} at line 137 -- is
+     * distinguishable from an implementation grouped by account; exactly one carries {@code 'N'} in
+     * {@code CARD-ACTIVE-STATUS}, without which column 91 would be indistinguishable from padding,
+     * since all fifty rows of the reference extract are {@code 'Y'}; and every
+     * {@code CARD-ACCT-ID} resolves in {@code acctfile.txt} with every {@code CARD-EMBOSSED-NAME}
+     * agreeing with the matching customer in {@code custfile.txt}.</p>
      */
     private static final List<String> EXPECTED_RESOURCES =
-            List.of("README.md", "acctfile.txt", "custfile.txt", "tcatbal.txt", "trancatg.txt",
-                    "trantype.txt");
+            List.of("README.md", "acctfile.txt", "carddata.txt", "custfile.txt", "tcatbal.txt",
+                    "trancatg.txt", "trantype.txt");
 
     /**
      * Resolves the fixture directory on the test classpath.
@@ -162,6 +202,16 @@ class ReportingFixtureContractTest {
                 Arguments.of("custfile.txt", "CUSTOMER", 500, 4),
                 Arguments.of("trantype.txt", "TRANTYPE", 60, 7),
                 Arguments.of("trancatg.txt", "TRANCAT", 60, 9),
+
+                // WHY : Assumptions: the card fixture is registered here rather than left merely
+                //       present in the directory listing, because being listed proves only that a
+                //       file exists. Its five rows against the 150-byte CARD descriptor are what
+                //       subject it to the same three structural cases as its siblings: the declared
+                //       length, the byte-for-byte round trip and the registered-descriptor check.
+                //       Trade-offs: the row count is stated here as well as being readable from the
+                //       file, so a row silently added or dropped fails this argument source rather
+                //       than passing a suite that only ever asserted "every row is 150 bytes".
+                Arguments.of("carddata.txt", "CARD", 150, 5),
 
                 // WHY : Assumptions: the balance fixture is registered last because it is the child
                 //       of the two reference fixtures above -- every one of its rows draws a type
@@ -256,7 +306,7 @@ class ReportingFixtureContractTest {
      * the sibling fixture trees agree -- {@code transaction-service}'s balance fixtures and
      * {@code reference-service}'s type and category fixtures all pad with zeroes.</p>
      *
-     * <p>Refactoring Rationale: three of this directory's five fixtures padded with blanks where
+     * <p>Refactoring Rationale: three of this directory's fixtures padded with blanks where
      * their extracts pad with zeroes, so the same record type was written two ways two directories
      * apart -- {@code reference-service}'s {@code trantype.txt} and this one differed in their last
      * eight bytes while claiming the same descriptor. The three are corrected and the convention is
@@ -276,6 +326,15 @@ class ReportingFixtureContractTest {
         return Stream.of(
                 Arguments.of("acctfile.txt", "ACCOUNT", ' '),
                 Arguments.of("custfile.txt", "CUSTOMER", ' '),
+
+                // WHY : Assumptions: the card record's pad is a BLANK, measured rather than assumed.
+                //       The FILLER span at columns 92 to 150 of app/data/ASCII/carddata.txt holds
+                //       exactly one distinct character across all fifty of its records, and that
+                //       character is a blank, so this row follows the account and customer extracts
+                //       rather than the three zero-padded ones. The fixture reaches the same byte by
+                //       a second, independent route: it omits the FILLER key entirely and lets
+                //       FixedWidthCodec rebuild the pad, which makes the value a codec fact.
+                Arguments.of("carddata.txt", "CARD", ' '),
                 Arguments.of("tcatbal.txt", "TCATBAL", '0'),
                 Arguments.of("trantype.txt", "TRANTYPE", '0'),
                 Arguments.of("trancatg.txt", "TRANCAT", '0'));

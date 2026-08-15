@@ -29,13 +29,6 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
 /**
  * Configures who may reach this context's endpoints, and which tokens are accepted at all.
  *
- * <p>This is the migrated form of the authorization check the baseline performs by reading the user type
- * out of the session structure it echoes between screen turns, declared at
- * {@code app/cpy/COCOM01Y.cpy} lines 19 to 44 with its two condition names for the administrator and
- * the ordinary user. That structure is storage the CLIENT hands back, so a client could in principle
- * assert its own user type; here the equivalent claim is signed by the identity provider and validated
- * on every request, so it cannot be asserted by the caller at all.</p>
- *
  * <p>Assumptions: this class has the same three responsibilities in every context of this repository --
  * a filter chain, the group-to-authority conversion, and the decoder that installs the token checks the
  * issuer alone does not make. It reads the same five property keys in every context, so the eight chains
@@ -48,6 +41,101 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
  * signature, the issuer and the time window, and the identity token this provider mints from the same
  * signing key satisfies all three. This class is where the declared keys became effective.</p>
  *
+ * <h2>Where the reference-only baseline decides authorization, and where this class decides it</h2>
+ *
+ * <p>Refactoring Rationale: the four transactions declared across the two resource definitions this
+ * context is migrated from carry resource security and command security both set to no, so the
+ * transaction monitor performs no per-resource authorization on any of them and each program settles
+ * the question for itself. Both settings sit on a single line per transaction:
+ * {@code app/app-transaction-type-db2/csd/CRDDEMOD.csd} line 32, for the transaction-type inquiry
+ * transaction declared at line 25 against the program named at line 26, and line 42 for the maintenance
+ * transaction declared at line 35 against the program named at line 36; and
+ * {@code app/app-vsam-mq/csd/CRDDEMOM.csd} line 24 and line 34 for the two transactions declared at
+ * lines 17 and 27. Each program authorizes in-program instead, by reading the one-character user type
+ * out of the communication area it is handed. This class authorizes per endpoint from the signed group
+ * claim, before any handler of this service runs, and the divergence is recorded in
+ * {@code docs/architecture/cobol-to-service-traceability.md}. What makes the change of mechanism worth
+ * making is where the deciding value is held rather than anything about the programs that hold it: the
+ * communication area is storage the client receives and returns on its next turn, so an in-program test
+ * reads a value the client was in possession of, whereas a claim inside a signed token cannot be
+ * asserted by the client at all -- an altered claim fails signature validation before any rule below is
+ * consulted.</p>
+ *
+ * <p>Assumptions: three of those four transactions drive this context and the fourth does not. The one
+ * declared at line 17 of {@code app/app-vsam-mq/csd/CRDDEMOM.csd}, against the account-inquiry program
+ * named at line 18, belongs to {@code account-service}: that context owns the account, customer and
+ * cross-reference data the program reads, and the alternate transport it was reached by is migrated
+ * alongside the data rather than beside this service's reference tables. No rule below authorizes a
+ * route for it, and none may be added here, because a route in this chain would put an authorization
+ * decision for another context's data in a file that context's reader never opens.</p>
+ *
+ * <p>Assumptions: the identity this chain authorizes on is the migrated form of a one-character field.
+ * {@code app/cpy/COCOM01Y.cpy} declares the user type at line 26 inside the communication area that
+ * begins at line 19, and gives it exactly two condition names, the administrator at line 27 valued
+ * {@code 'A'} and the ordinary user at line 28 valued {@code 'U'}. Those two become the identity
+ * provider's two group names, which arrive in the group claim and are turned into authorities by
+ * {@link JwtRoleConverter}. The mapping is closed at two because that copybook closes it at two.</p>
+ *
+ * <p>Assumptions: the two literal forms in that copybook are not interchangeable, and the declarations
+ * that use them sit four lines apart. The user-type condition names at lines 27 and 28 take QUOTED
+ * character values on a character picture, while the condition names at lines 30 and 31 -- belonging to
+ * the one-digit continuation field declared at line 29 -- take BARE numeric values on a numeric picture.
+ * Reading either family with the other's literal form yields a comparison that matches nothing and
+ * reports no error, so the pair of values this class depends on is the quoted pair at lines 27 and 28
+ * and nothing else in that copybook.</p>
+ *
+ * <h2>The continuation discriminator has no counterpart here</h2>
+ *
+ * <p>Refactoring Rationale: the one-digit field at line 29 of {@code app/cpy/COCOM01Y.cpy}, with the
+ * two condition names at lines 30 and 31 that tell a program's first turn at a screen from a later one,
+ * is how the baseline tracks where it is in a pseudo-conversational exchange. Nothing in this module
+ * carries it: no parameter of this class, no request parameter of any route it authorizes, and no field
+ * of any transfer object. A stateless handler that answers with a structured field-error body has no
+ * such distinction to draw, so error presentation is decided by the response body alone. The
+ * consequence of reintroducing a parameter of that shape is what keeps it out: per-turn state would be
+ * back on the wire, and the module would no longer be one that any task can serve, which is precisely
+ * what lets these tasks be scaled horizontally behind a load balancer with no sticky routing and no
+ * server-side session store.</p>
+ *
+ * <p>Assumptions: the communication area was the baseline's only channel for that state, so nothing
+ * else has to be accounted for. All four transactions are declared with a transaction work area of size
+ * zero -- {@code app/app-transaction-type-db2/csd/CRDDEMOD.csd} lines 26 and 36, and
+ * {@code app/app-vsam-mq/csd/CRDDEMOM.csd} lines 18 and 28 -- so no second per-task storage area was
+ * allocated for continuity to live in.</p>
+ *
+ * <h2>The correlation identity: relied on here, registered by the shared kernel</h2>
+ *
+ * <p>Alternatives Considered: three arrangements were available for
+ * {@code com.carddemo.common.web.CorrelationIdFilter} and two of the three are rejected. Declaring a
+ * {@code FilterRegistrationBean} for it in this file would hand this class explicit ordering control,
+ * and it is rejected because the shared kernel already declares one under the bean name
+ * {@code carddemoCorrelationIdFilterRegistration}, withheld only for a bean of that same name; a
+ * registration declared here under any other name would leave that condition unsatisfied and both would
+ * take effect, seating the filter twice. Adding a non-bean instance to this chain with
+ * {@code addFilterBefore} is the second arrangement and is also rejected, because it would cover only
+ * the requests this chain matches -- a container-level error page, and any refusal decided before the
+ * chain is entered, would then carry no identity at all, and those are the failures the identity is most
+ * needed for. Delegating to the shared registration is the third and is the one taken, which is also
+ * what keeps one file answerable for the effective order: an identity registered in two places has an
+ * order no single file can be read to establish.</p>
+ *
+ * <p>Assumptions: the position relied on is
+ * {@link com.carddemo.common.CardDemoCommonAutoConfiguration#CORRELATION_FILTER_ORDER}, the highest
+ * precedence available, applied to every request path. Because that position sits ahead of the security
+ * filter chain, the identity is already in the logging context before any filter below runs, so an
+ * authentication or authorization refusal decided here is recorded under the same identity as a request
+ * that reached a handler -- and the refusals are exactly the records an identity is wanted for, so a
+ * position behind the chain would leave them the only ones without it. The shared refusal renderers this
+ * chain installs read that identity from the logging context for the same reason.</p>
+ *
+ * <p>Assumptions: the filter's own contract is depended on and never restated here. An identity the
+ * caller supplies is echoed back unaltered, an identity the caller omits is minted rather than the
+ * request being refused, and the width is the twenty-four characters its own constant carries. This
+ * class names no header, no context key and no width, so one spelling governs every context and this
+ * file cannot introduce a second.</p>
+ *
+ * <h2>The shape of the route table</h2>
+ *
  * <p>Assumptions: reference WRITES are administrator-only and reference READS are not. The baseline
  * reaches the transaction-type maintenance screens from the administrative side while every other
  * context reads the seeded lookup rows to validate an address, so the split is by operation rather than
@@ -55,6 +143,43 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
  * enumerate every reference resource and would silently admit a write to one added later. "Not
  * administrator-only" means the ORDINARY-USER authority is still required: a read is open to both groups,
  * not to every holder of a valid token.</p>
+ *
+ * <p>Trade-offs: requiring the administrator authority on reads as well was the alternative and is
+ * declined. Reference data is the shared vocabulary the other bounded contexts read -- transaction types
+ * and categories to render a list, the disclosure-group rate to accrue interest, the seeded address rows
+ * to validate a customer address -- so an administrator-only read would oblige an ordinary session to
+ * escalate merely to populate the option list on a form. What is accepted in exchange is that an
+ * ordinary token can read every reference row this service publishes; that is the smaller cost, because
+ * the rows are a published vocabulary rather than customer data, and the write rules above still keep
+ * the vocabulary itself administrator-only.</p>
+ *
+ * <p>Assumptions: every rule below is written with the AUTHORITY predicate and none with the role
+ * predicate, and the two are not interchangeable here. {@link JwtRoleConverter} records the decision
+ * this matches at its own class documentation: the authority it grants is the identity provider's group
+ * name verbatim, with no role prefix added, and it names the role predicate as the mistake to avoid
+ * because that predicate would look for a prefixed authority the converter never produces. The failure
+ * that mismatch produces is why the form is asserted here rather than assumed -- the chain would build,
+ * the context would start, and every administrative request would be refused at run time with nothing
+ * at start-up to point at the cause.</p>
+ *
+ * <h2>Baseline attributes with no rule of their own</h2>
+ *
+ * <p>Assumptions: the four transactions are declared to back their unit of work out on abnormal
+ * termination, which is the attribute the target expresses as a transactional boundary rolled back when
+ * an exception propagates. That boundary is owned by the service layer of this module and by nothing in
+ * this class, and is named here only so a reader does not look for it among the rules below.</p>
+ *
+ * <p>Assumptions: all four are also declared not to restart, so the baseline holds no checkpoint
+ * contract for this context; the target's restart capability is an addition rather than a carried-across
+ * behaviour. Their trace configuration does not suppress confidential data either, which is why this
+ * migration masks sensitive values where a transfer object is built and never relies on a trace setting
+ * to withhold them. Neither attribute has a counterpart in this chain, and the interactive debugging
+ * facility the programs enable has no counterpart anywhere in the target.</p>
+ *
+ * <p>Assumptions: the closest baseline precedent for what this class does is the database authorization
+ * attribute at line 47 of {@code app/app-transaction-type-db2/csd/CRDDEMOD.csd}, which authorizes by the
+ * signed-on user identity. Authorizing from the identity carried on the request is the same idea; only
+ * the mechanism that makes the identity trustworthy differs.</p>
  *
  * @see CognitoAccessTokenValidator
  */
@@ -149,10 +274,10 @@ public class SecurityConfig {
     /**
      * The metric scrape path, reachable only from inside the task.
      *
-     * <p>Assumptions: the only configured consumer is task-local. The collector scrapes
-     * {@code 127.0.0.1:<container-port>} at {@code infra/modules/ecs-service/main.tf} lines 154 to 172
-     * and presents no authorization header, so a rule requiring a token would break the scrape rather
-     * than secure it.</p>
+     * <p>Assumptions: the only configured consumer is task-local. The collector configured at
+     * {@code infra/modules/ecs-service/main.tf} lines 154 to 172 reaches this path over the loopback
+     * address and presents no authorization header, so a rule requiring a token would stop the scrape
+     * rather than narrow it.</p>
      */
     public static final String METRIC_SCRAPE_PATH = "/actuator/prometheus";
 
@@ -165,18 +290,68 @@ public class SecurityConfig {
      */
     private static final List<String> LOOPBACK_RANGES = List.of("127.0.0.1/32", "::1/128");
 
+    /**
+     * The paths this service publishes its own API description at.
+     *
+     * <p>Refactoring Rationale: the chain granted none of these paths while the catch-all below denies,
+     * so every one of them answered 403 to a valid token of either group and 401 without one -- and this
+     * module's {@code application.yml} pins all three of the addresses they are served at and extends
+     * {@code spring.web.resources.static-locations} with {@code classpath:/openapi/} specifically so the
+     * packaged contract can be fetched. The configuration and the chain now agree. A sibling context
+     * reached the same arrangement first and found it unreachable only when it was exercised at run time,
+     * which is the reason this rule is stated here rather than left for the same discovery.</p>
+     *
+     * <p>Assumptions: five patterns are needed for three configured addresses. The generated document has
+     * a subtree beneath it because the browser view fetches its own settings from
+     * {@code /v3/api-docs/swagger-config}, and the view has an asset subtree because its markup, script
+     * and stylesheet ship inside a webjar served from {@code /swagger-ui/}. Granting only the three
+     * configured addresses would leave the page loading and then failing to render, which is a harder
+     * outcome to read than a refusal. The third address, {@code /reference-api.yaml}, is the committed
+     * contract the view is pointed at rather than a generated document.</p>
+     *
+     * <p>Alternatives Considered: {@code permitAll}, which is what many deployments give a documentation
+     * path and which would make the view usable from a browser with no token at all. Rejected because it
+     * would publish the complete shape of every operation, every field width and every authority
+     * requirement of this service to anything that can reach the listener, and this chain's whole posture
+     * is that nothing is reachable without a rule granting it. The document is not a secret -- it is
+     * committed to this repository -- but serving it anonymously from a running task widens the reachable
+     * surface and buys nothing an operator does not already have from the repository.</p>
+     *
+     * <p>Alternatives Considered: granting these to the administrator authority alone, on the reasoning
+     * that reading an API description is an operator activity. Rejected because the description is the
+     * contract an ordinary integrator writes a client against, and refusing it to the group permitted to
+     * call every read operation would make the document harder to obtain than the rows it describes.</p>
+     *
+     * <p>Assumptions: this rule is the same under every profile, and the per-environment difference lives
+     * entirely in configuration. The interactive view is left at its library default in the development
+     * overlay and switched off in the production one, so in production these patterns match a page that
+     * is not served while the document and the committed contract still are. Stating the rule
+     * unconditionally is what keeps that difference legible: a rule written to depend on the view being
+     * enabled would authorize differently per environment for a reason no reader of this file could
+     * see.</p>
+     *
+     * <p>Trade-offs: because the grant is by authority, a browser opened straight at the view is refused,
+     * since a navigation carries no bearer token. The page is reachable to a caller that presents one,
+     * which is how the document is fetched for a contract comparison. The accepted cost is that the view
+     * is not a click-and-read page; the alternative was to make the whole API description anonymous,
+     * which the paragraph above declines.</p>
+     */
+    private static final List<String> DOCUMENTATION_PATHS = List.of(
+            "/v3/api-docs", "/v3/api-docs/**", "/reference-api.yaml",
+            "/swagger-ui.html", "/swagger-ui/**");
+
     /*
-     * WHY : Alternatives Considered: one MANAGEMENT_PATH pattern of "/actuator/**" granted to
-     *       ADMIN_AUTHORITY, with the catch-all admitting either group. Authored and REJECTED on
-     *       the measured scrape configuration: infra/modules/ecs-service/main.tf configures the
-     *       task-local collector to scrape https://127.0.0.1:<container-port>/actuator/prometheus
-     *       every sixty seconds and sends NO authorization header of any kind, so an authority rule
-     *       over the whole namespace would not narrow who may read metrics -- it would stop the
-     *       only consumer that exists from reading them at all, and the loss would be silent
-     *       because a scrape failure is not a request failure anybody sees. Granting the two named
-     *       endpoints by network position keeps the scrape working while still refusing every
-     *       caller that arrives through the load balancer, and the catch-all is denyAll rather than
-     *       either-group so a route added without a rule fails closed instead of inheriting one.
+     * WHY : Alternatives Considered: one MANAGEMENT_PATH pattern granted to ADMIN_AUTHORITY, with
+     *       the catch-all admitting either group. Authored and REJECTED on the measured scrape
+     *       configuration: infra/modules/ecs-service/main.tf configures the task-local collector to
+     *       scrape the metric path on the loopback address and the container port, and to send NO
+     *       authorization header of any kind, so an authority rule over the whole namespace would
+     *       not narrow who may read metrics -- it would stop the only consumer that exists from
+     *       reading them at all, and the loss would be silent because a scrape failure is not a
+     *       request failure anybody sees. Granting the two named endpoints by network position keeps
+     *       the scrape working while still refusing every caller that arrives through the load
+     *       balancer, and the catch-all is denyAll rather than either-group so a route added without
+     *       a rule fails closed instead of inheriting one.
      */
 
     /**
@@ -188,13 +363,15 @@ public class SecurityConfig {
      * hold. Permitting one would reintroduce the sticky routing that horizontal scaling exists to
      * avoid.</p>
      *
-     * <p>Trade-offs: cross-site request forgery protection is disabled, which for a cookie-authenticated
-     * application would be a defect. It is not one here: every request authenticates with a bearer token
-     * that a browser does not attach automatically, so the confused-deputy condition the protection
-     * defends against cannot arise. Leaving it enabled would reject every non-browser client --
-     * including the load balancer -- for no gain.</p>
+     * <p>Trade-offs: cross-site request forgery protection is disabled, and the condition that makes it
+     * unnecessary is stated rather than assumed. The protection guards a session an ambient credential
+     * authenticates, and this chain has neither: every request authenticates with a bearer token, which a
+     * browser does not attach on its own, so the confused-deputy condition the protection defends against
+     * cannot arise. For a cookie-authenticated application the same setting would remove a control that
+     * was doing real work. Leaving it enabled here would reject every non-browser client -- including the
+     * load balancer -- for no gain.</p>
      *
- * <p>Assumptions: the four mutating methods are named explicitly rather than expressed as "not GET".
+     * <p>Assumptions: the four mutating methods are named explicitly rather than expressed as "not GET".
      * A negative match would also cover the methods the framework answers itself, and it would silently
      * change meaning if a method were added to the specification.</p>
      *
@@ -203,10 +380,12 @@ public class SecurityConfig {
      * EMPTY authority set for a token whose {@code cognito:groups} claim is absent, is not a collection,
      * holds a non-textual entry, or names only groups this application does not recognise -- and every
      * one of those tokens is still fully authenticated, because it carries a valid signature from the
-     * configured pool. A rule of {@code authenticated()} therefore admitted a principal that had been
-     * granted nothing, which is the missing-authorization defect the baseline does not have: the session
-     * structure at {@code app/cpy/COCOM01Y.cpy} lines 19 to 44 always carries one of exactly two user
-     * types, so no reachable baseline state corresponds to a signed-on user belonging to neither.</p>
+     * configured pool. A rule of {@code authenticated()} therefore admits a principal that has been
+     * granted nothing, and that state has no counterpart to reason from in the reference-only baseline:
+     * the communication area at {@code app/cpy/COCOM01Y.cpy} lines 19 to 44 always carries one of exactly
+     * two user types, so no reachable baseline state corresponds to a signed-on user belonging to
+     * neither group. Requiring an authority is how this chain keeps that property, and the divergence in
+     * mechanism is recorded in {@code docs/architecture/cobol-to-service-traceability.md}.</p>
      *
      * <p>Alternatives Considered: leaving the catch-all as {@code authenticated()} and adding an explicit
      * rule per published path, which is the shape the auth and card contexts use because each of those
@@ -241,7 +420,8 @@ public class SecurityConfig {
                         //       rendered -- an unsupported media type, an unacceptable representation, a
                         //       body over the published ceiling -- to its own error path, that forward
                         //       keeps the ORIGINAL request method. A refused POST therefore arrived at
-                        //       /error and matched the POST rule below, whose pattern is /**, so the
+                        //       /error and matched the POST rule below, whose pattern spans the whole
+                        //       tree, so the
                         //       forward was re-judged as a mutating call and answered
                         //       carddemo-admin-or-nothing. A caller owed 415 received 401 or 403 on a path
                         //       it never addressed, and an anonymous caller could not be told why its
@@ -273,6 +453,37 @@ public class SecurityConfig {
                         //       any method to either endpoint is judged by position alone.
                         .requestMatchers(BUILD_IDENTITY_PATH, METRIC_SCRAPE_PATH)
                         .access(loopbackOnly())
+                        // WHY : (1) Assumptions: the documentation grant is stated BEFORE the four
+                        //       method rules, and unlike the sibling contexts its position here is
+                        //       load-bearing rather than immaterial. Those rules pair a method with a
+                        //       whole-tree pattern, so they reach every path this service can be sent,
+                        //       documentation paths included; declared after them, a mutating request
+                        //       to a documentation path would be judged administrator-or-nothing while
+                        //       a read of the same path was judged by this rule. Declared here, one
+                        //       rule answers for those paths whatever method arrives, which is also
+                        //       what makes the outcome identical under both profiles.
+                        // WHY : (2) Assumptions: the accepted authorities are both CardDemo groups,
+                        //       matching the read half of the contract this document describes, so an
+                        //       administrator reaches it as well as an ordinary user. The reason the
+                        //       grant is by authority at all rather than openly is recorded on
+                        //       DOCUMENTATION_PATHS.
+                        .requestMatchers(DOCUMENTATION_PATHS.toArray(String[]::new))
+                        .access(businessAccess())
+                        // WHY : (1) Alternatives Considered: pairing each method with the reference
+                        //       subtree pattern, or enumerating the resources individually, instead of
+                        //       the whole tree. Both are rejected on the same consequence, and it is
+                        //       specific rather than defensive: the subtree rule beneath these admits
+                        //       EITHER group, so a resource added to that subtree without a matching
+                        //       write rule would have its mutating requests matched by that read rule
+                        //       and admitted to an ordinary token. Judging every mutating method here
+                        //       first makes administrator-only the DEFAULT for anything mutating, so a
+                        //       resource added later is guarded before anybody remembers to guard it.
+                        // WHY : (2) Assumptions: these four run after the health, operator and
+                        //       documentation rules on purpose. Each of those three is reached by a
+                        //       consumer that presents no token or only a read authority, and a rule
+                        //       pairing a method with the whole tree would otherwise capture them --
+                        //       which is why their position relative to this group is stated on the
+                        //       documentation rule above rather than left to be inferred.
                         .requestMatchers(HttpMethod.POST, "/**")
                         .hasAuthority(JwtRoleConverter.ADMIN_AUTHORITY)
                         .requestMatchers(HttpMethod.PUT, "/**")
@@ -306,13 +517,14 @@ public class SecurityConfig {
                 //       service's OpenAPI document declares for 401 and 403. Without them the framework
                 //       default answers with a status and a WWW-Authenticate header and no body at all,
                 //       because a refusal decided by the filter chain never reaches a controller and so
-                //       never reaches the shared @RestControllerAdvice. The 401 entry point delegates to
-                //       the framework's bearer-token entry point first, so the challenge header the OAuth
-                //       2.0 contract requires is composed exactly as before and only the body is added.
+                //       never reaches the shared error-rendering advice that common-lib contributes.
+                //       This class declares no advice of its own and maps no exception to a status; the
+                //       401 entry point delegates to the framework's bearer-token entry point first, so
+                //       the challenge header the OAuth 2.0 contract requires is composed exactly as
+                //       before and only the body is added.
                 .exceptionHandling(ApiErrorSecurityHandlers.renderingRefusals(clock))
                 .build();
     }
-
 
     /**
      * Builds the authorization manager that admits a request only from a loopback address.
@@ -364,6 +576,12 @@ public class SecurityConfig {
      * @param configuredUserGroupName the ordinary-user group name from runtime configuration; must
      *     equal {@link JwtRoleConverter#USER_AUTHORITY}
      * @return the authentication converter, never {@code null}
+     * @throws NullPointerException if either configured group name is {@code null}, which the shared
+     *     converter raises rather than defaulting, so an unset property stops the context instead of
+     *     producing a chain that authorizes nothing
+     * @throws IllegalStateException if either configured group name differs from the authority the
+     *     shared converter compiles in, which makes a renamed provider group a startup failure rather
+     *     than a service that authenticates every request and admits it to no route
      */
     @Bean
     public JwtAuthenticationConverter jwtAuthenticationConverter(

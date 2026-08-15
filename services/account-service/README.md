@@ -1599,8 +1599,8 @@ preserved too, for the same reason as the double space.
 
 ## Testing
 
-<!-- test-inventory: 32 tests + 8 integration tests -->
-**40** test classes: **32** unit and web-layer tests matching `*Test`, run by
+<!-- test-inventory: 34 tests + 8 integration tests -->
+**42** test classes: **34** unit and web-layer tests matching `*Test`, run by
 Surefire, and **8** integration tests matching `*IT`, run by Failsafe. Every one of
 the seven test packages also carries a `package-info.java`, because the
 documentation gate audits test sources too.
@@ -1645,10 +1645,50 @@ gives seven. Assumptions: the two counts are deliberately kept as two, because t
 class needs a database container — and a single figure covering both would hide that
 one of the eight needs neither.
 
+Refactoring Rationale: the unit figure then read 32 while the tree held 34, and the
+census check said so before a reader could: TWO classes were added to the `service`
+package and the marker above was not moved with either of them.
+`AddressValidationServiceTest` holds the allow-list edits directly, and
+`AccountViewServiceTest` holds the view composition. The figure is re-measured rather
+than incremented — `find src/test -name '*Test.java' | wc -l` gives 34 and
+`-name '*IT.java'` gives eight — and the `service` row below names both new classes,
+so the row and the figure can still be compared by reading. Assumptions: the two
+additions are recorded against one re-measurement rather than two, because they landed
+in the same package against the same marker; incrementing once per class is what
+produces a figure of 33 that matches neither the tree nor either author's intent, so
+the command is re-run instead of the number being adjusted.
+
+Refactoring Rationale: `AddressValidationServiceTest` is not a duplicate of
+`AccountAddressValidationTest`, which is why both are named. The two ask different
+questions of the same rules: the older class asserts that the update path RUNS the
+three edits and refuses a submission when one of them fails, while the new one asserts
+WHAT each edit decides — that the telephone target is gated on the general-purpose
+allow-list rather than the broader assigned one, that the state-and-postal pairing
+compares exactly four characters, and that the postal characters after the first two
+are carried with no rule applied to them at all.
+
+Refactoring Rationale: `AccountViewServiceTest` covers what no sibling did: which
+sentence each of the three composition outcomes carries, the exact bytes of the
+rejected-filter literal the program emits rather than the one it declares, the four
+sentinel values the input edit distinguishes, and the two `CBACT01C` report
+behaviours this service does not reproduce.
+
+Refactoring Rationale: the same row also gained `AccountViewRevisionTest`, which the
+tree already held and this table had never named. It is corrected here rather than
+left, because the row exists so that a reader can compare it against the figure above
+by counting, and a row naming nine of the ten classes in its package cannot serve
+that purpose — the mismatch reads as a missing test rather than as a missing line.
+Two further classes are still unnamed by the rows below, `InternalRouteClosureTest`
+in `config` and `AccountUpdateRequestContractTest` in `dto`. Both are recorded here
+rather than added, because they sit in rows this change has no other reason to touch
+and the census check above measures the two figures rather than row completeness; a
+reader counting either of those two rows against this paragraph will therefore find
+one more class in the tree than the row names.
+
 | Package | Classes | What they cover |
 |---|---|---|
 | `api` | `AccountControllerTest`, `AccountDispatcherTest`, `AccountContextContractTest`, `CustomerReadRouteTest`, `CardXrefControllerTest`, `CustomerControllerTest` | Web-layer binding, routing, status selection and the published contract, including the cross-reference and customer read routes |
-| `service` | `AccountUpdatePreservationTest`, `CustomerMasterReadTest`, `CardXrefByAccountReadTest`, `AccountAddressValidationTest`, `InquiryMessageListenerTest`, `RestReferenceAddressLookupTest`, `CustomerIdentifierCipherTest` | The transcribed rules — the update path including the 409-on-version-conflict branch, the read composition, the by-account cross-reference read, address validation, the inquiry consumer, and identifier protection |
+| `service` | `AccountViewServiceTest`, `AccountUpdatePreservationTest`, `AccountViewRevisionTest`, `CustomerMasterReadTest`, `CardXrefByAccountReadTest`, `AccountAddressValidationTest`, `AddressValidationServiceTest`, `InquiryMessageListenerTest`, `RestReferenceAddressLookupTest`, `CustomerIdentifierCipherTest` | The transcribed rules — the three-hop view composition with the verbatim sentence each of its four outcomes carries and the filter edit's four sentinels, the update path including the 409-on-version-conflict branch, the view and the concurrency revision beside it, the read composition, the by-account cross-reference read, that the update path runs the address edits, what each address edit decides against the five copybook allow-lists, the inquiry consumer, and identifier protection |
 | `config` | `SecurityConfigTest`, `InternalApiSecurityConfigTest`, `SecurityChainDispatchTest`, `SqsConfigTest`, `OpenApiDocumentTest`, `AccountApiContractGateTest`, `AccountConfigPackageTest`, `CustomerIdentifierProtectionConfigTest`, `CustomerIdentifierProtectionWiringTest`, `AwsIntegrationStartupTest`, `AwsStarterRuntimeIT` | Filter chain and authority mapping, the internal-token chain, how BOTH chains decide a container ERROR dispatch, listener wiring, the served OpenAPI document, the committed contract's agreement with the runtime it describes, and startup |
 | `mapper` | `AccountMapperTest`, `CardXrefMapperTest`, `AccountInquiryReplyMapperTest` | The anti-corruption layer — masking at the shared contract width, the misspelling correction, `FILLER` removal, the fixed-width reply |
 | `repository` | `AccountRepositoryIT`, `AccountScreenProjectionIT`, `AccountUpdateAtomicityIT`, `CardXrefRepositoryIT`, `CustomerMasterRepositoryIT`, `CustomerRepositoryIT`, `InquiryReplyLedgerIT` | Testcontainers-backed PostgreSQL — the account master's column contract, exact-decimal scale, date narrowing, version conflict and keyed windows; the joined screen projection and its outer-join arms; the two-write commit boundary of the update path; the cross-reference table's own contract together with the query plan the engine chooses for the by-account read that replaces `CXACAIX`; the customer master's column widths and schema ownership; the customer record's own contract — its layout, fixture bytes, keyed read, version column and keyed windows; and the inquiry reply ledger's second-delivery conflict |
@@ -1663,7 +1703,7 @@ All eight integration tests are named individually rather than described as a
 ```bash
 # WHY : Assumptions: Failsafe binds to `integration-test` and `verify`, so the
 #       eight `*IT` classes run under `verify` and NOT under `test`. A run that
-#       stops at `test` therefore exercises the 32 `*Test` classes and skips all
+#       stops at `test` therefore exercises the 34 `*Test` classes and skips all
 #       eight, and with them every Testcontainers-backed database assertion --
 #       including the by-account query that stands in for the CXACAIX alternate
 #       index and the plan assertion that proves it resolves through an index,

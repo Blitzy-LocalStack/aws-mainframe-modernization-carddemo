@@ -35,13 +35,30 @@ the comparison is `2065.00 >= 2065.01` -- false by a cent.
 
 Two properties make this folder more than the negation of its pair:
 
-- **the margin is the smallest representable one.** Money in this record is `S9(09)V99`, scale 2, so
-  one cent is the least significant unit the field can express. A fixture that exceeded the limit by
-  a dollar would pass under a comparison that had been implemented with a tolerance, a rounding step,
-  or a floating-point conversion; a one-cent excess does not.
+- **the margin is the smallest representable one.** Money in this record is `S9(09)V99`, scale 2, and
+  the working field the guard reads is declared `PIC S9(09)V99` at `app/cbl/CBTRN02C.cbl:187`, so one
+  cent is the least significant unit either side of the comparison can express. A fixture that
+  exceeded the limit by a dollar would pass under a comparison that had been implemented with a
+  tolerance, a rounding step, or a floating-point conversion; a one-cent excess does not.
 - **the date is deliberately inside the expiration date**, so that reason 102 is the reason the
   reject stream carries. Master section 7.1.4 records that 103 overwrites 102 when a record trips
   both, and a scenario meaning to isolate 102 has to avoid that.
+
+Trade-offs: the excess is **exactly `0.01`** rather than a comfortable margin, and the compromise that
+buys is a fixture with no diagnostic slack. An amount a dollar or a thousand dollars over the limit
+would reject too, and every assertion in this folder would still pass -- return code 4, one reject
+record, code `0102`, nothing posted -- while proving nothing about where the boundary actually sits.
+Only the one-cent excess, read together with `posting/boundary_exact_limit`'s exactly-equal amount,
+distinguishes the inclusive `>=` at `:407` from an exclusive `>`. What is given up is headroom: a
+fixture this tight is unforgiving of a future edit to either file, which is why the byte relation is
+asserted mechanically in section 5.2 rather than trusted to hold.
+
+Assumptions: the transaction date is kept **inside** the account's validity window on purpose, and the
+external behaviour this depends on is the unguarded fall-through at `:414-420` described in section 4.
+Reason 102 is assigned at `:410` and then left standing only because the expiration test at `:414`
+takes its `CONTINUE` arm; had the date been past `2024-12-13`, `:417` would have overwritten the
+reason with 103 and this folder would silently be testing the wrong rule. The date is therefore load
+bearing even though no date was reshaped to make it so.
 
 Alternatives Considered: reaching the excess by lowering the credit limit instead of raising the
 amount. Rejected because `posting/boundary_exact_limit` is this folder's pair and the pair only works
@@ -70,8 +87,10 @@ byte-identical to its seed in both folders is what makes the one-cent delta the 
 ```
 
 That is `:403-413`, reproduced faithfully. The projected balance is formed at `:403-405`, the guard
-is at **`:407`**, the reason is assigned at **`:410`** and the message literal is at **`:411`** --
-master section 7.1.1 gives both of the last two because a citation may reasonably point at either.
+is at **`:407`**, the reason is assigned at **`:410`** and the message is assigned by the single
+`MOVE` that spans **`:411-412`** -- the literal on `:411` and its `TO` clause on `:412` -- so a
+citation of the message names both lines. Master section 7.1.1 gives the reason and the message
+separately because a citation may reasonably point at either.
 
 **The reject is produced by the `ELSE` of a passing guard, not by a failing test.** `:407` asks
 whether the limit is at least the projected balance; the reject lives on the arm where it is not.
@@ -109,8 +128,16 @@ to.
 ## 3. Returns -- the expected outcome
 
 The return code is **4**, the soft-warn tier -- `:229-230` moves 4 because the rejected count is one.
-Master section 7.1.6 fixes that tier as a **fixture expectation value** belonging to the COBOL parity
+On the target side that tier is supplied by `dto/BatchReturnCode.SOFT_WARN`, whose numeric value is 4.
+Master section 7.1.6 fixes the tier as a **fixture expectation value** belonging to the COBOL parity
 suite's graded rubric, never to a Java build gate.
+
+> **Caution -- a Java build is never "warn-level green."** Tier 4 is a value this **job** returns
+> and this scenario expects, and the graded 0 / 4 / 8 / 16 rubric belongs to the COBOL parity suite
+> alone. Maven, Surefire, Failsafe and JUnit are binary: a test either passes or fails, and none of
+> them has an intermediate verdict to report. A test asserting this scenario passes -- fully green --
+> precisely **because** it observed the value 4; a build that finished with warnings has said nothing
+> about that at all. Conflating the two would let a genuine failure read as an expected soft reject.
 
 **The arithmetic, to the cent.**
 
@@ -131,8 +158,9 @@ suite's graded rubric, never to a Java build gate.
 | `[350:354]` | 4 | **`0102`** |
 | `[354:430]` | 76 | **`OVERLIMIT TRANSACTION`** followed by 55 spaces |
 
-`OVERLIMIT TRANSACTION` is 21 characters, so 55 spaces follow -- the padding `MOVE` supplies at
-`:411`, per the mechanism master section 6.3 records for the trailer description.
+`OVERLIMIT TRANSACTION` is 21 characters, so 55 spaces follow -- the padding the `MOVE` at `:411-412`
+supplies when a 21-character literal lands in a `PIC X(76)` field, per the mechanism master section 6.3
+records for the trailer description.
 
 **The rejected amount is recoverable from the reject stream**, at `[132:143]` of the verbatim image,
 which is what lets a comparison confirm that the record refused was the one-cent-over record and not
@@ -144,6 +172,14 @@ some other. Master section 7.1.7 records that the oracle reads the **card** out 
 migrated `ledger.transaction_rejects.reason_code` column is `SMALLINT` and holds the integer. Master
 section 7.1.2 fixes both representations and warns that an expectation must name which one it
 asserts.
+
+Assumptions: the two renderings are not stylistic variants and an assertion has to name which one it
+means. The leading zero exists because the field is a four-digit `PIC 9(04)` display field, so the
+value 102 occupies four character positions and pads on the left; the column is `SMALLINT`, so it
+stores the number and no width survives into storage. An expectation written as `"102"` against the
+trailer slice `[350:354]` fails on a byte the program is right to have written, and one written as
+`"0102"` against the column fails on a type. Both mistakes look like an off-by-one in the offset
+table, which is the reason this is stated here rather than left to the reader to infer.
 
 **Nothing else changes.**
 
@@ -193,10 +229,13 @@ record. Master section 5.5 forbids `float`, `double` and JSON numbers in the mon
 that the prohibition is asserted by an ArchUnit rule rather than left to review; this fixture is the
 data that would expose a violation of it.
 
-**Code 109 must not be expected.** `:556` assigns it inside the `INVALID KEY` branch of the account
-`REWRITE` at `:554-559`, on the posting path -- not taken here -- and writes no reject record. Master
-section 7.1.1 fixes the persisted domain as exactly `{100, 101, 102, 103}` and records 109 as a dead
-write.
+**Code 109 must not be expected.** `:556-558` assigns it -- the code on `:556` and the accompanying
+description across `:557-558` -- inside the `INVALID KEY` branch of the account `REWRITE` at
+`:554-559`, which sits in `2800-UPDATE-ACCOUNT-REC` on the posting path. That path is not taken here,
+and even when it is taken the assignment is a **dead write**: it lands in `WS-VALIDATION-FAIL-REASON`
+after `1500-VALIDATE-TRAN` has already been consulted at `:211`, so no reject record ever carries it.
+Master section 7.1.1 fixes the persisted domain as exactly `{100, 101, 102, 103}` and records 109 the
+same way.
 
 **No abend occurs.** The reachable `9999-ABEND-PROGRAM` sites are all status-guarded: the six opens
 (`:250`, `:268`, `:287`, `:305`, `:323`, `:341`), the feed read (`:363-366`), the reject write
@@ -328,6 +367,23 @@ particular fixture would still reject, for the wrong reason and by a different m
 7.1.3's identity is what keeps the scenario readable, and it holds only because the two cycle fields
 are zero.
 
+Assumptions: the projected balance is built from the **cycle accumulators**, never from the current
+balance, and that is a property of `:403-405` rather than a choice made here. `ACCT-CURR-CYC-CREDIT`
+at `[78:90]` and `ACCT-CURR-CYC-DEBIT` at `[90:102]` are the only two account fields the expression
+names; `ACCT-CURR-BAL` at `[12:24]` carries `+193.00` and is deliberately **not** an operand, even
+though it is the field a reader expects a credit-limit test to use. A fixture built on the other
+reading would still reject and would therefore not reveal the substitution -- which is why the two
+quantities are set far enough apart here that the arithmetic in section 3 can only be satisfied one
+way.
+
+Assumptions: **both cycle fields are `+0.00`**, which collapses `WS-TEMP-BAL` to the transaction amount
+alone and makes the boundary legible in a single field. With the accumulators at zero the expression
+`0.00 - 0.00 + 2065.01` reduces to the amount, so the one-cent excess is visible by comparing exactly
+two byte ranges -- the amount at `[132:143]` against the limit at `[24:36]` -- and no reader has to
+carry a running subtotal to check the claim. Non-zero accumulators would spread the boundary across
+three fields and, per master section 7.1.3, would oblige this document to disclose them; keeping them
+at their seed zeros avoids that and is why section 5.4 records no such disclosure.
+
 `ACCT-EXPIRAION-DATE` is spelled exactly as `app/cpy/CVACT01Y.cpy` line 11 spells it, preserved
 verbatim because this is copybook-side naming; master section 9.3 confines the three spelling
 corrections to target column names.
@@ -370,6 +426,14 @@ copies the entire 350-byte input image, so the reject's `[278:304]` carries
 processed". A reject record contains **no clock reading at all**, which is why `dalyrejs.expected` can
 be compared byte for byte with no field normalised.
 
+Assumptions: `DALYTRAN-PROC-TS` is left as **26 blanks** because it is a value the run produces, not a
+value the run consumes, and the determinism this buys depends on master section 8.1's posting
+normalisation set masking `PROC-TS` and only `PROC-TS` while asserting `ORIG-TS` literally. Populating
+it would put a clock reading into a compared byte range: either the comparison masks it, in which case
+the bytes were decorative, or it does not, in which case the scenario fails on the wall clock rather
+than on the credit limit. Leaving it blank keeps the folder free of run-varying bytes, which is what
+allows `dalyrejs.expected` to be compared across all 430 positions with nothing exempted.
+
 Everything else holds by construction: every byte here is literal, there is no random identifier and
 no environment-derived string, and each test provisions and tears down its own workspace, per master
 section 8.
@@ -381,15 +445,25 @@ section 8.
 The migrated job is `job/PostTransactionsJob`, and this scenario is one of the four the module's
 posting-validation assertions read directly:
 
-- **`dto/RejectReason.OVER_CREDIT_LIMIT`** carries the code `102` and the description `OVERLIMIT
-  TRANSACTION` **verbatim**, and renders both representations separately -- `codeField()` for the
+- **`dto/RejectReason.OVER_CREDIT_LIMIT`** carries the code `102` and, **verbatim**, the description
+  `OVERLIMIT TRANSACTION`. It renders both representations separately -- `codeField()` for the
   four-character `0102` and `code()` for the integer the `SMALLINT` column stores.
-- **`dto/PostingValidationResult.resolve`** takes `overCreditLimit` as the **strict complement** of
+- **`service/PostingValidationService`** computes the finding. Its over-limit predicate is **strictly
+  greater** -- projected balance strictly above the credit limit -- which is the exact complement of
+  the inclusive pass guard at `:407`, and the class states that complement rather than re-deriving a
+  second comparison of its own. It deliberately **does not resolve precedence**: it reports the two
+  boundary findings independently and hands both to the factory below, so the ordering rule lives in
+  one place instead of being re-decided at each call site.
+- **`dto/PostingValidationResult.resolve`** takes `overCreditLimit` as that **strict complement** of
   the inclusive guard at `:407`, so this folder is the fixture on the side where that argument is
   `true`. Unlike the two lookup failures, this outcome **carries a projected cycle balance**: the
   record's constructor requires a projection to be present exactly when one could have been computed,
   so a decision claiming reason 102 with a `null` projection is refused, and the number `:403-405`
   computed is asserted alongside the reason rather than inferred from it.
+- **`mapper/TransactionRejectRecordMapper`** owns the 430 bytes in both directions -- assembling a
+  350-byte daily-transaction image plus a validation outcome into the stream record and the row that
+  records it, and taking a stream record apart again. The decomposition in section 3 is that class's
+  contract restated as an expectation, not a second definition of it.
 - **`dto/RejectReason.lastWriterWins` and `baselineAssignmentOrder`** are how the target preserves
   master section 7.1.4's overwrite. `resolve` selects the surviving boundary reason as a **maximum**
   under the recorded assignment order rather than by an either-or, so a record tripping both
@@ -427,9 +501,17 @@ oracle's reject-slice constants agree with section 3 exactly: card `[262:278]`, 
 message `[354:430]`, `_REJ_RECLEN` 430.
 
 **The counts themselves are not expectations here.** This is one record, so the expectation is one
-processed and one rejected, not 300 and 38. And `_EXPECTED_CONSERVATION = Decimal("77954.70")` is a
-whole-cycle sum with no counterpart in a one-record fixture. The two loader-geometry constants do
-agree -- `_ACCT = (300, 11)` and `_TCAT = (50, 17)` match this folder's records and keys.
+processed and one rejected -- **not** `_EXPECTED_DAILY = 300`, `_EXPECTED_POSTED = 262` or
+`_EXPECTED_REJECTED = 38`, all of which describe the whole seed feed rather than this folder. For the
+same reason `_EXPECTED_CONSERVATION = Decimal("77954.70")` is a whole-cycle sum with no counterpart in
+a one-record fixture, and `_EXPECTED_TCAT_INIT_KEYS = 50` growing to `_EXPECTED_TCAT_FINAL_KEYS = 100`
+describes 50 rows updated and 50 created across that cycle, where this folder holds one row and
+creates none. The two loader-geometry constants do agree -- `_ACCT = (300, 11)` and `_TCAT = (50, 17)`
+match this folder's records and keys exactly, which is the check worth running against these files.
+
+None of the whole-cycle constants may be **contradicted** by this folder even though none is asserted
+of it: they are read from the same seed corpus these four files are derived from, so a claim here that
+the seed cycle posts some other number would be a claim about the same bytes.
 
 ### 8.3 The paired folder
 
@@ -458,6 +540,15 @@ card number, and account `00000000007` appears there under card `485945261287706
 **It represents no real person and no real account.** The seeds ship with the upstream open-source
 project as fabricated demonstration data, and master section 11.1 carries the tree-level attestation
 this scenario inherits. Identity and primary-account-number bytes are taken unchanged from the seed.
+
+Assumptions: this attestation is written down because **a well-formed primary account number is
+indistinguishable from a live one by inspection.** `4859452612877065` is sixteen digits in a real
+issuer-identifier shape and satisfies the same checksum a live card would, so nothing a reviewer can
+observe in the bytes separates fabricated demonstration data from a genuine payment instrument that
+had been pasted into a fixture. Provenance therefore has to be **attested against a named seed file
+and row** rather than assumed from the value's appearance -- which is what the table above does, and
+why it cites the row key and not merely the file. The obligation is inherited from master section 11.1
+and applies to every posting scenario because every one of them carries card-shaped data.
 
 **Exactly one business-rule field is reshaped away from its seed value.** In `dailytran.txt`,
 `DALYTRAN-AMT` at `[132:143]` is `0000020650A` = `+2065.01`, where seed row 1 carries `0000005047G` =
@@ -507,12 +598,18 @@ transaction master, category balances, account master and reject stream against
 values that make the scenario discriminating, so a layout mistake is caught in this module rather
 than surfacing later as a comparison failure.
 
-⚠️ Refactoring Rationale: this section stated that no test in this module opened the folder and that
-the corpus was a reference mirror. That was accurate when it was written and is no longer -- the
-parity class now seeds from here. It is corrected rather than deleted, because a reader who had been
-told these bytes drive nothing would edit them expecting no consequence, which is the most expensive
-mistake this folder admits.
+**Caution.** Assumptions: these four files are a **live input to a run**, not a reference mirror, and
+that rests on an external declaration this folder cannot see -- `PostTransactionsJobParityIT` naming
+`/fixtures/posting/` as its seed root. Editing any byte here therefore changes what the parity run
+asserts, and the failure would surface as a golden comparison mismatch in a different class, not as an
+error in this directory. That is the most expensive mistake this folder admits, so the dependency is
+stated at its point of use rather than left to be discovered from the test source.
 
-Assumptions: the sibling `preflight/**` and `interest/**` families are still mirrors -- no test
-declares either as a seed root -- so the tree serves two different purposes and only this one changes
-what a run asserts.
+Assumptions: the sibling families are driven inputs too, so nothing about this folder's status is
+special and no reader should infer that it is. Each family has a class that declares its own root and
+loads records from it -- `fixtures/preflight/` in `PreflightDailyTransactionsJobTest` and
+`fixtures/interest/` in `CalculateInterestJobTest`, alongside `fixtures/posting/` here in both
+`PostTransactionsJobParityIT` and `PostTransactionsJobTest`. `BatchFixtureContractTest` then holds
+**all four** families, `export/` included, to their declared geometry on top of that. The consequence
+worth carrying away is uniform rather than local: no fixture directory in this tree is inert, so an
+edit anywhere in it changes what some run asserts.
