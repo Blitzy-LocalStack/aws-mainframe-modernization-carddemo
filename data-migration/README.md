@@ -156,9 +156,20 @@ VSAM, Db2 or IMS. That is what makes the deployment satisfy the migration's
 > reading it would have written a second copy of something that already exists, or
 > concluded that a path they could see in the tree was not meant to be used. The
 > inventory is measured rather than remembered: `src/carddemo_migration/` holds
-> **thirty-seven** modules and `ruff check . --show-files` lists **seventy-four**
+> **thirty-seven** modules and `ruff check . --show-files` lists **seventy-seven**
 > governed files, and [`pyproject.toml`](pyproject.toml) states the same two numbers so a
 > disagreement between the two files is visible.
+>
+> Refactoring Rationale: the second figure read **seventy-four** here while
+> [`pyproject.toml`](pyproject.toml) read seventy-seven, so the cross-check this sentence
+> describes was broken for a third time and in the same way — the file that CONFIGURES the
+> gate had been re-measured and the file a reader consults had not. Both figures are now
+> set from the two commands named beside them, run against this tree; the module count was
+> already correct and is unchanged. The asymmetry is worth stating because it is what makes
+> the discrepancy easy to reintroduce: `data-migration/tests/test_gate_inventory.py` reads
+> the delimited region in `pyproject.toml` and compares it against the directory, so that
+> file cannot go stale without failing a test, while this sentence can — which is exactly
+> why the two are required to state the same numbers.
 >
 > Refactoring Rationale: these two figures read thirty-one and forty-nine here while
 > that file read thirty-two and fifty-six, so the cross-check this sentence describes
@@ -496,7 +507,10 @@ does not carry, and the refusal names both.
 Assumptions: `verify-all` is the one command that covers many datasets, and it is told where their
 bytes are rather than inventing a location. A `--manifest` is a JSON object carrying a non-empty
 `datasets` array whose entries each declare `dataset`, `source` and `encoding` — the same three
-values the four commands above take on the command line — and a relative `source` resolves against
+values the four commands above take on the command line, with `dataset` accepting **either**
+spelling exactly as their `--dataset` does, a seed token or a layout name, because a manifest entry
+that refused a spelling those commands accept would refuse a value an operator had just used
+successfully — and a relative `source` resolves against
 the manifest's OWN directory, so one manifest describes a delivery tree wherever that tree is
 mounted; the datasets are then verified in the manifest's declared order, because a load runs in a
 dependency order and the operator owns it. With no manifest the coverage is the seed registry's own
@@ -795,6 +809,19 @@ completed, `16` the environment or cluster could not be reached at all — exact
 the delivered [`credentials.py`](src/carddemo_migration/credentials.py) already does.
 No non-zero value is ever a pass.
 
+**Those four are the whole set, and two paths that used to escape it now report inside
+it.** A delivered extract that does not decode at its declared geometry is `8` from every
+command that reads one — including `decode-record` and all three per-dataset verification
+verbs, which previously ended in an interpreter traceback and status `1` when the fault
+came from the zoned or packed field codec rather than from the record codec above them.
+And **interrupting a running command with `Ctrl-C` is `8`**, not the interpreter's `130`:
+the entry point logs one sentence naming the subcommand that stopped, and the database
+work it had started is rolled back by the connection close that was already in place.
+`16` additionally covers an unusable `CARDDEMO_MASK_HMAC_KEY` (§5.7.1), which is now
+refused at the command-line boundary before any handler runs rather than from inside the
+first masked value — so a misconfigured key reports as the configuration fault it is
+instead of as a decode failure.
+
 > **Note — the graded rubric belongs to the parity oracle and to nothing else.** The
 > repository also contains a graded aggregate return-code rubric — `0` pass, `2`
 > usage, `4` warn, `8` fail, `16` fatal, aggregating the **worst** code across
@@ -878,7 +905,13 @@ Four obligations follow, and each is enforced somewhere rather than merely advis
   message naming this variable and the generation command but never the value: a value that
   is not valid standard base64 (which covers a passphrase and the URL-safe alphabet), a
   non-canonical base64 spelling, material decoding to fewer than 32 bytes, and material
-  that is a single repeated byte. Generate a conforming value with either of:
+  that is a single repeated byte. **The refusal now happens ONCE, at the command-line
+  boundary, before any subcommand is dispatched**, and it is classified `16` — the
+  environment tier — because no step has run at that point. It used to happen lazily,
+  from the first value a command masked, which put it in two places nobody would look for
+  a configuration fault: while printing an already-decoded record, and while composing the
+  message of a decode refusal — where an unusable key was reported as though the delivered
+  extract had failed to decode. Generate a conforming value with either of:
 
   ```bash
   openssl rand -base64 32

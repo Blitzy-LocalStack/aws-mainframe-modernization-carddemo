@@ -119,15 +119,30 @@ from carddemo_migration.config import (
     role_for_schema,
 )
 from carddemo_migration.copybook import layouts
+
+# WHY : Assumptions: `EbcdicRecordLengthError` is deliberately NOT imported, and its absence is a
+#   measurement rather than an omission. It subclasses `carddemo_migration.copybook.layouts`'s
+#   `RecordLengthError`, which `_DECODE_ERRORS` below names, so importing it would add a second
+#   spelling of a type already covered and invite a future `except` clause to name one of the pair
+#   and believe it had covered both. `EbcdicFieldDecodeError` IS imported because it is an
+#   independent `ValueError` subclass that no other named type covers.
 from carddemo_migration.copybook.ebcdic_codec import (
     EBCDIC_CODE_PAGE,
     EbcdicFieldDecodeError,
-    EbcdicRecordLengthError,
     decode_record,
     decode_record_fields,
     iter_ebcdic_records,
 )
 from carddemo_migration.copybook.layouts import RecordSpec
+
+# WHY : Assumptions: these two refusal types are imported at MODULE scope and that costs no
+#   additional module load, which is why it does not conflict with the deferred-import discipline
+#   the header records. `carddemo_migration.copybook.ebcdic_codec`, imported immediately above,
+#   already imports both `packed` and `zoned` for its own field decoding -- so by the time this
+#   line runs both modules are in the interpreter's cache. Deferring them would buy nothing and
+#   would put two class names behind a function call in a tuple every `except` clause reads.
+from carddemo_migration.copybook.packed import PackedDecimalError
+from carddemo_migration.copybook.zoned import ZonedDecimalError
 from carddemo_migration.credentials import (
     EXIT_FAILED,
     EXIT_FATAL,
@@ -254,12 +269,37 @@ _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 #   back from an object key identically to the way it was typed.
 _BUSINESS_DATE_PATTERN: Final[re.Pattern[str]] = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
-# Assumptions: the two decode failures a delivered extract can produce -- a record that is
-#   not the declared length, and a field that cannot be decoded at its declared geometry --
-#   are SIBLING ``ValueError`` subclasses rather than one hierarchy, so both are named here.
-#   Naming only :class:`~carddemo_migration.copybook.layouts.LayoutError` would leave
+# Assumptions: the decode failures a delivered extract can produce are SIBLING ``ValueError``
+#   subclasses rather than one hierarchy, so every one of them is named here. Naming only
+#   :class:`~carddemo_migration.copybook.layouts.LayoutError` would leave
 #   :class:`~carddemo_migration.copybook.layouts.RecordLengthError` uncaught, which is the
 #   commoner of the two in practice: a truncated transfer produces it on the first record.
+# WHY : Refactoring Rationale: this set held exactly TWO entries and now holds five, and the three
+#   additions are the whole of the remaining decode surface rather than a sample of it. The
+#   omission was reachable from every command that reads an extract: the committed
+#   `AWS.M2.CARDDEMO.DALYTRAN.PS.INIT` initializer carries four NUL bytes where `TRAN-CAT-CD`
+#   is declared, so decoding it raised `ZonedDecimalError` -- a `ValueError` sibling of
+#   `LayoutError`, matched by neither entry -- and `decode-record`, `verify-row-counts`,
+#   `verify-checksum` and `verify-money-parity` all ended in a raw traceback with status 1, which
+#   is outside the 0/2/8/16 classification README section 5.6 publishes and which a Step Functions
+#   `Choice` cannot branch on. The membership is now derived from the codecs rather than guessed:
+#   `zoned.ZonedSpanWidthError` and `packed.PackedSpanWidthError` are subclasses of the two named
+#   bases and so need no entry of their own, and `ebcdic_codec.EbcdicRecordLengthError` is a
+#   subclass of `layouts.RecordLengthError` and was already covered -- but
+#   `ebcdic_codec.EbcdicFieldDecodeError`, which that codec publishes as its single field-decode
+#   fault type, is an independent `ValueError` subclass and was NOT. All three gaps have one cause
+#   and are closed together.
+# WHY : Alternatives Considered: catching `ValueError` and being done with it. Rejected because it
+#   is the one widening that cannot be audited: it would also swallow a `ValueError` raised by a
+#   programming mistake in this package -- an int() over an operator-supplied string, a bad enum
+#   lookup -- and report it to an operator as though the delivered extract were malformed, sending
+#   them to inspect bytes that are fine. Naming the five means a genuinely unexpected `ValueError`
+#   still reaches the interpreter, where it belongs.
+# WHY : Assumptions: quoting these messages is safe. Every one of them is composed by this
+#   distribution, and both numeric codecs already withhold the offending content for a field the
+#   layout marks sensitive -- `zoned._render_content` returns a placeholder and `packed` withholds
+#   unconditionally -- so the sentence carries the record ordinal, the field name and its declared
+#   geometry and no cardholder value. `_reported` sanitises what is left.
 # Trade-offs: they are caught rather than propagated because README.md section 5.2
 #   contracts a non-zero EXIT for each of them, and an orchestrated batch state branching on
 #   a numeric return code cannot branch on a traceback. The cost is that the stack is not
@@ -274,6 +314,9 @@ _SEED_ENCODINGS: Final[tuple[str, ...]] = ("ascii", "ebcdic")
 _DECODE_ERRORS: Final[tuple[type[Exception], ...]] = (
     layouts.LayoutError,
     layouts.RecordLengthError,
+    EbcdicFieldDecodeError,
+    ZonedDecimalError,
+    PackedDecimalError,
 )
 
 # Refactoring Rationale: the shared refusal set used to be a module constant here. It is now
@@ -586,11 +629,22 @@ def _decode_record(arguments: argparse.Namespace) -> int:
             )
         else:
             fields = decode_record(image, layout, code_page=arguments.code_page)
-    except EbcdicRecordLengthError as failure:
-        print(str(failure), file=sys.stderr)
-        return EXIT_FAILED
-    except EbcdicFieldDecodeError as failure:
-        print(str(failure), file=sys.stderr)
+    # WHY : Refactoring Rationale: this refuses on the SHARED `_DECODE_ERRORS` set where it had two
+    #   hand-written clauses naming `EbcdicRecordLengthError` and `EbcdicFieldDecodeError`. Those
+    #   two are what the ebcdic codec raises, and they are not what the codecs BENEATH it raise: a
+    #   field whose declared span holds a value the numeric decoders refuse arrives as
+    #   `ZonedDecimalError` or `PackedDecimalError`, sibling `ValueError` subclasses that neither
+    #   clause matched -- so `decode-record` against the committed TRAN initializer, whose
+    #   `TRAN-CAT-CD` span is four NUL bytes, ended in a traceback with status 1. Refusing on the
+    #   same set the load and verification handlers refuse on is what makes the four commands agree
+    #   about what a malformed delivery is, which was the actual defect: the same file decoded by
+    #   two commands produced a classified status from one and a traceback from the other.
+    # WHY : Assumptions: `_reported` renders the message rather than `str(failure)` directly. All
+    #   five members are package-authored refusals so their own wording is quoted, and routing them
+    #   through the shared renderer means anything outside printable ASCII in a field name or a
+    #   decoded fragment is replaced rather than written into a line-oriented log verbatim.
+    except _DECODE_ERRORS as failure:
+        print(_reported(failure), file=sys.stderr)
         return EXIT_FAILED
     except OSError as failure:
         # WHY : Assumptions: the path is SANITISED before it is echoed and the failure is
@@ -981,8 +1035,11 @@ def _resolved_generation(
 
     Purpose
     -------
-    Let the orchestrator omit ``--generation`` -- which it does, and always did -- by reserving a
-    number durably instead of requiring the caller to have computed one.
+    Reserve the number durably instead of requiring a caller to have computed one, which is what
+    let the ``--generation`` option be withdrawn from the command line entirely: the orchestrator
+    never passed it, and no operator can now, so this is the only place a number is chosen. A
+    caller inside this process may still pin one through the ``generation`` attribute, which is why
+    the supplied value is honoured below rather than ignored.
 
     Parameters
     ----------
@@ -1036,12 +1093,24 @@ def _resolved_generation(
     #   the reservation exists to recognise -- a retry that is not recognised consumes a second
     #   generation for a byte-identical copy. The orchestrator already publishes this variable to
     #   every batch task, so an absent value means the command is running outside that context.
+    # WHY : Refactoring Rationale: the refusal named ONE remedy and offered TWO, and the second
+    #   could not be carried out. It ended "or pass --generation explicitly", but `--generation` was
+    #   withdrawn from every subparser when the reservation above replaced it, so an operator
+    #   following that advice got argparse's usage error and status 2 -- a refusal that reads as
+    #   actionable and sends the reader to a dead end is worse than a shorter one, because it costs
+    #   an attempt before it teaches anything. The clause is removed rather than reworded: setting
+    #   the execution name is the whole remedy, and it is the same value the orchestrator already
+    #   publishes to every batch task.
+    # WHY : Assumptions: the parameter itself is NOT removed. `getattr(arguments, "generation",
+    #   None)` above still honours a value composed programmatically -- `_refresh_steps` passes
+    #   `generation=None` explicitly, and a caller inside this process may pin one -- so the
+    #   distinction is that the pin is reachable from Python and not from the command line. Naming a
+    #   command-line option in a message is a promise about the parser; naming a parameter is not.
     if not execution_token:
         raise _StagingEnvironmentError(
-            f"no --generation was given and {_EXECUTION_TOKEN_VARIABLE} is not set, so a "
+            f"no generation was given and {_EXECUTION_TOKEN_VARIABLE} is not set, so a "
             f"generation cannot be reserved for {descriptor.token!r}; set "
-            f"{_EXECUTION_TOKEN_VARIABLE} to the orchestrator execution name, or pass "
-            f"--generation explicitly"
+            f"{_EXECUTION_TOKEN_VARIABLE} to the orchestrator execution name"
         )
     return reserve_generation(
         client,
@@ -1436,7 +1505,9 @@ def _refresh_steps(
     Returns
     -------
     tuple[tuple[str, Callable[[argparse.Namespace], int], argparse.Namespace], ...]
-        One (label, handler, arguments) triple per step, in the order they must run.
+        One (label, handler, arguments) triple per step, in the order they must run. A dataset whose
+        layout ships no committed extract gets the staging step and the allocator reconciliation
+        only, because there is nothing to load and its target is required to stay empty.
 
     Raises
     ------
@@ -1484,17 +1555,42 @@ def _refresh_steps(
     )
     steps: list[tuple[str, Callable[[argparse.Namespace], int], argparse.Namespace]] = [
         ("stage the generation", _stage_dataset, staging),
-        ("load the target table", _load_dataset, reading),
+    ]
+    # WHY : Refactoring Rationale: the load and the three verification passes are composed ONLY for
+    #   a dataset whose layout ships a committed extract, and they were composed unconditionally.
+    #   Exactly one registered token fails that test and it made the nightly chain fail every night:
+    #   `transactions` names `AWS.M2.CARDDEMO.DALYTRAN.PS.INIT`, the single 350-byte record
+    #   `app/jcl/TRANFILE.jcl` primes the TRANSACT cluster from, whose unpopulated category code is
+    #   four NUL bytes -- so reading it as a whole transaction raises a zoned-decimal refusal and
+    #   the refresh stopped at step 2 of 6 with status 8 for that branch of the scheduled Map.
+    # WHY : Assumptions: loading it would be WRONG rather than merely difficult, which is what makes
+    #   skipping the right resolution instead of finding a decodable initializer. Two authorities in
+    #   this distribution already say so and the gate already honours both: `readers/transaction.py`
+    #   declares `HAS_COMMITTED_SEED_DATASET = False`, and `verify/row_counts.py` names TRAN the
+    #   unseeded layout and REQUIRES `ledger.transactions` to hold zero rows after the ETL, because
+    #   posting is what fills it. A load of even one record would therefore fail verification pass 1
+    #   of the whole migration.
+    # WHY : Assumptions: the predicate is `readers.ships_committed_extract` rather than a comparison
+    #   against TRAN, so this decision and the combined gate's own coverage decision cannot disagree
+    #   -- `_gate_extracts` filters on exactly the same call. Naming the layout here would be a
+    #   third copy of a rule two modules already publish.
+    # WHY : Trade-offs: the STAGING step above still runs for such a dataset, and the generation it
+    #   writes is the point. `app/jcl/TRANFILE.jcl` REPROs that initializer into the TRANSACT
+    #   cluster in the baseline, so the bytes are a real dataset generation with real provenance;
+    #   staging them keeps the `ledger/transactions` generation family populated and its retention
+    #   sweep meaningful, which excluding the token from the orchestrator's Map would have silently
+    #   stopped. What is skipped is only the part that cannot be correct.
+    if ships_committed_extract(descriptor.layout_name):
+        steps.append(("load the target table", _load_dataset, reading))
         # WHY : Assumptions: the three verification passes run in the fixed order 1, 2, 3 and each
         #   is mandatory, because none subsumes another: row counts catch a load that stopped early
         #   or ran twice, the checksum catches a corrupted field where the counts agree, and money
         #   parity catches a sign overpunch or a misplaced decimal point where both the counts and
         #   the field bytes agree. A refresh that reported success on fewer than three would report
         #   a load as verified that nothing had checked in the dimension that failed.
-        ("verify row counts", _verify_row_counts, reading),
-        ("verify the record checksum", _verify_checksum, reading),
-        ("verify money parity", _verify_money_parity, reading),
-    ]
+        steps.append(("verify row counts", _verify_row_counts, reading))
+        steps.append(("verify the record checksum", _verify_checksum, reading))
+        steps.append(("verify money parity", _verify_money_parity, reading))
     family = seed_datasets.backup_family(descriptor.token)
     if family is not None:
         # WHY : Assumptions: the backup generation is staged LAST, after the load and all three
@@ -1680,10 +1776,25 @@ def _refresh_dataset(arguments: argparse.Namespace) -> int:
                 )
                 return status
 
-    _LOGGER.info(
-        "refreshed %s: staged, loaded into the owning schema and verified by all three passes",
-        descriptor.token,
-    )
+    # WHY : Assumptions: the closing line states WHICH refresh happened rather than one sentence
+    #   for both shapes, because the two are genuinely different claims and an operator reading
+    #   a nightly log has to be able to tell them apart. Saying "loaded and verified" for the
+    #   one dataset that is deliberately neither would be the same overstatement the chain used
+    #   to make in the other direction, when a state described as replacing ten IDCAMS master
+    #   loads only copied bytes.
+    if ships_committed_extract(descriptor.layout_name):
+        _LOGGER.info(
+            "refreshed %s: staged, loaded into the owning schema and verified by all three passes",
+            descriptor.token,
+        )
+    else:
+        _LOGGER.info(
+            "refreshed %s: staged the generation only. Its layout ships no committed extract -- the"
+            " transaction master is produced by posting, not seeded -- and the row-count baseline"
+            " requires its table to hold zero rows after the ETL, so there is nothing to load and"
+            " nothing to verify against",
+            descriptor.token,
+        )
     return EXIT_OK
 
 
@@ -3215,15 +3326,30 @@ def _manifest_entries(path: Path) -> tuple[tuple[str, str, str], ...]:
                 f"entry {position} of {path} must give a non-empty string for each of"
                 f" {', '.join(_MANIFEST_ENTRY_KEYS)}"
             )
-        dataset, source, encoding = values
+        declared_dataset, source, encoding = values
         # Assumptions: the dataset name and the seed form are validated HERE, before the first
         #   pass runs, rather than being discovered when a later entry fails. An aggregate that
         #   stops at the first failure would otherwise report pass 1 of dataset 1 as green and then
         #   abort on a typo in entry 9, leaving an operator unsure which half of the run to trust.
+        # WHY : Refactoring Rationale: the declared name is NORMALISED through `_layout_identity`
+        #   before it is validated, and it was not. README section 5.2 states that a manifest entry
+        #   declares "the same three values the four commands above take on the command line", and
+        #   those four accept either spelling -- the orchestrator's plural snake-case seed token or
+        #   the upper-case copybook layout name -- because their `--dataset` is normalised by the
+        #   same function. This validation checked the layout registry alone, so `transaction_types`
+        #   was refused as usage error 2 in a manifest while `verify-checksum --dataset
+        #   transaction_types` accepted it: one documented vocabulary, two behaviours, and an
+        #   operator transcribing a working command into a manifest hit the difference.
+        # WHY : Assumptions: the NORMALISED name is what the entry carries onward, because that is
+        #   what the three handlers, the layout registry and the load-target registry are all keyed
+        #   by -- so a token spelling is accepted at the boundary and never travels past it.
+        dataset = _layout_identity(declared_dataset)
         if dataset not in registered:
             raise _ManifestError(
-                f"entry {position} of {path} names dataset {dataset!r}, which no layout registers;"
-                " list-datasets reports the admitted names"
+                f"entry {position} of {path} names dataset {declared_dataset!r}, which is neither a"
+                f" layout name ({', '.join(layouts.names())}) nor a seed dataset token"
+                f" ({', '.join(seed_datasets.seed_dataset_tokens())}); list-datasets reports the"
+                " admitted names"
             )
         if encoding not in _MANIFEST_ENCODINGS:
             raise _ManifestError(
@@ -3235,6 +3361,61 @@ def _manifest_entries(path: Path) -> tuple[tuple[str, str, str], ...]:
             (dataset, str(resolved if resolved.is_absolute() else path.parent / resolved), encoding)
         )
     return tuple(entries)
+
+
+def _pass_arguments(
+    arguments: argparse.Namespace, dataset: str, source: str, encoding: str
+) -> argparse.Namespace:
+    """Compose the namespace one per-dataset verification pass is invoked with.
+
+    Purpose
+    -------
+    Build the argument object the three per-dataset handlers read, from the selector triple a
+    manifest entry declares PLUS every member :func:`main` places on the invocation rather than the
+    command line. Composing it in one place is what keeps the aggregate command's invocation
+    identical to the per-dataset command's: the three handlers are the real ones, so a member they
+    read and this namespace lacks is not a smaller invocation but a failed one.
+
+    Parameters
+    ----------
+    arguments : argparse.Namespace
+        The aggregate command's own namespace, read for the invocation-scoped members. Only
+        ``work_root`` is one today.
+    dataset : str
+        The record layout the pass is to verify, already normalised from either accepted spelling.
+    source : str
+        The extract the pass is to read: an absolute local path, or a key in the object-store
+        scheme.
+    encoding : str
+        ``ascii`` or ``ebcdic``, as the manifest entry declared it.
+
+    Returns
+    -------
+    argparse.Namespace
+        A namespace carrying ``dataset``, ``source``, ``encoding`` and ``work_root``.
+
+    Raises
+    ------
+    AttributeError
+        If the aggregate command's namespace carries no ``work_root``, which means this was called
+        from somewhere other than a dispatched subcommand -- :func:`main` sets it on every one.
+    """
+    # WHY : Alternatives Considered: forwarding the whole namespace with the three selectors
+    #   overwritten -- `argparse.Namespace(**vars(arguments), dataset=..., ...)` -- was rejected. It
+    #   would also carry `manifest`, `source_root` and `sql_root` into a per-dataset handler that
+    #   reads none of them, so a future handler consulting one of those by mistake would silently
+    #   pick up the AGGREGATE command's value instead of failing. Naming the members explicitly
+    #   keeps the per-pass invocation exactly as wide as the per-dataset command line is.
+    # WHY : Assumptions: `work_root` is read through attribute access rather than `getattr` with a
+    #   default. A default would let this compose a namespace pointing at a directory nothing
+    #   created, and the failure would then arrive as a materialised object written outside the
+    #   invocation's scratch space rather than as the programming error it is.
+    return argparse.Namespace(
+        dataset=dataset,
+        source=source,
+        encoding=encoding,
+        work_root=arguments.work_root,
+    )
 
 
 def _verify_manifested(arguments: argparse.Namespace) -> int:
@@ -3277,13 +3458,20 @@ def _verify_manifested(arguments: argparse.Namespace) -> int:
     for dataset, source, encoding in entries:
         for label, verify in _VERIFICATION_PASSES:
             print(f"=== {dataset}: {label} ===")
+            # WHY : Refactoring Rationale: the namespace is composed by `_pass_arguments`, which
+            #   carries the invocation-scoped members forward, where this line built one from the
+            #   three manifest values alone. That omission made this command unusable: every pass
+            #   resolves its source through `_reader_and_records`, which reads `work_root` -- the
+            #   directory `main` opens per invocation and an object-store source is materialised
+            #   into -- so the FIRST pass of the FIRST dataset raised AttributeError and the whole
+            #   documented manifest procedure exited on a traceback before verifying anything.
             # Trade-offs: each pass is invoked through the SAME handler the individual subcommand
             #   invokes, with a namespace built here, rather than through an extracted body the two
             #   share. What that costs is one synthesised namespace per pass; what it buys is that
             #   there is exactly one implementation of each pass, so this command cannot come to
             #   verify something subtly different from what `verify-checksum` verifies -- which is
             #   the failure mode an aggregate re-implementation has.
-            status = verify(argparse.Namespace(dataset=dataset, source=source, encoding=encoding))
+            status = verify(_pass_arguments(arguments, dataset, source, encoding))
             if status != EXIT_OK:
                 # Assumptions: the run stops at the FIRST failing pass rather than continuing to
                 #   collect every failure, and the stop is the contract README section 5.2 states.
@@ -3390,6 +3578,63 @@ def _verify_registry(arguments: argparse.Namespace) -> int:
         _LOGGER.error("%s", _reported(exc))
         return EXIT_FAILED
 
+    # WHY : Refactoring Rationale: the resolved extracts are memoised HERE, in one closure both
+    #   record-reading passes go through, and the change repairs a defect that only the deployed
+    #   configuration could produce. `sources` holds whatever `_gate_source` returned, which under
+    #   the deployment's own staging root -- `s3://<bucket>/<prefix>`, composed by
+    #   infra/modules/step-functions-batch -- is an object-store key rather than a path. Pass 2
+    #   reached it through `_records_for`, which materialises such a key into `work_root` first;
+    #   pass 3 built `Path(sources[token])` directly, and `Path` collapses `s3://bucket/key` to the
+    #   relative directory `s3:/bucket/key`, so the one pass that certifies money totals opened a
+    #   file that cannot exist. The gate therefore failed with a bare ENOENT after passes 1 and 2
+    #   had already succeeded -- in the deployed form, and only there, which is why a local run
+    #   certified 3 of 3 and the nightly chain's verification state could never pass.
+    # WHY : Assumptions: the resolution is MEMOISED per token rather than repeated, so pass 3 reads
+    #   the very bytes pass 2 read and digested rather than fetching the object a second time. A
+    #   second fetch would be two transfers of the same object per dataset and, worse, would let the
+    #   two passes disagree about the source if the object were replaced between them -- which is
+    #   exactly the disagreement a three-pass gate exists to detect rather than to contain.
+    # WHY : Trade-offs: it is memoised LAZILY -- inside the closure -- rather than resolved for all
+    #   eleven datasets in the setup block above. Eager resolution was the alternative and is
+    #   rejected on two counts: it transfers every extract even when pass 1 fails and no extract
+    #   is ever read, and it moves every `materialised ...` log line ahead of pass 1's own
+    #   output, so an operator reading a failed run could no longer see which pass read what.
+    materialised: dict[str, Path] = {}
+
+    def _local_extract(token: str, layout_name: str) -> Path:
+        """Resolve one dataset's configured extract to a local path, at most once per run.
+
+        Parameters
+        ----------
+        token : str
+            The registry token whose extract is wanted. Indexes the resolved-source mapping and
+            the memo.
+        layout_name : str
+            The record layout the extract holds, used to derive the declared fixed-record width a
+            materialising transfer is checked against.
+
+        Returns
+        -------
+        Path
+            A local path holding the extract's bytes: the configured path itself when the staging
+            root is a directory, or the file the object was materialised into when it is a bucket
+            prefix.
+
+        Raises
+        ------
+        ConfigurationError
+            Propagated from :func:`_resolved_source` if an object-store source is configured but no
+            client can be constructed.
+        DatasetSourceError
+            Propagated if the object is absent, or its transferred bytes disagree with its recorded
+            length, recorded digest or the declared record geometry.
+        StagingServiceError
+            Propagated if the provider refuses the probe or the read.
+        """
+        if token not in materialised:
+            materialised[token] = _resolved_source(sources[token], work_root, layout_name)
+        return materialised[token]
+
     def _row_counts() -> Any:
         """Run pass 1: the whole-migration row-count report, server-side.
 
@@ -3440,7 +3685,14 @@ def _verify_registry(arguments: argparse.Namespace) -> int:
         parts: list[Any] = []
         for token in tokens:
             layout_name = seed_datasets.seed_dataset(token).layout_name
-            reader, records = _records_for(layout_name, sources[token], encoding, work_root)
+            # WHY : Assumptions: the source is resolved through `_local_extract` and the LOCAL path
+            #   is handed to `_records_for`, rather than handing it the configured value and letting
+            #   its own resolver materialise. The two are equivalent for this pass -- a local path
+            #   passes through `_resolved_source` untouched -- and going through the memo is what
+            #   makes pass 3 read the same materialised file instead of transferring it again.
+            reader, records = _records_for(
+                layout_name, str(_local_extract(token, layout_name)), encoding, work_root
+            )
             target = target_for(layout_name)
             context = _load_context_for(target)
             tally = SealableValueTally(target.sealed_fields())
@@ -3517,10 +3769,18 @@ def _verify_registry(arguments: argparse.Namespace) -> int:
         #   total, and reports a not-comparable line for the one layout that ships none -- so
         #   filtering the set here would be this command second-guessing the authority that owns the
         #   rule, and guessing wrong is how a forgotten extract becomes a clean bill of health.
+        # WHY : Assumptions: the path is the one `_local_extract` resolves and NEVER
+        #   `Path(sources[token])`. `SourceExtract` opens the path it is given, and the configured
+        #   root is an object-store prefix in every deployed environment, so constructing a
+        #   `Path` from it produced the relative directory `s3:/bucket/key` and this pass failed
+        #   with a bare ENOENT after the other two had passed. Money parity is also the pass with
+        #   the least tolerance for reading the wrong bytes: its verdict is an exact total, so a
+        #   source that silently differed from the one pass 2 digested would report a mismatch an
+        #   operator would attribute to the load.
         extracts = tuple(
             SourceExtract(
                 layout_name=seed_datasets.seed_dataset(token).layout_name,
-                path=Path(sources[token]),
+                path=_local_extract(token, seed_datasets.seed_dataset(token).layout_name),
                 encoding=encoding,
             )
             for token in tokens
@@ -4289,6 +4549,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     #   credentials.main's format exactly so two subcommands of one entry point do not
     #   produce two log shapes for one orchestrated run to parse.
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+
+    # WHY : Refactoring Rationale: the masking key is resolved HERE, once, before any handler runs
+    #   and before the work root is opened. It used to be resolved lazily by the first call that
+    #   masked a value, which put the refusal in two places no operator would look: `_redacted`,
+    #   while PRINTING a successfully decoded record, and `zoned._render_content`, while composing
+    #   the message of a decode failure. The second is the one worth engineering against -- an
+    #   unusable environment variable was reported as though the delivered extract had failed to
+    #   decode, so the diagnosis pointed at the bytes instead of at the configuration.
+    # WHY : Assumptions: an unusable key is classified as EXIT_FATAL (16) rather than EXIT_FAILED
+    #   (8), because README section 5.6 reserves 16 for "the environment could not be resolved" and
+    #   8 for "the step ran and did not succeed". No step has run at this point. The distinction is
+    #   load-bearing for the orchestrator: a `Choice` on 16 means an operator must fix
+    #   configuration, where 8 means the data or the database is at fault, and misfiling this as 8
+    #   would send a retry at a fault no retry can clear.
+    # WHY : Assumptions: an UNSET variable raises nothing and is left unset. Running without a
+    #   supplied key is a supported configuration -- the process-scoped random key is then used --
+    #   so this validates what was supplied rather than requiring that something be supplied.
+    # WHY : Alternatives Considered: wrapping the handler call in `except layouts.LayoutError` and
+    #   classifying it there. Rejected because a `LayoutError` is also exactly what a malformed
+    #   extract raises, so one clause could not tell an unusable key from an unusable record and
+    #   would have had to choose a single status for both -- reporting a configuration fault as a
+    #   data fault or the reverse. Failing before dispatch means each keeps its own status.
+    try:
+        layouts.require_mask_key_material()
+    except layouts.LayoutError as unusable:
+        _LOGGER.error(_reported(unusable))
+        return EXIT_FATAL
+
     # WHY : Assumptions: every invocation runs inside ONE temporary directory, handed to the
     #   handler as `work_root`, and it is opened here rather than per handler so that a command
     #   which fetches an extract from the object store has somewhere to put it that is removed on
@@ -4297,7 +4585,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     #   comes to leak a file into the container's writable layer.
     with tempfile.TemporaryDirectory(prefix=_EXTRACT_WORK_PREFIX) as work:
         arguments.work_root = Path(work)
-        return int(arguments.handler(arguments))
+        # WHY : Refactoring Rationale: cancellation is caught and classified where it used to
+        #   propagate. An operator interrupting a long load got the interpreter's own handling: a
+        #   `KeyboardInterrupt` traceback and status 130, which is outside the 0/2/8/16 set this
+        #   entry point publishes and which the orchestrator's exit-code `Choice` states have no
+        #   branch for -- so a cancelled task fell to the catch-all failure path carrying a number
+        #   nothing in this distribution documents.
+        # WHY : Assumptions: the status is EXIT_FAILED (8), which is "the step did not complete".
+        #   There is deliberately no cancellation tier: adding a fifth status would change a
+        #   published classification every runbook, README section 5.6 and every `Choice` in the
+        #   state machine already agrees on, to distinguish a case an orchestrator cannot cause --
+        #   nothing sends SIGINT to a Fargate task, so this path is reached only by a human at a
+        #   terminal, who has the log line rather than the number.
+        # WHY : Assumptions: NOTHING is rolled back or cleaned up here, because both are already
+        #   correct without it. The loader closes its connection in a `finally`, so an interrupted
+        #   delivery is rolled back by the backend and leaves no orphaned session; and returning
+        #   from inside this `with` runs the temporary directory's own cleanup, so a partially
+        #   fetched extract is removed on this path exactly as on every other. Repeating either
+        #   here would be a second owner for work that has one.
+        # WHY : Assumptions: `BaseException` is not caught, only `KeyboardInterrupt`. A
+        #   `SystemExit` raised by a handler must keep its own status, and catching the base class
+        #   would also swallow it.
+        try:
+            return int(arguments.handler(arguments))
+        except KeyboardInterrupt:
+            _LOGGER.error(
+                "%s was cancelled before it completed; any database work it had started was"
+                " rolled back and its temporary files are removed",
+                arguments.subcommand,
+            )
+            return EXIT_FAILED
 
 
 # =============================================================================

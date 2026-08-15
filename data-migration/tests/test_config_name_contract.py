@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -91,8 +92,8 @@ _ENVIRONMENT = "dev"
 
 
 @pytest.fixture(autouse=True)
-def environment_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Set the environment name for the duration of each test and clear the resolver caches.
+def environment_name(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Set the environment name for each test and discard every cached resolution around it.
 
     Parameters
     ----------
@@ -100,20 +101,51 @@ def environment_name(monkeypatch: pytest.MonkeyPatch) -> None:
         The fixture used to set the variable and to have it removed afterwards, so no test
         leaves an environment behind for the next one.
 
-    Returns
-    -------
+    Yields
+    ------
     None
-        The fixture exists for its effect on the process environment.
+        The fixture exists for its effect on the process environment and on the module's caches.
     """
+    # WHY : Refactoring Rationale: this clears EVERY cached resolution through the package's own
+    #   `reset_resolution_cache`, where it looped over `parameter_path` and `database_secret_name`
+    #   calling `cache_clear` if the attribute was present. Measured, that loop cleared NOTHING:
+    #   neither of those two functions is memoised at all, so `getattr(resolver, "cache_clear",
+    #   None)` was `None` both times and the guard that made the loop look defensive was what made
+    #   its emptiness invisible. The resolver that IS memoised is the one every name is built from
+    #   and the one the list never named -- `config.resolve_environment_name`, `maxsize=1` -- so a
+    #   process that had ALREADY resolved an environment kept returning it and the
+    #   `monkeypatch.setenv` above became decorative. Running the suite with
+    #   `CARDDEMO_ENVIRONMENT=test` exported, which a developer or a CI job with a configured shell
+    #   does, therefore failed thirteen cases in this module, every one comparing a `test`-flavoured
+    #   name against a `dev` expectation. Nothing was wrong with the package.
+    # WHY : Assumptions: the package's accessor is used rather than a longer local list, and that
+    #   is the whole point rather than a tidiness preference. `reset_resolution_cache` SCANS the
+    #   config module's globals for the cache protocol, so a resolver added later is cleared
+    #   without an edit here; its own docstring states that there is deliberately no partial form,
+    #   "because clearing one cache and not another is how a process ends up holding a credential
+    #   resolved under an environment it no longer believes it is running in" -- which is precisely
+    #   what this fixture was doing.
+    # WHY : Assumptions: the reset also runs on TEARDOWN, and that half is PREVENTION rather than a
+    #   fix for an observed leak -- stated as such because overstating it would be the same kind of
+    #   claim the loop above encoded. Measured with a probe after this module: nothing is left
+    #   cached even without a teardown reset, but only by accident of the module's shape.
+    #   `test_environment_name_has_no_default` clears the one memoised resolver it touches, and no
+    #   case defined after it consults a memoised one, because `parameter_path` and
+    #   `database_secret_name` read the environment on every call. Adding a case that resolves an
+    #   environment last would silently export `dev` to whatever module runs next, under a variable
+    #   monkeypatch has by then removed -- order-dependent, so it would present as a flake rather
+    #   than as a failure. Resetting here removes the dependence on that accident.
+    # WHY : Assumptions: the shape here -- set, reset, yield, reset -- is copied deliberately from
+    #   `tests/test_seed_user_subjects.py`, the sibling module that also pins environment-scoped
+    #   names and that already cleared everything on both sides. That module was correct and this
+    #   one was the single outlier, so aligning them is what makes one pattern readable across the
+    #   suite instead of two that differ for no stated reason.
     monkeypatch.setenv("CARDDEMO_ENVIRONMENT", _ENVIRONMENT)
-
-    # Assumptions: the resolvers memoise, so a value set after one of them has run
-    #   would otherwise be ignored and the test would assert against whatever the first
-    #   caller resolved. Clearing is cheap and makes each test independent of order.
-    for resolver in (parameter_path, database_secret_name):
-        cache_clear = getattr(resolver, "cache_clear", None)
-        if cache_clear is not None:
-            cache_clear()
+    config.reset_resolution_cache()
+    try:
+        yield
+    finally:
+        config.reset_resolution_cache()
 
 
 def test_parameter_path_is_hierarchical() -> None:
@@ -250,6 +282,12 @@ def test_environment_name_has_no_default() -> None:
     """
     from carddemo_migration.config import ConfigurationError, resolve_environment_name
 
+    # WHY : Assumptions: this case clears ONE resolver where the autouse fixture above clears every
+    #   one, and the narrowness is correct here rather than an oversight left behind. The subject is
+    #   `resolve_environment_name` itself and nothing else is called, so a wider reset would clear
+    #   caches this case never consults; and whatever it leaves cached cannot escape the case,
+    #   because the fixture's teardown resets everything after it. A reader comparing the two should
+    #   not conclude that one of them is wrong.
     previous = os.environ.pop("CARDDEMO_ENVIRONMENT", None)
     try:
         resolve_environment_name.cache_clear()

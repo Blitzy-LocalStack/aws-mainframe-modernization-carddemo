@@ -221,7 +221,10 @@ execution against an empty cluster posted nothing and reported success. It now i
 `refresh-dataset`, which performs the whole per-dataset round trip in one branch:
 fetch, stage, load, the three verification passes, and for the transaction master the
 identifier-allocator reconciliation without which the first transaction the online
-service adds would collide on the primary key hours later.
+service adds would collide on the primary key hours later. Ten of the eleven branches
+run that whole round trip; the eleventh, `transactions`, stages its generation and
+reconciles the allocator without loading, for the reason recorded under
+[States 2 and 3](#states-2-and-3--refreshing-and-verifying-the-eleven-seed-datasets).
 
 Alternatives Considered: the load and the allocator reconciliation were authored as two
 further top-level states, `LoadSeedDatasets` and `ReconcileTransactionSequence`, which
@@ -238,7 +241,7 @@ resource graph, and `var.state_timeout_seconds` carries exactly twelve keys.
 | # | State | Replaces | Mechanism |
 |---|---|---|---|
 | 1 | `QuiesceOnlineWrites` | [`app/jcl/CLOSEFIL.jcl`](../../app/jcl/CLOSEFIL.jcl) L22–L30 — an SDSF operator command issuing `CEMT SET FIL(...) CLO` | Function setting a read-only flag in Parameter Store |
-| 2 | `StageSeedDatasets` | the whole `IDCAMS REPRO` master-refresh block — the ten load jobs listed in [States 2 and 3](#states-2-and-3--refreshing-and-verifying-the-eleven-seed-datasets), plus the `DALYTRAN.PS` daily feed | `Map` state, eleven branches, each a synchronous run-task on the data-migration image invoking `refresh-dataset`: fetch, stage a generation, load, verify, and for the transaction master reconcile the identifier allocator |
+| 2 | `StageSeedDatasets` | the whole `IDCAMS REPRO` master-refresh block — the ten load jobs listed in [States 2 and 3](#states-2-and-3--refreshing-and-verifying-the-eleven-seed-datasets), plus the `DALYTRAN.PS` daily feed | `Map` state, eleven branches, each a synchronous run-task on the data-migration image invoking `refresh-dataset`: fetch, stage a generation, load, verify, and for the transaction master reconcile the identifier allocator. Ten branches load and verify; `transactions` stages only, because no TRANSACT extract is committed |
 | 3 | `VerifyMigration` | **nothing** — the baseline verified no load at all | Container task invoking `verify-all`, then a `Choice` admitting only exit code zero, which is the ONLY edge into state 4 |
 | 4 | `PreflightDailyTransactions` | `CBTRN01C` — **which has no JCL driver in the baseline**; see [State 4](#state-4--cbtrn01c-has-no-jcl-driver-in-the-baseline) | Container task |
 | 5 | `PostTransactions` | [`app/jcl/POSTTRAN.jcl`](../../app/jcl/POSTTRAN.jcl) L23–L41 driving `CBTRN02C` | Container task, explicit run-scoped outcome handoff, then a `Choice` that distinguishes clean, warn and invalid/fatal outcomes |
@@ -842,6 +845,24 @@ passes in order — row counts, record checksum, money parity — and, for the
 transaction master alone, reconcile the transaction-identifier allocator. The
 allocator step is appended after the verifications rather than before them because
 advancing a sequence changes nothing the three passes compare.
+
+**One of the eleven branches stages and stops, and that is the correct outcome rather
+than a truncated one.** `transactions` is the exception, and the exemption is the ETL's
+own: the repository commits no `TRANSACT` extract, so the registry points that token at
+[`AWS.M2.CARDDEMO.DALYTRAN.PS.INIT`](../../app/data/EBCDIC/AWS.M2.CARDDEMO.DALYTRAN.PS.INIT)
+— the single 350-byte record `TRANFILE.jcl` L67–L75 `REPRO`s to prime the cluster, whose
+unpopulated fields do not decode as a whole transaction. `carddemo_migration.readers.transaction`
+declares `HAS_COMMITTED_SEED_DATASET = False`, and state 3's own row-count query names
+`TRAN` the unseeded layout and REQUIRES `ledger.transactions` to hold zero rows after the
+ETL, because posting at state 5 is what fills it. `refresh-dataset` reads that same
+predicate and composes the load and the three passes only for a seeded layout, so the
+branch stages its generation, reconciles the allocator and exits zero while stating the
+exemption in its log. Loading it would not merely be difficult — it would turn a green
+`Map` into a failed gate two states later, which is the failure hardest to attribute to
+the branch that caused it. Staging still runs because the generation family is real: the
+bytes are the ones the baseline `REPRO`s, so the `ledger/transactions` family stays
+populated and its `LIMIT(5)` retention sweep stays meaningful, which dropping the token
+from `var.seed_datasets` would have silently stopped.
 
 **One `IDCAMS` job is two halves, and the missing half was the defect.** A `REPRO`
 load both places the bytes and fills the cluster. Staging performed only the first

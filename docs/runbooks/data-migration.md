@@ -586,6 +586,16 @@ what an operator has to be able to state afterwards.
 #       form -- `app/data/ASCII/usrsec.txt` does not exist -- and the manifest carries the
 #       seed form per entry precisely so one invocation can span both trees, which the
 #       loops this replaces could not.
+# WHY : Assumptions: DISGROUP and ACCOUNT are ALSO declared from the EBCDIC tree, and those
+#       two specifically. `data-migration/README.md` records that the nine datasets shipping
+#       in both encodings agree field for field at every value except exactly two -- DISCGRP
+#       record 34's `DIS-INT-RATE` (15.00 against 0.00, the `DEFAULT` fallback rate that
+#       decides interest) and ACCTDATA record 49's `ACCT-ADDR-ZIP` -- and that this package
+#       treats EBCDIC as authoritative wherever both forms exist. The load above reads
+#       `app/data/EBCDIC`, so declaring those two from the ASCII twins made this example
+#       report a checksum DIFFER on a corpus divergence, which reads as a failed load rather
+#       than as the difference between two conversions of one extract. The other eight stay
+#       ASCII, so the example still demonstrates one manifest spanning both trees.
 # WHY : Trade-offs: the checksum pass over SECUSER digests the loaded columns only, and the
 #       credential is not among them -- the target schema has no column for it, by design. So
 #       this verifies the identity rows and says nothing about a secret, which is the intended
@@ -597,9 +607,11 @@ cat > carddemo-verification-manifest.json <<'MANIFEST'
   "datasets": [
     {"dataset": "TRANTYPE", "source": "app/data/ASCII/trantype.txt",  "encoding": "ascii"},
     {"dataset": "TRANCAT",  "source": "app/data/ASCII/trancatg.txt",  "encoding": "ascii"},
-    {"dataset": "DISGROUP", "source": "app/data/ASCII/discgrp.txt",   "encoding": "ascii"},
+    {"dataset": "DISGROUP", "source": "app/data/EBCDIC/AWS.M2.CARDDEMO.DISCGRP.PS",
+     "encoding": "ebcdic"},
     {"dataset": "CUSTOMER", "source": "app/data/ASCII/custdata.txt",  "encoding": "ascii"},
-    {"dataset": "ACCOUNT",  "source": "app/data/ASCII/acctdata.txt",  "encoding": "ascii"},
+    {"dataset": "ACCOUNT",  "source": "app/data/EBCDIC/AWS.M2.CARDDEMO.ACCTDATA.PS",
+     "encoding": "ebcdic"},
     {"dataset": "XREF",     "source": "app/data/ASCII/cardxref.txt",  "encoding": "ascii"},
     {"dataset": "CARD",     "source": "app/data/ASCII/carddata.txt",  "encoding": "ascii"},
     {"dataset": "DALYTRAN", "source": "app/data/ASCII/dailytran.txt", "encoding": "ascii"},

@@ -180,6 +180,16 @@ _ADMITTED_URI_SCHEME: Final[str] = "s3://"
 
 _SYNTHETIC_USER_ID: Final[str] = "SYNTH001"
 _SYNTHETIC_SUBJECT: Final[str] = "00000000-0000-4000-8000-000000000001"
+
+# WHY : Refactoring Rationale: the synthetic security records now carry a user identifier PER
+#   ORDINAL, drawn from this pool, where every one of them carried `_SYNTHETIC_USER_ID`. The builder
+#   documented that "each carries a distinct key" and that was false for exactly this record: the
+#   subject projection resolves a user through the published seed-user document and only one
+#   identifier was published, so the batch was three records sharing one primary key. It went
+#   unnoticed while a duplicate key inside one delivery was silently collapsed by the merge;
+#   now that the loader refuses such a delivery the fixture's own defect is visible. A pool,
+#   each with its own subject, is what makes the builder's documented property true.
+_SYNTHETIC_SUBJECT_POOL: Final[int] = 8
 # Assumptions: the stamp is the canonical 26-character form the timestamp module renders, taken
 #   from the committed transaction fixture's own originating stamp so it is a shape the reference
 #   compiler actually produced rather than one invented here.
@@ -868,6 +878,54 @@ class _StubDataKeys:
         return DataKey(plaintext=bytes(range(32)), wrapped=b"synthetic-wrapped-key")
 
 
+def _synthetic_user_id(ordinal: int) -> str:
+    """Return the synthetic security-user identifier for one record ordinal.
+
+    Parameters
+    ----------
+    ordinal : int
+        The record's zero-based position in a synthetic batch.
+
+    Returns
+    -------
+    str
+        An eight-character identifier of the record's declared width. Ordinal zero is
+        :data:`_SYNTHETIC_USER_ID`, so the single-record cases that name that constant keep naming
+        the same user as ordinal zero of a batch.
+
+    Raises
+    ------
+    None
+        Formatting an integer cannot fail.
+    """
+    return f"SYNTH{ordinal + 1:03d}"
+
+
+def _synthetic_subject(ordinal: int) -> str:
+    """Return the synthetic identity-provider subject paired with one record ordinal.
+
+    Parameters
+    ----------
+    ordinal : int
+        The record's zero-based position in a synthetic batch.
+
+    Returns
+    -------
+    str
+        An identifier in version-4 shape whose final group counts the ordinal. Ordinal zero is
+        :data:`_SYNTHETIC_SUBJECT`.
+
+    Raises
+    ------
+    None
+        Formatting an integer cannot fail.
+    """
+    # WHY : Assumptions: a subject NAMES a user rather than authenticating one, so nothing is
+    #   disclosed by writing a predictable value here, and a derived value is what lets the re-run
+    #   comparison be exact across two passes over the same batch.
+    return f"00000000-0000-4000-8000-{ordinal + 1:012d}"
+
+
 def _load_context() -> aurora.LoadContext:
     """Build the collaborator bundle every declared target can be loaded with.
 
@@ -893,8 +951,17 @@ def _load_context() -> aurora.LoadContext:
         verification_value_cipher=CardVerificationValueCipher(key_id="synthetic-key", keys=keys),
         # WHY : Assumptions: the subject is an all-zero identifier in version-4 shape. A subject
         #   NAMES a user rather than authenticating one, so nothing is disclosed by writing it,
-        #   and a fixed value is what lets the re-run comparison below be exact.
-        subjects=MappingProxyType({_SYNTHETIC_USER_ID: _SYNTHETIC_SUBJECT}),
+        #   and a derived value is what lets the re-run comparison below be exact.
+        # WHY : Assumptions: a POOL of subjects is published rather than one, because the security
+        #   record's key is the user identifier and the batch builder gives each record its own.
+        #   Publishing a single subject made every record of that batch the same user, which the
+        #   loader now correctly refuses as a delivery presenting one key twice.
+        subjects=MappingProxyType(
+            {
+                _synthetic_user_id(ordinal): _synthetic_subject(ordinal)
+                for ordinal in range(_SYNTHETIC_SUBJECT_POOL)
+            }
+        ),
     )
 
 
@@ -989,10 +1056,12 @@ def _synthetic_records(record: str, count: int) -> tuple[dict[str, object], ...]
                 continue
             values[name] = _synthetic_value(field, column, ordinal)
         if "SEC-USR-ID" in values:
-            # Assumptions: the user identifier is pinned to the one the subject document names,
+            # Assumptions: the user identifier is taken from the pool the subject document names,
             #   because the subject projection looks the record up by it and refuses a user it
-            #   cannot resolve.
-            values["SEC-USR-ID"] = _SYNTHETIC_USER_ID
+            #   cannot resolve -- and it varies BY ORDINAL, because that identifier is this
+            #   record's primary key and this function's contract is that every record it builds
+            #   carries a distinct one.
+            values["SEC-USR-ID"] = _synthetic_user_id(ordinal)
         built.append(values)
     return tuple(built)
 

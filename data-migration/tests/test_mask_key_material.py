@@ -136,18 +136,24 @@ def test_an_unset_key_falls_back_to_strong_process_material(
         assert "generate a key with" in message.lower()
 
 
-@pytest.mark.parametrize(
-    ("supplied", "reason"),
-    [
-        ("hunter2!", "a passphrase carrying characters outside the base64 alphabet"),
-        ("password", "a passphrase that is valid base64 but decodes to six bytes"),
-        (base64.b64encode(bytes(range(16))).decode(), "sixteen bytes, half the floor"),
-        (base64.b64encode(bytes(range(31))).decode(), "thirty-one bytes, one short of the floor"),
-        ("-__--__--__--__--__--__--__--__--__--__--__-", "the URL-safe alphabet"),
-        (base64.b64encode(bytes(32)).decode(), "thirty-two zero bytes"),
-        (base64.b64encode(b"\xff" * 48).decode(), "forty-eight copies of one byte"),
-    ],
+# WHY : Refactoring Rationale: this roster was written inline in the decorator below and is now a
+#   module constant, because a SECOND case has to refuse exactly the same set -- the published
+#   boundary check the command line calls before it dispatches. Two inline copies of seven forms is
+#   how one of them comes to be tightened or extended alone, and the failure that follows is the
+#   quiet kind: the resolver refuses a form the boundary check admits, so a bad key gets past the
+#   place that exists to stop it and surfaces later from a decode.
+_UNUSABLE_KEY_MATERIAL: tuple[tuple[str, str], ...] = (
+    ("hunter2!", "a passphrase carrying characters outside the base64 alphabet"),
+    ("password", "a passphrase that is valid base64 but decodes to six bytes"),
+    (base64.b64encode(bytes(range(16))).decode(), "sixteen bytes, half the floor"),
+    (base64.b64encode(bytes(range(31))).decode(), "thirty-one bytes, one short of the floor"),
+    ("-__--__--__--__--__--__--__--__--__--__--__-", "the URL-safe alphabet"),
+    (base64.b64encode(bytes(32)).decode(), "thirty-two zero bytes"),
+    (base64.b64encode(b"\xff" * 48).decode(), "forty-eight copies of one byte"),
 )
+
+
+@pytest.mark.parametrize(("supplied", "reason"), _UNUSABLE_KEY_MATERIAL)
 def test_weak_or_malformed_key_material_is_refused(
     supplied: str,
     reason: str,
@@ -319,3 +325,90 @@ def test_a_tag_is_stable_under_one_key_and_unrelated_across_keys(
 
     assert once == again, "one key must render one value identically"
     assert once != other, "two keys must render one value differently"
+
+
+@pytest.mark.parametrize(("supplied", "reason"), _UNUSABLE_KEY_MATERIAL)
+def test_the_published_check_refuses_exactly_what_the_resolver_refuses(
+    supplied: str,
+    reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Require the published boundary check to refuse every form the private resolver refuses.
+
+    Parameters
+    ----------
+    supplied : str
+        The value configured for the masking-key variable.
+    reason : str
+        Prose naming why the value is unacceptable, carried into the failure message so a failing
+        case identifies itself.
+    monkeypatch : pytest.MonkeyPatch
+        Used to configure the masking-key variable for the duration of the test.
+
+    Returns
+    -------
+    None
+        The refusal is the result.
+
+    Raises
+    ------
+    AssertionError
+        If the boundary check admits material the resolver refuses, which would let an unusable
+        key past the one place that can refuse it before any work has started.
+    """
+    # WHY : Refactoring Rationale: `require_mask_key_material` exists because resolution is LAZY.
+    #   The key was first read inside `mask_field`, so an unusable one surfaced from
+    #   `cli._redacted` while printing a decoded record and from `zoned._render_content` while
+    #   composing a DECODE refusal's message -- the second reporting an environment fault as
+    #   though the delivered extract had failed to decode. The command line now calls this before
+    #   it dispatches, and this case is what keeps the two in agreement.
+    # WHY : Assumptions: the MESSAGE is asserted identical, not merely present. The boundary check
+    #   deliberately re-raises the resolver's own wording rather than composing its own, so an
+    #   operator meets one sentence for one misconfiguration however it was reached; a second
+    #   wording would make the same fault look like two.
+    monkeypatch.setenv(layouts.ENV_MASK_HMAC_KEY, supplied)
+    with pytest.raises(layouts.LayoutError) as from_resolver:
+        layouts._mask_hmac_key()
+    with pytest.raises(layouts.LayoutError) as from_check:
+        layouts.require_mask_key_material()
+    assert str(from_check.value) == str(from_resolver.value), (
+        f"the boundary check must carry the resolver's own refusal ({reason})"
+    )
+    assert supplied not in str(from_check.value), f"the refusal must not echo the value ({reason})"
+
+
+def test_the_published_check_accepts_an_unset_variable_and_conforming_material(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accept both supported configurations, and return nothing on either.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Used to remove and to configure the masking-key variable.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If an unset variable is refused, which would make running without a supplied key
+        impossible, or if the check returns key material.
+    """
+    # WHY : Assumptions: the UNSET case is asserted first and is the one that matters most. Running
+    #   without a supplied key is a supported configuration -- the process-scoped random key is
+    #   used -- so a boundary check that demanded a key would refuse every correct local invocation
+    #   and every container run that does not carry the secret.
+    monkeypatch.delenv(layouts.ENV_MASK_HMAC_KEY, raising=False)
+    assert layouts.require_mask_key_material() is None
+    # WHY : Assumptions: the return value is asserted to be None rather than merely falsy, because
+    #   the whole point of the signature is that no caller can obtain key material through it. A
+    #   check that returned the bytes would become the second accessor, and the next caller needing
+    #   "the key" would reach for the public name instead of the private one.
+    monkeypatch.setenv(
+        layouts.ENV_MASK_HMAC_KEY, base64.b64encode(secrets.token_bytes(32)).decode()
+    )
+    assert layouts.require_mask_key_material() is None

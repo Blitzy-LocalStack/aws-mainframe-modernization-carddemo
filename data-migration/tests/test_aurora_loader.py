@@ -2268,6 +2268,261 @@ def test_the_merge_path_issues_no_guarding_count(
     assert fake_aurora.commits == 1
 
 
+def test_the_whole_row_target_locks_its_delivery_immediately_before_the_merge(
+    fake_aurora: FakeAuroraDatabase,
+) -> None:
+    """Serialise the daily feed's merge against a second delivery, and lock nothing earlier.
+
+    Purpose
+    -------
+    Assert the mutual exclusion the whole-row strategy cannot get from an index.
+    ``ledger.daily_transactions`` is keyed on an identity column and its ``transaction_id`` is
+    deliberately non-unique, so its merge decides what is new by an anti-join against the table as
+    the statement finds it. Two deliveries that both reach that anti-join before either commits each
+    find the table free of their rows and each insert all of them: two concurrent loads of the same
+    feed each reported ``300 inserted`` and left 600 rows, both exiting zero.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double for the driver, read for the statements the load issued and their order.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If no delivery lock is taken, if it is not transaction-scoped, or if it is taken before the
+        copy rather than immediately before the merge.
+    """
+    target = target_for("DALYTRAN")
+    assert target.strategy is LoadStrategy.WHOLE_ROW_MERGE
+    connection = fake_aurora.connect(**_connection_params())
+
+    load_records(connection, target, [_daily_feed_record()])
+
+    executed = fake_aurora.executed_sql()
+    lock = target.delivery_lock_statement()
+    assert lock in executed, "the whole-row delivery took no lock; two loads can still double it"
+    # WHY : Assumptions: the lock must be TRANSACTION-scoped, and the distinction is the whole
+    #   failure-path story. `pg_advisory_xact_lock` is released by the commit or the rollback that
+    #   ends the load; a session lock would have to be released explicitly, and the one path that
+    #   release could be missed on is the failure path -- which is the path a load takes when
+    #   something has already gone wrong, leaving the next delivery waiting forever.
+    assert "pg_advisory_xact_lock" in lock
+    # WHY : Assumptions: the ORDER is asserted rather than mere presence. Locking before the copy
+    #   would hold the lock across the whole transfer and serialise two large deliveries for the
+    #   duration of both, and locking after the merge would not serialise anything at all.
+    assert executed.index(lock) == executed.index(target.merge_statement()) - 1
+    assert executed.index(lock) > executed.index(target.stage_statement())
+    assert fake_aurora.commits == 1
+
+
+def test_a_keyed_target_takes_no_delivery_lock_because_its_index_serialises_it(
+    fake_aurora: FakeAuroraDatabase,
+) -> None:
+    """Leave the ten keyed loads unlocked, since a unique index already serialises them.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double for the driver.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If a keyed load takes an advisory lock, which would add a wait to every load to duplicate a
+        guarantee the schema already gives.
+    """
+    target = target_for("TRANTYPE")
+    assert target.strategy is LoadStrategy.KEYED_MERGE
+    connection = fake_aurora.connect(**_connection_params())
+
+    load_records(
+        connection,
+        target,
+        [{"TRAN-TYPE": "01", "TRAN-TYPE-DESC": "Purchase" + " " * 42}],
+    )
+
+    assert not [sql for sql in fake_aurora.executed_sql() if "pg_advisory" in sql]
+
+
+def test_two_targets_do_not_serialise_on_one_another(
+    fake_aurora: FakeAuroraDatabase,
+) -> None:
+    """Derive one delivery-lock key per table, so unrelated deliveries do not wait on each other.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Unused; the statements are composed without a connection.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If two different tables compose the same lock statement, or if a table's key is not stable
+        across calls -- a per-process value would make two concurrent loads lock different keys and
+        serialise on nothing.
+    """
+    statements = {name: target_for(name).delivery_lock_statement() for name in target_names()}
+    assert len(set(statements.values())) == len(statements)
+    # WHY : Assumptions: stability is asserted by recomposing rather than by reading the digest, so
+    #   the property under test is the one that matters at run time: two SEPARATE PROCESSES loading
+    #   one table must derive the same key. Python's own `hash()` is salted per process for strings,
+    #   so a key derived from it would differ between the two and the lock would serialise
+    #   nothing -- a defect no single-process test could observe.
+    assert statements == {name: target_for(name).delivery_lock_statement() for name in statements}
+
+
+def test_a_delivery_repeating_one_business_key_is_refused_whole(
+    fake_aurora: FakeAuroraDatabase,
+) -> None:
+    """Refuse an extract that presents one key twice, rather than collapsing the repeat silently.
+
+    Purpose
+    -------
+    Close the gap ``ON CONFLICT ... DO NOTHING`` leaves inside a SINGLE delivery. The merge cannot
+    tell a key this extract has already presented from one the table already held, so a 50-record
+    extract whose second record repeated the first's identifier reported ``49 inserted, 1 already
+    present`` and exited zero -- with the displaced record simply absent from a table that had been
+    empty. The row-count verifier catches the shortfall later; the load's own verdict, which is what
+    an operator acts on, said success.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double for the driver, read for the rollback and for the absence of a merge.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the delivery is accepted, if the refusal quotes a record value, or if anything is merged
+        or committed.
+    """
+    target = target_for("TRANTYPE")
+    repeated = [
+        {"TRAN-TYPE": "01", "TRAN-TYPE-DESC": "Purchase" + " " * 42},
+        {"TRAN-TYPE": "02", "TRAN-TYPE-DESC": "Payment" + " " * 43},
+        {"TRAN-TYPE": "01", "TRAN-TYPE-DESC": "Refund" + " " * 44},
+    ]
+    connection = fake_aurora.connect(**_connection_params())
+
+    with pytest.raises(AuroraLoadError) as refused:
+        load_records(connection, target, repeated)
+
+    reported = str(refused.value)
+    assert "type_cd" in reported, "the refusal does not name the key column to inspect"
+    assert "record 3" in reported, "the refusal does not locate the repeat in the extract"
+    # WHY : Assumptions: no record VALUE may appear in the refusal. These extracts carry primary
+    #   account numbers and national identifiers and this diagnostic is retained, so the ordinal and
+    #   the column names are what locate the repeat -- they are enough to find it in the file and
+    #   they disclose nothing about it.
+    for value in ("Purchase", "Refund", "'01'"):
+        assert value not in reported
+    assert fake_aurora.rollbacks == 1
+    assert fake_aurora.commits == 0
+    assert not [sql for sql in fake_aurora.executed_sql() if sql.startswith("INSERT INTO")]
+
+
+def test_the_daily_feed_may_repeat_an_identifier_within_one_delivery(
+    fake_aurora: FakeAuroraDatabase,
+) -> None:
+    """Load a feed carrying one identifier twice, because the baseline posts both occurrences.
+
+    Purpose
+    -------
+    Hold the exception the duplicate-key refusal must not swallow. ``app/cbl/CBTRN02C.cbl`` reads
+    the daily feed front to back with no record key at all, so a repeated ``DALYTRAN-ID`` is a
+    second physical occurrence the baseline posts twice, and ``V1__ledger.sql`` refuses a unique
+    index on that column for exactly that reason. A refusal keyed on the business identifier would
+    reject a delivery the baseline processes without complaint.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double for the driver, read for the rows copied and the commit.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the repeated occurrence is refused or dropped rather than staged.
+    """
+    target = target_for("DALYTRAN")
+    occurrence = _daily_feed_record()
+    connection = fake_aurora.connect(**_connection_params())
+
+    outcome = load_records(connection, target, [occurrence, dict(occurrence)])
+
+    assert outcome.staged == 2
+    assert fake_aurora.rollbacks == 0
+    assert fake_aurora.commits == 1
+    assert len(fake_aurora.copied_rows) == 2
+
+
+def _daily_feed_record() -> dict[str, str]:
+    """Build one decoded daily-transaction record every mapped field of its target is present in.
+
+    Purpose
+    -------
+    Give the two whole-row cases a record they can stage without reading a committed extract, so
+    each reads as the one property it asserts.
+
+    Returns
+    -------
+    dict[str, str]
+        One record keyed by copybook field name, carrying a value for every field
+        ``ledger.daily_transactions`` maps.
+
+    Raises
+    ------
+    None
+    """
+    # WHY : Assumptions: the mapped field names are read from the TARGET rather than listed here, so
+    #   a target that maps a further column later still receives a complete record and the case
+    #   fails for a real reason rather than for a stale fixture.
+    values = {
+        "DALYTRAN-ID": "000000000000001",
+        "DALYTRAN-TYPE-CD": "01",
+        "DALYTRAN-CAT-CD": "0001",
+        "DALYTRAN-SOURCE": "POS   ",
+        "DALYTRAN-DESC": "Synthetic occurrence" + " " * 40,
+        "DALYTRAN-AMT": Decimal("12.34"),
+        "DALYTRAN-MERCHANT-ID": "000000001",
+        "DALYTRAN-MERCHANT-NAME": "SYNTHETIC MERCHANT" + " " * 12,
+        "DALYTRAN-MERCHANT-CITY": "SYNTHETIC CITY" + " " * 36,
+        "DALYTRAN-MERCHANT-ZIP": "00000-0000",
+        "DALYTRAN-CARD-NUM": "4111111111111111",
+        "DALYTRAN-ORIG-TS": "2022-06-10 19:27:53.000000",
+        "DALYTRAN-PROC-TS": " " * 26,
+    }
+    missing = [field for field in target_for("DALYTRAN").columns if field not in values]
+    assert not missing, f"the synthetic daily record is missing {', '.join(missing)}"
+    return values
+
+
 def _arrange_allocator(
     fake_aurora: FakeAuroraDatabase,
     *,

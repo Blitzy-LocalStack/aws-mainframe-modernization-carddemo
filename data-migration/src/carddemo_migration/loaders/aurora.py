@@ -189,6 +189,7 @@ from __future__ import annotations
 
 import contextlib
 import enum
+import hashlib
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -1202,6 +1203,113 @@ class TableTarget:
             f" ON CONFLICT ({key}) DO NOTHING"
         )
 
+    def delivery_lock_statement(self) -> str:
+        """Compose the statement that serialises this target's merge against a second delivery.
+
+        Purpose
+        -------
+        Give :attr:`LoadStrategy.WHOLE_ROW_MERGE` the mutual exclusion its predicate cannot get from
+        an index. Its merge decides what is new by an anti-join against the target as the statement
+        finds it, so two deliveries that both reach that anti-join before either commits each find
+        the table empty of their rows and each insert all of them: two concurrent loads of the daily
+        feed reported ``300 inserted`` twice and left 600 rows, both exiting zero. A keyed target
+        cannot reach that state -- its unique index makes the second writer block and then do
+        nothing -- which is exactly why this one needs an explicit lock and the other ten do not.
+
+        Returns
+        -------
+        str
+            A ``SELECT pg_advisory_xact_lock(<namespace>, <table digest>)`` statement. Both keys are
+            integer literals derived here, so the statement carries no bound parameter and no
+            caller-supplied text.
+
+        Raises
+        ------
+        None
+            The keys are derived from this target's own schema and table names, which every declared
+            target carries.
+        """
+        # WHY : Alternatives Considered: `pg_advisory_xact_lock` rather than `pg_advisory_lock`, so
+        #   the lock is released by the COMMIT or the ROLLBACK that ends this load's transaction and
+        #   there is no path on which a failed load leaves a session-held lock behind for the next
+        #   one to wait on forever. A session lock would have to be released explicitly, and the one
+        #   place that release could be missed is the failure path -- which is the path a load takes
+        #   when something has already gone wrong.
+        # WHY : Assumptions: the keys are composed as LITERALS rather than bound as parameters,
+        #   because the `_Cursor` protocol this module declares takes a statement and nothing else,
+        #   and every other statement here is composed the same way. There is no injection surface:
+        #   both values are integers this module derives from its own declarations.
+        # WHY : Assumptions: `to_regclass('<schema>.<table>')::oid` was the alternative for the
+        #   second key and is rejected on one specific behaviour: `to_regclass` answers NULL for a
+        #   relation it cannot resolve, and `pg_advisory_xact_lock(NULL)` returns NULL having taken
+        #   NO lock. A serialisation that silently does not serialise is worse than none at all,
+        #   because it looks correct in the statement log.
+        digest = hashlib.blake2s(
+            f"{self.schema}.{self.table}".encode(), digest_size=_DELIVERY_LOCK_DIGEST_BYTES
+        ).digest()
+        key = int.from_bytes(digest, "big", signed=True)
+        return f"SELECT pg_advisory_xact_lock({_DELIVERY_LOCK_NAMESPACE}, {key})"
+
+    def key_of(
+        self, record: Mapping[str, str | int | Decimal | bytes]
+    ) -> tuple[object, ...] | None:
+        """Project one prepared record into the values its target key columns receive.
+
+        Purpose
+        -------
+        Let a load recognise that ONE delivery carries the same business key twice, before the merge
+        silently collapses the repeat. ``ON CONFLICT ... DO NOTHING`` cannot tell a repeat inside
+        the delivery from a row the table already held, so a 50-record extract whose second record
+        repeated the first record's key reported ``49 inserted, 1 already present`` and exited zero
+        while the record it displaced was simply absent.
+
+        Parameters
+        ----------
+        record : Mapping[str, str | int | Decimal | bytes]
+            One record already projected by :func:`prepare_record`, keyed by copybook field name.
+            The PREPARED form is used rather than the decoded one because it is what is staged, so
+            the values compared here are the values the merge would conflict on.
+
+        Returns
+        -------
+        tuple[object, ...] | None
+            The key values in the mapping's own field order, or ``None`` for a target bound to no
+            record, which therefore has no derived key to project.
+
+        Raises
+        ------
+        AuroraLoadError
+            If the record does not carry a field one of the key columns is mapped from, which means
+            the reader and the target disagree about the record's shape.
+        """
+        # WHY : Assumptions: whether a repeated key is a DEFECT is decided by the caller from the
+        #   target's STRATEGY, not here, and the distinction matters because a key window is
+        #   derived for every record including the daily feed's. `ledger.daily_transactions`
+        #   declares `DALYTRAN-ID` as its record key and its TABLE deliberately does not: the
+        #   primary key is an identity column and `transaction_id` carries no unique index,
+        #   because `app/cbl/CBTRN02C.cbl` reads the feed front to back and a repeated
+        #   identifier in one delivery is a second physical occurrence the baseline posts
+        #   twice. So this method answers the projection for any bound target and
+        #   `load_records` asks it only where the table asserts uniqueness.
+        # WHY : Assumptions: an unbound target answers None rather than an empty tuple, because an
+        #   empty tuple compares equal to itself for every row and would make the second record of
+        #   any such delivery a duplicate.
+        if not self.key_columns:
+            return None
+        keys = set(self.key_columns)
+        fields = tuple(field for field, column in self.columns.items() if column in keys)
+        missing = [field for field in fields if field not in record]
+        if missing:
+            # WHY : Assumptions: the FIELD NAMES are reported and no value is, for the reason
+            #   `row_of` records at length: a decoded record of these datasets carries primary
+            #   account numbers and national identifiers, and this diagnostic is retained.
+            raise AuroraLoadError(
+                f"a record bound for {self.schema}.{self.table} is missing the key field(s)"
+                f" {', '.join(missing)}, so its delivery cannot be checked for a repeated key;"
+                " the reader and the target disagree about the record's shape"
+            )
+        return tuple(record[field] for field in fields)
+
     def content_columns(self) -> tuple[str, ...]:
         """List the columns whose disagreement between a staged and a stored row is real.
 
@@ -1626,6 +1734,28 @@ _STAGE_PREFIX: Final[str] = "carddemo_stage_"
 #   namespaces in a statement.
 _MERGE_STAGE_ALIAS: Final[str] = "staged_row"
 _MERGE_TARGET_ALIAS: Final[str] = "existing_row"
+
+# WHY : Assumptions: the first key of every delivery lock this module takes is a FIXED literal, so
+#   PostgreSQL's two-argument advisory-lock space is partitioned once: every lock this package holds
+#   carries this value in `pg_locks.classid`, which is what lets an operator investigating a waiting
+#   load tell a delivery lock apart from any other advisory lock the cluster is holding. The value
+#   itself is arbitrary and is chosen to be recognisable rather than derived -- 0x43 0x44 are the
+#   letters C and D -- because a derived namespace would have to be documented somewhere anyway and
+#   a reader could not confirm it from the number in front of them.
+_DELIVERY_LOCK_NAMESPACE: Final[int] = 0x43440001
+
+# WHY : Assumptions: the second key is a DIGEST of the qualified table name, taken with blake2s at
+#   four bytes and read as a signed integer, because `pg_advisory_xact_lock(int, int)` takes two
+#   32-bit signed integers. Python's own `hash()` is emphatically NOT used: it is salted per process
+#   for str inputs, so two concurrent loads of one table -- which run as two processes -- would
+#   derive two different keys and serialise on nothing at all, which is the exact defect the lock
+#   exists to close and would have been invisible in any single-process test.
+# WHY : Trade-offs: a 32-bit digest can collide, and a collision means two DIFFERENT tables
+#   serialise their deliveries against each other. That is accepted because the consequence is a
+#   brief wait rather than a wrong answer, and because the alternative -- a registry mapping each
+#   table to a hand-assigned number -- is a second declaration of the same set that a target added
+#   later would silently be missing from, turning a correctness property into a maintenance one.
+_DELIVERY_LOCK_DIGEST_BYTES: Final[int] = 4
 
 # WHY : Assumptions: every mapping below was read from the owning service's own Flyway
 #   migration rather than derived, and each records one anti-corruption decision. TWO of the
@@ -2636,6 +2766,30 @@ def load_records(
     #   doubled itself. The module docstring records the full argument.
     staged = 0
     inserted = 0
+    # WHY : Refactoring Rationale: the delivery's own keys are tracked as it is staged, and they
+    #   were not. `ON CONFLICT ... DO NOTHING` cannot distinguish a key the TABLE already holds
+    #   from a key this same extract has already presented, so an extract whose second record
+    #   repeated the first's identifier loaded 49 of 50 rows, reported "1 already present" and
+    #   exited zero -- with the displaced record simply absent from a table that had been empty.
+    #   The later row-count verifier catches the shortfall, but the load's own verdict said
+    #   success, which is the verdict an operator acts on.
+    # WHY : Trade-offs: the keys are held in a SET for the length of the delivery, so peak memory
+    #   grows with the number of records rather than staying flat. That is accepted: the widest key
+    #   in this corpus is a sixteen-character card number, the largest keyed extract ships fifty
+    #   records, and the one genuinely large feed -- 300 records shipped and hundreds of thousands
+    #   possible -- is the identity-keyed target that answers None here and allocates nothing.
+    #   Asking the server instead, with a `GROUP BY ... HAVING count(*) > 1` probe over the staging
+    #   table, was the alternative: it is constant-memory and was rejected because it adds a
+    #   statement and a round trip to every one of the ten keyed loads to answer a question the rows
+    #   already passing through this loop can answer for free.
+    # WHY : Assumptions: the check applies to the KEYED strategy only, and the discriminator is the
+    #   strategy rather than the presence of key columns. Every bound target derives a key window
+    #   from its record -- the daily feed's is `DALYTRAN-ID` -- but only the ten keyed TABLES assert
+    #   uniqueness over it. Reading the key columns instead of the strategy would refuse a feed
+    #   carrying one identifier twice, which `V1__ledger.sql` deliberately permits and the baseline
+    #   posts twice.
+    enforce_unique_keys = target.strategy is LoadStrategy.KEYED_MERGE
+    seen_keys: set[tuple[object, ...]] = set()
     try:
         with _cursor_of(connection) as cursor:
             operation = "staging table creation"
@@ -2643,7 +2797,28 @@ def load_records(
             operation = "bulk copy"
             with cursor.copy(target.stage_copy_statement()) as stream:
                 for record in records:
-                    stream.write_row(target.row_of(prepare_record(target, record, context)))
+                    prepared = prepare_record(target, record, context)
+                    key = target.key_of(prepared) if enforce_unique_keys else None
+                    if key is not None:
+                        if key in seen_keys:
+                            # WHY : Assumptions: the whole delivery is refused rather than the one
+                            #   record skipped, and the refusal names the record's ORDINAL and the
+                            #   key COLUMNS while quoting no value. A duplicate business key means
+                            #   the extract is not the extract it claims to be -- one record of the
+                            #   population it was cut from is missing from it -- so loading the rest
+                            #   would store a partial master that every count check reports as a
+                            #   mismatch of unknown cause. Refusing here says which record to look
+                            #   at, and the ordinal plus the column names locate it in the file
+                            #   without putting an account identifier in a retained log.
+                            raise AuroraLoadError(
+                                f"the extract bound for {target.schema}.{target.table} presents the"
+                                f" same {', '.join(target.key_columns)} twice, first at an earlier"
+                                f" record and again at record {staged + 1}; a repeated business key"
+                                " means one record of the population is absent from the delivery,"
+                                " so the whole delivery is refused rather than silently collapsed"
+                            )
+                        seen_keys.add(key)
+                    stream.write_row(target.row_of(prepared))
                     staged += 1
             # WHY : Assumptions: the conflict probe runs BEFORE the merge and inside the same
             #   transaction. Before, because after the merge the disagreeing rows have already been
@@ -2660,6 +2835,27 @@ def load_records(
                 conflict = _conflicting_content(cursor, target)
                 if conflict is not None:
                     raise AuroraLoadError(conflict.describe(target))
+            else:
+                # WHY : Assumptions: the whole-row target takes an advisory lock and takes it HERE
+                #   -- after the copy, immediately before the merge -- rather than at the top of the
+                #   transaction. The staging table is session-temporary, so the copy needs no mutual
+                #   exclusion at all; only the anti-join and the insert it feeds do. Locking earlier
+                #   would hold the lock across the whole stream, which on a large feed serialises
+                #   two deliveries for the duration of both transfers rather than of one merge.
+                # WHY : Assumptions: the lock is correct only because this transaction runs at READ
+                #   COMMITTED, the server default, which nothing in this package changes. The merge
+                #   is issued AFTER the lock is granted, so it takes a fresh snapshot that includes
+                #   whatever the previous holder committed -- and its anti-join therefore finds
+                #   those rows and inserts none of its own. Under REPEATABLE READ the snapshot
+                #   would predate the wait and the duplication would survive the lock, so raising
+                #   the isolation level here would silently reintroduce the defect.
+                # WHY : Assumptions: the lock is taken for the whole-row strategy rather than for
+                #   every target, because the ten keyed targets already serialise on a real unique
+                #   index: the second writer blocks on the index entry and its `DO NOTHING` then
+                #   applies. Locking them too would add a wait to every load to duplicate a
+                #   guarantee the schema already gives.
+                operation = "delivery serialisation"
+                cursor.execute(target.delivery_lock_statement())
             operation = "merge"
             cursor.execute(target.merge_statement())
             # Assumptions: the inserted count is read from the driver's affected-row count for

@@ -277,7 +277,10 @@ the record checksum, verify money parity, and -- for the transaction master alon
 because it is the one table whose identifier allocator can point into a loaded
 range -- reconcile the allocator. The allocator step runs LAST rather than before
 the verifications, because advancing a sequence changes nothing the three passes
-compare. The scratch directory is removed when the step ends whatever the outcome.
+compare. The load and the three passes are composed only for a dataset whose layout
+ships a committed extract, so the `transactions` branch stages, reconciles and exits
+zero without loading -- see [Seed-data Maps](#seed-data-maps). The scratch directory
+is removed when the step ends whatever the outcome.
 The subcommand
 was added rather than the branch being expanded into five states because the
 eleven-state contract of the migration plan's section 0.4.1.7 is a topology this
@@ -335,6 +338,21 @@ declared target unloaded while verification totalled it, and verification pass 3
 refuses the whole run when a layout that ships a committed extract contributes no
 source total.
 
+Assumptions: ten of the eleven branches load and verify their master, and
+`transactions` STAGES ITS GENERATION AND STOPS -- reporting success rather than
+failing. The exemption belongs to the ETL and not to this module: the repository
+commits no `TRANSACT` extract, so the registry points that token at
+`AWS.M2.CARDDEMO.DALYTRAN.PS.INIT`, the single 350-byte record `TRANFILE.jcl` `REPRO`s
+to prime the cluster, whose unpopulated fields do not decode as a whole transaction.
+`carddemo_migration.readers.transaction` declares `HAS_COMMITTED_SEED_DATASET = False`
+and state 3's row-count query REQUIRES `ledger.transactions` to hold zero rows after
+the ETL, because posting at state 5 fills it -- so a branch that loaded even one
+record would turn a green Map into a failed gate two states later. `refresh-dataset`
+reads that same predicate and states the exemption in the branch's log. The token is
+kept in `var.seed_datasets` rather than dropped, because its generation family and
+`LIMIT(5)` retention sweep are real and because that list is asserted equal to the
+registry's eleven tokens by `data-migration/tests/test_seed_datasets.py`.
+
 Each branch is four inner states -- `RefreshSeedDataset`,
 `CheckDatasetRefreshExitCode`, and the two terminal states of the branch -- so the
 branch reports the refresh's own exit status rather than the task integration's.
@@ -348,9 +366,10 @@ Refactoring Rationale: there is ONE Map here and there was briefly a second. A
 `LoadSeedDatasets` Map was authored to run `load-dataset` over the same eleven
 items, on the grounds that staging writes no row -- which was true of the state
 that preceded it, and is not true of this one. `refresh-dataset` stages the
-generation, loads the target table, runs all three verification passes over that
-dataset, stages the backup generation for the three families that have one, and
-advances `ledger.transaction_id_seq` for the one dataset whose rows occupy the
+generation, loads the target table for the ten datasets that ship a committed
+extract, runs all three verification passes over each of those, stages the backup
+generation for the three families that have one, and advances
+`ledger.transaction_id_seq` for the one dataset whose rows occupy the
 allocator's range. A second Map would re-fetch and re-decode every extract to
 perform an upsert that by construction changes nothing, so it is withdrawn and
 what it was written to guarantee -- that the bytes staged are the bytes loaded --
@@ -828,7 +847,7 @@ scope.
 | <a name="input_retry_backoff_rate"></a> [retry\_backoff\_rate](#input\_retry\_backoff\_rate) | Multiplier applied to the retry interval on each successive attempt. A value of 1 makes every wait equal to the interval, which is a flat retry rather than a backoff; higher values grow the wait geometrically. | `number` | `2` | no |
 | <a name="input_retry_interval_seconds"></a> [retry\_interval\_seconds](#input\_retry\_interval\_seconds) | Seconds a state waits before its first retry. Subsequent waits are this interval multiplied by the backoff rate, compounding per attempt, so this value and the rate together bound how long a retrying state can occupy the batch window. | `number` | `30` | no |
 | <a name="input_retry_max_attempts"></a> [retry\_max\_attempts](#input\_retry\_max\_attempts) | Retry attempts each state makes after its first failure, before its catch handler runs. This is the per-state half of the durable retry tier; the other half is that a failed execution can be redriven from the state that failed, and that the batch run ledger makes a step which already completed a no-op when it is retried. | `number` | `3` | no |
-| <a name="input_seed_datasets"></a> [seed\_datasets](#input\_seed\_datasets) | Dataset names the seed-staging state iterates over, one Map branch and one data-migration task per name. The default is the eleven loaded masters, one per declared Aurora load target. daily\_transactions is included because ledger.daily\_transactions IS a declared load target whose amount column the committed money-total query totals, so verification pass 3 refuses the whole run without a DALYTRAN source total. An environment may pass a subset to restage one master without a module edit. | `list(string)` | <pre>[<br/>  "accounts",<br/>  "cards",<br/>  "customers",<br/>  "card_xref",<br/>  "transactions",<br/>  "daily_transactions",<br/>  "disclosure_groups",<br/>  "transaction_category_balances",<br/>  "transaction_types",<br/>  "transaction_categories",<br/>  "users"<br/>]</pre> | no |
+| <a name="input_seed_datasets"></a> [seed\_datasets](#input\_seed\_datasets) | Dataset names the seed-staging state iterates over, one Map branch and one data-migration task per name. The default is the eleven registered seed masters, one per declared Aurora load target. Ten of them stage, load and verify; transactions stages a generation only and reports success, because no committed TRANSACT extract exists and ledger.transactions must stay empty until posting fills it. daily\_transactions IS loaded, because ledger.daily\_transactions is a declared load target whose amount column the committed money-total query totals, so verification pass 3 refuses the whole run without a DALYTRAN source total. An environment may pass a subset to restage one master without a module edit. | `list(string)` | <pre>[<br/>  "accounts",<br/>  "cards",<br/>  "customers",<br/>  "card_xref",<br/>  "transactions",<br/>  "daily_transactions",<br/>  "disclosure_groups",<br/>  "transaction_category_balances",<br/>  "transaction_types",<br/>  "transaction_categories",<br/>  "users"<br/>]</pre> | no |
 | <a name="input_stage_datasets_max_concurrency"></a> [stage\_datasets\_max\_concurrency](#input\_stage\_datasets\_max\_concurrency) | Maximum number of seed-staging Map branches allowed to run at once. The environment root may lower it to fit Aurora connection and Fargate task quotas; the default permits parallel loads without starting all eleven branches simultaneously. A sizing value, so it is one of the few a root may legitimately differ on. | `number` | `3` | no |
 | <a name="input_state_machine_timeout_seconds"></a> [state\_machine\_timeout\_seconds](#input\_state\_machine\_timeout\_seconds) | Ceiling on a single daily-batch execution, applied at the top level of the state machine definition rather than to any one state. It bounds the whole chain: an execution that stalls where no individual state's timeout applies would otherwise wait indefinitely, holding the online read-only flag set, because the resume state runs only after the chain finishes or fails. The ceiling caps how long the flag can be held rather than releasing it -- a timed-out execution runs no further state -- so release on that path comes from the out-of-execution watchdog rule, and this same value is published to the quiesce call as the bracket's lease length. The default is validated against the aggregate SEQUENTIAL budget of the twelve work states rather than against the largest single one, because the chain runs them one after another. | `number` | `61200` | no |
 | <a name="input_state_timeout_seconds"></a> [state\_timeout\_seconds](#input\_state\_timeout\_seconds) | Ceiling on each of the twelve work states, keyed by the state name exactly as main.tf spells it. The default puts the migration verification gate at the top ceiling because it re-reads every staged record and runs both committed whole-migration queries, then the four next-longest states -- seed staging, posting, interest and statements -- below it, the three dataset-writing states in the middle, and the three states that only toggle a flag or refresh statistics at the bottom. Every key must be present, so a state can never be left without a timeout: a state with no ceiling waits indefinitely, which holds the whole chain open and leaves the online read-only flag set until an operator intervenes. | `map(number)` | <pre>{<br/>  "AnalyzeTables": 1800,<br/>  "BackupTransactions": 3600,<br/>  "CalculateInterest": 7200,<br/>  "CombineTransactions": 3600,<br/>  "GenerateReports": 3600,<br/>  "GenerateStatements": 7200,<br/>  "PostTransactions": 7200,<br/>  "PreflightDailyTransactions": 1800,<br/>  "QuiesceOnlineWrites": 300,<br/>  "ResumeOnlineWrites": 300,<br/>  "StageSeedDatasets": 7200,<br/>  "VerifyMigration": 10800<br/>}</pre> | no |

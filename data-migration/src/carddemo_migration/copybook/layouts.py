@@ -224,6 +224,7 @@ __all__ = [
     "packed_width",
     "provenance_of",
     "reclen_of",
+    "require_mask_key_material",
     "sensitive_binary",
     "sensitive_text",
     "sensitive_uint",
@@ -4734,6 +4735,55 @@ def _mask_hmac_key() -> bytes:
         )
 
     return material
+
+
+def require_mask_key_material() -> None:
+    """Resolve the masking key once, so unusable key material is refused before any work starts.
+
+    Purpose
+    -------
+    Publish the validation half of :func:`_mask_hmac_key` WITHOUT its result, so a caller can
+    establish at its own boundary that the configured key is usable. Resolution is otherwise lazy:
+    the key is read the first time a value is masked, which for a long-running command is deep
+    inside a decode or a load rather than at the start of it.
+
+    Parameters
+    ----------
+    None
+        The key is read from :data:`ENV_MASK_HMAC_KEY`, exactly as the masking functions read it.
+
+    Returns
+    -------
+    None
+        Nothing is returned, deliberately. The resolved bytes are discarded so that no caller can
+        hold key material, and so that this function cannot become a second way to obtain it.
+
+    Raises
+    ------
+    LayoutError
+        With :func:`_mask_hmac_key`'s own message, unmodified, if the variable is present but
+        empty or whitespace only, is not standard base64, is a non-canonical encoding, decodes to
+        fewer than :data:`_MASK_HMAC_KEY_MIN_BYTES` bytes, or decodes to one repeated byte.
+        An UNSET variable is a supported configuration and raises nothing.
+    """
+    # WHY : Refactoring Rationale: this exists because the lazy resolution above, correct in
+    #   itself, gave the command line no place to refuse a bad key. `_mask_hmac_key` runs for the
+    #   first time inside `mask_field` -- so an unusable key surfaced from `cli._redacted` while
+    #   printing a decoded record, and from `zoned._render_content` while composing a DECODE
+    #   refusal's message. In the second case the operator was told the extract had failed to
+    #   decode when the extract was fine and the environment was not, which is the diagnosis
+    #   error worth engineering against: it sends someone to inspect bytes rather than a variable.
+    # WHY : Assumptions: the return type is `None` rather than `bytes`, and that is the whole
+    #   design. A validator that returned the key would be indistinguishable from an accessor, and
+    #   the next caller to need "the key" would reach for the public name instead of the private
+    #   one -- putting key material in a frame that has no use for it. Discarding the value keeps
+    #   `_mask_hmac_key` the single way to obtain a key and this the single way to CHECK one.
+    # WHY : Alternatives Considered: memoising the resolution so the check also warmed a cache for
+    #   the masking calls that follow. Rejected: `_mask_hmac_key` is deliberately un-cached so that
+    #   a test which sets the variable, and a rotation that changes it, both take effect on the
+    #   next call rather than on the next process. Introducing a cache here to save one base64
+    #   decode would trade that property for an unmeasurable saving.
+    _mask_hmac_key()
 
 
 # Refactoring Rationale: the tag is built to FIT the field rather than being written at

@@ -1131,8 +1131,25 @@ variable "dataset_source_extract_prefix" {
 #   `data-migration/tests/test_seed_datasets.py` reads this variable's default list
 #   and asserts it names exactly the registry's tokens. A name added on either side
 #   without the other fails that test rather than a nightly execution.
+# Assumptions: ten of the eleven branches load and verify their master; `transactions`
+#   STAGES A GENERATION AND STOPS, and the branch still reports success. That is the
+#   ETL's own decision rather than a special case introduced here -- the repository
+#   ships no TRANSACT extract, so the registry points that token at
+#   AWS.M2.CARDDEMO.DALYTRAN.PS.INIT, the single 350-byte record app/jcl/TRANFILE.jcl
+#   primes the cluster from, whose unpopulated fields do not decode as a whole
+#   transaction. `carddemo_migration.readers.transaction` declares
+#   HAS_COMMITTED_SEED_DATASET = False and `carddemo_migration.verify.row_counts`
+#   REQUIRES ledger.transactions to hold zero rows after the ETL, because posting is
+#   what fills it -- so a branch that loaded even one record would fail the gate at
+#   state 3. `refresh-dataset` reads that same predicate and composes the load and the
+#   three passes only for a seeded layout, stating the exemption in its own log line.
+# Refactoring Rationale: the token is NOT removed from the default list, which was the
+#   other way to stop the failure. Its generation family is real and its retention
+#   sweep is meaningful, the list is asserted equal to the registry's eleven tokens by
+#   the cross-language test named above, and a Map that silently skipped a declared
+#   dataset would be harder to read than a branch that states why it stopped early.
 variable "seed_datasets" {
-  description = "Dataset names the seed-staging state iterates over, one Map branch and one data-migration task per name. The default is the eleven loaded masters, one per declared Aurora load target. daily_transactions is included because ledger.daily_transactions IS a declared load target whose amount column the committed money-total query totals, so verification pass 3 refuses the whole run without a DALYTRAN source total. An environment may pass a subset to restage one master without a module edit."
+  description = "Dataset names the seed-staging state iterates over, one Map branch and one data-migration task per name. The default is the eleven registered seed masters, one per declared Aurora load target. Ten of them stage, load and verify; transactions stages a generation only and reports success, because no committed TRANSACT extract exists and ledger.transactions must stay empty until posting fills it. daily_transactions IS loaded, because ledger.daily_transactions is a declared load target whose amount column the committed money-total query totals, so verification pass 3 refuses the whole run without a DALYTRAN source total. An environment may pass a subset to restage one master without a module edit."
 
   type = list(string)
 
@@ -1179,7 +1196,7 @@ variable "seed_datasets" {
         "users",
       ], d)
     ])
-    error_message = "seed_datasets must list at least one name, each DISTINCT and each one of the eleven loaded masters: accounts, cards, customers, card_xref, transactions, daily_transactions, disclosure_groups, transaction_category_balances, transaction_types, transaction_categories, users."
+    error_message = "seed_datasets must list at least one name, each DISTINCT and each one of the eleven registered seed masters: accounts, cards, customers, card_xref, transactions, daily_transactions, disclosure_groups, transaction_category_balances, transaction_types, transaction_categories, users."
   }
 }
 

@@ -1415,6 +1415,16 @@ locals {
         #       loaded. It stops at the first step that does not succeed and exits with
         #       that step's own status, so the branch's exit-code Choice below still
         #       distinguishes success from failure without knowing which step ran.
+        # WHY : Assumptions: the load and the three passes are composed only for a dataset
+        #       whose layout SHIPS a committed extract, so one branch of the eleven --
+        #       `transactions` -- stages its generation, reconciles the allocator and
+        #       reports success without loading anything. The exemption belongs to the ETL
+        #       and is stated in that branch's log: no TRANSACT extract is committed, the
+        #       registry points the token at the single 350-byte initializer record
+        #       app/jcl/TRANFILE.jcl REPROs, and the verification query at state 3
+        #       REQUIRES ledger.transactions to hold zero rows because posting is what
+        #       fills it. A branch that loaded it would turn a green Map into a failed
+        #       gate two states later, which is the failure mode hardest to attribute.
         # WHY : Alternatives Considered: expressing those steps as five further states
         #       inside this Map's ItemProcessor. Rejected on three counts. AAP section
         #       0.4.1.7 fixes the chain at ELEVEN states and describes this one as "a
@@ -1534,12 +1544,12 @@ locals {
               }
 
               # WHY : Assumptions: the Cause names the whole sequence rather than the
-              #       staging step, because the task now performs six operations and any
-              #       of them can be the one that failed. The container stops at the
-              #       first that did not succeed and logs which step it was together with
-              #       that step's own status, so the log line -- not this Cause -- is
-              #       where the diagnosis lives; naming one step here would point every
-              #       reader at the wrong one five times out of six.
+              #       staging step, because the task performs up to six operations -- how
+              #       many depends on the dataset -- and any of them can be the one that
+              #       failed. The container stops at the first that did not succeed and
+              #       logs which step it was together with that step's own status, so the
+              #       log line -- not this Cause -- is where the diagnosis lives; naming
+              #       one step here would point most readers at the wrong one.
               DatasetRefreshFailed = {
                 Type  = "Fail"
                 Error = "DatasetRefreshFailed"
@@ -1602,8 +1612,9 @@ locals {
         #       running `reconcile-sequences` -- and BOTH are withdrawn. The work each
         #       one was written to add is already performed, per dataset, inside the
         #       refresh branch above: `refresh-dataset` stages the generation, LOADS the
-        #       target table, runs all three verification passes, stages the backup
-        #       generation for the three families that have one, and ADVANCES
+        #       target table for the ten datasets that ship a committed extract, runs all
+        #       three verification passes on each of those, stages the backup generation
+        #       for the three families that have one, and ADVANCES
         #       ledger.transaction_id_seq for the one dataset whose rows occupy the
         #       allocator's range. A second Map would re-fetch and re-decode every
         #       extract to perform an upsert that by construction changes nothing, and a

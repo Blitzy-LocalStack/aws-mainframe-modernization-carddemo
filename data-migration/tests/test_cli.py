@@ -6,6 +6,7 @@ import argparse
 import base64
 import errno
 import hashlib
+import inspect
 import io
 import json
 import logging
@@ -27,7 +28,7 @@ from carddemo_migration.config import (
     DatasetStagingSettings,
     role_for_schema,
 )
-from carddemo_migration.copybook import ebcdic_codec, layouts
+from carddemo_migration.copybook import ebcdic_codec, layouts, packed, zoned
 from carddemo_migration.credentials import EXIT_FAILED, EXIT_FATAL, EXIT_OK, EXIT_USAGE
 from carddemo_migration.loaders import aurora
 from carddemo_migration.loaders.aurora import (
@@ -438,6 +439,43 @@ def _registered_subcommands() -> tuple[str, ...]:
     return tuple(subparser_actions[0].choices)
 
 
+def _subparser(name: str) -> argparse.ArgumentParser:
+    """Reach one subcommand's own parser, so its accepted options can be read from the shipped code.
+
+    Purpose
+    -------
+    Let an assertion compare a message, a runbook or a container override against the options a
+    subcommand ACTUALLY accepts, rather than against a second list of them written in a test. The
+    two drift, and the direction they drift in is the dangerous one: the copy keeps agreeing with
+    the assertion after the parser has stopped agreeing with either.
+
+    Parameters
+    ----------
+    name : str
+        A registered subcommand name.
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        That subcommand's parser.
+
+    Raises
+    ------
+    AssertionError
+        If the name is not registered, because an assertion built on an absent subparser would
+        otherwise fail for a reason that reads as unrelated to what it was checking.
+    """
+    actions = [
+        action
+        for action in cli.build_parser()._actions
+        if hasattr(action, "choices") and isinstance(action.choices, dict)
+    ]
+    assert actions, "the parser registers no subcommands"
+    choices = actions[0].choices
+    assert name in choices, f"{name!r} is not a registered subcommand; registered: {tuple(choices)}"
+    return choices[name]
+
+
 def test_every_implemented_subcommand_is_registered() -> None:
     """Register exactly the subcommands whose backing modules are present."""
     assert _registered_subcommands() == _IMPLEMENTED_SUBCOMMANDS
@@ -506,6 +544,190 @@ def test_list_datasets_touches_no_client(monkeypatch: pytest.MonkeyPatch) -> Non
 
     monkeypatch.setattr(cli, "resolve_dataset_staging_settings", _refuse)
     assert cli.main(["list-datasets"]) == EXIT_OK
+
+
+# WHY : Assumptions: a REPRESENTATIVE five of the seven unusable forms are named here, and the
+#   exhaustive roster with its per-form reasoning lives in `tests/test_mask_key_material.py`, which
+#   owns the resolver's contract. What these cases add is the CLASSIFICATION the command line puts
+#   on a refusal and the point in the invocation at which it happens -- neither of which that
+#   module can assert, because it never runs a subcommand. Restating all seven here would be a
+#   second roster to keep in step for no additional property.
+_UNUSABLE_MASK_KEYS: tuple[str, ...] = (
+    "",
+    "   ",
+    "notbase64!!",
+    base64.b64encode(bytes(range(16))).decode(),
+    base64.b64encode(b"\xff" * 48).decode(),
+)
+
+
+@pytest.mark.parametrize("supplied", _UNUSABLE_MASK_KEYS, ids=repr)
+def test_unusable_mask_key_material_is_the_environment_tier_and_refused_before_dispatch(
+    supplied: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Refuse an unusable masking key as an environment fault, before any handler runs.
+
+    Parameters
+    ----------
+    supplied : str
+        The value configured for the masking-key variable.
+    monkeypatch : pytest.MonkeyPatch
+        Configures the variable and installs a handler that must never be reached.
+    caplog : pytest.LogCaptureFixture
+        Captures the refusal so it can be asserted logged and value-free.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the refusal escapes as a traceback, is classified as a step failure, or arrives after a
+        handler has begun work.
+    """
+    # WHY : Refactoring Rationale: the key used to be resolved lazily by the first masked value, so
+    #   an unusable one reached `main` as a raw `LayoutError` from inside `_redacted` -- status 1,
+    #   outside the documented classification -- and, worse, could arrive from
+    #   `zoned._render_content` while composing a decode refusal, presenting an environment fault
+    #   as a malformed extract.
+    # WHY : Assumptions: the status is asserted to be FATAL (16) and not FAILED (8). 16 is
+    #   "the environment could not be resolved" and 8 is "the step ran and did not succeed"; no
+    #   step has run here, and filing this as 8 would invite the orchestrator to retry a fault no
+    #   retry can clear.
+    reached: list[str] = []
+
+    def _handler(_arguments: argparse.Namespace) -> int:
+        """Record that a handler was entered, which on this path it must not be.
+
+        Parameters
+        ----------
+        _arguments : argparse.Namespace
+            The parsed arguments, unused.
+
+        Returns
+        -------
+        int
+            Never returned on this path; the recording is the assertion.
+        """
+        reached.append("dispatched")
+        return EXIT_OK
+
+    monkeypatch.setenv(layouts.ENV_MASK_HMAC_KEY, supplied)
+    monkeypatch.setattr(cli, "_list_datasets", _handler)
+    with caplog.at_level(logging.ERROR, logger="carddemo_migration.cli"):
+        status = cli.main(["list-datasets"])
+    assert status == EXIT_FATAL
+    # Assumptions: the subject is `list-datasets` deliberately -- the ONE subcommand that reads no
+    #   configuration, opens no client and masks nothing. It therefore has no reason of its own to
+    #   fail, so a refusal here can only have come from the boundary check, and the handler patch
+    #   proves the check ran BEFORE dispatch rather than the command having failed on its own.
+    assert reached == [], "the masking key must be refused before any handler is entered"
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert layouts.ENV_MASK_HMAC_KEY in logged, "the refusal must name the variable it is about"
+    if supplied.strip():
+        assert supplied not in logged, "the refusal must not echo candidate key material"
+
+
+def test_a_conforming_mask_key_leaves_every_subcommand_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dispatch normally when the masking key is conforming, and when it is unset.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Configures and removes the masking-key variable.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the boundary check refuses a supported configuration, which would make the check itself
+        the outage it was added to prevent.
+    """
+    # WHY : Assumptions: this control is as important as the refusals above. A check placed before
+    #   dispatch fails EVERY subcommand when it is wrong, so the two supported configurations --
+    #   conforming material and no material at all -- are asserted to still reach a handler.
+    monkeypatch.delenv(layouts.ENV_MASK_HMAC_KEY, raising=False)
+    assert cli.main(["list-datasets"]) == EXIT_OK
+    monkeypatch.setenv(layouts.ENV_MASK_HMAC_KEY, base64.b64encode(bytes(range(32, 64))).decode())
+    assert cli.main(["list-datasets"]) == EXIT_OK
+
+
+def test_cancellation_is_classified_rather_than_raised(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Report a documented status when an operator interrupts a running subcommand.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Installs a handler that raises the interrupt an operator's SIGINT produces.
+    caplog : pytest.LogCaptureFixture
+        Captures the cancellation sentence.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the interrupt escapes, or the status falls outside the published classification.
+    """
+
+    # WHY : Refactoring Rationale: an interrupt used to propagate, so a cancelled command produced
+    #   the interpreter's own `KeyboardInterrupt` traceback and status 130 -- a number no runbook,
+    #   no README section and no `Choice` state in the batch state machine documents. Rollback and
+    #   cleanup were already correct; what was missing was a classified status and one sentence
+    #   saying so.
+    # WHY : Assumptions: the interrupt is raised from the HANDLER rather than delivered as a real
+    #   signal. A signal delivered to the test process would interrupt the runner rather than the
+    #   subcommand, and what is under test is the boundary's handling of the exception -- which is
+    #   the same object either way.
+    def _interrupted(_arguments: argparse.Namespace) -> int:
+        """Raise the interrupt an operator's SIGINT delivers into a running handler.
+
+        Parameters
+        ----------
+        _arguments : argparse.Namespace
+            The parsed arguments, unused.
+
+        Returns
+        -------
+        int
+            Never returned; the interrupt is the point.
+
+        Raises
+        ------
+        KeyboardInterrupt
+            Always.
+        """
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_list_datasets", _interrupted)
+    with caplog.at_level(logging.ERROR, logger="carddemo_migration.cli"):
+        status = cli.main(["list-datasets"])
+    # Assumptions: the status is asserted to be INSIDE the published set as well as equal to the
+    #   failed tier, so a later change that invents a cancellation tier fails here rather than
+    #   publishing a fifth status the state machine has no branch for.
+    assert status == EXIT_FAILED
+    assert status in {EXIT_OK, EXIT_USAGE, EXIT_FAILED, EXIT_FATAL}
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    # Assumptions: the sentence must name the SUBCOMMAND, because an operator who interrupted one
+    #   of several concurrent container steps needs to know which one stopped.
+    assert "list-datasets" in logged
+    assert "cancelled" in logged
 
 
 def _stage_arguments(dataset: str = "transactions") -> list[str]:
@@ -832,6 +1054,73 @@ def test_stage_dataset_requires_an_execution_token_to_reserve_a_generation(
     #   default would silently reintroduce duplicate generations.
     assert (
         cli.main(["stage-dataset", "--dataset=users", "--business-date=2022-07-18"]) == EXIT_FATAL
+    )
+
+
+def test_the_generation_refusal_names_only_remedies_the_parser_accepts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Require every remedy the generation refusal suggests to be executable against the parser.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        Holds a staging root carrying the extract, so the refusal reached is the reservation's own.
+    monkeypatch : pytest.MonkeyPatch
+        Binds the staging seams and removes the execution identity.
+    caplog : pytest.LogCaptureFixture
+        Captures the refusal so its wording can be asserted.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the refusal recommends an option the parser would reject, which costs an operator an
+        attempt before it teaches them anything.
+    """
+    # WHY : Refactoring Rationale: the refusal ended "or pass --generation explicitly", and
+    #   `--generation` had been withdrawn from every subparser when the durable reservation replaced
+    #   it -- so following the advice produced argparse's usage error and status 2. A refusal that
+    #   reads as actionable and is not is worse than a shorter one, because the reader spends the
+    #   attempt before learning the option does not exist.
+    # WHY : Assumptions: the assertion is written against the PARSER rather than against the removed
+    #   string, so it keeps working as a guard: any option name a future refusal suggests must be
+    #   one this command actually accepts, and a re-added `--generation` would satisfy it honestly
+    #   rather than having to be exempted.
+    descriptor = seed_datasets.seed_dataset("users")
+    staging_root = tmp_path / "extracts"
+    staging_root.mkdir()
+    (staging_root / descriptor.source_object).write_bytes(b"u" * 80)
+
+    monkeypatch.setattr(cli, "resolve_dataset_staging_settings", _test_settings)
+    monkeypatch.setattr(cli, "_s3_client", _CapableS3Client)
+    monkeypatch.setenv(seed_datasets.STAGING_ROOT_VARIABLE, str(staging_root))
+    monkeypatch.delenv("CARDDEMO_BATCH_RUN_ID", raising=False)
+
+    with caplog.at_level(logging.ERROR, logger="carddemo_migration.cli"):
+        status = cli.main(["stage-dataset", "--dataset=users", "--business-date=2022-07-18"])
+    assert status == EXIT_FATAL
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "CARDDEMO_BATCH_RUN_ID" in logged, "the refusal must name the remedy that works"
+
+    # Assumptions: the roster of accepted options is recovered from the SUBPARSER itself rather
+    #   than listed here, so this compares the message against the shipped parser and not against a
+    #   second copy of it that could drift the same way the message did.
+    accepted = {
+        option
+        for action in _subparser("stage-dataset")._actions
+        for option in action.option_strings
+    }
+    suggested = set(re.findall(r"--[a-z][a-z0-9-]*", logged))
+    assert suggested <= accepted, (
+        "the refusal suggests options this subcommand does not accept: "
+        f"{sorted(suggested - accepted)}"
     )
 
 
@@ -1357,6 +1646,187 @@ def test_decode_record_requires_both_the_dataset_and_the_source() -> None:
     """Refuse an invocation missing either required argument."""
     assert cli.main(["decode-record", "--dataset", "ACCOUNT"]) == EXIT_USAGE
     assert cli.main(["decode-record", "--source", str(_ACCOUNT_EXTRACT)]) == EXIT_USAGE
+
+
+# Assumptions: this is the committed extract the `transactions` seed token names -- the single
+#   350-byte record `app/jcl/TRANFILE.jcl` REPROs to prime the TRANSACT cluster. It is read here
+#   rather than fabricated because it is the delivery an operator and the nightly chain actually
+#   meet, and its `TRAN-CAT-CD` span is four NUL bytes, which is what makes it the shipped subject
+#   for a numeric-codec refusal. A hand-built corrupt record would prove only that this file agreed
+#   with itself about what corruption looks like.
+_TRANSACTION_INITIALIZER_EXTRACT = _EBCDIC_DIRECTORY / "AWS.M2.CARDDEMO.DALYTRAN.PS.INIT"
+
+
+def _published_decode_faults() -> dict[str, type[BaseException]]:
+    """Discover every decode-fault class the copybook package publishes, by scanning it.
+
+    Purpose
+    -------
+    Derive the subject list for the refusal-coverage assertions below from the CODECS rather than
+    from a list restated here, so a fault type added to a codec later becomes a new subject
+    automatically instead of escaping the command line unnoticed.
+
+    Parameters
+    ----------
+    None
+        The four modules scanned are the whole decode stack: the layout registry, the EBCDIC record
+        codec and the two numeric field codecs beneath it.
+
+    Returns
+    -------
+    dict[str, type[BaseException]]
+        Class name to class, for every ``ValueError`` subclass DECLARED in one of those modules.
+        Keyed by name so a failing assertion below names the class that is not covered.
+
+    Raises
+    ------
+    None
+    """
+    # WHY : Assumptions: `o.__module__ == module.__name__` is what restricts the scan to classes
+    #   each module DECLARES rather than merely imports. Without it `ebcdic_codec` would contribute
+    #   the two layout errors it imports for its own raising, and the four modules would report
+    #   overlapping sets -- which still passes, but stops being a measurement of where each fault
+    #   is authored and so stops being able to notice a fault authored somewhere new.
+    faults: dict[str, type[BaseException]] = {}
+    for module in (layouts, ebcdic_codec, zoned, packed):
+        for name, obj in vars(module).items():
+            if (
+                inspect.isclass(obj)
+                and issubclass(obj, ValueError)
+                and obj.__module__ == module.__name__
+            ):
+                faults[name] = obj
+    return faults
+
+
+def test_the_shared_refusal_set_covers_every_published_decode_fault() -> None:
+    """Require the command line's decode-refusal set to match every decode fault the codecs raise.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If a published decode fault would escape the shared set, which is how one reaches ``main``
+        as a traceback and a status outside the documented classification.
+    """
+    # WHY : Refactoring Rationale: the set held two entries and covered four of the eight faults the
+    #   stack publishes -- the two it named plus the two subclasses of those, which is exactly the
+    #   coverage pattern that reads as complete. `EbcdicFieldDecodeError`, `ZonedDecimalError`,
+    #   `ZonedSpanWidthError` and `PackedDecimalError` are `ValueError` SIBLINGS, so every command
+    #   that read an extract could end in a traceback with status 1. This test is written as a scan
+    #   rather than as five membership assertions so that the NEXT fault a codec gains is a failure
+    #   here rather than a traceback in a deployment.
+    faults = _published_decode_faults()
+    # Assumptions: the discovery is asserted non-vacuous before it is used. A scan that found
+    #   nothing -- a renamed module, a moved class -- would make every assertion below pass while
+    #   proving nothing, which is the failure mode a derived subject list invites.
+    assert len(faults) >= 8, f"the decode stack must publish at least eight faults, found {faults}"
+    for name, fault in sorted(faults.items()):
+        assert issubclass(fault, cli._DECODE_ERRORS), (
+            f"{name} is a published decode fault and must be covered by the shared refusal set, "
+            f"which names {[member.__name__ for member in cli._DECODE_ERRORS]}"
+        )
+        # Assumptions: the same class must also reach the LOAD and VERIFICATION handlers' set,
+        #   because those refuse on `_step_errors()` and not on the constant directly. Asserting
+        #   only the constant would let the two diverge, which is the state that produced one
+        #   classified status and one traceback for a single malformed file.
+        assert issubclass(fault, cli._step_errors()), f"{name} must reach the step refusal set"
+    # Assumptions: the widening is asserted to stop at the named classes. A bare `ValueError` must
+    #   NOT match, because catching it would report a programming mistake in this package -- a bad
+    #   int() over an operator string, a failed enum lookup -- to an operator as a malformed
+    #   delivery, sending them to inspect bytes that are fine.
+    assert not issubclass(ValueError, cli._DECODE_ERRORS)
+
+
+def test_decode_record_classifies_a_numeric_codec_refusal_rather_than_raising(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Report the failed tier when a field's declared span holds bytes the numeric codec refuses.
+
+    Parameters
+    ----------
+    capsys : pytest.CaptureFixture[str]
+        Captures the refusal so the message can be asserted safe and self-locating.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the refusal escapes as a traceback rather than becoming the documented status.
+    """
+    # WHY : Assumptions: the subject is the SHIPPED transaction initializer rather than a corrupted
+    #   copy of a good extract, because this is the file the nightly chain and the runbook both
+    #   name -- so the case that used to end in a traceback is the case an operator actually met.
+    assert (
+        cli.main(_decode_arguments(_TRANSACTION_INITIALIZER_EXTRACT, dataset="TRAN")) == EXIT_FAILED
+    )
+    captured = capsys.readouterr()
+    # Assumptions: the message must locate the fault to a FIELD, because that is the whole reason
+    #   for quoting a package-authored refusal instead of printing a class name: an operator has to
+    #   know which span of which record to look at.
+    assert "TRAN-CAT-CD" in captured.err
+    # Assumptions: no decoded record is printed on this path. A partially decoded field map written
+    #   to stdout beside a refusal would read as a successful decode to anything parsing the output.
+    assert captured.out == ""
+
+
+@pytest.mark.parametrize(
+    "verb",
+    ["verify-row-counts", "verify-checksum", "verify-money-parity"],
+)
+def test_the_verification_verbs_classify_a_numeric_codec_refusal_rather_than_raising(
+    verb: str,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_aurora: FakeAuroraDatabase,
+    aurora_settings: AuroraConnectionSettings,
+) -> None:
+    """Report the failed tier from every per-dataset verification verb on an undecodable extract.
+
+    Parameters
+    ----------
+    verb : str
+        The verification subcommand under test.
+    monkeypatch : pytest.MonkeyPatch
+        Binds the database seam so the verb runs end to end without a cluster.
+    fake_aurora : FakeAuroraDatabase
+        The recording double every patched connection returns.
+    aurora_settings : AuroraConnectionSettings
+        Synthetic settings naming an unreachable host.
+
+    Returns
+    -------
+    None
+        The assertion is the result.
+
+    Raises
+    ------
+    AssertionError
+        If any verb ends in a traceback, which is the state that made one malformed file produce
+        three different outcomes from three commands that read it the same way.
+    """
+    # WHY : Assumptions: all three verbs are parametrized rather than one being taken as
+    #   representative, because they refuse through three different `except` clauses -- each adding
+    #   its own verification error to the shared set -- and a widening applied to the shared half
+    #   still has to reach all three. Asserting one would leave the other two able to regress
+    #   independently, which is how this class of defect survived a checkpoint.
+    _bind_database(monkeypatch, fake_aurora, aurora_settings)
+    status = cli.main(
+        [
+            verb,
+            "--dataset=TRAN",
+            f"--source={_TRANSACTION_INITIALIZER_EXTRACT}",
+            "--encoding=ebcdic",
+        ]
+    )
+    assert status == EXIT_FAILED
 
 
 def _bind_database(
@@ -4147,8 +4617,13 @@ def test_refresh_steps_reconcile_the_allocator_only_for_the_transaction_master()
         If the allocator step is attached to the wrong set of datasets, or if the five common
         steps are not the five an operator runs by hand.
     """
-    common = (
-        "stage the generation",
+    staging = "stage the generation"
+    # WHY : Refactoring Rationale: the five "common" steps became one common step plus four that are
+    #   composed only for a dataset whose layout ships a committed extract, and the expectation is
+    #   derived from that predicate rather than asserted for every token. It used to assert all five
+    #   unconditionally, which codified the defect: the one unseeded token was scheduled for a
+    #   load its extract cannot survive, so its nightly Map branch failed at step 2 of 6 every run.
+    loading = (
         "load the target table",
         "verify row counts",
         "verify the record checksum",
@@ -4170,7 +4645,14 @@ def test_refresh_steps_reconcile_the_allocator_only_for_the_transaction_master()
         labels = tuple(
             label for label, _, _ in cli._refresh_steps(descriptor, arguments, Path("extract.PS"))
         )
-        assert labels[:5] == common
+        # WHY : the load-and-verify expectation is derived from `ships_committed_extract`, the same
+        #   predicate the combined gate's coverage reads, so the refresh and the gate cannot come to
+        #   disagree about which datasets have something to load. Writing "except transactions" here
+        #   would be a third copy of a rule two modules publish.
+        leading = (
+            (staging, *loading) if ships_committed_extract(descriptor.layout_name) else (staging,)
+        )
+        assert labels[: len(leading)] == leading
         # WHY : the expectation is derived from the LOAD TARGET rather than from the token, because
         #   that is what the production predicate compares: two tokens loading into one table would
         #   both need the step, and a token renamed would not change which table it feeds.
@@ -4193,7 +4675,62 @@ def test_refresh_steps_reconcile_the_allocator_only_for_the_transaction_master()
         #   backups to reference data, so no dataset can carry both. Asserting the exact tuple is
         #   what would catch a future binding that put a backup family on the transaction master and
         #   silently changed which step ran last.
-        assert labels[5:] == trailing
+        assert labels[len(leading) :] == trailing
+
+
+def test_refresh_stages_but_neither_loads_nor_verifies_an_unseeded_dataset() -> None:
+    """Compose no load and no verification for the one dataset that ships no committed extract.
+
+    Purpose
+    -------
+    Hold the nightly chain to the seed exemption two other modules already publish. The
+    ``transactions`` token names ``AWS.M2.CARDDEMO.DALYTRAN.PS.INIT`` -- the single 350-byte record
+    ``app/jcl/TRANFILE.jcl`` primes the TRANSACT cluster from, whose unpopulated category code is
+    four NUL bytes -- so its refresh staged the generation and then failed decoding at step 2 of 6,
+    every run, for that branch of the scheduled Map. Loading it would be wrong even if it decoded:
+    ``verify/row_counts.py`` requires ``ledger.transactions`` to hold zero rows after the ETL,
+    because posting is what fills it.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If a load or a verification step is composed for an unseeded dataset, if the staging step is
+        dropped along with them, or if the exemption is applied to a dataset that does ship an
+        extract.
+    """
+    unseeded = [
+        token
+        for token in seed_datasets.SEED_DATASETS
+        if not ships_committed_extract(seed_datasets.seed_dataset(token).layout_name)
+    ]
+    # WHY : Assumptions: the set is derived and then asserted non-empty, so this case cannot pass
+    #   vacuously if the predicate ever answers True for everything -- a parametrised loop over an
+    #   empty list collects nothing and reports green, which is the failure mode this suite exists
+    #   to avoid elsewhere.
+    assert unseeded, "no unseeded dataset remains, so this exemption is no longer under test"
+
+    for token in unseeded:
+        descriptor = seed_datasets.seed_dataset(token)
+        arguments = argparse.Namespace(
+            business_date=date(2022, 7, 18),
+            encoding="ebcdic",
+            retain=None,
+            work_root=Path("unused-work-root"),
+        )
+        labels = tuple(
+            label for label, _, _ in cli._refresh_steps(descriptor, arguments, Path("extract.PS"))
+        )
+        assert "stage the generation" in labels, (
+            f"{token} lost its staging step; the generation family it writes is a real dataset"
+            " generation the baseline's own REPRO job reads"
+        )
+        assert "load the target table" not in labels
+        assert not [label for label in labels if label.startswith("verify")]
 
 
 def _manifest(directory: Path, entries: object) -> Path:
@@ -4609,8 +5146,13 @@ def test_verify_all_resolves_a_relative_source_against_the_manifest(
         ([], "declares no dataset"),
         ([{"dataset": "ACCOUNT", "source": "acctdata.txt"}], "carrying exactly"),
         (
+            # WHY : Refactoring Rationale: the expected fragment reads "neither a layout name"
+            #   where it read "no layout registers". The refusal now names BOTH admitted
+            #   vocabularies, because a manifest accepts either spelling as the four per-dataset
+            #   commands do, so a message naming only the layout registry would tell an operator
+            #   who mistyped a seed token that tokens are not accepted here at all.
             [{"dataset": "NOT-A-RECORD", "source": "acctdata.txt", "encoding": "ascii"}],
-            "no layout registers",
+            "neither a layout name",
         ),
         (
             [{"dataset": "ACCOUNT", "source": "acctdata.txt", "encoding": "utf8"}],
@@ -4719,6 +5261,221 @@ def test_verify_all_reports_an_absent_manifest_rather_than_raising(
     with caplog.at_level(logging.ERROR):
         assert cli.main(["verify-all", "--manifest", str(tmp_path / "absent.json")]) == EXIT_USAGE
     assert "could not be read" in caplog.text
+
+
+def test_verify_all_manifest_form_drives_a_real_pass_end_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_aurora: FakeAuroraDatabase,
+    aurora_settings: AuroraConnectionSettings,
+) -> None:
+    """Reach the REAL first pass through the manifest form and report a classified status.
+
+    Purpose
+    -------
+    Cover the manifest form with an invocation that is not stubbed. Every other case here replaces
+    :data:`cli._VERIFICATION_PASSES` with recorders, and that is exactly why an unusable command
+    stayed green for a whole checkpoint: the synthesised namespace carried the three manifest values
+    and NOT the invocation's work directory, so the first real pass raised ``AttributeError`` on
+    ``arguments.work_root`` and the documented operator procedure exited 1 on a traceback before
+    verifying a single dataset. One real pass invocation is what makes that class of omission a test
+    failure rather than a deployment failure.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Used to bind the database seam to the double.
+    tmp_path : Path
+        Where the manifest is written; its own directory is the root the relative source resolves
+        against.
+    fake_aurora : FakeAuroraDatabase
+        Recording double for the driver.
+    aurora_settings : AuroraConnectionSettings
+        Synthetic settings naming an unreachable host.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the pass never reached the database, or if the aggregate reports a status outside the
+        published classification -- which is what an escaping exception produces.
+    """
+    requested = _bind_database(monkeypatch, fake_aurora, aurora_settings)
+    # WHY : Assumptions: an aggregate is arranged to answer ONE row, because a real server returns a
+    #   row for `COUNT(*)` even over an empty table and the pass correctly refuses a connection that
+    #   returns none. The count is the seed's own record count, so pass 1 MATCHES and the aggregate
+    #   goes on to pass 2 -- which is what proves the run got past the first handler rather than
+    #   stopping inside it.
+    records = sum(1 for line in _CATEGORY_BALANCE_SEED.read_bytes().splitlines() if line.strip())
+    fake_aurora.arrange_rows("COUNT(*) FROM", [(records,)])
+    manifest = _manifest(
+        tmp_path,
+        [{"dataset": "TCATBAL", "source": str(_CATEGORY_BALANCE_SEED), "encoding": "ascii"}],
+    )
+
+    exit_code = cli.main(["verify-all", "--manifest", str(manifest)])
+
+    # WHY : Assumptions: the SCHEMA REQUEST is the property this case turns on. A pass that raised
+    #   before opening a connection records nothing, so an empty list is precisely the failure this
+    #   test was written to catch, and it is invisible to any assertion about the status alone.
+    assert requested, "no pass reached the database, so the manifest form ran nothing for real"
+    assert requested[0] == "ledger"
+    # WHY : Trade-offs: the expected status is the CLASSIFIED failure and not success. Pass 2 reads
+    #   the loaded rows back and this double has none arranged, so a negative verdict is the honest
+    #   outcome; what matters is that the run reported a documented status rather than the 1 an
+    #   escaping AttributeError produced. Arranging a full read-back for eleven columns would make
+    #   this a checksum test rather than a namespace-contract one.
+    assert exit_code in {EXIT_OK, EXIT_FAILED}
+
+
+def test_verify_all_manifest_passes_carry_the_invocations_work_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Give every manifested pass the work directory the invocation opened, not just the selectors.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Used to record the namespace each pass is invoked with.
+    tmp_path : Path
+        Where the manifest and its named source are written.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If a pass is invoked without ``work_root``, or with one that names no existing directory --
+        either of which makes an object-store source unreadable for that pass.
+    """
+    seen: list[tuple[frozenset[str], object, bool]] = []
+
+    def _capture(arguments: argparse.Namespace) -> int:
+        """Record the namespace's members, its work root, and whether that root exists yet.
+
+        Parameters
+        ----------
+        arguments : argparse.Namespace
+            The synthesised namespace.
+
+        Returns
+        -------
+        int
+            The success status, so every declared pass is reached.
+
+        Raises
+        ------
+        None
+            Recording cannot fail.
+        """
+        # WHY : Assumptions: the directory's existence is evaluated HERE and stored as a flag rather
+        #   than asserted after the run. `main` opens the work root as a `TemporaryDirectory` and
+        #   removes it on every exit path, so a check made after `cli.main` returns reports False
+        #   for a good root and the test would fail for a reason that is not the defect.
+        root = getattr(arguments, "work_root", None)
+        seen.append((frozenset(vars(arguments)), root, isinstance(root, Path) and root.is_dir()))
+        return EXIT_OK
+
+    monkeypatch.setattr(
+        cli,
+        "_VERIFICATION_PASSES",
+        (("row counts", _capture), ("record checksums", _capture), ("money parity", _capture)),
+    )
+    (tmp_path / "acctdata.txt").write_text("", encoding="utf-8")
+    manifest = _manifest(
+        tmp_path, [{"dataset": "ACCOUNT", "source": "acctdata.txt", "encoding": "ascii"}]
+    )
+
+    assert cli.main(["verify-all", "--manifest", str(manifest)]) == EXIT_OK
+
+    assert len(seen) == 3, "the three mandated passes were not all invoked"
+    for members, work_root, live in seen:
+        # WHY : Assumptions: the members are asserted EXACTLY rather than by containment, so a
+        #   namespace that grew the aggregate command's own `manifest` or `sql_root` fails here. A
+        #   per-dataset handler reading one of those would silently take the aggregate's value
+        #   instead of its own, which is a wrong answer rather than an error.
+        assert set(members) == {"dataset", "source", "encoding", "work_root"}
+        assert live, (
+            f"a pass was handed {work_root}, which was not a live directory an object-store source"
+            " could be materialised into"
+        )
+
+
+def test_verify_all_manifest_accepts_either_dataset_spelling(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Accept a seed-dataset token in a manifest, and hand the passes the layout name.
+
+    Purpose
+    -------
+    Hold the manifest to the vocabulary README section 5.2 publishes for it: an entry declares "the
+    same three values the four commands above take on the command line", and those four accept
+    either spelling. Validating against the layout registry alone refused ``transaction_types`` as a
+    usage error while ``verify-checksum --dataset transaction_types`` accepted it, so an operator
+    transcribing a working command into a manifest met a refusal naming the value they had just used
+    successfully.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Used to record the dataset each pass is invoked with.
+    tmp_path : Path
+        Where the manifest and its named source are written.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If a token spelling is refused, or if the token rather than the layout name is carried into
+        the passes -- the registries downstream are keyed by the layout name.
+    """
+    named: list[str] = []
+
+    def _capture(arguments: argparse.Namespace) -> int:
+        """Record the dataset a pass was handed and report success.
+
+        Parameters
+        ----------
+        arguments : argparse.Namespace
+            The synthesised namespace.
+
+        Returns
+        -------
+        int
+            The success status.
+
+        Raises
+        ------
+        None
+            Recording cannot fail.
+        """
+        named.append(arguments.dataset)
+        return EXIT_OK
+
+    monkeypatch.setattr(cli, "_VERIFICATION_PASSES", (("row counts", _capture),))
+    (tmp_path / "trantype.txt").write_text("", encoding="utf-8")
+    manifest = _manifest(
+        tmp_path,
+        [{"dataset": "transaction_types", "source": "trantype.txt", "encoding": "ascii"}],
+    )
+
+    assert cli.main(["verify-all", "--manifest", str(manifest)]) == EXIT_OK
+
+    # WHY : Assumptions: the expected name is DERIVED from the registry rather than written as
+    #   "TRANTYPE", so the assertion states the property -- the token is resolved to its layout --
+    #   rather than a pair of literals that could both be edited to agree with a wrong mapping.
+    assert named == [seed_datasets.layout_name_for("transaction_types")]
 
 
 def test_no_contracted_subcommand_remains_unregistered() -> None:
@@ -6180,6 +6937,114 @@ def test_verify_all_offers_pass_three_every_money_bearing_extract(
     )
     offered = next(int(name.split(":", 1)[1]) for name in ran if name.startswith("money_parity:"))
     assert offered == expected
+
+
+def test_verify_all_gives_pass_three_a_materialised_extract_when_the_root_is_a_bucket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Materialise an object-store extract for pass 3, and transfer each object only once.
+
+    Purpose
+    -------
+    Assert the gate works in the ONE configuration the deployment actually runs. Both environment
+    roots leave ``dataset_staging_root`` null, so ``infra/modules/step-functions-batch`` composes it
+    as ``s3://<bucket>/<prefix>`` and the verification state's container reads that -- yet pass 3
+    built its source as ``Path`` of that value, which collapses ``s3://bucket/key`` to the relative
+    directory ``s3:/bucket/key``. Passes 1 and 2 materialised correctly, so the gate reported two
+    successes and then failed with a bare ENOENT: every local run certified three of three while the
+    nightly chain's verification state could not pass at all.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Binds the gate's measurement seams, the staging root, the settings resolver and the client
+        factory, so the test needs no network.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If pass 3 is offered a path that is not a readable local file, if any offered path still
+        carries the object-store scheme, or if an object is transferred more than once.
+    """
+    _arrange_gate(monkeypatch)
+    # WHY : Assumptions: the money stub is re-bound AFTER `_arrange_gate` so this test observes the
+    #   extract PATHS rather than only how many were offered, which is all the shared arrangement
+    #   records. The two answers differ precisely in the defect under test: the count was already
+    #   correct while every path was unreadable.
+    offered: list[tuple[str, bool]] = []
+
+    def _record_money(connection: Any, extracts: Any, *, query_path: Any = None) -> _StubPass:
+        """Record each offered extract's path and whether it was readable AT THAT MOMENT.
+
+        Parameters
+        ----------
+        connection : Any
+            The reporting connection, unused.
+        extracts : Any
+            The source extracts pass 3 was offered.
+        query_path : Any, optional
+            The committed query's location, unused.
+
+        Returns
+        -------
+        _StubPass
+            A verified stub verdict, so the gate reaches its success path.
+
+        Raises
+        ------
+        None
+            Recording cannot fail.
+        """
+        # WHY : Assumptions: `is_file()` is evaluated HERE and stored, not asserted after the run.
+        #   The work directory is a `TemporaryDirectory` opened by `main` and removed when it
+        #   returns, so a check made after `cli.main` would report False for a correctly
+        #   materialised extract and the test would fail for the wrong reason.
+        offered.extend((str(extract.path), extract.path.is_file()) for extract in extracts)
+        return _StubPass("money totals", True)
+
+    monkeypatch.setattr(money_parity, "verify_money_totals", _record_money)
+
+    client = _CapableS3Client()
+    delivered = {
+        seed_datasets.seed_dataset(token).source_object
+        for token in seed_datasets.seed_dataset_tokens()
+        if seed_datasets.seed_dataset(token).layout_name in _gate_covered_layouts()
+    }
+    # WHY : Assumptions: the REAL committed extracts are seeded rather than synthetic bytes, because
+    #   the shared arrangement's pass-2 stub drains the record streams exactly as the real
+    #   comparison does. Synthetic bytes would fail to decode and the test would report a codec
+    #   refusal instead of the resolution defect it exists to catch.
+    for source_object in sorted(delivered):
+        client.seed_object(
+            _INBOX_BUCKET,
+            f"{_INBOX_PREFIX}/{source_object}",
+            (_EBCDIC_DIRECTORY / source_object).read_bytes(),
+        )
+
+    monkeypatch.setenv(seed_datasets.STAGING_ROOT_VARIABLE, _inbox_root())
+    monkeypatch.setattr(cli, "resolve_dataset_staging_settings", _test_settings)
+    monkeypatch.setattr(cli, "_s3_client", lambda: client)
+
+    assert cli.main(["verify-all"]) == EXIT_OK
+
+    assert offered, "pass 3 was never reached, so nothing about its sources was proved"
+    for rendered, readable in offered:
+        assert not rendered.startswith(seed_datasets.OBJECT_STORE_SCHEME), (
+            f"pass 3 was offered {rendered}, which still carries the object-store scheme"
+        )
+        assert readable, f"pass 3 was offered {rendered}, which is not a readable local file"
+    # WHY : Assumptions: each delivered object is asserted to have been fetched EXACTLY once, which
+    #   is what proves the resolution is memoised across passes 2 and 3 rather than repeated. Two
+    #   transfers of one object are not merely wasteful: they let the two passes read different
+    #   bytes if the object is replaced between them, which is the disagreement this gate exists
+    #   to detect rather than to contain.
+    fetched = [key for key in client.gets if key.startswith(f"{_INBOX_PREFIX}/")]
+    assert sorted(fetched) == sorted(f"{_INBOX_PREFIX}/{name}" for name in delivered)
 
 
 @pytest.mark.parametrize(
