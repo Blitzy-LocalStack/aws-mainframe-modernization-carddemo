@@ -51,12 +51,34 @@
  *
  * <h2>The closed inventory</h2>
  *
- * <p>This directory holds four files and a fifth is prohibited: this charter, together with
- * {@code BatchRunRepositoryIT}, {@code CrossSchemaFeedRepositoryIT} and {@code PostingUnitOfWorkIT}.</p>
+ * <p>This directory holds six files and a seventh is prohibited: this charter, together with
+ * {@code BatchRunRepositoryIT}, {@code CrossSchemaFeedRepositoryIT}, {@code CardXrefRepositoryIT},
+ * {@code DailyTransactionRepositoryIT} and {@code PostingUnitOfWorkIT}.</p>
  *
  * <pre>
- * this directory: 4 java files = 3 tests + 1 charter
+ * this directory: 6 java files = 5 tests + 1 charter
  * </pre>
+ *
+ * <p>Refactoring Rationale: this section counted four files and three tests, and admitted a fourth test
+ * once a measurement showed one property genuinely unowned. {@code DailyTransactionRepository} declares
+ * TWO reads over the unposted feed with different lifetimes -- an unbounded lazily-populated cursor and a
+ * bounded chunk -- and a search for callers of the cursor across every module found none in any test. The
+ * feed's entry in {@code CrossSchemaFeedRepositoryIT} exercises the BOUNDED finder only, so the cursor's
+ * whole contract was unexercised: that it orders across more than one fetch, that its mandatory
+ * propagation refuses a call holding no transaction, and that it closes. An unexercised cursor was worse
+ * than an untested one, because the feed LOOKED covered while the member a nightly pass actually drives
+ * was not reached at all.</p>
+ *
+ * <p>Refactoring Rationale: this inventory then read five files and named a sixth prohibited, and it is
+ * raised to six because {@code CardXrefRepositoryIT} was added deliberately rather than by drift. What
+ * was wrong with the previous arrangement is recorded on the cross-reference entry below: the two
+ * access paths over {@code account.card_xref} were carried as ONE case inside
+ * {@code CrossSchemaFeedRepositoryIT}, which could assert that both finders resolve but could not
+ * assert the property the by-account path actually turns on -- that its result is DETERMINED when an
+ * account holds several cards. A prohibition is a useful thing for this roster to carry, so the prose
+ * above still carries one at the next number up; what it must not do is prohibit a proof the package
+ * needs, and the marker line is re-measured against the directory on every build so the two figures
+ * cannot drift apart again.</p>
  *
  * <p>Refactoring Rationale: that marker line is what turns the sentence above from a claim into a checked
  * one. {@code PackageCharterInventoryTest} in the shared kernel parses the line and re-counts this
@@ -74,14 +96,28 @@
  * roster; it is cited rather than restated, so the two cannot disagree about a number.</p>
  *
  * <p>Alternatives Considered: one integration class per production interface, which would make this a
- * roster of ten rather than three and would let each class be named for the interface it covers. Rejected
- * on what the classes would then contain. The property worth proving about the six read-only feeds is
+ * roster of ten rather than four and would let each class be named for the interface it covers. Rejected
+ * on what the classes would then contain. The property worth proving about most of the read-only feeds is
  * identical in each case -- that a mapping resolves against a table this module does not own and walks it
- * in a declared order -- so ten classes would be six near-copies of one another, and a change to the
- * harness would have to be chased through six files. The property worth proving about posting is not a
+ * in a declared order -- so ten classes would be several near-copies of one another, and a change to the
+ * harness would have to be chased through all of them. The property worth proving about posting is not a
  * property of any single interface at all: it spans four of them in one commit, so no per-interface class
- * could hold it without either splitting the proof or duplicating it. The three classes below are
+ * could hold it without either splitting the proof or duplicating it. The five classes below are
  * therefore partitioned by PROPERTY rather than by interface, and between them they reach all ten.</p>
+ *
+ * <p>Assumptions: neither of the two classes named for a single interface is a departure from that
+ * partition but an application of it. Each is named for an interface because it happens to reach only
+ * one, yet what each owns is a PROPERTY none of the others holds -- the lifetime of an unbounded
+ * database cursor in the one case, the determinacy of a by-account read over a NON-UNIQUE index in the
+ * other -- and both are different questions from whether a mapping resolves and walks in order. Two
+ * classes therefore touch the daily-transaction interface, and the split between them is by member
+ * rather than by table: the bounded chunk finder belongs to {@code CrossSchemaFeedRepositoryIT} because
+ * it is one of that class's six near-identical feed walks, and the cursor belongs to
+ * {@code DailyTransactionRepositoryIT} because its contract has no counterpart among them. Two classes
+ * likewise touch the cross-reference, and that split is by KIND of statement: the catalog fact and a
+ * reachability read stay with the feed walks, while the keyed access paths and their multiplicity
+ * ruling belong to {@code CardXrefRepositoryIT}. A sixth test would need to name a property this list
+ * does not already own.</p>
  *
  * <h2>Ruling one: the name is what makes a class here run at all</h2>
  *
@@ -97,8 +133,8 @@
  * {@code com.carddemo.batch} owns the full derivation of that split and the failure a wrong name
  * produces; what is restated here is only the part that binds a class in this directory.</p>
  *
- * <p>Assumptions: the plan's uniform per-service shape spells the name {@code *RepositoryIT}, and two of
- * the three members here follow that spelling while {@code PostingUnitOfWorkIT} does not. The departure is
+ * <p>Assumptions: the plan's uniform per-service shape spells the name {@code *RepositoryIT}, and four
+ * of the five members here follow that spelling while {@code PostingUnitOfWorkIT} does not. The departure is
  * deliberate and is recorded so it does not read as an oversight: the operative selector is the
  * {@code IT} ending, which that name satisfies, and what the class proves is a unit of work spanning four
  * interfaces and two schemas rather than one interface's contract, so naming it after any single
@@ -117,7 +153,7 @@
  *
  * <h2>Ruling two: the profile and the connection are declared on the class</h2>
  *
- * <p>Assumptions: each of the three carries {@code @ActiveProfiles("test")}, which is the whole of how
+ * <p>Assumptions: each of the five carries {@code @ActiveProfiles("test")}, which is the whole of how
  * {@code src/test/resources/application-test.yml} comes into force. No build plugin activates that
  * profile on any class's behalf, so a class omitting the annotation would resolve the base profile
  * instead and reach for remote configuration sources the container does not serve.</p>
@@ -135,11 +171,13 @@
  * expect a mechanism that cannot resolve here.</p>
  *
  * <p>Alternatives Considered: one shared abstract base class holding the container, the property
- * registration and the schema prerequisite once for all three. Rejected: a container held in a base class
+ * registration and the schema prerequisite once for all five. Rejected: a container held in a base class
  * is shared mutable state, so rows one class inserts are rows another reads, and the failure then names
- * whichever class happened to run second. Each class starts its own container and owns its own schema
- * state, which is what lets any one of the three be run alone and still mean something. Trade-offs: the
- * accepted cost is three container starts and three copies of the container declaration, paid every time
+ * whichever class happened to run second. That hazard is concrete rather than hypothetical here, because
+ * three of the five arrange rows in {@code account.card_xref} and each empties it for itself. Each class
+ * starts its own container and owns its own schema state, which is what lets any one of the five be run
+ * alone and still mean something. Trade-offs: the
+ * accepted cost is five container starts and five copies of the container declaration, paid every time
  * that declaration changes.</p>
  *
  * <p>Alternatives Considered: an in-memory engine, rejected more firmly here than anywhere else in the
@@ -234,18 +272,58 @@
  *       be faithful to.</li>
  *   <li>{@code CrossSchemaFeedRepositoryIT} across 9 cases -- the harness post-state and the six
  *       read-only feeds: the card, cross-reference, customer, daily-transaction, disclosure-group and
- *       reject interfaces. It owns the 430-byte reject composition, which the baseline builds at
+ *       reject interfaces. Of the daily-transaction interface it owns the BOUNDED chunk finder and its
+ *       walk-until-empty loop only; the unbounded cursor beside it belongs to
+ *       {@code DailyTransactionRepositoryIT} below, and the division is by member rather than by table. It owns the 430-byte reject composition, which the
+ *       baseline builds at
  *       {@code app/cbl/CBTRN02C.cbl:447} as a whole-group move of the daily record exactly as read, so
  *       the stored row retains that record's own trailing filler span and its own processing timestamp
- *       rather than acquiring fresh ones. It also owns the two cross-reference access paths, which are
- *       tested separately because the baseline separates them: {@code app/jcl/POSTTRAN.jcl:32-33} mounts
- *       the base cluster alone, whose key is the card number at {@code app/jcl/XREFFILE.jcl:43}, while
- *       {@code app/jcl/INTCALC.jcl:31-32} mounts the alternate-index path as its own data definition,
- *       whose key is declared {@code NONUNIQUEKEY} at {@code app/jcl/XREFFILE.jcl:74-75}. Because that
- *       index is explicitly non-unique, one account may legitimately map to many cards, so the
- *       by-account finder must be deterministic -- ordered by card number ascending and bounded to one
- *       row -- and never a bare single-result finder, which would fail on data the declared contract
- *       admits.</li>
+ *       rather than acquiring fresh ones. On the cross-reference it owns the CATALOG fact -- that the
+ *       by-account secondary index exists and is not unique -- which is a statement about the schema
+ *       rather than about a query, and it additionally carries one reachability case confirming that
+ *       both cross-reference finders resolve at all.</li>
+ *   <li>{@code CardXrefRepositoryIT} across 8 cases -- the two keyed access paths over
+ *       {@code account.card_xref}, held apart from one another. They are separate cases because the
+ *       baseline separates them at three levels: {@code app/jcl/XREFFILE.jcl:43} keys the base cluster
+ *       {@code KEYS(16 0)} on the card number while {@code app/jcl/XREFFILE.jcl:74-75} keys the
+ *       alternate index {@code KEYS(11,25)} and declares it {@code NONUNIQUEKEY};
+ *       {@code app/cbl/CBACT04C.cbl:38} declares that alternate key alongside the record key; and
+ *       {@code app/jcl/INTCALC.jcl:29-32} mounts BOTH as separate data definitions where
+ *       {@code app/jcl/POSTTRAN.jcl:32-33} mounts the base cluster alone. Because the index is
+ *       explicitly non-unique one account may legitimately hold many cards, so this class owns the
+ *       ruling that the by-account finder must be ordered by card number ascending and bounded to one
+ *       row, and it owns the demonstration that the bare single-result alternative raises an
+ *       incorrect-result-size failure over exactly the rows the bounded finder resolves cleanly. It
+ *       also owns the compile-time reading of the read-only contract, the cross-reference being the one
+ *       {@code account} table this module never writes. Its multiplicity fixture is CONSTRUCTED and
+ *       that is the point of the class: {@code app/data/ASCII/cardxref.txt} is 50 rows under 50
+ *       distinct accounts and both parity fixtures are one-to-one, so no shipped row exercises the
+ *       multiplicity the contract admits and a broken finder would pass against all of it.
+ *       Trade-offs: the reachability case named on the entry above overlaps this class's two path
+ *       cases, and the overlap is retained rather than removed. Deleting a case from a green sibling to
+ *       tidy a boundary would take four of its constants and one of its imports out of use with it, and
+ *       the two are not the same assertion in any event -- reachability asks whether each finder
+ *       resolves, where the cases here ask whether the by-account result is DETERMINED under
+ *       multiplicity that no shipped row carries. The residual cost is that a reader meets the
+ *       cross-reference in two files; it is recorded here so the second encounter reads as a boundary
+ *       rather than as a duplicated proof.</li>
+ *   <li>{@code DailyTransactionRepositoryIT} across 8 cases -- the UNBOUNDED forward-only cursor over the
+ *       unposted feed, which is the one member of that interface no other class here reaches. It owns the
+ *       cursor's lifetime rather than its result set: that a walk keeps its order past the point where
+ *       the driver must fetch again, which a walk fitting inside one fetch cannot show; that the
+ *       mandatory propagation refuses a call holding no transaction, so a cursor is never handed back
+ *       already closed; that the walk closes; and that an empty feed yields an empty walk rather than a
+ *       failure. It also owns two boundaries the loop beside it cannot state as properties -- that the
+ *       continuation predicate is STRICTLY greater, so a resumed step never processes a row twice, and
+ *       that the interface's reachable surface is exactly two reads, which is what makes the read-only
+ *       guarantee structural rather than dependent on a privilege these tests do not have. The ordering
+ *       key is the ingestion ordinal and the class asserts it is neither of the two columns a reader
+ *       reaches for first: the processing stamp is absent on every row the walk returns, and the
+ *       transaction identifier carries only a partial order. The reference read it mirrors is declared
+ *       {@code ORGANIZATION IS SEQUENTIAL} with {@code ACCESS MODE IS SEQUENTIAL} at
+ *       {@code app/cbl/CBTRN02C.cbl:29-32} and driven at {@code app/cbl/CBTRN02C.cbl:202-219}, and
+ *       {@code app/jcl/POSTTRAN.jcl:30-31} mounts the dataset for input only, which is the documentary
+ *       basis for an interface that declares no mutator.</li>
  *   <li>{@code PostingUnitOfWorkIT} across 6 cases -- the atomicity proof, the account and
  *       transaction writes that only it performs, and the daily-subset finder's ordering and window
  *       against a real engine. That last case is here rather than beside the job that calls the finder
@@ -274,8 +352,10 @@
  * engine rather than asserted in prose.</p>
  *
  * <p>Trade-offs: each proof above has exactly ONE owner, and the cost accepted for that is some
- * cross-referencing between the three classes -- the cross-reference table, for instance, is written by
- * two of them, and only one of them owns its access paths. The alternative was to let two classes each
+ * cross-referencing between the five classes -- the cross-reference table, for instance, is written by
+ * three of them, and only one of them owns its access paths, and the daily-transaction interface is read
+ * by more than one, its bounded chunk finder and its unbounded cursor owned separately. The alternative
+ * was to let two classes each
  * assert a property partially, which is how a proof drifts: one side is updated, the other still passes,
  * and the two now describe different behaviour with nothing able to report the divergence.</p>
  *
@@ -344,7 +424,7 @@
  * one of them with no match-if-missing fallback, so the gate stays closed and no case here needs a
  * transport to be stood up.</p>
  *
- * <p>Assumptions: this package's file set is closed at the three integration classes and this charter. A
+ * <p>Assumptions: this package's file set is closed at the five integration classes and this charter. A
  * fixture builder, a shared constant holder or a container base class introduced here would reintroduce
  * the shared state ruling two rejects, and no subdirectory belongs here. The test-tree charter at
  * {@code com.carddemo.batch} owns the boundaries this whole tree does not cross -- that no controller
@@ -383,7 +463,7 @@
  * Fabricating the at-clauses instead would be worse than useless: Javadoc has no parameter, return or
  * exception concept for a package, and the shared ruleset audits at-clause bodies for emptiness, so an
  * invented clause would either be discarded or reported. That exemption is this compilation unit's alone
- * and does not travel to the three classes beside it, where a test class, a test method and a private
+ * and does not travel to the five classes beside it, where a test class, a test method and a private
  * helper alike do have parameters, return values and thrown types to document.</p>
  *
  * <h2>Why this charter exists, and the form it takes</h2>

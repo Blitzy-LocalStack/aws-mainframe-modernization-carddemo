@@ -299,8 +299,8 @@ queue nothing else publishes to and look idle rather than misconfigured.
 
 ## 6. Test
 
-<!-- test-inventory: 29 tests + 10 integration tests -->
-**39** test classes across nine packages: **29** matching `*Test`, run by
+<!-- test-inventory: 34 tests + 10 integration tests -->
+**44** test classes across nine packages: **34** matching `*Test`, run by
 Surefire, and **10** matching `*IT`, run by Failsafe. Those two totals are
 machine-checked — `ServiceReadmeInventoryTest` in `common-lib` parses the HTML
 comment above this paragraph and re-counts both tiers from this module's test
@@ -308,7 +308,7 @@ tree, so adding a test class without updating the marker fails the build.
 
 | Package | Classes | Package | Classes |
 |---|---|---|---|
-| `service` | 11 (10 `*Test`, 1 `*IT`) | `api` | 5 |
+| `service` | 12 (11 `*Test`, 1 `*IT`) | `api` | 9 |
 | `repository` | 9 (all `*IT`) | `config` | 5 |
 | `mapper` | 3 | `dto` | 2 |
 | `fixtures` | 2 | `domain` | 1 |
@@ -321,8 +321,8 @@ class, and it matches neither suffix because it carries no test case of its own.
 ```bash
 # WHAT: run both test tiers for this module and the module it depends on.
 # WHY : Assumptions: `verify` rather than `test`, because Failsafe binds to the
-#       `integration-test` and `verify` phases. Stopping at `test` runs 27 of the
-#       37 classes and skips all TEN Failsafe classes -- every persistence
+#       `integration-test` and `verify` phases. Stopping at `test` runs 34 of the
+#       44 classes and skips all TEN Failsafe classes -- every persistence
 #       assertion in the module, including the referential refusal and the padded
 #       `DEFAULT` seed, which are the two properties this schema exists to
 #       preserve. A container runtime is required.

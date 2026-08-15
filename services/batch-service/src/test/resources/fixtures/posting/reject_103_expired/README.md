@@ -58,6 +58,17 @@ the amount also exceeded the limit, `:410` would assign 102 and `:417` would the
 while proving nothing about the date, because the reason would have been reachable through the
 amount. The only way to earn 103 is to make it the sole assignment.
 
+Trade-offs: the one-day margin buys the sharpest possible statement about the operator and concedes
+that **neither folder is self-sufficient**. This one shows that a date past expiration is refused; it
+cannot show where the boundary falls, because a refusal is equally consistent with `>=` and with `>`.
+Only [`../boundary_expiry_equal`](../boundary_expiry_equal/README.md), where the dates are equal and
+the record posts, excludes `>`. The compromise accepted is therefore a maintenance coupling between
+two directories: a one-byte edit to the date in either half silently converts the pair into two
+copies of the same claim, with both halves still passing their own byte checks. What limits the cost
+is that the coupling is asserted rather than trusted -- `BatchFixtureContractTest` pins both dates,
+holds the account and cross-reference rows equal across the pair, and requires the two feeds to
+differ in exactly one byte position, so the pair cannot quietly stop discriminating.
+
 ---
 
 ## 2. The business rule, cited by program and line
@@ -90,6 +101,16 @@ Three properties of the guard, each checked against the source:
 - **The field name carries the baseline's misspelling.** `EXPIRAION` is what line 11 says, and a
   citation of `:414` must quote it that way; master section 9.3 confines the three spelling
   corrections to target column names.
+
+Assumptions: the whole scenario rests on an external property of the data format rather than on
+anything the program does -- that `YYYY-MM-DD` is zero-padded and big-endian, so byte order and
+chronological order coincide. Nothing at `:414` enforces it. Both dates here are ten-character fields
+compared left to right, and the fixture is only a valid test of an expiration rule because those two
+orderings agree; a fixture written with a `DD-MM-YYYY` or unpadded date would compare `2024-12-14`
+against something whose byte order said the opposite of its calendar order, and the reject this folder
+expects would then be produced by the wrong reason or not at all. It also means the equivalence is a
+property of the **baseline only**: the migrated job compares typed dates, so it inherits the outcome
+but not the mechanism, and no target-side code may lean on the string comparison.
 
 **The reject is produced by the `ELSE` of a passing guard**, not by a failing test: `:414` asks
 whether expiration is at least the transaction date, and the reject lives on the arm where it is not.
@@ -161,6 +182,15 @@ feed record, and the feed record has no expiration field.
 migrated `ledger.transaction_rejects.reason_code` column is `SMALLINT` and holds the integer. Master
 section 7.1.2 fixes both representations and warns that an expectation must name which one it asserts.
 
+Assumptions: the two forms are one value in two representations, and which one an assertion is written
+against is decided by where it reads. The four characters exist because the field is declared `9(04)`,
+not because anything formats it, so the zero is data at that offset; the integer exists because
+`SMALLINT` has no width. The reason to state this at all is that **getting it wrong fails in a way that
+looks like the wrong reject reason**: a byte comparison against `103` finds `010` at `[350:353]` and
+misaligns everything after it, and a column comparison against the string `0103` fails a type it never
+mentions. Neither failure message says "representation", so a reader spends the debugging cycle on the
+business rule instead.
+
 **Nothing else changes.**
 
 | Output | Expected | Authority |
@@ -192,6 +222,16 @@ which of the two folders a divergence belongs to.
 103 overwrites 102 when both fire, so a fixture that tripped both would produce **this folder's exact
 reject bytes** -- code `0103`, the expiration message -- while proving nothing about the date. The
 scenario is only informative because the date is the sole cause.
+
+**For a future author, the corollary is worth stating in advance.** No scenario in this tree currently
+trips both boundaries, and if one is added its expected reject code is **`0103`**, not `0102`, with
+`TRANSACTION RECEIVED AFTER ACCT EXPIRATION` as its expected message -- and its own README must say so
+explicitly, naming `:407-413` and `:414-420` as the two unguarded blocks and 103 as the surviving
+assignment, exactly as master section 7.1.4 requires of any scenario touching the overwrite. **This
+folder cannot stand in for that one.** Its output is byte-identical to what such a record would
+produce, which is precisely why the two cases have to be told apart by their inputs rather than by
+their reject bytes: a reader who found `0103` in a reject stream cannot tell from the stream alone
+whether one guard fired or two.
 
 **100 and 101 must not be reported.** The card is in the cross-reference, so `:385` cannot fire; the
 resolved account is present in the master, so `:397` cannot fire. Reaching `:414` at all presupposes
@@ -361,6 +401,14 @@ SPACE; `tcatbal.txt` pads with ASCII `'0'`, `0x30`. Both are the bytes master se
 and master section 6.2 records the category-balance row as one of the two contradicting the general
 rule of section 3.2, with the measured byte winning.
 
+Assumptions: the padding byte is a measured property of the corpus rather than something derivable from
+the `PICTURE` clause, and `TRAN-CAT-BAL-RECORD` is precisely a record where the general rule and the
+measurement disagree -- `FILLER X(22)` reads as text and would pad with SPACE under section 3.2 alone.
+Deriving it that way here would produce twenty-two wrong bytes in a row that is asserted **unchanged**,
+so the mismatch would surface as a comparison failure on the one file this scenario never touches, and
+the reader would look for a write that does not exist. The measured value is used because it is
+measured; all twenty-two bytes at `[28:50]` were confirmed to be `'0'` and nothing else.
+
 ### 5.4 Departures from a tree rule, named
 
 | Departure | Rule | Reason |
@@ -373,6 +421,16 @@ rule of section 3.2, with the measured byte winning.
 No non-zero cycle values are used, so the disclosure master section 7.1.3 requires of a fixture that
 changes the projected-balance identity does not apply here.
 
+Assumptions: the row above states the consequence of a surviving `CR`; what it does not state is why the
+normalisation has to happen **per row** rather than once per file. The seed is mixed, not uniformly
+`CRLF` -- forty-nine terminators across fifty rows, its last row ending in a bare `LF` (master section
+3.8) -- so a reader who inspected the seed's final line would conclude no conversion was needed and
+would be wrong for the other forty-nine. Two further points a reader may otherwise get backwards: the
+resulting failure names the record length, not the byte that caused it, so the diagnosis is slower than
+the defect is deep; and master section 3.8 requires only a deliberately **preserved** `CRLF` to be
+declared, silence meaning `LF`, so this note is recorded for the reader rather than to satisfy the
+contract. The folder is `CR`-free by measurement, not by intent.
+
 ---
 
 ## 6. Determinism -- and what the blank timestamp means here
@@ -383,6 +441,16 @@ blank timestamp is shown, because the byte pattern is identical to the one norma
 the meaning cannot be recovered from the bytes. It is the same reason the migrated
 `ledger.daily_transactions.proc_ts` column is nullable while `ledger.transactions.proc_ts` is
 `NOT NULL`.
+
+Assumptions: twenty-six blanks are load-bearing input data here, and the reason to say so is that the
+byte pattern is **ambiguous on its own**. A normaliser that masks a processing timestamp before a golden
+comparison writes exactly the same twenty-six blanks, so the same bytes mean "not yet processed" in an
+input and "deliberately not compared" in an output, and nothing in the bytes distinguishes them. Filling
+the field with a plausible timestamp instead would be worse than useless: `:447` copies the record
+verbatim, so the invented value would travel into the reject image and be compared byte for byte against
+a golden that has blanks there, and the run would fail on a field the scenario is not about. The width is
+twenty-six because that is the declared field width, and it is asserted rather than assumed -- `[304:330]`
+was confirmed to be blank in both the fixture and the committed reject golden.
 
 **Both 26-byte fields travel into the reject record unchanged, and neither is masked there.** `:447`
 copies the entire 350-byte input image, so the reject's `[278:304]` carries the reshaped
@@ -412,6 +480,14 @@ posting-validation assertions read directly:
   both representations separately -- `codeField()` for the four-character `0103` and `code()` for the
   integer the `SMALLINT` column stores. Its 76-character `descriptionField()` is the tightest fit of
   the four descriptions, with 34 characters of padding.
+- **`service/PostingValidationService`** decides only **which** conditions a transaction failed, and
+  its expiration predicate is the **strict complement** of the inclusive pass guard at `:414`: it holds
+  when the expiration date is strictly earlier than the ten-character date prefix, which is why an
+  equal date is not a finding and this folder's one-day-later date is. It deliberately **does not
+  resolve precedence**; it reports both boundary findings independently and lets the result type pick
+  the survivor. That split is the reason this folder can assert a single-reason path at all -- if the
+  service short-circuited on the first failing condition, the reported reason would depend on the order
+  the two tests happen to be written in, which is the one thing `:407-413` and `:414-420` do not fix.
 - **`dto/PostingValidationResult.resolve`** takes `pastAccountExpiration` as the **strict complement**
   of the inclusive guard at `:414`, documented on the parameter itself, so this folder is the fixture
   on the side where that argument is `true`. Like reason 102 and unlike the two lookup failures, this
@@ -432,9 +508,15 @@ boundary, which is what this folder pins.
 
 The rows load into the objects the sibling harness declares in
 [`test-harness-schemas-and-foreign-tables.sql`](../../../db/testharness/test-harness-schemas-and-foreign-tables.sql),
-where lines 492 to 494 declare the reject contract by composition -- `raw_record CHAR(350)`,
-`reason_code SMALLINT`, `reason_desc VARCHAR(76)`. That file is the authority for the schema and it is
-deliberately not re-derived here.
+whose `CREATE TABLE ledger.transaction_rejects` declares the reject contract by composition --
+`raw_record CHAR(350)`, `reason_code SMALLINT`, `reason_desc VARCHAR(76)`, currently at lines 554 to
+558. That file is the authority for the schema and it is deliberately not re-derived here.
+
+Assumptions: the table is cited **by name** and the line span only as a convenience, because a line
+number in a 632-line file that is still being extended is the least durable part of a citation. Master
+section 7.1.2 gives this same contract at lines 492 to 494, which is where it sat earlier; those lines
+now carry an interest-accrual comment, and the composition is unchanged. The name resolves under a
+search whatever moves above it, which the number does not.
 
 The graded rubric 0, 4, 8 belongs to the COBOL parity suite alone (master section 7.1.6). The
 warn-tier expectation here is the job's return code, not a build status.
@@ -491,6 +573,16 @@ card number, and account `00000000007` appears there under card `485945261287706
 project as fabricated demonstration data, and master section 11.1 carries the tree-level attestation
 this scenario inherits. Identity and primary-account-number bytes are taken unchanged from the seed.
 
+Assumptions: the attestation is written down because it **cannot be recovered by looking at the bytes**.
+`4859452612877065` is sixteen digits, opens on the digit that denotes a real card scheme, and **satisfies
+the Luhn check** -- so it is indistinguishable by inspection from a live primary account number, and
+validating it only confirms it is well formed, which is exactly what a generator produces. No test a
+reader can run on the number itself will establish that it is synthetic. The provenance is therefore
+stated on the authority of the seed file the row came from, and the seed row is cited per file above so
+that the claim is checkable against something. That is also why the reshaping inventory below is
+exhaustive: the only way to confirm no identity byte was invented is to be told which bytes were changed
+and to find every other one unchanged in the seed.
+
 **Exactly one business-rule field is reshaped away from its seed value.** In `dailytran.txt`,
 `DALYTRAN-ORIG-TS` at `[278:304]` begins `2024-12-14` where seed row 1 begins `2022-06-10`. Measured,
 the difference is **four bytes** in three runs -- offset 281 (`2` becoming `4`), offsets 283 to 284
@@ -502,6 +594,16 @@ the separators and the whole time portion are unchanged. The sixteen characters 
 `posting/boundary_expiry_equal` carries `2024-12-13` where this folder carries `2024-12-14`, differing
 only at offset 287. Both folders reshape the same field of the same seed row, to two values one day
 apart.
+
+Assumptions: the sixteen characters of time were left at the seed's own ` 19:27:53.000000` in both halves
+deliberately, and their being **identical** is itself part of what the pair demonstrates. `:414` slices
+ten characters, so a differing time could not change either verdict -- but a reader has no way to know
+that from one folder, whereas a pair whose feeds differ in one byte of the date and agree in every byte of
+the time makes the irrelevance of the time visible rather than asserted. Advancing the clock as well would
+have cost that: two feeds differing in the date *and* the time would still produce these outcomes, so a
+divergence could no longer be attributed to the date, and the folder would prove less while looking like
+it proved more. It is also what keeps the delta at one byte and lets `BatchFixtureContractTest` assert a
+single differing position instead of a set.
 
 No other field in any file here departs from its seed value: the account row, the category row and the
 cross-reference row are the seed's own, and in the daily transaction the identifier, type, category,
@@ -525,15 +627,6 @@ baseline or the parity oracle.
 
 ---
 
-*This README is the mandatory Explainability carrier for the four record files in this directory,
-required by master section 10 and by user-specified Rule 1. `config/rule1/rule1_gate.py` decides the
-form of the rationale labels above, repository-wide and including Markdown, which is why they are
-written plain rather than emphasised. `config/checkstyle/checkstyle.xml` limits its audit set to
-`java`, so no linter reads this prose. Whether each rationale names a real consequence, and whether
-every number and line citation is true, are review obligations no lexical gate can decide.*
-
----
-
 ## 10. What drives this corpus, and what reads it
 
 This corpus is a **driven input**. `PostTransactionsJobParityIT` resolves each scenario under
@@ -544,12 +637,35 @@ transaction master, category balances, account master and reject stream against
 values that make the scenario discriminating, so a layout mistake is caught in this module rather
 than surfacing later as a comparison failure.
 
-⚠️ Refactoring Rationale: this section stated that no test in this module opened the folder and that
-the corpus was a reference mirror. That was accurate when it was written and is no longer -- the
-parity class now seeds from here. It is corrected rather than deleted, because a reader who had been
-told these bytes drive nothing would edit them expecting no consequence, which is the most expensive
-mistake this folder admits.
+**The distinction above is the most expensive thing in this document to get wrong.** A reader who
+believes these bytes drive nothing will edit them expecting no consequence, and the consequence is a
+parity comparison against a golden that no longer matches. An earlier draft of this section did say
+that -- that no test in this module opened the folder and that the corpus was a reference mirror --
+which was true of the tree at the time and stopped being true when the parity class took
+`/fixtures/posting/` as its seed root. It is stated positively here, and the sentence a reader should
+carry away is the first one: **driven input, not mirror.**
+
+Assumptions: a correction like the one above looks as though it belongs under Rule 1's fourth category
+name -- the one its line 32 scopes to *replacing existing code* -- and that category is **factually
+unavailable in this file**, for the reason master section 1.4 gives. Nothing in this folder replaces
+anything: all five files are net-new, the COBOL baseline they derive from is untouched, and the house
+fixture tree they parallel still runs unchanged. Section 1.4 names the two categories that carry such a
+difference instead, and this note uses one of them. The category name itself is left unwritten here as
+well as unused, because a reviewer auditing this tree finds each rationale by literal string search, and
+a mention inside a sentence saying the category does not apply is indistinguishable from a use of it.
+The header of this file enumerates exactly the three labels it uses, and that enumeration is meant to be
+verifiable by the same search.
 
 Assumptions: the sibling `preflight/**` and `interest/**` families are still mirrors -- no test
 declares either as a seed root -- so the tree serves two different purposes and only this one changes
 what a run asserts.
+
+---
+
+*This README is the mandatory Explainability carrier for the four record files in this directory,
+required by master section 10 and by user-specified Rule 1. `config/rule1/rule1_gate.py` decides the
+form of every rationale label above, repository-wide and including Markdown, which is why they are
+written plain rather than emphasised -- it judges form only. `config/checkstyle/checkstyle.xml` limits
+its audit set to `java`, so nothing mechanical reads this prose for meaning. Whether each rationale
+names a real consequence, and whether every number and line citation is true, are review obligations no
+lexical gate can decide.*

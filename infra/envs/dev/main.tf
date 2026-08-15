@@ -729,45 +729,167 @@ resource "aws_iam_role_policy" "spa_publication" {
 module "network" {
   source = "../../modules/network"
 
-  name_prefix             = var.name_prefix
-  environment             = var.environment
-  vpc_cidr                = var.vpc_cidr
-  app_container_port      = 8080
-  database_port           = 5432
+  name_prefix        = var.name_prefix
+  environment        = var.environment
+  vpc_cidr           = var.vpc_cidr
+  app_container_port = 8080
+  database_port      = 5432
+
+  # WHY : Assumptions: flow-log retention is one of the five values AAP §0.4.1.6
+  #       permits dev and prod to differ by, so it is driven from a root variable
+  #       rather than fixed in the module. It reads the same var.log_retention_days
+  #       every other log group in this root reads, because a VPC flow log outliving
+  #       -- or expiring before -- the application logs it is correlated against
+  #       makes an incident reconstructible from only one half of the evidence.
   flow_log_retention_days = var.log_retention_days
-  flow_log_kms_key_arn    = module.kms.s3_key_arn
+
+  # WHY : Assumptions: infra/modules/network declares this input nullable with a null
+  #       default so that customer-managed encryption is AVAILABLE without the module
+  #       taking a dependency on the sibling kms module. That keeps the module reusable
+  #       in a root that has no key module; it also means the join has to happen
+  #       somewhere, and an environment root composing both is the only place that can
+  #       see both. This is that join, and it is deliberate rather than incidental.
+  # WHY : Trade-offs: supplying a key means the flow-log group is encrypted under a
+  #       CardDemo-owned CMK instead of the AWS-owned key CloudWatch would use by
+  #       default, at the cost of one more grant the log-delivery principal must hold
+  #       (infra/modules/kms carries it as cloudwatch_log_delivery_source_arns). The
+  #       grant is what makes the encryption real; leaving the input null would have
+  #       encrypted nothing and reported success. The baseline is the reason the cost
+  #       is accepted: every one of the eight CICS file resources in
+  #       app/csd/CARDDEMO.CSD is defined RECOVERY(NONE) with JOURNAL(NO) -- eight
+  #       occurrences of each -- so the mainframe kept neither encryption nor a
+  #       journal, and the four CMKs are net-new protection this migration adds rather
+  #       than a mainframe property being ported across.
+  flow_log_kms_key_arn = module.kms.s3_key_arn
 }
 
+# -----------------------------------------------------------------------------
+# Container image registry.
+# -----------------------------------------------------------------------------
+#
+# WHY : Assumptions: var.repository_names is deliberately NOT passed. The image
+#       inventory is topology rather than sizing, and AAP §0.4.1.6 confines dev/prod
+#       differences to sizing and retention, so the inventory lives once in
+#       infra/modules/ecr/variables.tf where both roots inherit the same list. That
+#       module does not merely default the set, it ASSERTS it with a validation, so
+#       overriding it here with a hand-written list is the one way to turn a
+#       shared contract back into two copies that can drift.
+# WHY : Assumptions: the repository count is ELEVEN, and the arithmetic is worth
+#       stating because two plausible readings of this repository both give a
+#       different number. Ten are this migration's own deployables -- the eight
+#       Spring Boot services plus the browser SPA and the ETL image -- and the
+#       eleventh, `aws-otel-collector`, is a MIRROR of a pinned third-party image
+#       this repository does not build. infra/modules/ecs-service attaches that
+#       telemetry sidecar to every workload by default while infra/modules/network
+#       enumerates the application tier's egress instead of allowing 0.0.0.0/0, and
+#       the public registry the collector ships from has neither an interface
+#       endpoint nor a managed prefix list -- so without the mirror NO task could
+#       pull its sidecar and therefore no task could start, from a plan that
+#       reported nothing wrong.
+# WHY : Assumptions: `services/` holds NINE Maven modules but only EIGHT of them are
+#       images. `common-lib` is a library the eight services compile against, not a
+#       deployable, so it has no repository here. Naming it would create a twelfth
+#       repository that .github/workflows/deploy.yml never pushes to, and an empty
+#       repository is not a visible failure -- it is a scan target that never
+#       reports, a lifecycle policy that never expires anything, and a line in the
+#       registry a later reader has to disprove.
 module "ecr" {
   source = "../../modules/ecr"
 
-  name_prefix  = var.name_prefix
-  environment  = var.environment
-  kms_key_arn  = module.kms.s3_key_arn
+  name_prefix = var.name_prefix
+  environment = var.environment
+  kms_key_arn = module.kms.s3_key_arn
+
+  # WHY : Assumptions: force_delete tracks deletion protection rather than being set
+  #       independently, so `terraform destroy` satisfies the AAP §0.9.1 teardown
+  #       criterion in an environment that has opted out of protection. A repository
+  #       still holding images refuses deletion, which would leave a destroy
+  #       half-complete and a state file describing resources that no longer match
+  #       the account. In prod the same expression resolves the other way and the
+  #       registry is retained.
   force_delete = !var.deletion_protection
 }
 
 module "aurora" {
   source = "../../modules/aurora-postgresql"
 
-  name_prefix                  = var.name_prefix
-  environment                  = var.environment
-  isolated_subnet_ids          = module.network.isolated_data_subnet_ids
-  security_group_ids           = [module.network.data_security_group_id]
-  kms_key_arn                  = module.kms.aurora_key_arn
-  secrets_kms_key_arn          = module.kms.secrets_key_arn
-  engine_version               = var.aurora_engine_version
-  parameter_group_family       = var.aurora_parameter_group_family
-  port                         = module.network.database_port
-  min_capacity                 = var.aurora_min_capacity
-  max_capacity                 = var.aurora_max_capacity
-  seconds_until_auto_pause     = var.aurora_seconds_until_auto_pause
-  backup_retention_period      = var.aurora_backup_retention_period
+  name_prefix = var.name_prefix
+  environment = var.environment
+
+  # WHY : Assumptions: the two names are DELIBERATELY different and this line is an
+  #       interface bridge, not a typo awaiting correction. infra/modules/network
+  #       publishes `isolated_data_subnet_ids` because it names three tiers and has to
+  #       say which one; infra/modules/aurora-postgresql accepts `isolated_subnet_ids`
+  #       because a database module has only one tier to be placed in and qualifying it
+  #       would say nothing. A reader who "fixes" either side to match the other breaks
+  #       the wiring at plan time, so the mismatch is recorded here rather than left to
+  #       look like an oversight.
+  # WHY : Assumptions: these subnets carry NO route to the internet at all -- that is
+  #       the property that makes them the database tier rather than merely a third set
+  #       of private subnets, and it is why the cluster is placed here instead of in
+  #       private_app_subnet_ids alongside the tasks.
+  isolated_subnet_ids = module.network.isolated_data_subnet_ids
+
+  # WHY : Assumptions: a singular producer feeding a plural consumer, so the value is
+  #       wrapped in a list to reconcile the arity. infra/modules/network publishes
+  #       exactly one `data_security_group_id`, while the database module accepts
+  #       `security_group_ids` as a list so that a caller with a second group -- a
+  #       bastion or an analytics client -- can attach it without the module changing.
+  #       This root has no such caller and attaches exactly one group, so the list has
+  #       one element by design and not by omission.
+  # WHY : Alternatives Considered: publishing a list from the network module so no wrap
+  #       were needed. Rejected because that module creates one data security group and
+  #       a list-typed output would invite a consumer to assume it may contain several,
+  #       moving the arity question from this visible call site into every reader of
+  #       that output.
+  security_group_ids = [module.network.data_security_group_id]
+
+  kms_key_arn            = module.kms.aurora_key_arn
+  secrets_kms_key_arn    = module.kms.secrets_key_arn
+  engine_version         = var.aurora_engine_version
+  parameter_group_family = var.aurora_parameter_group_family
+  port                   = module.network.database_port
+
+  # WHY : Assumptions: these three values are passed and NOT re-checked here.
+  #       infra/modules/aurora-postgresql owns the capacity invariant -- capacity within
+  #       0-256 in half-unit increments, auto-pause within 300-86400 seconds, and a zero
+  #       minimum making auto-pause mandatory while forcing the maximum to at least one
+  #       -- as `validation` blocks with a `lifecycle` precondition behind them.
+  #       Repeating any part of that rule in this root would create a second place to
+  #       maintain one invariant, and the two copies drift silently because only the
+  #       stricter of them ever fires.
+  # WHY : Trade-offs: dev sets the minimum to zero so the cluster scales to nothing
+  #       between runs, accepting a resume latency on the first query after a pause.
+  #       That is acceptable in an environment whose load is a test run and is why prod
+  #       passes a non-zero floor through the same three inputs -- the permitted
+  #       dev/prod difference of AAP §0.4.1.6, expressed as values rather than as
+  #       different wiring.
+  min_capacity             = var.aurora_min_capacity
+  max_capacity             = var.aurora_max_capacity
+  seconds_until_auto_pause = var.aurora_seconds_until_auto_pause
+
+  backup_retention_period = var.aurora_backup_retention_period
+
+  # WHY : Assumptions: the backup window and the nightly batch window MUST NOT overlap,
+  #       and nothing in Terraform enforces it because the two values are set in
+  #       different module calls -- this one and module.eventbridge_scheduler below --
+  #       so the coupling is invisible unless stated. As configured in
+  #       infra/envs/dev/terraform.tfvars the batch chain is triggered by
+  #       `cron(0 2 * * ? *)` and this window is "07:00-08:00", both interpreted in UTC
+  #       (the scheduler module's timezone default), so they are disjoint by five hours.
+  # WHY : Trade-offs: a backup taken while the posting chain holds its write window
+  #       would snapshot the ledger mid-chain. The snapshot would still be
+  #       transactionally consistent, so nothing would fail and no alarm would fire --
+  #       the cost is that restoring it lands the estate between posting steps, which is
+  #       a state the baseline's nightly cycle never produced and none of the golden
+  #       masters describe. Either value may move; they may not be moved onto each
+  #       other.
   preferred_backup_window      = var.aurora_preferred_backup_window
   preferred_maintenance_window = var.aurora_preferred_maintenance_window
-  deletion_protection          = var.deletion_protection
-  skip_final_snapshot          = var.skip_final_snapshot
-  enable_http_endpoint         = true
+
+  deletion_protection  = var.deletion_protection
+  skip_final_snapshot  = var.skip_final_snapshot
+  enable_http_endpoint = true
 }
 
 # =============================================================================
@@ -1362,6 +1484,18 @@ resource "aws_cloudwatch_log_group" "ecs_execute_command" {
 # Runtime control parameters and Lambda IAM.
 # -----------------------------------------------------------------------------
 
+# WHY : Assumptions: this parameter exists so no service hard-codes the write gate, and
+#       like every other parameter this root publishes (AAP §0.5.3.5) it carries a
+#       runtime control value only -- never a credential, which is what Secrets Manager
+#       holds. It is the cloud analogue of the SDSF operator quiesce in
+#       app/jcl/CLOSEFIL.jcl and app/jcl/OPENFIL.jcl: the mainframe closed the CICS
+#       files so the batch window owned the masters, and here the online services read
+#       this flag and refuse writes while the nightly chain holds the bracket.
+# WHY : Assumptions: `type = "String"` because a boolean gate every online task must
+#       read is not secret -- eight task roles are granted GetParameter over this
+#       prefix, and encrypting a value whose two possible states are already inferable
+#       from whether writes are being accepted would imply a confidentiality it does not
+#       have.
 resource "aws_ssm_parameter" "online_writes_enabled" {
   name        = "${local.parameter_prefix}/${var.environment}/batch/online-writes-enabled"
   description = "Runtime gate set false while the nightly posting chain owns the write window."
@@ -2005,19 +2139,96 @@ module "cognito" {
   ]
 }
 
+# -----------------------------------------------------------------------------
+# Messaging: the five IBM MQ queues, re-expressed.
+# -----------------------------------------------------------------------------
+#
+# WHY : Assumptions: the queue inventory and each queue's FIFO-versus-standard nature
+#       are topology and live in infra/modules/sqs, so this root passes only the key.
+#       Two FIFO queues carry the pending-authorization request and reply, three
+#       standard queues carry the two inquiry flows and the terminal error sink, and
+#       every one of the five has its own dead-letter queue at a redrive threshold of
+#       five receives.
+# WHY : Assumptions: FIFO here does NOT mean a single-threaded queue, which is the
+#       reading a reviewer arrives at by default and the reason this is written down.
+#       Ordering in a FIFO queue is per MESSAGE GROUP, and the producer sets the group
+#       from the card the authorization belongs to, so two authorizations for one card
+#       are delivered in the order they were sent while authorizations for different
+#       cards remain free to be processed in parallel. Per-card ordering is the property
+#       the baseline had by construction -- one MQ queue read sequentially by one
+#       consumer -- and it is the only ordering the business rules actually depend on.
+# WHY : Assumptions: the deduplication identifier is the transaction identifier, which
+#       is what converts the baseline's at-least-once redelivery into exactly-once
+#       ACCEPTANCE inside the deduplication window. app/app-authorization-ims-db2-mq
+#       reads its queue with a no-syncpoint get, so a consumer that crashed after
+#       processing and before acknowledging saw the same authorization twice and had no
+#       mechanism to tell that it had; posting it twice would double-count the amount.
+#       Content-based deduplication was not usable for this: two genuinely distinct
+#       authorizations for the same card and amount hash identically, so the queue would
+#       silently discard the second.
+# WHY : Trade-offs: the group identifier published on the wire is a keyed derivation of
+#       the card number rather than the card number itself, because a group identifier
+#       is message METADATA that appears in queue telemetry, logs and metrics -- exactly
+#       where ADR-008 requires an account number to be masked. The cost is one more
+#       secret to provision and rotate; the alternative was emitting a primary account
+#       number into every observability surface that touches the queue.
 module "sqs" {
   source = "../../modules/sqs"
 
   name_prefix = var.name_prefix
   environment = var.environment
+
+  # WHY : Assumptions: the queue key and not the S3 key. infra/modules/kms publishes
+  #       four separate CMKs so that one compromised grant reaches one store, and an
+  #       authorization message body carries cardholder data, so reusing the
+  #       object-store key here would collapse two of those four boundaries at a call
+  #       site nobody would think to audit.
   kms_key_arn = module.kms.sqs_key_arn
 }
 
+# -----------------------------------------------------------------------------
+# Generation datasets: the GDG bases, re-expressed as versioned S3 prefixes.
+# -----------------------------------------------------------------------------
+#
+# WHY : Assumptions: var.dataset_families is deliberately NOT passed. There are TEN
+#       generation-dataset families -- not six, and not eleven -- and the inventory with
+#       its per-family provenance lives once in infra/modules/s3-datasets/variables.tf
+#       so both roots provision identical prefix topology. Six is what a reader gets
+#       from app/jcl/DEFGDGB.jcl alone, and that file looks complete because it is
+#       headed as the GDG bases needed by the project and defines six in one IDCAMS
+#       step; the other four are elsewhere, three in app/jcl/DEFGDGD.jcl (L28, L51,
+#       L74) and one in app/jcl/DALYREJS.jcl (L25).
+# WHY : Assumptions: an exhaustive search of the baseline for DEFINE
+#       GENERATIONDATAGROUP returns ELEVEN statements over TEN distinct base names, so
+#       the eleventh hit is not an eleventh family. AWS.M2.CARDDEMO.TRANREPT is defined
+#       twice -- app/jcl/DEFGDGB.jcl:L37 and again standalone at app/jcl/REPTFILE.jcl:L26
+#       -- and a maintainer who counts DEFINE statements rather than names will
+#       "correct" ten to eleven and provision a prefix no batch step ever writes to.
+#       Provisioning six is the more damaging error in the other direction: the four
+#       missing steps would still write their objects, into a prefix carrying no
+#       lifecycle rule, so nothing would fail and those generations would accumulate
+#       without limit.
+# WHY : Alternatives Considered: honouring TRANREPT's LIMIT(10) from
+#       app/jcl/REPTFILE.jcl:L27 by overriding that one family's retention. Rejected
+#       because the two baseline definitions contradict each other -- DEFGDGB.jcl:L38
+#       says LIMIT(5) with SCRATCH, REPTFILE.jcl:L27 says LIMIT(10) with no SCRATCH --
+#       and AAP §0.4.1.7 fixes a uniform five-generation retention across all ten. One
+#       family retaining ten would make the lifecycle rule non-uniform for no stated
+#       benefit and would leave the next reader unable to tell the exception from a
+#       mistake. The module keeps a per-family override available so the decision stays
+#       reversible without a topology change if the conflict is ever resolved the other
+#       way.
 module "s3_datasets" {
   source = "../../modules/s3-datasets"
 
   name_prefix = var.name_prefix
   environment = var.environment
+
+  # WHY : Assumptions: the S3 customer-managed key, because these objects are dataset
+  #       generations derived from the cardholder masters. Bucket versioning plus a
+  #       five-noncurrent-version lifecycle rule is what reproduces LIMIT(5) SCRATCH:
+  #       a sixth generation makes the oldest noncurrent version expire, which is the
+  #       scratch the baseline performed on the catalog.
   kms_key_arn = module.kms.s3_key_arn
   # WHY : Refactoring Rationale: this call used to pass
   #       `object_created_lambda_arn = aws_lambda_function.dataset_retention.arn`,
@@ -2495,6 +2706,34 @@ locals {
   }
 }
 
+# -----------------------------------------------------------------------------
+# Parameter Store publication -- the root's own contract with the services.
+# -----------------------------------------------------------------------------
+#
+# WHY : Assumptions: these parameters exist so that NO service hard-codes an endpoint,
+#       which AAP §0.5.3.5 makes the root's responsibility precisely because none of the
+#       sixteen modules can discharge it -- a module knows the value it produced but not
+#       which of eight consumers needs it under which name. Every endpoint and
+#       identifier a container needs at startup is resolved here from a module output and
+#       written to one namespace, so a redeployed database or a replaced queue moves the
+#       value and the services follow it without an image rebuild or a tfvars edit.
+# WHY : Assumptions: this resource carries ENDPOINTS AND IDENTIFIERS ONLY, and never a
+#       credential. Credentials are generated during apply and written to Secrets
+#       Manager by module.secrets and module.cognito, and the services read them from
+#       there through a separate grant. The boundary matters because Parameter Store is
+#       read by every task role in the estate over one shared prefix, while a secret is
+#       reachable only by the roles named on it -- so a credential placed here would be
+#       legible to seven workloads that have no business holding it.
+# WHY : Assumptions: `type = "String"` is therefore the correct type and not a
+#       weakening. A value that genuinely needed SecureString would be a credential,
+#       which means it would belong in Secrets Manager and should not appear in this
+#       resource at all -- so a SecureString parameter appearing here is the signal that
+#       the boundary above has been crossed, rather than a stronger way to hold the same
+#       kind of value.
+# WHY : Assumptions: names are composed from var.name_prefix and var.environment through
+#       local.parameter_prefix and never written literally, so the prod root publishes a
+#       parallel namespace that cannot collide with this one even in a shared account,
+#       and no service resolves a dev endpoint from a prod profile.
 resource "aws_ssm_parameter" "runtime" {
   for_each = local.runtime_parameters
 
@@ -2504,6 +2743,14 @@ resource "aws_ssm_parameter" "runtime" {
   value       = each.value.value
 }
 
+# WHY : Assumptions: the same two guarantees as the per-service parameters above apply
+#       to this resource -- it exists so no service hard-codes an endpoint, and it
+#       carries identifiers only and never a credential. It is a SEPARATE resource
+#       because its keys are platform-wide rather than service-scoped: the Aurora writer
+#       endpoint, port and database name, the dataset bucket, the batch state-machine
+#       ARNs and the seeded identity subjects are each read by several workloads and by
+#       the ETL, so keying them per service would publish the same value under seven
+#       names and leave a reader unable to tell which copy is authoritative.
 resource "aws_ssm_parameter" "platform" {
   for_each = local.platform_parameters
 
@@ -4081,9 +4328,34 @@ module "eventbridge_scheduler" {
   state_machine_arn       = module.step_functions.daily_state_machine_arn
   dead_letter_arn         = module.sqs.error_queue_arn
   dead_letter_kms_key_arn = module.kms.sqs_key_arn
-  schedule_expression     = var.batch_schedule_expression
-  kms_key_arn             = module.kms.s3_key_arn
+  # WHY : Assumptions: this cron is the other half of the backup-window coupling noted
+  #       on module.aurora's preferred_backup_window above. The two are set in different
+  #       module calls and nothing enforces their disjointness, so neither may be moved
+  #       onto the other. It replaces the intent of app/scheduler/CardDemo.ca7 and
+  #       CardDemo.controlm, not their syntax -- those definitions are retired rather
+  #       than ported.
+  schedule_expression = var.batch_schedule_expression
+  kms_key_arn         = module.kms.s3_key_arn
 
+  # WHY : Assumptions: this edge is NOT redundant, which is the default expectation for
+  #       an explicit depends_on and the reason it is justified rather than left bare.
+  #       Neither resource references the other, so Terraform infers no ordering between
+  #       them: the schedule takes only the state-machine ARN and the two keys, and the
+  #       policy attaches S3 rights to the dataset-retention function's role. Reference
+  #       inference therefore cannot see the relationship at all.
+  # WHY : Assumptions: the relationship is real because a schedule is LIVE the moment it
+  #       is created. It starts the nightly chain, whose staging states write dataset
+  #       generations, and each of those writes notifies the retention function that
+  #       enforces the five-generation limit. Created before that policy lands, the
+  #       schedule can fire against a function whose S3 calls are denied -- so the
+  #       generations are written and the pruning silently fails, which is the one
+  #       failure mode in this chain that produces no error and no alarm: objects
+  #       accumulate past LIMIT(5) while every state reports success.
+  # WHY : Trade-offs: the edge serialises the schedule behind one IAM policy
+  #       attachment, costing a little apply parallelism. Accepted because the
+  #       alternative is a first apply whose correctness depends on the cron not
+  #       firing before Terraform reaches the policy -- a race whose outcome varies with
+  #       the time of day the apply is run.
   depends_on = [aws_iam_role_policy.dataset_retention_s3]
 }
 

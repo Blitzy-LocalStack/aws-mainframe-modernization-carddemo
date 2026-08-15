@@ -56,10 +56,10 @@
  * <h2>What this directory holds</h2>
  *
  * <pre>
- * this directory: 12 java files = 11 tests + 1 charter
+ * this directory: 13 java files = 12 tests + 1 charter
  * </pre>
  *
- * <p>Eleven test classes are present, and between them they carry all five rules above, with no
+ * <p>Twelve test classes are present, and between them they carry all five rules above, with no
  * subdirectory beneath this one:</p>
  *
  * <ul>
@@ -79,6 +79,15 @@
  *       including the reply's exact bytes, the echoed correlation identifier and the request dropped
  *       for having expired.</li>
  *   <li>{@code DateConversionServiceTest} across 6 cases -- the date edit rules themselves.</li>
+ *   <li>{@code DateConversionMessageListenerTest} across 11 cases -- the properties of the date
+ *       flow that SPAN the two classes above, which neither of their own suites can state: that the
+ *       withdrawn consumer both are named after is absent while both halves it was split into
+ *       remain, that the copybook geometry and the shared request codec agree on every offset, that
+ *       nothing carries from one invocation of the consumer to the next, that the queue answer
+ *       ignores its request while the evaluation answer depends on its own, that the reply and the
+ *       diagnostic address two distinct queues, that all three queue names arrive from configuration
+ *       with no in-code fallback, and that the two ten-character date pictures this flow carries are
+ *       never interchangeable.</li>
  *   <li>{@code ReferenceServiceStructureTest} across 3 cases and
  *       {@code ReferenceQueueConsumerContractTest} across 1 -- the structural guards on this
  *       package rather than on one rule.</li>

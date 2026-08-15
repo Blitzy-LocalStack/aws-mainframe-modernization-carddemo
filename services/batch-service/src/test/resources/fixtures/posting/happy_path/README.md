@@ -104,14 +104,41 @@ credit-limit test at `:407` passes. `2024-12-13 >= 2022-06-10`, so the expiratio
 section 7.1.3 relies on: the projected balance equals the transaction amount, so the outcome
 can be read off the amount alone.
 
+**`ACCT-CURR-BAL` takes no part in that test, and the misreading is worth pre-empting.** The
+account's `+193.00` current balance is the most balance-shaped number in the folder and it is
+**not** an operand of `:403-405`, which composes the projection from `ACCT-CURR-CYC-CREDIT`,
+`ACCT-CURR-CYC-DEBIT` and the transaction amount only. A reader who assumes otherwise computes
+`193.00 + 504.77 = 697.77` against a `2065.00` limit, still concludes "passes", and is right by
+luck rather than by rule -- so the error survives this scenario and surfaces on
+`boundary_exact_limit`, where the two readings disagree about which side of the boundary the
+record falls. `ACCT-CURR-BAL` is a **posting** field here: `:547` adds to it after validation has
+already finished.
+
 **The three mutations.**
 
 | Output | Before | Arithmetic | After | Encoded |
 |---|---|---|---|---|
-| `TRAN-CAT-BAL` for `00000000007 / 01 / 0001` | `+100.00` | `100.00 + 504.77` | **`+604.77`** | `0000060477G` |
-| `ACCT-CURR-BAL` for `00000000007` | `+193.00` | `193.00 + 504.77` | **`+697.77`** | `00000069777G` |
-| `ACCT-CURR-CYC-CREDIT` | `+0.00` | `0.00 + 504.77` | **`+504.77`** | `00000050477G` |
+| `TRAN-CAT-BAL` for `00000000007 / 01 / 0001` | `+100.00` | `100.00 + 504.77` | **`+604.77`** | `0000006047G` |
+| `ACCT-CURR-BAL` for `00000000007` | `+193.00` | `193.00 + 504.77` | **`+697.77`** | `00000006977G` |
+| `ACCT-CURR-CYC-CREDIT` | `+0.00` | `0.00 + 504.77` | **`+504.77`** | `00000005047G` |
 | `ACCT-CURR-CYC-DEBIT` | `+0.00` | untouched -- `:551` runs only for a negative amount | **`+0.00`** | `00000000000{` |
+
+Read the `Encoded` column against master sections 3.3 and 3.7 and it is self-checking: the
+overpunch folds the sign onto the **last** digit, so `G` *is* a `7` carrying a plus, and the
+column holds one digit fewer than the field's digit count rather than a full digit string with a
+sign character appended to it. `ACCT-CURR-BAL` is `S9(10)V99`, twelve digits, so `+697.77`
+encodes as eleven literal digits plus `G`; `TRAN-CAT-BAL` is `S9(09)V99`, eleven digits, so
+`+604.77` encodes as ten plus `G`. Writing `00000069777G` instead would be thirteen digits'
+worth of information in a twelve-digit field and would decode to `+6977.77`, a factor of ten
+out, which is precisely the class of error a reader cannot see by eye.
+
+Assumptions: the four encodings above are the bytes at the same offsets in
+`tests/golden/posting/happy_path/`, so the arithmetic and the golden corpus are cross-checks on
+each other rather than one being copied from the other. `ACCT-CURR-BAL` sits at `[12:24]` and
+`ACCT-CURR-CYC-CREDIT` at `[78:90]` of `acctdat.expected`, and `TRAN-CAT-BAL` at `[17:28]` of
+`tcatbal.expected`. Stating the encoded form as well as the decimal is what makes the check
+possible at all: two documents can agree on "`+604.77`" while disagreeing on the bytes, and it
+is the bytes a comparison fails on.
 
 **The written transaction record**, one row of 350 bytes: identifier `0000000000683580`, type
 `01`, category `0001`, source `POS TERM`, amount `+504.77`, card `4859452612877065`, all four
@@ -305,6 +332,28 @@ rule of section 3.2, with the measured byte winning. Applying the general rule t
 would produce a row differing from its seed **and** from the golden in 22 bytes that carry no
 data at all.
 
+**Which arm wrote the category row is what decides its pad, and this scenario's arm is the
+update one.** Master section 6.2.1 requires a scenario document to name that arm rather than
+name the record, because TCATBAL is one record type with two padding bytes: a row the job
+**rewrites** starts from the image the read returned and carries whatever that image held, so
+this folder's `0x30` survives from the seed into the expectation untouched, while a row the job
+**creates** is built in a record area no `MOVE` reaches past the fields it sets and keeps that
+area's low values. Measured across the nine committed posting trees, eight expectations carry
+byte-set `{48}` and only `zero_balance` -- the one scenario whose `tcatbal.txt` is a zero-byte
+file, so the only one reaching `2700-A-CREATE-TCATBAL-REC` -- carries `{0}`. The consequence is
+directional and worth stating in full: an author who reasons "TCATBAL pads with ASCII zero"
+onto a **created** expectation is wrong by 22 bytes with the key and the balance both correct,
+which is the same failure master section 6.2 describes arriving from the opposite side.
+
+Assumptions: this folder's `0x30` pad is inherited, not chosen. It is the byte the seed row
+already carried, and the update arm's `REWRITE` at `:528` preserves it because it writes back a
+record area that the read at `:474` populated; the pad is never assigned by any `MOVE` in the
+program. Deriving the pad from the `PICTURE` clause instead -- blanks, on the reasoning that
+`X(22)` is text -- is the documented hazard, and it is worth naming that the shared codec does
+exactly that on encode by design, because a codec has no record-specific padding knowledge and
+must pick one filler. That makes the codec right and the fixture-authoring rule different, which
+is why master section 6.1 is the authority here and overrides the general rule of section 3.2.
+
 ### 5.4 Departures from a tree rule, named
 
 | Departure | Rule | Reason |
@@ -312,6 +361,26 @@ data at all.
 | `cardxref.txt` is 50 bytes, not the seed's 36 | master section 3.10 | The copybook sums to 50 and the seed simply omits the trailing `FILLER X(14)`. Authored at the full copybook width with that `FILLER` space-padded, which is the ruling and the house shape |
 | `tcatbal.txt` is `LF`-terminated where its seed is `CRLF` | master sections 3.8, 3.9 | A stray `0x0D` absorbed into the 22-byte `'0'` `FILLER` would push the record to 51 bytes and fail the load with every field value correct |
 | `tcatbal.txt` carries `+100.00` where its seed row carries `+0.00` | master section 11.1 | A business-rule field reshaped deliberately; see section 1 for why, and section 9 for the attestation |
+
+Assumptions: the first two departures are conformance to a declared width and a declared line
+ending, and neither touches a value. The card-xref seed row stops after `XREF-ACCT-ID` at 36
+bytes because the seed omits the trailing `FILLER X(14)` outright, so authoring at the copybook's
+full 50 is what makes the row loadable at all rather than a decoration -- and the 14 bytes added
+are blanks in a field no program reads, so no identity byte moves. The category-balance seed
+ships `CRLF`, and a surviving `0x0D` would be absorbed into the 22-byte pad and push the physical
+row to 51 bytes while every field still decoded correctly, which is the failure that looks like a
+loader bug and is not one. Both are therefore recorded here as departures from a seed rather than
+in section 9 as reshaped values, and section 9 says so explicitly so the two statements cannot be
+read as contradicting each other.
+
+Trade-offs: each file here holds exactly **one** record, which buys unambiguous attribution --
+every byte of every expectation traces to the single input row that produced it, so a failure
+names a field rather than a row -- and gives up any coverage of multi-record iteration, ordering
+across keys, or the pre-sorted-input requirement of master section 3.12. That cost is accepted
+because it is already paid elsewhere: the full 300-record seed cycle in the reference-only
+`tests/e2e/test_posting_cycle.py` exercises iteration at scale, and section 8.2 records why its
+constants are not this scenario's expectations. A fixture that tried to do both would localise
+neither.
 
 ---
 
@@ -335,6 +404,16 @@ Everything else about determinism holds by construction: every byte here is lite
 no random identifier and no environment-derived string, and each test provisions a fresh
 workspace and tears it down, per master section 8.
 
+Assumptions: the input `DALYTRAN-PROC-TS` is left as 26 blanks because it is the **one** field on
+this path the program overwrites from the wall clock -- `:437-438` performs
+`Z-GET-DB2-FORMAT-TIMESTAMP`, which reads `FUNCTION CURRENT-DATE` at `:693` -- so any literal
+value written here would be discarded on the way to the output record while making this file
+falsely appear to describe an already-processed transaction. The blanks also decode to SQL `NULL`
+against the nullable `ledger.daily_transactions.proc_ts` column, which is the migrated shape of
+the same fact, and the harness's own comment records that the nullability asymmetry between the
+daily feed and the posted ledger is deliberate rather than incidental. Choosing a fixed literal
+instead would have made the field self-documenting at the cost of making it a lie.
+
 ---
 
 ## 7. Target-side contracts this scenario agrees with
@@ -346,10 +425,15 @@ this folder may expect:
   `dto/PostingValidationResult.accepted(504.77)` -- the projected cycle balance is part of the
   accepted outcome, held at `PROJECTED_BALANCE_SCALE` decimal places, so the number `:403-405`
   computes survives into the target rather than being recomputed later.
-- **`service/CategoryBalanceService`** reports its arm explicitly. For this scenario the
-  outcome's `Arm` is the **update** arm and the resulting balance is `604.77`. The service
-  expresses the branch as `INSERT ... ON CONFLICT DO UPDATE SET balance = balance + :amt`, so
-  both arms are additive exactly as `:508` and `:527` are.
+- **`service/CategoryBalanceService`** reports its arm explicitly, returning an `Outcome` whose
+  `Arm` is `UPDATED` for this scenario and whose balance is `604.77`. It reaches that arm the
+  way the COBOL does -- a keyed read, then a write down one of two branches -- rather than by
+  collapsing the two into a single database-side upsert, and both branches accumulate additively
+  exactly as `:508` and `:527` do. That shape is deliberate and the service's own header records
+  the reason: an upsert resolves the branch inside the database, so the caller cannot observe
+  which arm ran, and `tests/README.md` section 13 requires the branch exercised both ways with
+  the arms distinguishable. This folder is the update half of that requirement, so a design that
+  hid the arm would make the folder unable to prove the thing it exists to prove.
 - **`dto/BatchRunSummary`** enforces the warn-tier biconditional in both directions: the
   soft-warn tier holds **exactly when** the rejected count exceeds zero. A summary claiming
   warn with nothing rejected is refused, and so is one claiming clean with records rejected.
@@ -414,7 +498,19 @@ ordered by card number, and account `00000000007` appears there under card
 **It represents no real person and no real account.** Those seeds ship with the upstream
 open-source project as fabricated demonstration data, and master section 11.1 carries the
 tree-level attestation this scenario inherits. Identity and primary-account-number bytes are
-taken unchanged from the seed.
+taken unchanged from the seed, and the whole folder turns on one identity triple: card
+`4859452612877065`, the customer `000000007` it belongs to, and the account `00000000007` the
+cross-reference resolves it to.
+
+The attestation is written out rather than assumed, and the reason is specific to
+financial data. A sixteen-digit primary account number that satisfies a Luhn check is
+**indistinguishable by inspection** from a live one: nothing about the digits themselves tells a
+reviewer whether the number was fabricated for a sample dataset or captured from a real card, and
+no amount of care reading the bytes can settle it. The only thing that can settle it is a stated,
+checkable provenance -- this file, this seed, this row -- which is why every scenario in this tree
+carries the statement even where the number is obviously synthetic, and why the per-file seed-row
+table above cites rows rather than merely asserting that the data is fake. Leaving it implicit
+would shift the burden onto each future reader to re-derive what the author already knew.
 
 **Exactly one business-rule field is reshaped away from its seed value.** In `tcatbal.txt`,
 `TRAN-CAT-BAL` at `[17:28]` is `0000001000{` = `+100.00`, where seed row 7 carries
@@ -460,12 +556,12 @@ transaction master, category balances, account master and reject stream against
 values that make the scenario discriminating, so a layout mistake is caught in this module rather
 than surfacing later as a comparison failure.
 
-⚠️ Refactoring Rationale: this section stated that no test in this module opened the folder and that
-the corpus was a reference mirror. That was accurate when it was written and is no longer -- the
-parity class now seeds from here. It is corrected rather than deleted, because a reader who had been
-told these bytes drive nothing would edit them expecting no consequence, which is the most expensive
-mistake this folder admits.
-
-Assumptions: the sibling `preflight/**` and `interest/**` families are still mirrors -- no test
-declares either as a seed root -- so the tree serves two different purposes and only this one changes
-what a run asserts.
+Assumptions: this section exists because the two halves of this tree behave differently and a
+reader cannot tell which half a directory belongs to by looking at it. `PostTransactionsJobParityIT`
+names `/fixtures/posting/` as its seed root and reads all four files here -- `acctdata.txt`,
+`cardxref.txt` and `tcatbal.txt` to seed the masters, `dailytran.txt` to seed the feed -- so an edit
+to these bytes changes what a parity run asserts. The sibling `preflight/**` and `interest/**`
+families are mirrors: `CalculateInterestJobTest` resolves its inputs under the repository-root
+`tests/fixtures/interest/` tree instead, so editing those directories changes nothing a job reads.
+Stating which case applies is the point of the section, because the two look identical on disk and
+the expensive mistake is editing a driven byte while believing it is inert.

@@ -4,29 +4,40 @@
 > whose card **is** in the cross-reference but whose resolved account is **absent** from the account
 > master reaches the second of the program's two diagnostic branches, is **reported** rather than
 > rejected, changes nothing, and still ends in the clean return-code tier. It is the second half of a
-> pair with `../unmatched_card`, which breaks the first link of the same chain.
+> pair with [`../unmatched_card`](../unmatched_card), which breaks the first link of the same chain.
 >
 > **Source of truth.** `app/cbl/CBTRN01C.cbl` for the behaviour, cited below by line;
 > `app/cpy/CVTRA06Y.cpy`, `app/cpy/CVACT03Y.cpy` and `app/cpy/CVACT01Y.cpy` for the record layouts; the
 > seed datasets under `app/data/ASCII/` for the bytes; and the tree-level
 > [master contract](../../README.md) for every encoding rule, which this document cites by section
 > rather than restating (master section 1.3). **There is no JCL driver to cite**: master section 4.1
-> records that no member of `app/jcl` executes this program at all.
+> records that no member of `app/jcl` executes this program at all, which is why this folder is
+> hand-authored rather than lifted from a job's dataset list.
 >
 > **Label form.** Rationales below are tagged `Alternatives Considered:`, `Assumptions:` and
-> `Trade-offs:` -- plain, plural, colon retained, no emphasis markup, per
-> `docs/CODE_DOCUMENTATION_STANDARD.md` and master section 1.4. This whole file is pure ASCII for the
-> reason that section gives.
+> `Trade-offs:` -- plain, plural, colon retained, no emphasis markup. That form is fixed by
+> `docs/CODE_DOCUMENTATION_STANDARD.md` and by master section 1.4, and it is enforced repository-wide
+> by `config/rule1/rule1_gate.py`, whose `labels` check fails an emphasis-wrapped label.
+>
+> **Reference-only sources.** `app/**`, `tests/**` and `scripts/**` are read here and never modified.
+> Where the migrated pass behaves differently from the reference, this document says so and names the
+> registered divergence; it does not characterise the reference as wrong.
 
 **This README is the mandatory Explainability carrier for the three record files beside it.** Master
 section 1.2 records why: a fixed-width record file cannot carry a comment of any kind, because every
 byte position is meaningful and a comment on its own line is a physical row of the wrong length. Master
-section 10 makes the artifact mandatory rather than courteous, and the section order below is the one it
-fixes.
+section 10 makes the artifact mandatory rather than courteous, and fixes the order of the five items
+this document must state. Nothing in the migration plan asks for a README at this path; user-specified
+Rule 1 (Explainability) is the whole reason it exists, and its validation gate means an absent or
+unjustified rationale here fails review.
 
-This tree calls the domain **`preflight/`** where the reference-only house tree calls it **`prepost/`**.
-Master section 4.2 records that the two names denote the same `CBTRN01C` behaviour and that neither is
-wrong; nobody should correct one to the other.
+Assumptions: this tree calls the domain **`preflight/`** where the reference-only house tree calls it
+**`prepost/`** (`tests/fixtures/prepost/**`), and neither name is wrong. Master section 4.2 rules the
+correspondence: the AAP and this module name the job **`preflight-daily-transactions`**, so this tree
+matches the job name a reader will find in the module's sources and in the batch state machine, while
+the house tree keeps its own older name and is reference-only in any case. The consequence worth naming
+is navigational -- a reader looking for the house analogue of this folder must look under `prepost/`,
+and a reader who "corrects" either name breaks the cross-tree trail without changing a byte.
 
 ---
 
@@ -79,6 +90,21 @@ conditions that could both be reported for one record.
 | Leave the loop | `:186` | the next iteration reaches end of file; see section 2.2 |
 | Close and finish | `:188-197` | six closes, the end banner at `:195`, `GOBACK` at `:197` |
 
+The four lines the successful first lookup emits are reproduced here character for character, because
+two of them space their labels differently and the difference is published text rather than a typo to
+tidy:
+
+| Line | Literal, verbatim | Value appended |
+|---|---|---|
+| `:235` | `SUCCESSFUL READ OF XREF` | -- |
+| `:236` | `CARD NUMBER: ` | `XREF-CARD-NUM` |
+| `:237` | `ACCOUNT ID : ` | `XREF-ACCT-ID` |
+| `:238` | `CUSTOMER ID: ` | `XREF-CUST-ID` |
+
+`:237` carries a **space before its colon** where `:236` and `:238` do not. The three labels are
+thereby padded to one width, so the values line up in a console log. An expectation that normalises the
+spacing would stop matching the program's output.
+
 **Two diagnostics are emitted, not one, and they come from different places.** `:246` is inside
 `3000-READ-ACCOUNT` and reports that a read failed; `:178` is in the main loop and reports **which**
 account was not found, because the paragraph that discovered the failure does not have the identifier
@@ -97,23 +123,52 @@ the record display at `:168`. The lookup block at `:170-184` sits **outside** it
 display is skipped -- and the lookup block runs **again**, against the card number still sitting in
 `DALYTRAN-RECORD`. So for one input record **both** diagnostics of this scenario appear **twice**.
 
-Assumptions: this is a control-flow characteristic of the immutable baseline, not a defect to work
-around. It has no effect on data -- every dataset is opened `INPUT` -- so the repeated reads change
-nothing and produce no output beyond the duplicated console lines. **An expectation must assert on
-marker presence, never on a repetition count**, which is the rule the reference-only
-`tests/fixtures/prepost/unmatched_account/README.md` records for the house tree as well. The migrated
-pass implements the clean loop instead and its class documentation records that divergence.
+Assumptions: this is verified control-flow behaviour of the reference program, which is REFERENCE-ONLY
+and is not altered. It has no effect on data -- every dataset is opened `INPUT` and the program contains
+no write verb of any kind -- so the repeated reads change nothing and produce no output beyond the
+duplicated console lines. The consequence for anyone writing an expectation against this folder is
+exact: **assert marker presence and absence, never a repetition count.** A test pinned to "twice" would
+encode the reference loop shape, and the migrated pass inspects each record once, so that test would
+fail against the target while asserting nothing extra about the reference. The migrated pass carries
+this as divergence **D-7**, registered as `D-PREFLIGHT-LOOKUP-PAST-END-OF-FILE`; its own class
+documentation is the authority on it and this document does not restate it.
+
+### 2.3 Two data-names are declared twice in the FILE SECTION
+
+`CBTRN01C` declares six FDs, and two data-names appear in more than one of them. Both are noted because
+a reader mapping the program's record layouts by name alone will find two answers for each and may take
+the collision for an error.
+
+Assumptions: `FD-CUST-DATA` is declared **twice** -- at `:69` in the DALYTRAN FD as `PIC X(334)`, and at
+`:74` in the CUSTOMER FD as `PIC X(491)`. The two are unrelated: the first is the remainder of a
+350-byte feed record after its 16-byte key, and the second the remainder of a 500-byte customer record
+after its 9-byte key. Nothing here is ambiguous to the compiler, which resolves each inside its own
+record description; the collision exists only in a flat symbol table, so **layouts must be scoped per
+copybook** rather than looked up by data-name. A reader who resolves `FD-CUST-DATA` to the wrong one of
+the two mis-sizes a record by 157 bytes.
+
+Assumptions: `FD-ACCT-DATA` is likewise declared **twice** -- at `:89` in the ACCOUNT FD as
+`PIC X(289)`, and at `:94` in the TRANSACT FD as `PIC X(334)`. This pair matters more than the first
+one here, because **this scenario's failing read is the one declared against the ACCOUNT FD at
+`:86-89`**: `05 FD-ACCT-ID PIC 9(11)` plus `05 FD-ACCT-DATA PIC X(289)` sums to exactly **300**, which
+is the account record length this folder's `acctdata.txt` is authored at. Resolving `FD-ACCT-DATA` to
+the TRANSACT FD's `X(334)` instead would make the account record appear to be 345 bytes and would put
+every field offset in section 5.3 out by the difference.
 
 ---
 
 ## 3. Returns -- the expected outcome
 
-The return code is **0**. **`CBTRN01C` never assigns `RETURN-CODE` anywhere**, so an unresolvable record
-leaves it at zero. That is the distinction this domain turns on: **preflight reports, posting rejects.**
-The same missing-account condition becomes reject reason **101** with the message
-`ACCOUNT RECORD NOT FOUND` and a return code of **4** in `CBTRN02C` -- master section 7.1.1 -- and
-`../../posting/reject_101_acct_missing` is the folder for that. Nothing about this scenario may be
-expressed as a warn tier or a reject.
+The return code is **0**. **`CBTRN01C` declares no `RETURN-CODE` statement anywhere in its 494 lines,
+no reject stream and no counters**, so an unresolvable record leaves the code at zero. That is the
+distinction this domain turns on: **preflight reports, posting rejects.**
+
+Assumptions: the graded tier contract -- `0` clean, `4` soft warn, `>= 8` hard failure, with only
+`PostTransactionsJob` able to emit `4` -- is owned by `com.carddemo.batch.job.package-info` and is
+referenced here rather than redefined, so that one statement of it governs every job in the module. What
+this folder contributes to it is the *reason* the preflight pass can never reach the warn tier: there is
+no assignment in the reference for the migrated pass to carry across. Expressing anything about this
+scenario as a warn tier or a reject would contradict both the reference and that contract.
 
 **What must appear.**
 
@@ -133,9 +188,9 @@ expressed as a warn tier or a reject.
 
 | Absent marker | Line | Why it cannot occur |
 |---|---|---|
-| `SUCCESSFUL READ OF ACCOUNT FILE` | `:249` | the read at `:243` takes `INVALID KEY`, so the `NOT INVALID KEY` arm is not entered |
-| `INVALID CARD NUMBER FOR XREF` | `:232` | the cross-reference read succeeds |
-| `CARD NUMBER ... COULD NOT BE VERIFIED. SKIPPING TRANSACTION ID-...` | `:181-183` | reached only when `WS-XREF-READ-STATUS` is not 0, and here it is 0 |
+| `SUCCESSFUL READ OF ACCOUNT FILE` | `:249` | the read at `:243` takes `INVALID KEY`, so the `NOT INVALID KEY` arm at `:248` is never entered. The account read did not succeed, and this is the line that would claim it did |
+| `INVALID CARD NUMBER FOR XREF` | `:232` | the card **was** verified: the cross-reference read at `:229` took `NOT INVALID KEY`. This marker belongs to [`../unmatched_card`](../unmatched_card), whose cross-reference holds a different card |
+| `CARD NUMBER ... COULD NOT BE VERIFIED. SKIPPING TRANSACTION ID-...` | `:181-183` | the `ELSE` arm at `:180` is reached only when `WS-XREF-READ-STATUS` is not 0, and here it is 0. Again the card was verified, so the transaction is not skipped -- it is carried through to the account read |
 
 **The account identifier reported is the one the cross-reference resolved, not the one the master
 holds.** `:178` prints `ACCT-ID`, which `:175` loaded from `XREF-ACCT-ID`, so the line names
@@ -148,46 +203,67 @@ backwards.
 **no** `WRITE`, `REWRITE` or `DELETE` statement of any kind. In particular the missing account is **not
 created**: a preflight pass has no mechanism to create anything.
 
-**Three of the six datasets are opened and never read.** `CUSTFILE`, `CARDFILE` and `TRANFILE` are
-opened at `:158`, `:160` and `:162` and closed at `:189`, `:191` and `:193`; the program's only three
-`READ` statements are the feed at `:203`, the cross-reference at `:229` and the account at `:243`. That
-is why this folder ships **three** record files rather than six.
+**Three of the six datasets are opened and never read.** The program's only three `READ` statements are
+the feed at `:203`, the cross-reference at `:229` and the account at `:243`; `CUSTFILE`, `CARDFILE` and
+`TRANFILE` are opened at `:273`, `:309` and `:345` and closed again without being read.
+
+Trade-offs: those three datasets therefore need only be **openable**, and the paired test supplies
+**empty valid indexed files carrying the correct key geometry** rather than three more byte images in
+this folder. The compromise accepted is that this folder does not document a complete picture of every
+dataset the program touches -- a reader counting files here finds three where the program opens six, and
+section 5.4 names that departure. What is bought is worth more: three additional record files would be
+dead weight that no `READ` ever reaches, and each would still owe the full provenance attestation of
+section 9, so the tree would carry three unfalsifiable governance claims to explain bytes nothing
+consumes. An empty file with the right key geometry proves exactly the property the program depends on,
+which is that the `OPEN INPUT` succeeds.
 
 Assumptions: this domain has **no golden corpus in this tree's shape**, and none is asserted here. The
 program's output is console diagnostics rather than records, so the expectation is stated as marker
-presence and absence above rather than as a byte comparison against an `*.expected` file. The
-reference-only house tree states the same expectation for the same program in the same terms.
+presence and absence above rather than as a byte comparison against an `*.expected` file.
 
 ---
 
 ## 4. Exceptions and errors -- what must not happen, and why it cannot
 
-**The missing account must not abend the run.** This is the scenario's central negative.
-`3000-READ-ACCOUNT` (`:241-250`) has **no abend site at all**: its `INVALID KEY` arm DISPLAYs and sets a
-status field, and that is the whole of it. An implementation treating a missing account as an I/O error
-would abend here while handling the matched path correctly.
+**The missing account must not abend the run.** This is the scenario's central negative. An unmatched
+account is a normal not-found report, not an I/O error: `3000-READ-ACCOUNT` (`:241-250`) has **no abend
+site at all**, its `INVALID KEY` arm being a DISPLAY at `:246` and a status move at `:247` and nothing
+else. An implementation treating a missing account as an I/O error would abend here while handling the
+matched path correctly, which is why the negative is stated rather than left implied.
 
-**The pass must not fail or warn the chain.** Section 3 states the return code; the reason it matters is
-that a failure here would stop the nightly chain on a condition the baseline treats as informational,
-and posting would then never run to reject the record properly.
+**The program's only failure exit is `Z-ABEND-PROGRAM` at `:469-473`**, which DISPLAYs
+`ABENDING PROGRAM`, moves 999 into the abend code and calls `CEE3ABD`. Every path to it is guarded by a
+file status, and none of those guards can trip on this scenario's data:
+
+| Guarded site | Lines | Reached only when |
+|---|---|---|
+| the six `OPEN INPUT` paragraphs | begin at `:252`, `:271`, `:289`, `:307`, `:325`, `:343` | an open returns a status other than `'00'` |
+| the feed read | `:222` | the read status is neither `'00'` nor `'10'` |
+| the six close paragraphs | begin at `:361` | a close returns a status other than `'00'` |
+
+A run whose six opens and six closes all return `'00'`, and whose feed read returns `'00'` for the one
+record and then `'10'` at end of file, reaches none of them. **A missing account key is not a file
+status**, so the account read's `INVALID KEY` arm is a normal branch and not an error path.
+
+**The pass must not fail or warn the chain.** Section 3 states the tier; the reason it matters is that a
+failure here would stop the nightly chain on a condition the reference treats as informational, and
+posting would then never run to reject the record properly.
 
 **The card diagnostic must not appear.** An implementation that inverted the guard at `:173` -- testing
-`NOT = 0` where the baseline tests `= 0` -- would skip the account read on this resolvable card and emit
-`../unmatched_card`'s skip message instead. The two folders together are what distinguish a correct
-guard from an inverted one; neither does it alone.
+`NOT = 0` where the reference tests `= 0` -- would skip the account read on this resolvable card and emit
+[`../unmatched_card`](../unmatched_card)'s skip message instead. The two folders together are what
+distinguish a correct guard from an inverted one; neither does it alone.
 
-**Only the first of the two diagnostics must not be emitted alone.** `:246` reports that a read failed
-and `:178` reports which account; an implementation that emitted the paragraph's line but not the
-loop's, or vice versa, would still look like a not-found report to a loose assertion. Section 3 lists
-both.
+**Neither of the two diagnostics may be emitted without the other.** `:246` reports that a read failed
+and `:178` reports which account; an implementation emitting the paragraph's line but not the loop's, or
+the reverse, would still look like a not-found report to a loose assertion. Section 3 requires both.
 
-**No abend occurs.** `CBTRN01C` uses `Z-ABEND-PROGRAM` and `Z-DISPLAY-IO-STATUS` rather than the
-numbered paragraphs `CBTRN02C` uses, and every site is status-guarded: the six open paragraphs
-beginning at `:252`, `:271`, `:289`, `:307`, `:325` and `:343`, each abending at `:266`, `:285`, `:303`,
-`:321`, `:339` and `:357`; the feed read at `:222`, reached only when the status is neither `'00'` nor
-`'10'`; and the six close paragraphs beginning at `:361`, abending at `:375`, `:393`, `:411`, `:429`,
-`:447` and `:465`. A run whose opens and closes all return `'00'` and whose feed read returns `'00'`
-then `'10'` reaches none of them.
+Assumptions: the `INVALID KEY` arm at `:245` depends on the account file being a genuine indexed file
+opened successfully. Master section 3.12 requires indexed inputs to be pre-sorted by key, which one row
+satisfies trivially, but the consequence worth naming is the failure mode this scenario cannot
+distinguish on its own: if `acctdata.txt` failed to load at all, the read would still miss and the same
+two diagnostics would appear. That is precisely why section 1 rejects an empty account master, and why
+the verification script in section 5.2 asserts the account master's key rather than only its geometry.
 
 ---
 
@@ -195,28 +271,43 @@ then `'10'` reaches none of them.
 
 ### 5.1 Inventory
 
-| File | Copybook | RECLN | DDNAME / `ASSIGN` | Organization | Key |
-|---|---|---:|---|---|---|
-| `dailytran.txt` | `app/cpy/CVTRA06Y.cpy` | 350 | `DALYTRAN` | SEQUENTIAL | -- |
-| `cardxref.txt` | `app/cpy/CVACT03Y.cpy` | 50 | `XREFFILE` | INDEXED | `XREF-CARD-NUM`, offset 0, length 16 |
-| `acctdata.txt` | `app/cpy/CVACT01Y.cpy` | 300 | `ACCTFILE` | INDEXED | `ACCT-ID`, offset 0, length 11 |
-| `README.md` | -- | -- | -- | -- | this file |
+| File | Copybook | RECLN | DDNAME / `ASSIGN` | Organization | Key | Role in this scenario |
+|---|---|---:|---|---|---|---|
+| `dailytran.txt` | `app/cpy/CVTRA06Y.cpy` | 350 | `DALYTRAN` | SEQUENTIAL | -- | its card resolves through the cross-reference to account `00000000007` |
+| `cardxref.txt` | `app/cpy/CVACT03Y.cpy` | 50 | `XREFFILE` | INDEXED | `XREF-CARD-NUM`, offset 0, length 16 | the indexed lookup that **HITS**, yielding `XREF-ACCT-ID` = `00000000007` |
+| `acctdata.txt` | `app/cpy/CVACT01Y.cpy` | 300 | `ACCTFILE` | INDEXED | `ACCT-ID`, offset 0, length 11 | the indexed lookup that **MISSES** -- it holds unrelated account `00000000020` |
+| `README.md` | -- | -- | -- | -- | -- | this file |
 
 The `ASSIGN` names are declared at `app/cbl/CBTRN01C.cbl:29-58`; the record lengths are the summed
-widths of master section 5.1, never a `RECLN` banner. This program reads the cross-reference **by card
-number** at offset 0, exactly as posting does; master section 4.3 records that the account-keyed
-alternate path belongs to the interest domain and nothing here uses it.
+widths of master section 5.1, never a `RECLN` banner. Indexed inputs are pre-sorted by key per master
+section 3.12, which one row per file satisfies trivially.
+
+**Two distinct keys, two distinct outcomes.** The cross-reference read uses the **primary** xref key --
+card number, offset 0, length 16 -- and must hit. The account read uses `ACCT-ID` at offset 0, length 11,
+and must miss. Master section 4.3 records that the account-keyed alternate cross-reference path belongs
+to the interest domain; **nothing here reads the cross-reference by account.** `XREF-ACCT-ID` at offset
+25 appears in this scenario only as the field `:175` reads the resolved account id *out of*, never as a
+key anything is looked up *by*.
+
+Assumptions: `DALYTRAN-RECORD` is field-for-field identical to `CVTRA05Y` at the same copybook line
+numbers, 5 through 18, with only the `DALYTRAN-` prefix distinguishing the names -- which is why master
+section 5.2 tabulates one field list under both copybook names. The offsets this folder depends on are
+therefore the shared ones: `CARD-NUM` at **262**, `ORIG-TS` at **278**, `PROC-TS` at **304** and the
+trailing `FILLER` at **330**, the widths summing to exactly 350 as
+`16+2+4+10+100+11+9+50+50+10+16+26+26+20`. The consequence is that a reader may verify this feed record
+against either copybook and must not treat the two as separate layouts needing separate verification.
 
 ### 5.2 On-disk sizes and line endings
 
-| File | Size | Records | Bytes per record | `CR` bytes | Trailing newline |
-|---|---:|---:|---:|---:|---|
-| `dailytran.txt` | **351** | 1 | 350 | 0 | exactly one `LF` |
-| `cardxref.txt` | **51** | 1 | 50 | 0 | exactly one `LF` |
-| `acctdata.txt` | **301** | 1 | 300 | 0 | exactly one `LF` |
+| File | Size | Records | Bytes per record | `CR` bytes | `NUL` bytes | Trailing newline |
+|---|---:|---:|---:|---:|---:|---|
+| `dailytran.txt` | **351** | 1 | 350 | 0 | 0 | exactly one `LF` |
+| `cardxref.txt` | **51** | 1 | 50 | 0 | 0 | exactly one `LF` |
+| `acctdata.txt` | **301** | 1 | 300 | 0 | 0 | exactly one `LF` |
 
-One record plus a single trailing `LF` per file, per master sections 3.8 and 3.9, and **zero `CR`
-bytes** in the folder.
+One record plus a single trailing `LF` per file, per master sections 3.8 and 3.9, so `wc -l` returns 1
+for each file and equals its record count. There are **zero `CR` bytes and zero `NUL` bytes** in the
+folder.
 
 ```bash
 # WHAT: assert the byte geometry, and additionally assert the two relations this scenario turns on --
@@ -236,8 +327,9 @@ for name, (size, width) in EXPECTED.items():
     rows = [r for r in raw.split(b"\n") if r]
     widths = sorted({len(r) for r in rows})
     print(name, "size", len(raw), "expected", size, "| rows", len(rows), widths,
-          "| CR", raw.count(b"\r"),
-          "| OK" if len(raw) == size and raw.count(b"\r") == 0 and widths == [width]
+          "| CR", raw.count(b"\r"), "| NUL", raw.count(b"\x00"),
+          "| OK" if len(raw) == size and raw.count(b"\r") == 0
+          and raw.count(b"\x00") == 0 and widths == [width]
           else "| MISMATCH")
 feed_card = open("dailytran.txt", "rb").read()[262:278].decode("ascii")
 xref = open("cardxref.txt", "rb").read()
@@ -255,16 +347,17 @@ PY
 ### 5.3 Field values, as observed
 
 Offsets are zero-based; money is signed zoned with the sign folded into the last byte and no byte for
-the decimal point, per master sections 3.3 and 3.7. **This program reads no monetary field at all.**
+the decimal point, per master sections 3.3 and 3.7. The overpunch alphabet is the master's and is not
+reproduced here. **This program reads no monetary field at all.**
 
 `dailytran.txt`, one `DALYTRAN-RECORD`: `DALYTRAN-ID` `0000000000683580` at 0, type `01` at 16,
 category `0001` at 18, source `POS TERM` plus two spaces at 22, description
-`Purchase at Abshire-Lowe` plus 76 spaces at 32, `DALYTRAN-AMT` `0000005047G` = `+504.77` at 132,
-merchant identifier `800000000` at 143, merchant name `Abshire-Lowe` plus 38 spaces at 152, merchant
-city `North Enoshaven` plus 35 spaces at 202, merchant ZIP `72112` plus five spaces at 252,
+`Purchase at Abshire-Lowe` plus 76 spaces at 32, `DALYTRAN-AMT` `0000005047G` at 132 decoding to
+`+504.77`, merchant identifier `800000000` at 143, merchant name `Abshire-Lowe` plus 38 spaces at 152,
+merchant city `North Enoshaven` plus 35 spaces at 202, merchant ZIP `72112` plus five spaces at 252,
 **`DALYTRAN-CARD-NUM` `4859452612877065` at 262** -- the key `:171` moves and `:229` **finds** --
-`DALYTRAN-ORIG-TS` `2022-06-10 19:27:53.000000` at 278, `DALYTRAN-PROC-TS` 26 spaces at 304 (see
-section 6), and 20 spaces of `FILLER` at 330.
+`DALYTRAN-ORIG-TS` `2022-06-10 19:27:53.000000` at 278, `DALYTRAN-PROC-TS` 26 spaces at 304 whose
+meaning section 6 states, and 20 spaces of `FILLER` at 330.
 
 `cardxref.txt`, one `CARD-XREF-RECORD` -- the row that **matches**, and whose three identifiers are all
 DISPLAYed at `:236-238`:
@@ -298,45 +391,67 @@ DISPLAYed at `:236-238`:
 ask for.** `3000-READ-ACCOUNT` reads by key and DISPLAYs a fixed marker; it inspects nothing. The row's
 values are therefore entirely inert -- but they are not interchangeable with account 7's, and the
 difference is useful: `+369.00` and `+3767.00` appearing anywhere in a diagnostic is immediate evidence
-that this folder's account row was read when it should not have been, whereas the familiar `+193.00`
-and `+2065.00` of account 7 would be indistinguishable from the sibling folders' at a glance.
+that this folder's account row was read when it should not have been, whereas the `+193.00` and
+`+2065.00` of account 7 would be indistinguishable from the sibling folders' values at a glance.
 
-`ACCT-EXPIRAION-DATE` is spelled exactly as `app/cpy/CVACT01Y.cpy` line 11 spells it, preserved verbatim
-because this is copybook-side naming; master section 9.3 confines the three spelling corrections to
-target column names.
+`ACCT-EXPIRAION-DATE` is spelled exactly as `app/cpy/CVACT01Y.cpy` spells it, preserved verbatim because
+this is copybook-side naming; master section 9.3 confines the three spelling corrections to target
+column names, where this field becomes `expiration_date`.
 
-**`FILLER` bytes: both files here pad with `0x20` SPACE**, which is what master section 6.1 measures for
-the ACCOUNT, input-DALYTRAN and CARD-XREF records. No file in this folder carries the ASCII-`'0'`
-padding of the category-balance or disclosure-group records, because neither record type appears in this
-domain -- so master section 6.2's two exceptions do not arise here.
+Assumptions: every padding byte in this folder is **SPACE (`0x20`), never `NUL`** -- the `FILLER X(20)`
+of the feed record at 330, the `FILLER X(178)` of the account record at 122 together with its blank
+`ACCT-GROUP-ID` at 112, and the widened `FILLER X(14)` of the cross-reference record at 36. That is what
+master section 6.1 **measures** for the ACCOUNT, input-DALYTRAN and CARD-XREF records, and master
+section 6 is explicit that the measured table **overrides** the general padding rule of section 3.2
+wherever the two disagree. The consequence of getting it wrong is silent: a `NUL`-padded row is the
+right length and the wrong bytes, so it loads and then mismatches on comparison rather than failing at
+load. No file here carries the ASCII-`'0'` padding that master section 6.2 measures for the
+category-balance and disclosure-group records, because neither record type appears in this domain.
 
 ### 5.4 Departures from a tree rule, named
 
 | Departure | Rule | Reason |
 |---|---|---|
-| `cardxref.txt` is 50 bytes, not the seed's 36 | master section 3.10 | The copybook sums to 50; the seed omits the trailing `FILLER X(14)`. Authored at full copybook width with that `FILLER` space-padded |
-| The account master deliberately omits the resolved account | master sections 8, 9.1 | Master section 8 permits a key to be deliberately omitted to trigger a fallback or a reject and requires the README to name it. Account `00000000007` is absent by design |
-| The folder holds three record files where the program opens six datasets | master section 2 | `CUSTFILE`, `CARDFILE` and `TRANFILE` are opened and never read (section 3), so a fixture for them would assert nothing |
-| The domain is named `preflight` where the house tree names it `prepost` | master section 4.2 | Recorded at the head of this document; the two denote the same program |
+| `cardxref.txt` is 50 bytes, not the seed's 36 | master section 3.10 | The copybook sums to 50; the shipped seed measures 36 because the trailing `FILLER X(14)` is absent from the seed text. Authored at full copybook width with that `FILLER` space-padded |
+| The account master deliberately omits the resolved account | master section 8 | Master section 8 permits a key to be **deliberately** omitted to trigger a reject or a fallback and requires the scenario README to name it. Account `00000000007` is absent by design; section 9 states it in full |
+| The folder holds three record files where the program opens six datasets | master section 2 | `CUSTFILE`, `CARDFILE` and `TRANFILE` are opened and never read, per the `Trade-offs:` note in section 3 |
+| The domain is named `preflight` where the house tree names it `prepost` | master section 4.2 | Recorded at the head of this document; the two names denote the same `CBTRN01C` behaviour |
 
-There is **no** line-ending normalization to declare: neither seed source ships `CRLF`. **No
-business-rule field is reshaped either** -- section 9 attests every row.
+Assumptions: the 50-byte width above is a deliberate choice between two forms the master permits, not an
+inherited property of the seed. Master section 3.10 rules that either the full copybook width or the
+shipped 36-byte seed geometry may be authored, provided the scenario names which it uses; **this folder
+uses the full 50-byte copybook width and no 36-byte variant appears here.** The consequence of the
+choice is that a byte-for-byte diff of this file against its seed row shows 14 trailing bytes of
+difference that carry no value, so section 9 states the widening explicitly rather than leaving a reader
+to conclude the row was edited. Had a 36-byte variant been wanted -- to exercise a reader against the
+seed's own geometry -- that would have been a different departure requiring its own statement here.
+
+There is **no** line-ending normalization to declare: neither seed source ships `CRLF`, so master
+section 3.8 is satisfied without a conversion step.
 
 ---
 
 ## 6. Determinism -- and what the blank timestamp means here
 
-**`DALYTRAN-PROC-TS` is 26 spaces, and in this input file those spaces are genuine input data** -- the
-feed record has not been processed yet. Master section 8.1 requires this to be stated every time a blank
-timestamp is shown, because the byte pattern is identical to the one normalisation produces and the
-meaning cannot be recovered from the bytes. It is the same reason the migrated
-`ledger.daily_transactions.proc_ts` column is nullable while `ledger.transactions.proc_ts` is
-`NOT NULL`.
+**`DALYTRAN-PROC-TS` is 26 spaces at offset 304, and in this input file those spaces are genuine input
+data.** The feed record has not been processed yet, so the field is legitimately blank rather than
+missing or erroneous.
+
+Assumptions: master section 8.1 requires that meaning to be stated every time a blank timestamp is
+shown, because the byte pattern is identical to the one timestamp normalisation produces and the meaning
+cannot be recovered from the bytes alone. This document therefore fixes it once, here, for every place
+26 spaces appear in it: **the 26 spaces in this folder are unprocessed-input blanks, never normalised
+output.** The migrated schema encodes the same distinction structurally -- `ledger.daily_transactions`
+declares `proc_ts` **nullable** while `ledger.transactions` declares it `NOT NULL` -- in the sibling
+harness
+[`test-harness-schemas-and-foreign-tables.sql`](../../../db/testharness/test-harness-schemas-and-foreign-tables.sql),
+whose own rationale records that a posted row has been processed by definition whereas a pre-posting
+feed row has not. `DALYTRAN-ORIG-TS` at 278, by contrast, is deterministic author-supplied input data
+carrying a real value.
 
 **Neither timestamp field is read, written or normalised anywhere in this domain**, because `CBTRN01C`
-writes no record at all. Master section 8.1's posting and interest rules therefore do not engage; the
-field appears here only because the feed record carries it and master section 8.1 requires its meaning
-to be stated whenever it is shown.
+writes no record at all. Master section 8.1's posting and interest normalisation rules therefore do not
+engage; the field appears here only because the feed record carries it.
 
 The doubled diagnostics of section 2.2 are deterministic too: exactly two lookups for one record on
 every run, not a race. Everything else holds by construction -- every byte is literal, there is no clock
@@ -347,42 +462,50 @@ its own workspace, per master section 8.
 
 ## 7. Target-side contracts this scenario agrees with
 
-The migrated pass is `job/PreflightDailyTransactionsJob`, and four of its contracts constrain what this
-folder may expect:
+The migrated pass is `job/PreflightDailyTransactionsJob`, the bean `preflight-daily-transactions` and
+state 3 of the nightly chain. It is read-only and validation-only, emits a diagnostic per missing account
+and writes no record. Four of its contracts constrain what this folder may expect; each is named here and
+specified there, not restated:
 
 - **An unresolvable record is a diagnostic, never a rejected row.** The pass reports it and completes,
   and it has **no warn tier to report at all** -- the target-side expression of section 3's observation
-  that `CBTRN01C` never assigns `RETURN-CODE`.
+  that `CBTRN01C` contains no `RETURN-CODE` statement.
 - **The reported account identifier is redacted.** The line is emitted at warning level and so reaches
   durable log storage, so the target renders `ACCOUNT *********** NOT FOUND` -- **eleven** redaction
-  characters, the width `ACCT-ID` is declared at, `PIC 9(11)` at `app/cpy/CVACT01Y.cpy:5` -- so a
-  positional reader still finds the field at its declared width. The two surrounding literals are
-  verbatim, including the trailing space of `ACCOUNT ` and the leading space of ` NOT FOUND`. This is a
-  **documented, deliberate qualification** of the verbatim-text rule, taken because the alternative is
-  writing an account identifier into a durable log.
-- **The account lookup is performed, and that is asserted.** Unlike `../unmatched_card`, where the
-  absence of the read is the assertion, here the read must **happen** and must be issued for the
-  resolved identifier.
-- **One inspection per record read.** The target implements the clean loop rather than the baseline's
-  repeated final pass (section 2.2), so the doubled markers are a baseline characteristic the target
-  does not reproduce and no test asserts a count for.
+  characters, the width `ACCT-ID` is declared at as `PIC 9(11)` -- so a positional reader still finds the
+  field at its declared width. The two surrounding literals are verbatim, including the trailing space of
+  `ACCOUNT ` and the leading space of ` NOT FOUND`. This is a documented, deliberate qualification of the
+  verbatim-text rule, taken because the alternative is writing an account identifier into a durable log.
+- **The account lookup is performed, and that is asserted.** Unlike [`../unmatched_card`](../unmatched_card),
+  where the absence of the read is the assertion, here the read must **happen** and must be issued for
+  the resolved identifier.
+- **One inspection per record read.** The target implements the single-pass loop, so the doubled markers
+  of section 2.2 are a reference characteristic the target does not reproduce and no test asserts a count
+  for. The divergence is registered as `D-PREFLIGHT-LOOKUP-PAST-END-OF-FILE`.
+
+The bytes decode through the shared codecs in
+`services/common-lib/src/main/java/com/carddemo/common/codec/` -- `CopybookLayout`, `FixedWidthCodec` and
+`ZonedDecimalCodec` -- and through the module's `DailyTransactionMapper`, `CardXrefRecordMapper` and
+`AccountRecordMapper`. Two of their decisions matter to a reader of these bytes: the unsigned `PIC 9(n)`
+identifiers here are decoded as `CopybookLayout.Kind.UINT` and never through sign overpunch, so the final
+byte of `XREF-ACCT-ID` is the digit it looks like; and the account record's five 12-byte zoned money
+fields decode to `NUMERIC(12,2)`, which is why section 5.3 can state their values exactly.
+
+The rows land in the objects the sibling harness declares -- `ledger.daily_transactions` for the feed,
+`account.card_xref` for the cross-reference with `card_num CHAR(16)` as its primary key, and
+`account.accounts` for the master with `account_id BIGINT` as its primary key. Two consequences of that
+last type are worth naming: `00000000020` lands as the integer `20`, and the deliberately absent
+`00000000007` simply has **no row** rather than a row with a null or sentinel key. The harness is created
+under the `test` profile configured in `../../application-test.yml`. A scenario owns only its own rows and
+never seeds another service's schema, per master section 11.3.
 
 Assumptions: the module's own test reaches this scenario's outcome **the other way round** from this
-fixture, and the difference is worth recording so neither reads as a mistake. This folder resolves the
-card to account `00000000007` and commits an account master holding `00000000020`; the test commits a
-cross-reference resolving to an identifier **no** account row carries. Both produce the same finding
-from the same branch -- the account read misses -- and the second form needs no second committed image.
-The fixture keeps the house tree's construction because it is the form the reference-only
-`tests/fixtures/prepost/unmatched_account/` uses, so one description covers both trees.
-
-The rows load into the objects the sibling harness declares in
-[`test-harness-schemas-and-foreign-tables.sql`](../../../db/testharness/test-harness-schemas-and-foreign-tables.sql)
--- `ledger.daily_transactions` for the feed, `account.card_xref` and `account.accounts` for the two
-lookups. A scenario owns only its own rows and never seeds another service's schema, per master section
-11.3.
-
-The graded rubric 0, 4, 8 belongs to the COBOL parity suite alone (master section 7.1.6). The tier-0
-expectation here is the pass's own outcome, not a build status.
+fixture, and the difference is recorded so neither reads as a mistake. This folder resolves the card to
+account `00000000007` and commits an account master holding `00000000020`; the test commits a
+cross-reference resolving to an identifier **no** account row carries. Both produce the same finding from
+the same branch -- the account read misses -- and the second form needs no second committed image. The
+fixture keeps the reference construction because it is the form the house tree uses, so one description
+covers both trees.
 
 ---
 
@@ -395,23 +518,60 @@ posting and interest domains, this one has **no golden corpus at all** in either
 produces console diagnostics rather than records, so its expectation is stated as marker presence and
 absence in section 3. `tests/**` remains reference-only and no golden is ever regenerated.
 
-### 8.2 The posting scenario this must not be confused with
+### 8.2 The posting reject this is the lineage of, and does not produce
 
-`../../posting/reject_101_acct_missing` is the **same broken chain link** driven through `CBTRN02C`
-instead, and it is the folder whose expectation is a reject: code `0101`, the message
-`ACCOUNT RECORD NOT FOUND`, a 430-byte reject record and a return code of **4**. Its fixture even uses
-the same two seed rows this one does. **The two scenarios differ only in which program reads them**, and
-that difference changes the outcome from a console diagnostic to a persisted reject. Master section
-7.1.7's oracle constants belong to that folder's program, not to this one: this pass posts nothing,
-rejects nothing and touches no category balance, so none of them applies here.
+The same broken chain link, driven through the posting program instead, is reject reason **101**.
+`app/cbl/CBTRN02C.cbl:397-398` moves `101` into the reason field and the message
+`ACCOUNT RECORD NOT FOUND` into its description, from the `INVALID KEY` arm of the account read in
+`1500-B-LOOKUP-ACCT` at `:393-395`. Master section 7.1.1 carries that reason with the other three, and
+[`../../posting/reject_101_acct_missing`](../../posting/reject_101_acct_missing) is the folder whose
+expectation is that reject. Its fixture even uses the same two seed rows this one does, so **the two
+scenarios differ only in which program reads them** -- and that difference changes the outcome from a
+console diagnostic to a persisted reject.
 
-### 8.3 The sibling folders
+The lineage is recorded so a reader can connect the two domains through one condition, and for no other
+purpose. **Preflight emits no reject record, no reason code and no return code.** The reject stream
+belongs entirely to the posting domain: nothing in this folder produces a `0101`, a 430-byte reject
+record or a tier-4 outcome, and an expectation that looked for one here would be looking for posting's
+output in a pass that writes nothing. Master section 7.1.7's oracle constants belong to that folder's
+program, not to this one -- this pass posts nothing, rejects nothing and touches no category balance, so
+none of them applies here.
 
-`../unmatched_card` breaks the **first** link of the chain -- its cross-reference holds a different card
--- and `../happy_path` breaks neither. Each ships the same three files at the same widths; only which
-seed row is copied differs. Read the three together: they cover the two ways the chain can fail and the
-case where it does not, and only the set of three shows that each diagnostic is reported for its own
-condition and no other.
+The two programs word the condition **differently**, and each wording is carried verbatim from its own
+program:
+
+| Program | Text, verbatim | Line |
+|---|---|---|
+| `CBTRN01C` | `INVALID ACCOUNT NUMBER FOUND` | `:246` |
+| `CBTRN01C` | `ACCOUNT ` + `ACCT-ID` + ` NOT FOUND` | `:178` |
+| `CBTRN02C` | `ACCOUNT RECORD NOT FOUND` | `:398` |
+
+Assumptions: the three strings are never merged or paraphrased into one another. They are published
+text, each read by expectations written against its own program, so normalising them to a single
+sentence would break whichever expectation lost its wording -- and would misattribute a posting message
+to a pass that never emits it.
+
+### 8.3 The sibling folders, and the two files this folder shares with one of them
+
+[`../unmatched_card`](../unmatched_card) breaks the **first** link of the chain -- its cross-reference
+holds a different card -- and [`../happy_path`](../happy_path) breaks neither. Read the three together:
+they cover the two ways the chain can fail and the case where it does not, and only the set of three
+shows that each diagnostic is reported for its own condition and no other.
+
+One relationship inside that set is a byte-level fact rather than a family resemblance, and it is stated
+here because a contract test asserts it: **this folder's `dailytran.txt` and `cardxref.txt` are
+byte-identical to `../happy_path`'s, and `acctdata.txt` is the only file that differs between the two
+scenarios.** Both folders carry the same feed record and the same cross-reference row resolving to
+account `00000000007`; `../happy_path` then supplies account `00000000007` in its account master, where
+this folder supplies account `00000000020` instead.
+
+Assumptions: that duplication is deliberate and is the whole construction of the pair, so it must not be
+tidied. Holding the feed and the cross-reference **equal** across the two folders is what isolates the
+account master as the single variable, which is the only way the pair proves that the account read is
+what decides the outcome. A future author who removed the duplication -- by editing one folder's feed or
+cross-reference, or by pointing one scenario at the other's files -- would leave both scenarios still
+passing their own expectations while this documented relationship became false, which is precisely why
+`BatchFixtureContractTest` asserts the sameness rather than trusting the prose.
 
 ---
 
@@ -421,37 +581,67 @@ condition and no other.
 in it.** Every record is a published AWS CardDemo sample seed row under `app/data/ASCII/`, selected
 rather than edited:
 
-| File | Seed | Seed row | Relationship |
+| File | Seed | Seed row | Relationship to the seed row |
 |---|---|---:|---|
-| `dailytran.txt` | `app/data/ASCII/dailytran.txt` | 1 | **byte-identical** |
-| `cardxref.txt` | `app/data/ASCII/cardxref.txt` | 21 | identical on `[0:36]`; 14 spaces appended, per master section 3.10 |
+| `dailytran.txt` | `app/data/ASCII/dailytran.txt` | **1** | **byte-identical** |
+| `cardxref.txt` | `app/data/ASCII/cardxref.txt` | **21** | identical on `[0:36]`; 14 spaces appended, per master section 3.10 |
 | `acctdata.txt` | `app/data/ASCII/acctdata.txt` | **20** | **byte-identical** |
 
-**The scenario is created by selection, not by reshaping.** The account row is row **20** of its seed --
-account `00000000020` -- chosen because it is a real seed row naming an account the cross-reference does
-not resolve to. `../happy_path` and `../unmatched_card` both use row 7, account `00000000007`. Swapping
-which seed row is copied is the entire construction, and it is why the phrase "every business-rule field
-reshaped away from its seed value" resolves to **none** for this folder.
+**Every business-rule field reshaped away from its seed value: none.** Master section 10's fifth item
+requires that clause to be answered explicitly rather than left blank, and for this folder the answer is
+that no field was reshaped at all -- not the account identifier, not a balance, not a limit, not a date,
+and not `ACCT-GROUP-ID`, which master section 7.2.3 names as the canonical reshaped field in the interest
+domain and which is left at its seed blank here because nothing in this domain reads it. **The scenario
+is created by selection, not by reshaping.**
+
+**The only byte-level difference from any seed anywhere in this folder** is the `cardxref.txt` widening
+from the seed's 36 bytes to the copybook's 50, which appends 14 spaces of `FILLER X(14)` and alters no
+value. Section 5.4 names it as a departure and this section names it as the sole byte-level edit, so the
+two statements agree: every other byte in the folder is a seed byte in its seed position.
 
 The cross-reference row is row **21** of its seed rather than row 7 because that file is ordered by card
-number, and account `00000000007` appears there under card `4859452612877065`.
+number, and account `00000000007` appears in it under card `4859452612877065`.
 
 **It represents no real person and no real account.** The seeds ship with the upstream open-source
-project as fabricated demonstration data, and master section 11.1 carries the tree-level attestation
-this scenario inherits. Identity and primary-account-number bytes -- the card number, the customer
-identifier and both account identifiers named in this document -- are taken unchanged from the seed.
+project as fabricated demonstration data, and master section 11.1 carries the tree-level attestation this
+scenario inherits. Identity and primary-account-number bytes -- the card number, the customer identifier
+and both account identifiers named in this document -- are taken unchanged from the seed.
 
-The single normalization named in section 5.4 is width conformance, **not** a business-rule field
-change, so it does not qualify the "nothing reshaped" statement above.
+### 9.1 The deliberate omission, and why it must not be repaired
+
+**Account `00000000007` -- the identifier the cross-reference resolves -- is deliberately not present as
+an `ACCT-ID` key in `acctdata.txt`.** That absence is not an oversight, an incomplete extract or a
+missing row awaiting completion: **it is the mechanism of the scenario.** The account read at `:243`
+misses because there is nothing under that key to find, and every expectation in section 3 follows from
+the miss.
+
+Assumptions: master section 8's self-containment rule -- every key cross-referenced inside a scenario
+resolves inside its own files -- carries an **explicit carve-out** for exactly this case, permitting a
+key to be deliberately omitted to trigger a reject or a fallback provided the scenario's README names
+the omission. This section is that naming, and it is the reason this folder does not violate
+self-containment despite holding a cross-reference row whose account resolves to nothing. **No future
+reader should "repair" this fixture by adding the missing account.** Adding a row for `00000000007`
+would make both lookups hit, both diagnostics vanish, and this folder become a duplicate of
+`../happy_path` while still claiming in its own documentation to pin the account-not-found path -- and
+because this domain has no return code and no reject stream, nothing in a run's exit status would reveal
+the change.
+
+The omission is an authorial decision rather than an artifact of what the seed happened to offer, and the
+trap is worth naming: **account `00000000007` genuinely does exist, as row 7 of the 50-record
+`app/data/ASCII/acctdata.txt` seed.** The matching row was available and was not used; row 20 was chosen
+instead. A reader who notices that row 7 exists and infers the fixture is simply incomplete would be
+reading the one fact that most looks like evidence of an accident.
 
 Trade-offs: selecting seed row 20 rather than reshaping row 7's account identifier to something absent
 costs one thing worth naming. Row 20 differs from row 7 in every monetary field and every date, so this
-folder's account row shares almost no bytes with its siblings' -- a reader diffing two preflight
-fixtures sees a large difference where the scenario's actual delta is the key alone. The compromise is
-accepted because the alternative is worse in kind: overwriting an account identifier produces a row
-whose key names an account no seed row describes, so its provenance could no longer be stated as a seed
-row and the eleven bytes would have to be justified as invented. Section 5.3 turns the cost into a
-benefit by naming the unfamiliar values as a diagnostic signal.
+folder's account row shares almost no bytes with its siblings' -- a reader diffing two preflight fixtures
+sees a large difference where the scenario's actual delta is the key alone. The compromise is accepted
+because the alternative is worse in kind: overwriting an account identifier would produce a row whose key
+names an account no seed row describes, so its provenance could no longer be stated as a seed row and the
+eleven bytes would have to be justified as invented -- and an invented identifier could in principle
+collide with a real value, which is the risk the seed-only discipline of master section 11.2 exists to
+remove. Even the deliberately wrong record is therefore attributable to a published synthetic row.
+Section 5.3 turns the cost into a benefit by naming the unfamiliar values as a diagnostic signal.
 
 Master section 11.3 governs the rest and is not restated: no secret, credential, connection string or
 endpoint appears in any file here, money never leaves fixed point, and nothing here modifies the COBOL
@@ -459,24 +649,30 @@ baseline or the parity oracle.
 
 ---
 
-*This README is the mandatory Explainability carrier for the three record files in this directory,
-required by master section 10 and by user-specified Rule 1. `config/rule1/rule1_gate.py` decides the
-form of the rationale labels above, repository-wide and including Markdown, which is why they are
-written plain rather than emphasised. `config/checkstyle/checkstyle.xml` limits its audit set to `java`,
-so no linter reads this prose. Whether each rationale names a real consequence, and whether every number
-and line citation is true, are review obligations no lexical gate can decide.*
+## 10. What drives this corpus, and what reads it
+
+Master section 1.5 records which scenarios this module drives and which it mirrors, and names this one as
+driven from its `dailytran.txt` by `PreflightDailyTransactionsJobTest`, which seeds the card to an
+account it deliberately does not create. Every file here additionally has a contract consumer in
+`BatchFixtureContractTest`, which enumerates this scenario among all sixteen, holds each file to its
+declared geometry, its line endings and its trailing newline, decodes every record under its declared
+layout, and asserts the relationships this document states -- including the byte-sameness of section 8.3.
+So an edit to any file here is detected in this module even where no job reads the bytes.
+
+Assumptions: this document is self-contained for every contract fact it states, and its links to
+`../happy_path`, `../unmatched_card` and `../../posting/reject_101_acct_missing` are for orientation
+only. No fact above is deferred to a sibling README, and no claim is made about what a sibling document
+says, because a scenario folder can be read, moved or authored independently of its siblings -- a
+statement of the form "as documented in the sibling README" would be unverifiable from this folder alone.
+Byte-encoding rules are the single exception: those belong to the master contract by master section 1.3
+and are cited there by section rather than copied here, because sixteen copies of one ledger would become
+sixteen things to keep in step.
 
 ---
 
-## 10. What drives this corpus, and what reads it
-
-This corpus is a **reference mirror**, not a driven input: no test in this module seeds a run from
-`/fixtures/preflight/`. What reads it is `BatchFixtureContractTest`, which enumerates this scenario
-among all sixteen fixture trees and holds every file here to its declared geometry and to the values
-that make the scenario discriminating -- so an edit is detected in this module even though no job
-consumes the bytes. The end-to-end run for this rule belongs to the reference suite.
-
-Assumptions: the distinction from `posting/**` is deliberate and is stated rather than left to
-inference. That family IS driven -- `PostTransactionsJobParityIT` declares
-`/fixtures/posting/` as its seed root and compares against `tests/golden/posting/<scenario>` -- so
-one tree serves two purposes, and only there does an edit change what a run asserts.
+*This README is the mandatory Explainability carrier for the three record files in this directory,
+required by master section 10 and by user-specified Rule 1. `config/rule1/rule1_gate.py` decides the form
+of the rationale labels above, repository-wide and including Markdown, which is why they are written
+plain rather than emphasised. `config/checkstyle/checkstyle.xml` limits its audit set to `java`, so no
+linter reads this prose. Whether each rationale names a real consequence, and whether every number and
+line citation is true, are review obligations no lexical gate can decide.*

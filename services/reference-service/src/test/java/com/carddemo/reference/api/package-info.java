@@ -25,9 +25,9 @@
  * at-clause bodies for emptiness through {@code NonEmptyAtclauseDescription}, so an invented empty
  * at-clause would be reported rather than credited.</p>
  *
- * <h2>The five classes this package holds, and how each one reaches the surface</h2>
+ * <h2>The nine classes this package holds, and how each one reaches the surface</h2>
  *
- * <p>This directory holds this descriptor and five test classes, and admits no subdirectory. The five
+ * <p>This directory holds this descriptor and nine test classes, and admits no subdirectory. They
  * reach the boundary by three different routes, which is the distinction to carry away, because it
  * decides what each one is able to detect:</p>
  *
@@ -76,6 +76,61 @@
  *       drove a write route through a dispatcher at all -- and no service test can, because a response header
  *       is produced by the value the handler hands the framework rather than by anything the service
  *       does.</li>
+ *   <li>{@code DateConversionControllerTest} drives the date-evaluation route through a real dispatcher
+ *       as well. Alternatives Considered: adding its cases to the date dispatcher class above instead of
+ *       standing up a second class on the same route. Rejected because that class assembles exactly one
+ *       dispatcher and its cases all rest on the advice being registered, whereas this one assembles a
+ *       SECOND dispatcher with nothing registered and asserts the difference -- a class cannot both
+ *       depend on a registration and hold it in question, so the two belong apart. Its opening case
+ *       asserts that registration itself:
+ *       one refused request is driven through a dispatcher that registers the shared advice and through
+ *       one that registers nothing, and the two failure modes are asserted separately -- an over-wide
+ *       picture is claimed by the framework's own default resolver, which answers the SAME four hundred
+ *       with an empty body, so a case asserting only the status cannot tell a registered advice from a
+ *       missing one; a width disagreement is claimed by no default resolver and escapes unanswered. That
+ *       makes the registration every status assertion in this package rests on a permanently asserted
+ *       property rather than one a reviewer re-verifies by deleting a line. Beyond it the class holds the
+ *       separation of this route from the queue-borne system-date reply, the two reported codes as two
+ *       members of the closed member set with the tolerated rejection intact, the delegated pair captured
+ *       as it was handed on, the problem document's stamp traced to the clock the advice was given, the
+ *       withholding of a diagnostic wider than the inherited message line, the correlation identity
+ *       echoed and minted through the shared filter, and the absence of anything retained between
+ *       requests.</li>
+ *   <li>{@code TransactionTypeControllerTest} drives the transaction-type routes through a real
+ *       dispatcher and holds the ANSWER each refusal composes to the contract, which none of the five
+ *       above can see. Refactoring Rationale: it exists because the refusals on that surface were
+ *       reachable only through the shared advice and nothing drove them. Three properties in
+ *       particular had no owner: that a delete refused by a still-referencing row surfaces as a
+ *       conflict rather than as a fault, and does so even for an integrity state the service does not
+ *       classify, while a failure OUTSIDE that family does not; that the three conditions sharing the
+ *       conflict status are separated by their sentence, the shared advice publishing no subordinate
+ *       code to tell them apart; and that the trailing paging position names the last row PUBLISHED
+ *       rather than the surplus row read beyond it, which is what stops a caller seeing one row twice
+ *       at every page boundary. It also asserts the one authority-adjacent property that belongs here
+ *       rather than to the chain -- that the caller's own name is what the browse seals its positions
+ *       against -- because the constraint class above deliberately accepts any subject.</li>
+ *   <li>{@code DisclosureGroupControllerTest} drives the disclosure-group rate route through a real
+ *       dispatcher and settles six questions no class beneath the boundary can: that the reply is one
+ *       object rather than a window over rows, which JSON token the rate is written as, that the
+ *       indicator reporting the SUBSTITUTED group reaches the caller in both of its states, which
+ *       status and sentence a key resolving to nothing renders, that the three key components survive
+ *       the round trip at their declared widths, and what authority the deployed chain demands of a
+ *       read. Trade-offs: it assembles two dispatchers rather than one, because the two properties
+ *       cannot be held at once -- without a filter chain a 404 can only mean the key, and with the
+ *       deployed chain the authority a read demands becomes observable. The rate RULES stay in
+ *       {@code com.carddemo.reference.service} and the seeded rows stay in
+ *       {@code com.carddemo.reference.repository}, so no rule is asserted twice.</li>
+ *   <li>{@code LookupControllerTest} drives the three seeded address browses and their three item
+ *       reads through the deployed chain, that surface being the only way the area-code, state and
+ *       state-and-postal-prefix allow-lists leave this context. It owns the members the page envelope
+ *       carries, the three domain sizes reaching a client without loss, the classification arriving as
+ *       a total and disjoint two-value partition, the width each key round-trips at, the problem
+ *       document an absent code is refused with, and which caller is admitted to a read at all.
+ *       Refactoring Rationale: the domain sizes are asserted HERE rather than only where the rows are
+ *       stored because a code missing from this surface presents in a DIFFERENT bounded context, as a
+ *       valid address being rejected with no defect of its own to point at; the relationship runs over
+ *       the published contract and the schema and never through code, so no type of that context is
+ *       named in it.</li>
  * </ul>
  *
  * <p>Refactoring Rationale: a dispatcher class earns its cost over a direct handler call for one
@@ -90,7 +145,7 @@
  * not-found sentence. The second is the harder of the two to notice, because its status looks like an
  * ordinary outcome rather than a fault.</p>
  *
- * <p>Assumptions: all five names end in {@code Test}, so Surefire collects them at the {@code test}
+ * <p>Assumptions: all six names end in {@code Test}, so Surefire collects them at the {@code test}
  * phase of the build. Failsafe collects the {@code IT} names, which in this module means the
  * container-backed classes under {@code com.carddemo.reference.repository}, and asserts their result at
  * {@code verify}. The suffix is therefore doing structural work: a container-backed class misnamed
@@ -207,15 +262,26 @@
  * <h2>The page envelope, and why no test here pages by position</h2>
  *
  * <p>Assumptions: {@code com.carddemo.common.web.PageResponse} is the one page envelope this context
- * returns, it takes a single type parameter, and it carries five components: the items, a leading
- * boundary token, a trailing boundary token, and two booleans reporting whether a further page exists
- * ahead and behind. The two tokens are opaque strings and either may be absent. Three invariants are
- * enforced by the envelope's own constructor rather than by any test here, so a test neither has to
- * establish them nor may contradict them:
- * a page carrying rows must carry both boundary tokens; a page may claim a further page ahead only
- * while its trailing token is present; and it may claim one behind only while its leading token is
- * present. The backward claim is a component in its own right and is accepted as given rather than
- * derived from the leading token, which answers a different question.</p>
+ * returns, it takes a single type parameter, and it carries FOUR components: the items, a leading
+ * boundary token, a trailing boundary token, and one boolean reporting whether a further page exists
+ * ahead. The two tokens are opaque strings, each must be a token that type's sealer minted, and either
+ * may be absent. Backward availability is the PRESENCE of the leading token rather than a component of
+ * its own, and the published page schemas of
+ * {@code src/main/resources/openapi/reference-api.yaml} declare the same four members. Three
+ * invariants are enforced by the envelope's own constructor rather than by any test here, so a test
+ * neither has to establish them nor may contradict them: a page carrying rows must carry both boundary
+ * tokens; a page may claim a further page ahead only while its trailing token is present; and a
+ * present token must have the sealed shape, so a raw keyset key is unrepresentable. The converse of
+ * the first is deliberately NOT asserted -- a page with no rows may still name a boundary, because a
+ * read whose every row was filtered away still has the keys at which scanning stopped.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph described an envelope of five components whose backward
+ * availability was a claim in its own right, and the envelope now carries four. The change is recorded
+ * rather than quietly overwritten because a reader who had built against the fifth component needs to
+ * know where it went: the envelope's own documentation states that backward availability became the
+ * presence of the leading token, which is what the browser client already binds its backward control
+ * to, so the claim was not removed but relocated to the component that answers it. The measurement to
+ * trust is the record and the published schema, both of which state four.</p>
  *
  * <p>Alternatives Considered: paging by position, which the framework offers ready-made and which would
  * let a test assert a row count and a position number instead of decoding a cursor. Rejected on
@@ -419,14 +485,20 @@
  *
  * <p>Refactoring Rationale: an earlier form of this descriptor, and the plan that specified it, both
  * described a package that does not exist, and the departures are recorded so that nobody restores the
- * projection over the measured state. The projection named four per-controller test classes; the four
- * classes present are the ones enumerated above, and no class of any projected name exists anywhere in
- * this reactor. The projection described them as context-slicing web tests; no such annotation is used
- * anywhere in this reactor, and the mechanism is a standalone dispatcher, which is why the advice above
- * is registered by hand rather than imported. The projection described four controllers with the
+ * projection over the measured state. The projection named four per-controller test classes; the nine
+ * classes present are the ones enumerated above, and three of them --
+ * {@code DateConversionControllerTest}, {@code DisclosureGroupControllerTest} and
+ * {@code TransactionTypeControllerTest} -- carry a name the projection also used, each authored against
+ * the measured tree rather than against the projection and holding the subjects listed for it above
+ * rather than the per-controller sweep the projection described. The projection described them as
+ * context-slicing web tests; that annotation is not on this module's test class path at all, having
+ * moved in the framework's fourth generation into a separate servlet slice artifact this module does not
+ * declare, so the mechanism is a standalone dispatcher, which is why the advice above is registered by
+ * hand rather than imported. The projection described four controllers with the
  * category surface nested beneath the type; six are mounted and the category surface is a root
- * collection. The projection described a page envelope of four components whose backward availability
- * had to be inferred; it carries five, and the backward claim is one of them. The projection stated that
+ * collection. On the page envelope the projection was RIGHT and an earlier form of this descriptor was
+ * wrong: it carries four components and backward availability is inferred from the leading token, as
+ * the paragraph above now records. The projection stated that
  * no version attribute existed and that a conflict rested on a before-image comparison alone; both
  * entities carry one, and the two mechanisms are ordered as described above. The projection named
  * service methods and refusal types that do not exist, and an enum name for the rate provenance that

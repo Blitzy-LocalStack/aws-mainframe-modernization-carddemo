@@ -23,7 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type * as AuthModule from '../../api/auth';
 import { MESSAGE_BAND_TEST_ID } from '../../layout/MessageBand';
-import { PROGRAM_MESSAGES, THANK_YOU_CCDA } from '../../messages/messages';
+import { PROGRAM_MESSAGES, THANK_YOU_CARDDEMO } from '../../messages/messages';
 import { cardDemoTheme } from '../../theme/antdTheme';
 
 const signOnMock = vi.fn();
@@ -260,7 +260,17 @@ async function answersAChallengeAndThenEnters(): Promise<void> {
   render(renderSignOn());
 
   await userEvent.type(screen.getByLabelText(/user id/iu), 'USER0001');
-  await userEvent.type(screen.getByLabelText(/^password$/iu), 'secret');
+  /*
+   * Refactoring Rationale: this matched `/^password$/iu` and now matches the label the screen
+   * actually paints. The anchors were there to separate the current-password control from the
+   * replacement one, and they stopped matching once the screen began rendering the mapset's own
+   * label text: `app/bms/COSGN00.bms` L174 declares `INITIAL='Password    :'` at `LENGTH=13`, so the
+   * accessible name carries four interior spaces and a trailing colon that an accessible-name lookup
+   * normalises to `Password :`. The pattern is widened rather than the label narrowed, because the
+   * label is a transformation-rule-T8 transcription and this anchor was only ever a disambiguator —
+   * and it still disambiguates, since `New Password` cannot match a pattern anchored at the start.
+   */
+  await userEvent.type(screen.getByLabelText(/^password\s*:?$/iu), 'secret');
   await userEvent.click(screen.getByRole('button', { name: /sign on/iu }));
 
   const replacement = await screen.findByLabelText(/new password/iu);
@@ -314,6 +324,15 @@ function offersExactlyTheTwoSourceFunctionKeys(): void {
  *
  * Assumptions: this asserts the migration of `WHEN DFHPF3`, which moves CCDA-MSG-THANK-YOU into the
  * message field. The constant is read from the catalog so the sentence cannot drift from the source.
+ *
+ * Refactoring Rationale: this asserted `THANK_YOU_CCDA` and now asserts `THANK_YOU_CARDDEMO`. The two
+ * are DIFFERENT baseline constants that read almost alike, and the catalog holds both because
+ * transformation rule T8 requires it: `CCDA-THANK-YOU` is `PIC X(40)` at `app/cpy/COTTL01Y.cpy`
+ * L23-L24 and names the application "CCDA", while `CCDA-MSG-THANK-YOU` is `PIC X(50)` at
+ * `app/cpy/CSMSG01Y.cpy` L18-L19 and names it "CardDemo". `app/cbl/COSGN00C.cbl` L89 moves the
+ * SECOND one, so the first assertion passed against a screen that showed the wrong sentence at the
+ * wrong declared width — a byte-level parity defect that a test naming the other constant could only
+ * ratify. Both the screen and this assertion now name the constant L89 selects.
  * @returns {Promise<void>} Resolves once the assertion has run.
  */
 async function reportsTheSourceFarewellOnExit(): Promise<void> {
@@ -321,7 +340,7 @@ async function reportsTheSourceFarewellOnExit(): Promise<void> {
 
   await userEvent.click(screen.getByRole('button', { name: /F3=Exit/u }));
 
-  expect(await screen.findByText(THANK_YOU_CCDA.trim())).toBeInTheDocument();
+  expect(await screen.findByText(THANK_YOU_CARDDEMO.trim())).toBeInTheDocument();
 }
 
 /**

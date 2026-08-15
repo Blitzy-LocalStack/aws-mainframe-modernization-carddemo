@@ -2,7 +2,7 @@
  * Unit tests for the service layer of the account bounded context, run against substituted
  * collaborators.
  *
- * <p>NINE classes execute here. Each one owns a rule or an entry point of this context's service
+ * <p>TEN classes execute here. Each one owns a rule or an entry point of this context's service
  * layer, and each states in its own descriptor which COBOL program and which physical line it was
  * transcribed from. The roster is written out rather than summarised as a count, because a count tells
  * a reader that a class is missing without telling them which rule went with it.</p>
@@ -12,6 +12,10 @@
  *       outcomes it reaches, the exact bytes of every sentence a user reads, the four sentinel values
  *       the input edit distinguishes, and the two report behaviours of {@code app/cbl/CBACT01C.cbl}
  *       that the target does not reproduce, from {@code app/cbl/COACTVWC.cbl}.</li>
+ *   <li>{@code AccountUpdateServiceTest} asserts the edit surface of the update path itself -- the
+ *       SEVENTEEN edit routines beneath the driver at L1429 of {@code app/cbl/COACTUPC.cbl}, the two
+ *       validation-marker regimes that program declares, both of its concurrency signal sites, and the
+ *       three places where the target deliberately behaves differently from it.</li>
  *   <li>{@code AccountUpdatePreservationTest} asserts which submitted values an account update applies
  *       and which stored values it preserves, and that a stale precondition changes nothing, from
  *       {@code app/cbl/COACTUPC.cbl}.</li>

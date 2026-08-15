@@ -134,10 +134,50 @@ class ReportingFixtureContractTest {
      * since all fifty rows of the reference extract are {@code 'Y'}; and every
      * {@code CARD-ACCT-ID} resolves in {@code acctfile.txt} with every {@code CARD-EMBOSSED-NAME}
      * agreeing with the matching customer in {@code custfile.txt}.</p>
+     *
+     * <p>Assumptions: {@code cardxref.txt} is the third such admission, and unlike the card master it
+     * is a file the report path genuinely reads. It is the card cross-reference of
+     * {@code app/cpy/CVACT03Y.cpy}, whose {@code 01 CARD-XREF-RECORD} at line 4 declares
+     * {@code XREF-CARD-NUM PIC X(16)}, {@code XREF-CUST-ID PIC 9(09)} and
+     * {@code XREF-ACCT-ID PIC 9(11)} summing to 36 bytes, plus a trailing {@code FILLER PIC X(14)} at
+     * line 8, giving the 50-byte length its header comment at line 2 states and {@link CopybookLayout}
+     * registers as {@code XREF}. {@code app/cbl/CBSTM03B.CBL} corroborates the same 50 bytes
+     * independently, declaring {@code FD-XREFFILE-REC} at lines 66 to 68 as {@code X(16)} followed by
+     * {@code X(34)}. {@code app/jcl/TRANREPT.jcl} names it at lines 67 and 68 under the DD
+     * {@code CARDXREF}, and {@code app/cbl/CBTRN03C.cbl} reads it at line 485.</p>
+     *
+     * <p>Assumptions: one copybook serves TWO DD names, so this directory will hold two fixtures that
+     * share the single {@code XREF} descriptor rather than declaring a layout each. This file is the
+     * report path's set under DD {@code CARDXREF}; the statement path reads the identical 50-byte
+     * record under DD {@code XREFFILE}, which is one of the four {@code WHEN} branches of the
+     * {@code EVALUATE LK-M03B-DD} at line 118 of {@code app/cbl/CBSTM03B.CBL}. A reader who assumed
+     * one file per descriptor would read the pair as a duplicate and delete one of them.</p>
+     *
+     * <p>Assumptions: its {@code XREF-ACCT-ID} at zero-based offset 25 is an access path rather than a
+     * spare column. In the baseline it is the key of the {@code CXACAIX} alternate index, surfaced to
+     * CICS as a file in its own right, and the migration replaces it with the non-unique index
+     * {@code idx_card_xref_account_id}. Two of the four rows therefore share account
+     * {@code 00000000050} under different card numbers, which is what makes that index exercisable and
+     * what makes the card-keyed control break of {@code app/cbl/CBTRN03C.cbl} line 181 distinguishable
+     * from an implementation grouped by account: its band at line 183 is labelled "Account Total"
+     * while the break key is {@code WS-CURR-CARD-NUM} at line 137, so those two rows emit two bands
+     * printing one account id where a {@code GROUP BY account_id} emits one band.</p>
+     *
+     * <p>Alternatives Considered: carrying the eighty-eight card numbers the statement extract
+     * mentions, or adding an eighty-fifth row for card {@code 9999999999999999}. Both were rejected,
+     * and the second is the load-bearing one. That card is deliberately ABSENT so that it is the
+     * unresolvable-lookup case the transaction fixture can point at: the {@code INVALID KEY} path of
+     * {@code app/cbl/CBTRN03C.cbl} at lines 486 to 490 ABENDS rather than warning and continuing, and
+     * because the lookup fires only inside the control break at lines 181 to 188 a missing row makes
+     * the report print the account id left resident from the PREVIOUS card rather than a blank. Adding
+     * the row to "fix" the orphan would delete that case, and the eighty-four
+     * {@code 1010000000000001} through {@code 1010000000000084} overflow cards belong to the statement
+     * path's superset, where rows this module never joins against cannot drift out of agreement with
+     * the account fixture.</p>
      */
     private static final List<String> EXPECTED_RESOURCES =
-            List.of("README.md", "acctfile.txt", "carddata.txt", "custfile.txt", "tcatbal.txt",
-                    "trancatg.txt", "trantype.txt");
+            List.of("README.md", "acctfile.txt", "carddata.txt", "cardxref.txt", "custfile.txt",
+                    "tcatbal.txt", "trancatg.txt", "trantype.txt");
 
     /**
      * Resolves the fixture directory on the test classpath.
@@ -212,6 +252,20 @@ class ReportingFixtureContractTest {
                 //       file, so a row silently added or dropped fails this argument source rather
                 //       than passing a suite that only ever asserted "every row is 150 bytes".
                 Arguments.of("carddata.txt", "CARD", 150, 5),
+
+                // WHY : Assumptions: the cross-reference is registered under the descriptor name XREF
+                //       while the file is named cardxref.txt, and the two are NOT interchangeable.
+                //       XREF is the registry key for app/cpy/CVACT03Y.cpy; cardxref.txt is named for
+                //       the DD app/jcl/TRANREPT.jcl declares at lines 67 and 68, which happens to
+                //       coincide with the seed dataset name. The SAME descriptor also serves the
+                //       statement path's XREFFILE branch at line 118 of app/cbl/CBSTM03B.CBL, so a
+                //       second fixture will arrive against this one entry rather than declaring a
+                //       layout of its own.
+                //       Trade-offs: the row count of four is stated here as well as being readable
+                //       from the file, because two of those four rows exist only to share account
+                //       00000000050 and a silently dropped row would take that property with it while
+                //       still leaving every surviving row exactly 50 bytes.
+                Arguments.of("cardxref.txt", "XREF", 50, 4),
 
                 // WHY : Assumptions: the balance fixture is registered last because it is the child
                 //       of the two reference fixtures above -- every one of its rows draws a type
@@ -334,6 +388,20 @@ class ReportingFixtureContractTest {
                 //       rather than the three zero-padded ones. The fixture reaches the same byte by
                 //       a second, independent route: it omits the FILLER key entirely and lets
                 //       FixedWidthCodec rebuild the pad, which makes the value a codec fact.
+                // WHY : Assumptions: the cross-reference is the one record whose pad CANNOT be
+                //       measured from its extract, because app/data/ASCII/cardxref.txt stores only the
+                //       36 declared bytes and pads nothing at all -- it truncates where the account
+                //       and card extracts pad. Two independent sources settle it as a BLANK instead,
+                //       and they agree: the live house fixture at
+                //       tests/fixtures/posting/happy_path/cardxref.txt writes those 36 bytes followed
+                //       by 14 blanks, and this fixture reaches the same byte by omitting the FILLER
+                //       key so FixedWidthCodec rebuilds the pad, which makes the value a codec fact
+                //       rather than a typed-in one.
+                //       Trade-offs: a zero pad was available and would have matched the three
+                //       zero-padded reference records, but it would have contradicted the only
+                //       committed cardxref fixture in the repository for a record type whose own
+                //       extract offers no counter-evidence.
+                Arguments.of("cardxref.txt", "XREF", ' '),
                 Arguments.of("carddata.txt", "CARD", ' '),
                 Arguments.of("tcatbal.txt", "TCATBAL", '0'),
                 Arguments.of("trantype.txt", "TRANTYPE", '0'),
