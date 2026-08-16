@@ -3,10 +3,11 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   The complete input surface of the `sqs` module -- every value a calling
-#   root may supply, and nothing beyond that. The module provisions twelve
-#   queues: six primary queues plus one dead-letter queue for each. The two
-#   inquiry request flows are split by owning service, while one shared reply
-#   queue follows the request's replyToQueueUrl contract.
+#   root may supply, and nothing beyond that. The module provisions ten
+#   queues: five primary queues plus one dead-letter queue for each. Both
+#   inquiry flows share ONE request queue, as the baseline's single
+#   CARDDEMO.REQUEST.QUEUE does, and one shared reply queue follows the
+#   request's replyToQueueUrl contract.
 #
 #   Every variable below is explicitly typed, carries a `description`, and is
 #   consumed by main.tf or outputs.tf. Nothing is declared speculatively.
@@ -53,7 +54,7 @@
 #     than either source. The reasoning for each sits on the variable itself,
 #     because the three values are only defensible in relation to one another.
 #   - Alternatives Considered: no per-queue name override and no `create_*`
-#     feature flag is offered. The queue set is fixed at six plus six
+#     feature flag is offered. The queue set is fixed at five plus five
 #     dead-letter queues by the messaging design, so a toggle would advertise
 #     an optionality that does not exist, and a `count`-gated queue would turn
 #     every output in outputs.tf into a possibly-empty list that each caller
@@ -106,18 +107,25 @@ variable "name_prefix" {
   #       Terraform. An SQS queue name may be at most 80 characters, and on a
   #       FIFO queue the mandatory `.fifo` suffix counts toward that 80. The
   #       arithmetic, which a reader can check against the naming locals in
-  #       main.tf: the longest name this module composes is the account-inquiry
-  #       dead-letter queue, whose fixed part is
-  #       "-account-inquiry-request-" (25 characters) + <environment> (4 at
-  #       most, being "prod") + "-dlq" (4) = 33. 80 - 33 = 47, so a
-  #       47-character prefix composes a name of exactly 80 and anything longer
-  #       cannot fit. The default spends 8 of those 47.
+  #       main.tf: the longest name this module composes is the authorization
+  #       request dead-letter queue, whose fixed part is
+  #       "-pauth-request-" (15 characters) + <environment> (4 at most, being
+  #       "prod") + "-dlq.fifo" (9) = 28. 80 - 28 = 52, so a 52-character
+  #       prefix composes a name of exactly 80 and anything longer cannot fit.
+  #       The default spends 8 of those 52.
+  #       Refactoring Rationale: the binding case used to be an account-inquiry
+  #       dead-letter name at 33 characters, which fixed the ceiling at 47. That
+  #       queue no longer exists: the two per-consumer inquiry request queues
+  #       were merged into the single shared queue the baseline defines, and the
+  #       merged "-inquiry-request-" pair composes 25 characters. Leaving 47 in
+  #       place would refuse five prefix characters that now fit, and would state
+  #       an arithmetic a reader could not reproduce from main.tf.
   #       Left unchecked, an over-long prefix passes `plan` untouched and fails
   #       during `apply` against whichever queue the provider reached first,
   #       reported as an invalid parameter on a name the caller never typed.
   validation {
-    condition     = length(var.name_prefix) >= 1 && length(var.name_prefix) <= 47
-    error_message = "name_prefix must be 1 to 47 characters. The module appends up to 33 more characters (\"-account-inquiry-request-\" + environment + \"-dlq\") and SQS limits queue names to 80 characters."
+    condition     = length(var.name_prefix) >= 1 && length(var.name_prefix) <= 52
+    error_message = "name_prefix must be 1 to 52 characters. The module appends up to 28 more characters (\"-pauth-request-\" + environment + \"-dlq.fifo\") and SQS limits queue names to 80 characters, counting the .fifo suffix."
   }
 
   # WHY : Assumptions: SQS accepts only letters, digits, hyphens and
@@ -156,7 +164,7 @@ variable "name_prefix" {
 #       queue here is required to be encrypted with a customer-managed key, and
 #       the policy scan in .github/workflows/infra-ci.yml checks exactly that.
 #       A default would make the requirement skippable by omission: a caller
-#       who simply forgot the argument would still get twelve working queues, just
+#       who simply forgot the argument would still get ten working queues, just
 #       unencrypted ones, and the omission would surface only in the scan. With
 #       no default the same mistake is a `plan` error, so the requirement is
 #       carried by the shape of the contract instead of by a downstream check.
@@ -184,7 +192,7 @@ variable "kms_key_arn" {
 #       lifetime of a cached data key, stated in both directions because
 #       neither end is obviously correct. Raising it means fewer GenerateDataKey
 #       and Decrypt calls -- KMS bills per request and enforces a per-account
-#       request-rate quota that twelve queues sharing one key can contend for --
+#       request-rate quota that ten queues sharing one key can contend for --
 #       but a data key then stays resident in the service for longer, so
 #       revoking access takes effect only once the period lapses. Lowering it
 #       inverts both halves: tighter key turnover, more requests, more contention
@@ -211,7 +219,7 @@ variable "kms_data_key_reuse_period_seconds" {
 
 # WHY : Assumptions: 5 is constrained at both ends rather than chosen. The
 #       messaging design fixes a dead-letter queue at a receive count of five
-#       for each of the six source queues, and the baseline corroborates that
+#       for each of the five source queues, and the baseline corroborates that
 #       figure independently: app/scheduler/CardDemo.controlm sets
 #       MAXRERUN="5" on every job it defines -- lines 4, 8, 14, 20 and 27, and
 #       on all fifteen job elements in the file -- so a budget of five attempts
@@ -227,7 +235,7 @@ variable "kms_data_key_reuse_period_seconds" {
 #       drift is at least visible, since it can only be introduced through
 #       infra/envs/dev/terraform.tfvars or infra/envs/prod/terraform.tfvars.
 variable "max_receive_count" {
-  description = "Receives a message may accumulate on a source queue before SQS moves it to that queue's dead-letter queue. Applied as maxReceiveCount in the redrive_policy of all six source queues."
+  description = "Receives a message may accumulate on a source queue before SQS moves it to that queue's dead-letter queue. Applied as maxReceiveCount in the redrive_policy of all five source queues."
   type        = number
   default     = 5
 
@@ -445,13 +453,13 @@ variable "reply_message_retention_seconds" {
 #       is bounded by the failure rate rather than by throughput. That is the
 #       compromise -- paying to store failed messages in exchange for the
 #       failure still being diagnosable when somebody looks.
-# WHY : Assumptions: one value covers all six dead-letter queues, including the
+# WHY : Assumptions: one value covers all five dead-letter queues, including the
 #       two whose source queues use the bounded retry-retention window above.
 #       Widening those two to the service maximum is intentional: a reply that
 #       failed repeatedly is exactly the case where the source retention would
 #       otherwise destroy the only surviving record before investigation.
 variable "dlq_message_retention_seconds" {
-  description = "Seconds a message is retained on each of the six dead-letter queues, applied as message_retention_seconds to those queues. Defaults longer than either source retention, and is validated never to be shorter than the request retention, because a message only arrives here already aged."
+  description = "Seconds a message is retained on each of the five dead-letter queues, applied as message_retention_seconds to those queues. Defaults longer than either source retention, and is validated never to be shorter than the request retention, because a message only arrives here already aged."
   type        = number
   default     = 1209600
 
@@ -499,7 +507,7 @@ variable "dlq_message_retention_seconds" {
 #       to inherit, so tagging cannot happen implicitly the way it does in
 #       infra/bootstrap, which IS a root and therefore does use `default_tags`.
 #       Tags instead arrive as an input and main.tf attaches them to each of the
-#       twelve queues individually. The asymmetry between this module and bootstrap
+#       ten queues individually. The asymmetry between this module and bootstrap
 #       is deliberate, and it is recorded here so that it is not later
 #       "simplified" into a provider block that would break every call site
 #       using for_each.

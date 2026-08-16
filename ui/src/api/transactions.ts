@@ -126,12 +126,15 @@
  */
 
 import { getApiClient, keysetPagingMembers, requestPath } from './client';
+import { MASKED_CARD_NUMBER } from './masking';
 import type {
   BillPaymentOutcome,
   BillPaymentPreview,
   BillPaymentRequest,
   BillPaymentResponse,
   ContractOperation,
+  CopiedTransactionData,
+  CopyLastTransactionRequest,
   PageResponse,
   TransactionAddOutcome,
   TransactionAddPreview,
@@ -155,6 +158,8 @@ export type {
   TransactionDetail,
   TransactionCreateRequest,
   TransactionAddPreview,
+  CopiedTransactionData,
+  CopyLastTransactionRequest,
   TransactionCreated,
   TransactionAddOutcome,
   BillPaymentRequest,
@@ -227,15 +232,6 @@ export const TRANSACTION_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
 /** HTTP status the three write operations answer when the record was actually written. */
 const HTTP_CREATED = 201;
 
-/**
- * The masked rendering a transaction detail must carry: twelve asterisks then the last four digits.
- *
- * Assumptions: this recognises the reduction the service performed and never performs one. It is a
- * predicate over a value already received, so it cannot disclose anything the response did not
- * already contain, and it holds the shape in one place so the check cannot drift between operations.
- */
-const MASKED_CARD_NUMBER = /^[*]{12}[0-9]{4}$/u;
-
 /*
  * WHY : Refactoring Rationale: the four helpers below check a write response MEMBER BY MEMBER, and the
  *       revision they replace cast each body to its outcome type with a type assertion. The assertion
@@ -283,6 +279,21 @@ const TRANSACTION_AMOUNT = /^-?[0-9]{1,9}\.[0-9]{2}$/u;
 /** The shape the contract publishes for an account identifier: exactly eleven digits. */
 const ACCOUNT_ID = /^[0-9]{11}$/u;
 
+/*
+ * WHY : Assumptions: this shape is SIXTEEN DIGITS rather than the masked form the rest of this client
+ *       accepts, and the difference is deliberate and confined to one member. Every card number a read
+ *       operation returns is masked to its last four, and ./masking's MASKED_CARD_NUMBER is what
+ *       validates those. The copy-last answer's resolvedCardNumber is not a read of somebody's card: it
+ *       is the key the row WOULD be written under, echoed back so the operator can confirm the value
+ *       they just keyed -- the reference paints the same digits in the same field. Masking it would
+ *       withhold from the operator the one value they are being asked to confirm.
+ * WHY : Trade-offs: the digits therefore exist in the browser for the life of the copy turn. Accepted
+ *       because the operator supplied them on that turn, and bounded by the shape being asserted here:
+ *       a response that put anything other than sixteen digits in this member is refused rather than
+ *       painted, so the field cannot become a channel for arbitrary text.
+ */
+const RESOLVED_CARD_NUMBER = /^[0-9]{16}$/u;
+
 /**
  * The shape the contract publishes for an account balance.
  *
@@ -292,6 +303,50 @@ const ACCOUNT_ID = /^[0-9]{11}$/u;
  * whichever member did not own it.
  */
 const ACCOUNT_BALANCE = /^-?[0-9]{1,10}\.[0-9]{2}$/u;
+
+/*
+ * WHY : Assumptions: the six shapes below serve the COPIED members alone, and each is the shape the
+ *       contract publishes for the component that member points at -- `TransactionTypeCode`,
+ *       `TransactionCategoryCode`, `MerchantId`, `DateOnly10`, and the plain bounded strings the source,
+ *       description, merchant name, city and postal code carry. They are declared here rather than reused
+ *       from the request builder because nothing in this module validated a REQUEST field before: a
+ *       request is composed by the screen and refused by the service, whereas these values arrive over
+ *       the wire and are then sent back through the capture operation, which is what makes checking them
+ *       on arrival worth the six declarations.
+ * WHY : Alternatives Considered: one permissive `typeof value === 'string'` test for all nine text
+ *       members. Rejected for the reason the block above gives for the money members and for one more
+ *       that is specific to this path: a copied value that fails the capture operation's own bound would
+ *       be adopted into the form, shown to the operator as the value about to be written, and then
+ *       refused on the confirming turn -- reporting a field the operator never typed.
+ */
+
+/** `TransactionTypeCode`: exactly two digits. */
+const TYPE_CODE = /^[0-9]{2}$/u;
+
+/** `TransactionCategoryCode`: exactly four digits. */
+const CATEGORY_CODE = /^[0-9]{4}$/u;
+
+/** `MerchantId`: exactly nine digits, zero-padded to the width of the map field. */
+const MERCHANT_ID = /^[0-9]{9}$/u;
+
+/**
+ * `DateOnly10`: an ISO calendar date, ten characters.
+ *
+ * Assumptions: the shape is checked and the CALENDAR is not -- `2026-02-31` satisfies this and is not a
+ * date. That is deliberate: the service validates both, through the same date-edit routine the reference
+ * calls at `app/cbl/COTRN02C.cbl` L389 to L427, so a second calendar implementation here would be a
+ * second authority on which dates exist.
+ */
+const ISO_DATE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/u;
+
+/** A non-empty string of at most ten characters, as `TRAN-SOURCE` and `TRAN-MERCHANT-ZIP` declare. */
+const BOUNDED_TEXT_10 = /^.{1,10}$/su;
+
+/** A non-empty string of at most fifty characters, as the two merchant name and city members declare. */
+const BOUNDED_TEXT_50 = /^.{1,50}$/su;
+
+/** A non-empty string of at most a hundred characters, as `TRAN-DESC` declares. */
+const BOUNDED_TEXT_100 = /^.{1,100}$/su;
 
 /**
  * Reads a response body as a member bag, refusing anything that is not one.
@@ -435,10 +490,79 @@ function requireTransactionCreated(body: unknown): TransactionCreated {
 }
 
 /**
+ * Validates the ten copied members a copy-last turn publishes, and the row they came from.
+ *
+ * Assumptions: the shape is checked member by member rather than trusted, on the same footing as every
+ * other body this module reads, and the reason is stronger here than elsewhere: these values are about to
+ * be sent BACK through the capture operation, so a member the service could not have produced would be
+ * carried into a write. Each is checked against the shape the contract publishes for it, which is the
+ * same shape the capture request declares — a value that fails here would have been refused there.
+ *
+ * Assumptions: an absent or null member is a MALFORMED body on this path, not a tolerated omission, and
+ * that is the opposite of how `returnMessage` is read two functions below. The distinction is what each
+ * member means: a missing message line is a screen with nothing to say, whereas a missing copied value is
+ * a screen that cannot be filled in, and adopting it would leave one control blank while the operator
+ * confirmed the rest.
+ * @param {unknown} value - The `copied` member of a 200 body, which is null on the capture operation.
+ * @returns {CopiedTransactionData | null} The copied screen state, or null when the turn copied nothing.
+ * @throws {RangeError} If the member is present but is not an object, or carries a malformed member.
+ */
+function optionalCopiedSource(value: unknown): CopiedTransactionData | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  const members = requireBody(value, 'copied transaction');
+  return {
+    sourceTransactionId: requireShaped(
+      members.sourceTransactionId,
+      TRANSACTION_ID,
+      'sourceTransactionId',
+      'copied transaction',
+    ),
+    typeCode: requireShaped(members.typeCode, TYPE_CODE, 'typeCode', 'copied transaction'),
+    categoryCode: requireShaped(
+      members.categoryCode,
+      CATEGORY_CODE,
+      'categoryCode',
+      'copied transaction',
+    ),
+    source: requireShaped(members.source, BOUNDED_TEXT_10, 'source', 'copied transaction'),
+    description: requireShaped(
+      members.description,
+      BOUNDED_TEXT_100,
+      'description',
+      'copied transaction',
+    ),
+    merchantId: requireShaped(members.merchantId, MERCHANT_ID, 'merchantId', 'copied transaction'),
+    merchantName: requireShaped(
+      members.merchantName,
+      BOUNDED_TEXT_50,
+      'merchantName',
+      'copied transaction',
+    ),
+    merchantCity: requireShaped(
+      members.merchantCity,
+      BOUNDED_TEXT_50,
+      'merchantCity',
+      'copied transaction',
+    ),
+    merchantZip: requireShaped(
+      members.merchantZip,
+      BOUNDED_TEXT_10,
+      'merchantZip',
+      'copied transaction',
+    ),
+    originDate: requireShaped(members.originDate, ISO_DATE, 'originDate', 'copied transaction'),
+    processDate: requireShaped(members.processDate, ISO_DATE, 'processDate', 'copied transaction'),
+  };
+}
+
+/**
  * Validates the body an unwritten transaction submission answers with.
  * @param {unknown} body - The parsed 200 body.
  * @returns {TransactionAddPreview} The amount a confirmed submission would capture, the false capture
- *   flag, and the prompt when the service sent one.
+ *   flag, the prompt when the service sent one, and the copied screen state on a copy-last turn.
  * @throws {RangeError} If a required member is absent or malformed, or the capture flag contradicts the
  *   status.
  */
@@ -460,7 +584,38 @@ function requireTransactionAddPreview(body: unknown): TransactionAddPreview {
   //   carries the key and a screen never has to distinguish an absent member from a null one. An
   //   ABSENT member is still tolerated on the read and normalised to null rather than refused, because
   //   this validator's subject is a malformed body and a missing message line is not one.
-  return { amount, written, returnMessage: returnMessage ?? null };
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the resolved PAIR is validated here, on the preview, where it was
+   *       validated inside the copied block. The service resolves whichever key the request omitted -- a
+   *       request keyed by card number answers with the account the cross-reference gave it, and one keyed
+   *       by account answers with the card the row will be written under -- and it does so on EVERY turn,
+   *       because `app/cbl/COTRN02C.cbl` L166 performs `VALIDATE-INPUT-KEY-FIELDS` for the Enter arm as
+   *       L473 does for the copy arm. Reading it off the copied block therefore only ever saw it on a copy
+   *       turn, so an ordinary capture left the screen showing the key the operator typed rather than the
+   *       key the row would carry.
+   * WHY : Assumptions: the resolved card is validated against the UNMASKED sixteen-digit pattern, because
+   *       it is the value the confirming turn submits and the value the operator is being asked to compare
+   *       against what they typed. Accepting a masked form here would admit a body the screen could not
+   *       submit.
+   */
+  return {
+    amount,
+    written,
+    returnMessage: returnMessage ?? null,
+    resolvedAccountId: requireShaped(
+      members.resolvedAccountId,
+      ACCOUNT_ID,
+      'resolvedAccountId',
+      'previewed transaction',
+    ),
+    resolvedCardNumber: requireShaped(
+      members.resolvedCardNumber,
+      RESOLVED_CARD_NUMBER,
+      'resolvedCardNumber',
+      'previewed transaction',
+    ),
+    copied: optionalCopiedSource(members.copied),
+  };
 }
 
 /**
@@ -706,15 +861,21 @@ export async function addTransaction(
 /**
  * Re-captures the most recently stored transaction as a new one, previewing or writing it.
  *
- * Assumptions: the request shape is the SAME one `addTransaction` takes, because the baseline reaches
- * this action from the same screen with the same fields keyed. Eleven of those fields are overwritten
- * from the copied record -- `app/cbl/COTRN02C.cbl` L480 to L493 -- so values supplied for them are
- * replaced rather than merged; they stay required because the contract requires them, the baseline
- * having validated the key fields at L473 against the screen the operator was already on.
- * @param {TransactionCreateRequest} request - The submission whose key fields select the account or
- *   card and whose `confirmation` decides whether the copied capture is written.
+ * ⚠️ Refactoring Rationale: the request shape is the copy operation's OWN and is no longer the capture's.
+ * The reasoning that stood here -- that "the baseline reaches this action from the same screen with the
+ * same fields keyed" -- described the screen and not the request: `app/cbl/COTRN02C.cbl` L473 validates the
+ * KEY fields and nothing else before reading the row, and L481 to L492 then fill the eleven data fields. A
+ * body requiring those eleven made the action reachable only from a screen that was already filled in.
+ *
+ * ⚠️ Refactoring Rationale: this operation is reached ONCE per action. The withheld answer carries the
+ * copied members, so a caller adopts them and CONFIRMS through {@link addTransaction}; reaching this
+ * operation again to confirm would resolve "the most recently stored transaction" a second time, and a row
+ * appended in between would be written in place of the one the operator previewed.
+ * @param {CopyLastTransactionRequest} request - The key that selects the account or card, and the
+ *   `confirmation` that decides whether the copied capture is written in this same turn.
  * @returns {Promise<TransactionAddOutcome>} `CREATED` carrying the identifier the service assigned to
- *   the copied record, or `PREVIEWED` carrying the amount it read with nothing written.
+ *   the copied record, or `PREVIEWED` carrying the normalised amount together with the ten other copied
+ *   members and the identifier of the row they came from.
  * @throws {RangeError} If the body the service sent does not carry the members its status's shape
  *   requires, which is reported as a malformed response and never re-read as the other outcome.
  * @throws {Error} An `ApiRequestError` from `./client` for every transport failure, carrying the
@@ -724,7 +885,7 @@ export async function addTransaction(
  *   concurrent change, 500 for a service-side failure and 503 when the ledger is unavailable.
  */
 export async function copyLastTransaction(
-  request: TransactionCreateRequest,
+  request: CopyLastTransactionRequest,
 ): Promise<TransactionAddOutcome> {
   const response = await getApiClient().post<unknown>(requestPath(COPY_LAST_TRANSACTION), request);
 

@@ -505,28 +505,50 @@ export interface AccountLookupRequest {
  * One account and its customer as the account-view operation returns them.
  *
  * Assumptions: this mirrors `AccountViewResponse` in `account-api.yaml`, whose five members are all
- * required. The composition -- an identifier, an account part, a customer part and two message
- * channels -- is the shape of the screen rather than the shape of either record, because the reference
- * builds this view from two files at once: `app/cbl/COACTVWC.cbl` reads the account and then the
- * customer the cross-reference names, and renders both on one map.
+ * required and three of which are nullable. The composition -- an identifier, an account part, a
+ * customer part and two message channels -- is the shape of the screen rather than the shape of either
+ * record, because the reference builds this view from two files at once: `app/cbl/COACTVWC.cbl` reads
+ * the account and then the customer the cross-reference names, and renders both on one map -- and it
+ * renders the account half alone when only the customer is missing, which is why that half is
+ * nullable.
  */
 export interface AccountViewResponse {
   /**
    * The account that was read, echoed as digits so the caller can confirm what it received.
    *
    * Assumptions: eleven digits at `^[0-9]{1,11}$`, from `ACCT-ID PIC 9(11)` at
-   * `app/cpy/CVACT01Y.cpy` L5. It is text in this body while the path parameter addressing the same
-   * account is an integer, and the contract states that difference is deliberate: every value on this
-   * screen is character data, so a body member typed as a number would be the only one a client had to
-   * convert back before rendering it.
+   * `app/cpy/CVACT01Y.cpy` L5. It is text here for the same reason every value on this screen is
+   * character data: a body member typed as a number would be the only one a client had to convert back
+   * before rendering it.
+   *
+   * Refactoring Rationale: this compared the member against "the path parameter addressing the same
+   * account", which no operation has — the account read is `POST /api/v1/accounts/view` and the
+   * account it names travels in the REQUEST BODY, registered as `D-ACCOUNT-SELECTION-IN-BODY` in
+   * `docs/architecture/cobol-to-service-traceability.md` §7.4. The echo is therefore a confirmation of
+   * what the caller sent in the same representation it sent it, which is a stronger reason for the
+   * member existing than the withdrawn contrast was.
    */
   readonly accountId: string;
 
   /** The account's own stored values, as {@link AccountDetail} describes them. */
   readonly account: AccountDetail;
 
-  /** The customer the account belongs to, at screen widths, as {@link CustomerDetail} describes. */
-  readonly customer: CustomerDetail;
+  /**
+   * The customer the account belongs to, at screen widths, or `null` when the account was located
+   * and the customer master holds no matching row.
+   *
+   * ⚠️ Refactoring Rationale: this member was declared non-nullable, and the state it could not
+   * express is one the reference paints. `app/cbl/COACTVWC.cbl` guards its two screen regions
+   * differently -- the account region on the disjunction at L471 and L472, the customer region on
+   * `FOUND-CUST-IN-MASTER` alone at L493 -- so an account with no customer row renders its ten
+   * account fields with the verbatim sentence naming the miss on the message line. A screen typed
+   * against a required member had to render both halves or neither.
+   *
+   * Assumptions: the ACCOUNT half stays non-nullable, and the asymmetry is the reference's own: with
+   * no account row located both guards are false and neither region is painted, so this operation
+   * answers 404 rather than sending a customer with no account.
+   */
+  readonly customer: CustomerDetail | null;
 
   /**
    * The screen's information line, or nothing when there is none to show.
@@ -534,9 +556,14 @@ export interface AccountViewResponse {
    * Assumptions: forty characters, the width `05 WS-INFO-MSG PIC X(40)` declares at
    * `app/cbl/COACTVWC.cbl` L110 -- not the forty-five its map container holds. The container is the
    * box and the program's field is what the program moves into it, so forty is the binding figure and
-   * a caller sizing for forty-five would be allowing for a value this system never emits. This
-   * operation always leaves it empty; the member exists because the update response shares the shape
-   * and does fill it.
+   * a caller sizing for forty-five would be allowing for a value this system never emits.
+   *
+   * ⚠️ Refactoring Rationale: this said the operation "always leaves it empty", which the delivered
+   * service never did -- every arm of the composition sets the reference's own prompt, because
+   * `app/cbl/COACTVWC.cbl` L528-L530 forces `WS-PROMPT-FOR-INPUT` back whenever the field is empty,
+   * making the prompt that channel's floor rather than its first value. The null arm remains declared
+   * because the shape is shared with the update response and because the serialiser emits the key
+   * either way.
    */
   readonly informationMessage: string | null;
 
@@ -547,6 +574,9 @@ export interface AccountViewResponse {
    * the two communication-area carriers `CCARD-ERROR-MSG` and `CCARD-RETURN-MSG`, both
    * `PIC X(75)` at `app/cpy/CVCRD01Y.cpy` L28 and L29. It is a rendering constraint carried across
    * rather than a suggestion, and it is NOT the seventy-eight of the map's `ERRMSGI` field.
+   *
+   * Assumptions: it is populated on the partial-customer arm above, where it carries the reference's
+   * own `Did not find associated customer in master file`, and null when both halves were located.
    */
   readonly returnMessage: string | null;
 }
@@ -1087,6 +1117,45 @@ export interface SensitiveAccountUpdateFields {
 export type SensitiveAccountUpdateRequest = AccountUpdateRequest & SensitiveAccountUpdateFields;
 
 /**
+ * The verdict of the account-update edits, reported without anything having been written.
+ *
+ * Assumptions: this is the payload of the baseline's FIRST turn. `COACTUPC` decides whether to advance
+ * to its confirmation state on the strength of edits that have already run --
+ * `IF INPUT-ERROR OR NO-CHANGES-DETECTED ... CONTINUE ELSE SET ACUP-CHANGES-OK-NOT-CONFIRMED` at
+ * `app/cbl/COACTUPC.cbl` L2584 to L2591 -- and only the later turn writes. Without this shape a screen
+ * could only advance having validated nothing, or write in order to find out.
+ *
+ * Assumptions: a refusal arrives as a 200 carrying this body, NOT as a 400, so a caller reads
+ * {@link AccountUpdateValidationResponse.inputError} rather than the status. A refused value is the
+ * successful answer to the question this operation asks; on the write it means the request could not be
+ * carried out.
+ */
+export interface AccountUpdateValidationResponse {
+  /**
+   * One entry per refused property, in the order the edits reached them, empty when all were accepted.
+   *
+   * Assumptions: keyed by REQUEST PROPERTY so a form attaches each refusal to the control that
+   * submitted it, which is the same keying the write's own refusal uses.
+   */
+  readonly fieldErrors: readonly FieldError[];
+
+  /** The sentence to show for this verdict in the reference's own wording, or nothing. */
+  readonly message: string | null;
+
+  /** Whether any submitted value was refused -- the reference's `INPUT-ERROR` condition. */
+  readonly inputError: boolean;
+
+  /**
+   * Whether the submission matched the stored rows everywhere compared.
+   *
+   * Assumptions: carried separately from {@link AccountUpdateValidationResponse.inputError} because
+   * the reference treats them as two distinct reasons not to advance and shows a different sentence
+   * for each, so a single flag would lose which sentence to show.
+   */
+  readonly noChangesFound: boolean;
+}
+
+/**
  * What the account-update operation returns.
  *
  * Assumptions: this mirrors `AccountUpdateResponse` in `account-api.yaml`, whose six members are all
@@ -1270,12 +1339,13 @@ export interface CardListQuery {
 }
 
 // ---------------------------------------------------------------------------
-// auth-api.yaml -- the sign-on exchange and the four user-maintenance shapes
+// auth-api.yaml -- the session exchanges and the four user-maintenance shapes
 // ---------------------------------------------------------------------------
 // WHY : Assumptions: this section carries the one password member in the whole module, on
 //       SignOnRequest, and it is the only shape in this file that may. A credential belongs to the
 //       exchange that sends it and to nothing else, so no other declaration here names one -- the
-//       token refresh and the challenge answer carry a token and a session handle instead.
+//       token refresh, the challenge answer and the revocation carry a token and a session handle
+//       instead.
 
 /**
  * The two user types the baseline admits, and the two Cognito groups they map to.
@@ -1294,10 +1364,20 @@ export interface SignOnRequest {
 /**
  * A completed sign-on, carrying the token set the SPA presents on every later request.
  *
- * Assumptions: `refreshToken` is nullable because the identity provider omits it on a renewal, which
- * is the flow that consumed the previous one. A caller that stored null over a held refresh token
- * would sign the user out at the next expiry, so a null must be treated as "keep what you have"
- * rather than as "the token was revoked".
+ * Assumptions: `refreshToken` is nullable, and the nullability is a tolerance rather than the normal
+ * case. Refresh-token ROTATION is enabled on the pool client, so a renewal ordinarily answers with a
+ * REPLACEMENT token and invalidates the one submitted -- a caller that kept the old one would be refused
+ * on its next renewal, so a non-null value MUST be stored over the held one. The null case remains
+ * declared because the retry grace period is a pool-side setting: configured above zero it lets the
+ * submitted token stay current for a window, and the provider then answers without a replacement. A
+ * caller that stored null over a held refresh token would sign the user out at the next expiry, so a null
+ * must be treated as "keep what you have" rather than as "the token was revoked".
+ *
+ * Refactoring Rationale: this block previously said the provider "omits it on a renewal, which is the
+ * flow that consumed the previous one" -- describing the legacy refresh flow, which this pool refuses to
+ * enable while rotation is on. Both halves of the handling are now stated because only one of them is the
+ * common path, and a reader who took the old sentence at face value would write a client that never
+ * stored a rotated token.
  */
 export interface SignOnTokens {
   readonly outcome: 'AUTHENTICATED';
@@ -1342,6 +1422,25 @@ export interface SignOnChallengeRequest {
   readonly userId: string;
   readonly session: string;
   readonly newPassword: string;
+}
+
+/**
+ * The one member a sign-out submits: the refresh token whose revocation ends the session.
+ *
+ * Assumptions: ONE member, and the absence of a `userId` beside it is deliberate rather than an
+ * omission. The provider's revocation operation takes the token and the confidential client's
+ * credentials and accepts no user name -- the token identifies its own subject -- so an identifier
+ * submitted here would be read by nothing, and admitting a field nothing reads would invite a later
+ * reader to believe it was checked. The three sibling exchanges each carry one because each has
+ * something to do with it.
+ *
+ * Assumptions: the token is a credential and travels in the BODY for the reason recorded at the head of
+ * `ui/src/api/auth.ts` -- a target is written in full into the edge access log before any application
+ * code runs and is retained by browser history, and neither store is reachable by anything this module
+ * could add.
+ */
+export interface SignOutRequest {
+  readonly refreshToken: string;
 }
 
 /**
@@ -1486,10 +1585,122 @@ export interface CreatedUserResponse extends UserResponse {
   readonly credentialSecretName: string;
 }
 
+/**
+ * The request the add screen submits to copy the account's last transaction.
+ *
+ * Purpose
+ * -------
+ * `COTRN02C` lets an operator recall the last transaction for an account or card and paint its fields
+ * as the starting point for a new one. Both key members are optional because the reference accepts
+ * EITHER an account identifier or a card number and resolves whichever was supplied.
+ *
+ * Refactoring Rationale: ⚠️ this is ONE request type for ONE operation. A separate lookup request and
+ * response pair was authored alongside it, on the reading that recalling the values and previewing the
+ * draft were two steps; transaction-service publishes a single operation that answers with the preview
+ * carrying the copied fields, so the pair described a call that does not exist. Naming the key members
+ * optional here is what keeps the either-key rule visible at the type rather than in a comment.
+ *
+ * Assumptions: `confirmation` is carried on the copy request itself rather than on a second call,
+ * because the reference's own flow re-keys the confirmation on the same map turn.
+ */
+export interface CopyLastTransactionRequest {
+  /** Account identifier whose last transaction is recalled, when the operator keyed one. */
+  readonly accountId?: string;
+  /** Card number whose last transaction is recalled, when the operator keyed one instead. */
+  readonly cardNumber?: string;
+  /** The operator's re-keyed confirmation, carried on the same turn as the reference does. */
+  readonly confirmation?: string;
+}
+
+/**
+ * The fields of the recalled transaction, as the copy operation returns them.
+ *
+ * Purpose
+ * -------
+ * These are the members `COTRN02C` moves from the recalled record into the map so the operator edits a
+ * populated screen. Every member is a string because each is a fixed-width alphanumeric field in
+ * `app/cpy/CVTRA05Y.cpy`, and because a value that is going straight back into an input must survive
+ * the round trip unchanged.
+ *
+ * Assumptions: there is deliberately NO `amount` member. The reference recalls the descriptive and
+ * merchant fields and leaves the amount for the operator to key, so a copied amount would prefill the
+ * one value the operator must state deliberately. A shape carrying `amount` was authored and is not
+ * used, for that reason.
+ *
+ * Refactoring Rationale: ⚠️ `resolvedAccountId` and `resolvedCardNumber` are NOT members of this type.
+ * Two shapes were authored for the same answer and each put them somewhere the ordinary capture turn
+ * cannot reach -- a distinct `EffectiveCapture` interface, and this record. They are members of
+ * `TransactionAddPreview` instead, because the reference resolves and repaints BOTH key fields on EVERY
+ * turn: `app/cbl/COTRN02C.cbl` L166 performs `VALIDATE-INPUT-KEY-FIELDS` for the Enter arm as L473 does
+ * for the copy arm, and L209 and L221 write the two fields. This record is attached to the copy turn
+ * alone, so holding them here published the repaint on one of the two turns that perform it.
+ */
+export interface CopiedTransactionData {
+  /** Identifier of the transaction the values came from, for the screen's provenance line. */
+  readonly sourceTransactionId: string;
+  /** Transaction type code, as recalled. */
+  readonly typeCode: string;
+  /** Transaction category code, as recalled. */
+  readonly categoryCode: string;
+  /** Transaction source, as recalled. */
+  readonly source: string;
+  /** Transaction description, as recalled. */
+  readonly description: string;
+  /** Merchant identifier, as recalled. */
+  readonly merchantId: string;
+  /** Merchant name, as recalled. */
+  readonly merchantName: string;
+  /** Merchant city, as recalled. */
+  readonly merchantCity: string;
+  /** Merchant postal code, as recalled. */
+  readonly merchantZip: string;
+  /** Origination date of the recalled transaction, `YYYY-MM-DD`. */
+  readonly originDate: string;
+  /** Processing date of the recalled transaction, `YYYY-MM-DD`. */
+  readonly processDate: string;
+}
+
+/**
+ * What a withheld turn reports: the amount it would capture, the pair it resolved, and what it copied.
+ *
+ * Purpose
+ * -------
+ * This is the reference's re-sent screen expressed as a response body. `app/cbl/COTRN02C.cbl` L173 to
+ * L176 moves the confirmation prompt and performs `SEND-TRNADD-SCREEN`, so the operator giving the
+ * confirming keystroke is looking at a screen the program has already corrected.
+ */
 export interface TransactionAddPreview {
   readonly amount: string;
   readonly written: boolean;
   readonly returnMessage: string | null;
+  /*
+   * WHY : ⚠️ Assumptions: the resolved PAIR is published on every withheld answer, and it was declared
+   *       inside `CopiedTransactionData` -- which the copy turn alone carries -- so an ordinary capture
+   *       published neither. The reference resolves and repaints both key fields on every turn (L166 and
+   *       L473 both perform `VALIDATE-INPUT-KEY-FIELDS`, whose L209 and L221 write them) and then
+   *       re-sends the screen, so a client that could not read the pair rendered the key the operator
+   *       TYPED while the service wrote the key it resolved.
+   * WHY : Assumptions: the card number arrives UNMASKED, because it is the one value the operator must be
+   *       able to compare against what they typed and a suffix cannot distinguish two cards on one
+   *       account. The screen masks it where it displays it.
+   */
+  readonly resolvedAccountId: string;
+  readonly resolvedCardNumber: string;
+  /*
+   * WHY : Refactoring Rationale: this member is `copied`, of type CopiedTransactionData, and FOUR
+   *       shapes for it were authored independently -- `copiedDraft: TransactionCopiedDraft`,
+   *       `effective: EffectiveCapture`, `copied: CopiedTransactionData` and a separate
+   *       `TransactionCopyResponse` reached through its own lookup request. All four described the same
+   *       answer: the fields of the account's last transaction, returned so the add screen can paint
+   *       them. This one is kept because it is the shape transaction-service actually publishes -- the
+   *       preview's `withCopiedSource` member serialises here -- so the other three would have typed a
+   *       response body that never arrives. The two resolved key values the third of them carried are
+   *       members of this shape instead, above, so that every withheld answer publishes them.
+   * WHY : Assumptions: `null` is the ordinary answer for an account with no prior transaction, not an
+   *       error. The reference paints its own no-transaction message in that case rather than refusing
+   *       the screen, so the member is nullable and the screen decides what to say.
+   */
+  readonly copied: CopiedTransactionData | null;
 }
 
 export interface TransactionCreated {

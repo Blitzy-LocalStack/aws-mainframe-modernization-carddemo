@@ -642,42 +642,59 @@ paths:
         L471, which the baseline reaches from PF5 at L146 and L147.
 
 
-        The request carries the same shape the add operation takes, and exactly
-        one of accountId and cardNumber selects the account or card the new
-        transaction is recorded against. Eleven data members of the submission
-        are OVERWRITTEN from the copied record -- the type code, category code
-        and source at L482 to L484, the amount rendered through the edited
-        picture at L481 and L485, the description at L486, the two dates at L487
-        and L488 and the four merchant members at L489 to L492 -- so values
-        supplied for those members are replaced rather than merged, which is the
-        baseline behaviour. They remain required by the request schema because
-        the baseline validates the key fields at L473 against the same screen the
-        operator was already on.
+        The request carries a KEY and a confirmation and no data members, because
+        L473 performs VALIDATE-INPUT-KEY-FIELDS and nothing else before the read:
+        the eleven data members are this action's OUTPUT, filled from the copied
+        record at L481 to L492 and validated afterwards by the re-entry at L495.
+        At least one of accountId and cardNumber selects the account or card the
+        new transaction is recorded against, and the account resolves first when
+        both are supplied.
+
+
+        ⚠️ Refactoring Rationale: this operation used to be declared over
+        TransactionCreateRequest, whose eleven data members are each required --
+        so the action was reachable only from a screen that was ALREADY filled
+        in, which is the opposite of what an operator presses the key for. The
+        earlier text here required "eleven data members" of a body whose eleven
+        data members the service was about to overwrite.
 
 
         The confirmation decides whether the copied capture is written, exactly
         as it does for the add operation, because L495 re-enters
         PROCESS-ENTER-KEY and the copied values therefore travel the full
         validation chain rather than a shortened one.
+
+
+        ⚠️ A client is expected to reach this operation ONCE per action. Its
+        withheld answer publishes the copied members, so a confirming turn goes
+        through POST /api/v1/transactions carrying the values that were
+        previewed. Reaching this operation a second time to confirm would
+        re-resolve which row is last, and a row appended in between would
+        silently replace what the operator was shown -- which the baseline cannot
+        do, because its copy block moves the values into the operator's own map
+        fields at L480 to L493 and every later turn reads them back off the
+        screen.
       parameters:
         - $ref: "#/components/parameters/CorrelationIdHeader"
       requestBody:
         description: >-
-          The submission whose key members select the account or card, and whose
-          confirmation decides whether the copied capture is written. Its eleven
-          data members are replaced from the copied record.
+          The key that selects the account or card, and the confirmation that
+          decides whether the copied capture is written.
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/TransactionCreateRequest"
+              $ref: "#/components/schemas/CopyLastRequest"
       responses:
         "200":
           description: >-
             The confirmation was withheld, so no transaction was written. The body
             reports the normalised amount the copied submission would be captured
-            at and the prompt "Confirm to add this transaction..." verbatim from
-            app/cbl/COTRN02C.cbl L178.
+            at, the prompt "Confirm to add this transaction..." verbatim from
+            app/cbl/COTRN02C.cbl L178, and -- unlike the same status on the capture
+            operation -- a non-null `copied` member carrying the other ten copied
+            values and the identifier of the row they came from, which is the
+            screen state L482 to L492 leaves the operator looking at.
           headers:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
@@ -1205,9 +1222,8 @@ components:
         published bound, or carrying a character outside the published set, is
         refused with 400 rather than being silently replaced, so a caller cannot
         believe it is correlating requests the service is in fact correlating
-        under a different identity. A value whose shape is that of a
-        primary account number -- only digits and the three separators, with
-        thirteen or more digits -- is refused on the same terms, because this
+        under a different identity. A value whose shape is that of a protected identifier -- only digits and the
+        three separators, with nine or more digits -- is refused on the same terms, because this
         identity is echoed and logged. The refusal carries the shared problem body
         and the response correlation header, the same as any other 400, and it names
         the rule it applied without ever repeating the value it refused.
@@ -1762,7 +1778,7 @@ components:
     CorrelationId:
       type: string
       maxLength: 24
-      pattern: '^$|^(?!(?:[._-]*[0-9]){13,}[._-]*$)[A-Za-z0-9_.-]{1,24}$'
+      pattern: '^$|^(?!(?:[._-]*[0-9]){9,}[._-]*$)[A-Za-z0-9_.-]{1,24}$'
       description: >-
         Identity of one unit of work. At most twenty-four characters drawn from
         the ASCII letters, the digits, the hyphen, the underscore and the full
@@ -1770,14 +1786,15 @@ components:
         characters over eleven bytes of entropy; a value a caller
         supplies need only fit the bound and the set. The empty string appears
         only inside an error body, and only for a failure raised before any
-        identity had been established. The pattern additionally
-        refuses one narrow class the character set alone admits: a value made up
-        only of digits and the three separators, carrying thirteen or more digits.
-        That is the shape of a primary account number, in contiguous form and in
-        every separated form, and the shared correlation filter refuses it because
-        this identity is echoed on the response and written to every log line for
-        the request -- so accepting one would copy a card number into both. Ordinary
-        values are unaffected: a timestamp-like 2022-07-18-0930 carries nine digits
+        identity had been established. The pattern additionally refuses one narrow class the character set alone
+        admits: a value made up only of digits and the three separators, carrying nine
+        or more digits. That is the shape of every protected identifier this system
+        holds, in contiguous form and in every separated form -- a customer identifier
+        and a national identifier are nine digits, an account identifier eleven, a
+        card number sixteen -- and the shared correlation filter refuses it because
+        this identity is echoed on the response and written to every log line for the
+        request, so accepting one would copy a protected identifier into both.
+        Ordinary values are unaffected: a date-like 2022-07-18 carries eight digits
         and is accepted, and any value containing a letter is accepted whatever its
         digits. The CD prefix on a minted identity is what keeps a minted value out
         of the refused class.
@@ -2577,7 +2594,8 @@ components:
       #       every response and a nullable member arrives as null, NEVER absent. Publishing such
       #       a member as optional described an omission this service cannot produce, and generated
       #       a type that was optional AND nullable -- two states for one fact.
-      required: [amount, written, returnMessage]
+      required:
+        [amount, written, returnMessage, resolvedAccountId, resolvedCardNumber, copied]
       additionalProperties: false
       properties:
         amount:
@@ -2601,6 +2619,276 @@ components:
         #       app/cbl/COTRN02C.cbl L178, which that branch always sets.
         returnMessage:
           $ref: "#/components/schemas/ReturnMessage"
+        # WHY : ⚠️ Refactoring Rationale: this PAIR is published on every withheld
+        #       answer, and it was declared inside CopiedTransactionData -- which the
+        #       copy operation alone attaches -- so an ordinary capture published
+        #       neither. The reference resolves and repaints BOTH key fields on every
+        #       turn: L166 performs VALIDATE-INPUT-KEY-FIELDS for the Enter arm as
+        #       L473 does for the copy arm, L209 moves the cross-reference's card
+        #       number into CARDNINI on the account path, L221 moves the entry's
+        #       account identifier into ACTIDINI on the card path, and L173 to L176
+        #       then re-send the screen. So the operator giving the confirming
+        #       keystroke has already been shown the resolved pair; a client that
+        #       could not read it rendered the key that was TYPED while this service
+        #       wrote the key it resolved.
+        # WHY : Assumptions: the pair lives HERE rather than in a second identity
+        #       object beside the copied one. Two objects would both describe one
+        #       screen state and a client would have to choose which it was
+        #       confirming; one pair on the shape both turns answer with keeps one
+        #       answer per call.
+        resolvedAccountId:
+          allOf:
+            - $ref: "#/components/schemas/AccountId"
+          description: >-
+            The account identifier the key resolution settled on. On the account path
+            it is the submitted value converted to its eleven declared positions,
+            which app/cbl/COTRN02C.cbl L206 moves back into the screen's own field;
+            on the card path it is the cross-reference entry's account, which L221
+            moves into that field.
+        resolvedCardNumber:
+          allOf:
+            - $ref: "#/components/schemas/CardNumber"
+          description: >-
+            The card number the cross-reference resolved, in full and unmasked. It is
+            the value app/cbl/COTRN02C.cbl L209 moves over the screen's card field on
+            the account path, and the value L459 then stores. It is published
+            unmasked because a suffix cannot distinguish two cards on one account,
+            which is the only comparison this disclosure exists to support; the
+            sensitive-data prohibition is on durable diagnostics, which is why the
+            record's own rendering withholds it and this body does not.
+        # WHY : ⚠️ Refactoring Rationale: this member is new, and the omission it
+        #       closes was a WRITE hazard rather than a display gap. The copy-last
+        #       operation used to answer with the normalised amount alone, so a
+        #       browser could restore one of the eleven values the copy block moves
+        #       and had no way to hold the other ten -- which forced its confirming
+        #       turn back through the copy operation, re-resolving which row is last
+        #       and silently replacing what the operator had previewed with any row
+        #       appended in between. Publishing the copied members lets the
+        #       confirming turn use the ordinary capture operation, so "last" is
+        #       resolved exactly once per action, as it is at
+        #       app/cbl/COTRN02C.cbl L471 to L495.
+        # WHY : Assumptions: the member is NULL on the capture operation's own
+        #       withheld turn, which copies nothing, and both operations keep
+        #       pointing at this one schema. Declaring a third response shape for a
+        #       single differing member would have duplicated the other three plus
+        #       the status mapping; the reasoning is recorded in full at
+        #       CopiedTransactionData.java.
+        copied:
+          oneOf:
+            - $ref: "#/components/schemas/CopiedTransactionData"
+            - type: "null"
+          description: >-
+            The ten data members a copy-last turn lifted out of the stored row,
+            paired with that row's identifier, or null on the ordinary capture
+            operation. The eleventh copied value is the normalised amount this same
+            body publishes above: ten of the eleven moves at app/cbl/COTRN02C.cbl
+            L482 to L492 are plain field-to-field moves, while the amount is the one
+            value TRANSFORMED on its way to the screen -- L481 renders it through
+            WS-TRAN-AMT-E PIC +99999999.99 and L485 moves that rendering -- so
+            repeating it inside this member would publish one figure twice.
+
+    # WHY : ⚠️ Refactoring Rationale: this request schema is new, and it exists
+    #       because the copy-last operation was declared over
+    #       TransactionCreateRequest -- whose eleven data members are each required
+    #       -- so the action was reachable only from a screen that was already
+    #       filled in. app/cbl/COTRN02C.cbl L473 performs VALIDATE-INPUT-KEY-FIELDS
+    #       and nothing else before the read, and L481 to L492 then FILL those
+    #       eleven fields, so they are the action's output rather than its input.
+    # WHY : Alternatives Considered: keeping the shared request body and having a
+    #       client send placeholder values for the eleven members. Rejected because
+    #       it puts invented data on the wire -- values no operator keyed, validated
+    #       as though they had been. Also considered: relaxing the eleven members to
+    #       optional on the shared shape, rejected because they are genuinely
+    #       required by the CAPTURE operation and one schema cannot state two
+    #       obligations.
+    # WHY : Assumptions: the two key members and the confirmation point at the SAME
+    #       component schemas the capture request points at. They are the same three
+    #       screen controls, and a second declaration is how two operations come to
+    #       refuse different values for one control.
+    CopyLastRequest:
+      type: object
+      description: >-
+        What a copy-last submission carries: the key that selects the account, and
+        the operator's confirmation. Migrated from COPY-LAST-TRAN-DATA at
+        app/cbl/COTRN02C.cbl L471, whose first statement at L473 validates the key
+        fields and whose L481 to L492 then fill the eleven data fields from the
+        copied record.
+
+
+        At least one of accountId and cardNumber must be supplied. Supplying
+        neither is refused with the sentence L226 moves, reported against both
+        members because either is the one the operator may fill in. Supplying both
+        is accepted and the account resolves first, which is the baseline's own
+        ordered selection at L195.
+      additionalProperties: false
+      # WHY : Assumptions: anyOf and not oneOf, for the reason the capture body's own
+      #       block records at length: the reference's paragraph SELECTS rather than
+      #       validates, so a body carrying both keys is processed on the account and
+      #       the card number is discarded by the cross-reference lookup at L209. An
+      #       exclusive form would refuse a submission the baseline captures. Both
+      #       bodies express one rule because L473 and L133 perform one paragraph.
+      anyOf:
+        - required: [accountId]
+          description: >-
+            The account-id form, which is also the form a both-keys submission
+            resolves through.
+        - required: [cardNumber]
+          description: >-
+            The card-number form, reached only when no account identifier was
+            supplied.
+      properties:
+        accountId:
+          allOf:
+            - $ref: "#/components/schemas/AccountId"
+          description: >-
+            The account the copied transaction is recorded against, keyed at
+            ACTIDINI PIC X(11) on app/cpy-bms/COTRN02.CPY L60. A non-numeric value
+            is refused with "Account ID must be Numeric..." verbatim from
+            app/cbl/COTRN02C.cbl L199.
+        cardNumber:
+          allOf:
+            - $ref: "#/components/schemas/CardNumber"
+          description: >-
+            The card the copied transaction is recorded against, keyed at CARDNINI
+            PIC X(16) on app/cpy-bms/COTRN02.CPY L66. A non-numeric value is
+            refused with "Card Number must be Numeric..." verbatim from
+            app/cbl/COTRN02C.cbl L213.
+        confirmation:
+          allOf:
+            - $ref: "#/components/schemas/Confirmation"
+          description: >-
+            Whether to write the copied transaction. A confirming value copies and
+            writes in one turn, which is the reference's own fall-through at L495
+            into PROCESS-ENTER-KEY, and is answered with 201; a declining or absent
+            value copies without writing and is answered with 200 carrying the
+            copied members and the prompt from L178.
+
+    # WHY : Assumptions: this schema is CLOSED and every member is required, on the
+    #       same reasoning the shape that carries it records: the services pin
+    #       default-property-inclusion to always, so every record component is
+    #       written on every response and none of these can be absent.
+    # WHY : Assumptions: NO key member appears here -- no account identifier, no card
+    #       number and no confirmation. The copy block at app/cbl/COTRN02C.cbl L480
+    #       to L493 moves nothing into those three, so a browser adopting this shape
+    #       leaves its own key controls and its confirmation exactly as the operator
+    #       left them, which is what makes the copied capture land against the
+    #       account being worked on rather than the account the copied row belonged
+    #       to.
+    CopiedTransactionData:
+      type: object
+      description: >-
+        What a copy-last turn put on the screen, migrated from COPY-LAST-TRAN-DATA at
+        app/cbl/COTRN02C.cbl L471 to L495. That paragraph writes nothing: it moves
+        eleven values out of the row it read into the unprotected map fields the
+        operator is looking at and then performs PROCESS-ENTER-KEY at L495, so
+        everything a confirming turn writes is read off the screen and the row that
+        was copied is never consulted again. This shape is that screen state.
+      required:
+        - sourceTransactionId
+        - typeCode
+        - categoryCode
+        - source
+        - description
+        - merchantId
+        - merchantName
+        - merchantCity
+        - merchantZip
+        - originDate
+        - processDate
+      additionalProperties: false
+      properties:
+        # WHY : Assumptions: the identifier is published as ITSELF and is not sealed,
+        #       because every other transaction operation publishes it as itself --
+        #       the detail operation is keyed by it -- so sealing it here would
+        #       introduce a second spelling of one identity while masking nothing: a
+        #       ledger identifier is neither a primary account number nor sensitive
+        #       authentication data.
+        sourceTransactionId:
+          allOf:
+            - $ref: "#/components/schemas/TransactionId"
+          description: >-
+            Identifier of the row these members were copied out of. It is what makes
+            the preview a STABLE reference to one stored row: a caller holding it can
+            tell that two copy turns copied the same row, and an audit of the
+            appended capture can name the row it was taken from.
+        # WHY : Assumptions: the six members below point at the SAME component
+        #       schemas TransactionCreateRequest points at, rather than restating
+        #       their widths and patterns. A copied value is a value that came out of
+        #       the ledger and is about to be submitted BACK through the capture
+        #       operation, so any bound stated more loosely here would publish a value
+        #       that body would then refuse -- and stating it twice is how the two
+        #       come to disagree.
+        typeCode:
+          allOf:
+            - $ref: "#/components/schemas/TransactionTypeCode"
+          description: >-
+            The copied transaction type, from app/cbl/COTRN02C.cbl L482;
+            TRAN-TYPE-CD PIC X(02) at app/cpy/CVTRA05Y.cpy L6.
+        categoryCode:
+          allOf:
+            - $ref: "#/components/schemas/TransactionCategoryCode"
+          description: >-
+            The copied transaction category, from L483; TRAN-CAT-CD PIC 9(04) at
+            app/cpy/CVTRA05Y.cpy L7, carried as characters because the map field it is
+            painted into is a character field.
+        source:
+          allOf:
+            - $ref: "#/components/schemas/TransactionSource"
+          description: >-
+            The copied source, from L484; TRAN-SOURCE PIC X(10) at
+            app/cpy/CVTRA05Y.cpy L8.
+        description:
+          allOf:
+            - $ref: "#/components/schemas/TransactionDescription"
+          description: >-
+            The copied description, from L486; TRAN-DESC PIC X(100) at
+            app/cpy/CVTRA05Y.cpy L9.
+        merchantId:
+          allOf:
+            - $ref: "#/components/schemas/MerchantId"
+          description: >-
+            The copied merchant identifier, from L489; TRAN-MERCHANT-ID PIC 9(09) at
+            app/cpy/CVTRA05Y.cpy L11, zero-padded to its nine declared positions
+            because the map field is nine characters wide and the reference moves a
+            zoned display field into it.
+        merchantName:
+          type: string
+          minLength: 1
+          maxLength: 50
+          description: >-
+            The copied merchant name, from L490; TRAN-MERCHANT-NAME PIC X(50) at
+            app/cpy/CVTRA05Y.cpy L12.
+        merchantCity:
+          type: string
+          minLength: 1
+          maxLength: 50
+          description: >-
+            The copied merchant city, from L491; TRAN-MERCHANT-CITY PIC X(50) at
+            app/cpy/CVTRA05Y.cpy L13.
+        merchantZip:
+          type: string
+          minLength: 1
+          maxLength: 10
+          description: >-
+            The copied merchant postal code, from L492; TRAN-MERCHANT-ZIP PIC X(10) at
+            app/cpy/CVTRA05Y.cpy L14.
+        # WHY : Assumptions: both dates are DATES at the declared width of the MAP
+        #       fields rather than of the columns. L487 and L488 move a PIC X(26)
+        #       record field into a PIC X(10) screen field, which truncates to the
+        #       leftmost ten characters, so what is published is what the reference
+        #       would have painted.
+        originDate:
+          allOf:
+            - $ref: "#/components/schemas/DateOnly10"
+          description: >-
+            The copied origination date, from L487, being the leftmost ten characters
+            of TRAN-ORIG-TS PIC X(26) at app/cpy/CVTRA05Y.cpy L15.
+        processDate:
+          allOf:
+            - $ref: "#/components/schemas/DateOnly10"
+          description: >-
+            The copied processing date, from L488, being the leftmost ten characters
+            of TRAN-PROC-TS PIC X(26) at app/cpy/CVTRA05Y.cpy L16.
 
     # WHY : Refactoring Rationale: THREE members, including the amount. An earlier
     #       revision declared two and set additionalProperties false, while the Java

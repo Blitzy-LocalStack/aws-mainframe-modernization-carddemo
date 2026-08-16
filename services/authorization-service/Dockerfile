@@ -46,9 +46,6 @@
 #       default because an empty or permissive default would let a request name its
 #       own reply queue, which is the confused-deputy shape this allowlist exists to
 #       refuse.
-#     - CARDDEMO_MESSAGING_HMAC_KEY -- the key the request and reply payloads are
-#       authenticated with, replacing the trust the baseline placed in the queue
-#       manager itself.
 #     - CARDDEMO_ACCOUNT_CONTEXT_BASE_URL -- an authorization decision reads account
 #       state this context does not own, so the account context's address is a
 #       start-time input.
@@ -78,6 +75,17 @@
 #       PendingAuthViewMapper requires one, and the context then fails to start.
 #   Every entry above is a variable NAME. No value, and therefore no credential,
 #   connection string, issuer URI, queue URL or key, appears anywhere in this file.
+#   Refactoring Rationale: one name has been REMOVED from the list above and is
+#   recorded here rather than dropped in silence, because an operator comparing this
+#   header against a task definition written earlier will find it there and needs to
+#   know it is withdrawn rather than forgotten. CARDDEMO_MESSAGING_HMAC_KEY was
+#   listed as the key the request and reply payloads were authenticated with. That
+#   description was untrue -- no payload was ever authenticated with it -- and the
+#   bean it did key had no injection point at all once the queue identities became
+#   the literal values the specification freezes. The property, the bean, the secret
+#   both environment roots provisioned, the task-role read grant and the ecs-service
+#   condition that required this task to receive it are withdrawn together, so a task
+#   definition still passing it passes a value nothing reads.
 #
 # Return values:
 #   0 (integer): the JVM exited after a requested shutdown.

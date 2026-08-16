@@ -551,7 +551,7 @@ whole run because all four layouts that ship an extract for a money column (`ACC
 mixed-form run; the per-pairing third component exists for a corpus that one day does.
 
 Assumptions: `--dataset` carries exactly one meaning on every verb that takes it — the
-dataset, named in either of the two spellings [§5.4](#54-dataset-identifiers) publishes.
+dataset, named in either of the two spellings [§5.4](#54-dataset-identifiers--there-are-two-vocabularies) publishes.
 It is emphatically **not** `decode-record`'s `--record`, which is a one-based ORDINAL
 within an extract; an earlier draft of these four commands spelled the selector `--record`
 and so gave one flag two unrelated meanings, which the "change only the verb" path above
@@ -2140,8 +2140,10 @@ module, class and function.
 
 **Presence on private and nested declarations is a second gate, not this one.**
 [`tests/test_docstring_gate.py`](tests/test_docstring_gate.py) walks the same two trees
-with the standard library's `ast` and asserts a non-blank docstring on every module,
-class and function at **every** visibility and **every** nesting depth. It exists
+— plus `config/rule1`, the repository-wide Rule 1 lexical gate, as a third root, because
+a nested helper there shipped undocumented past every wired Python gate — with the
+standard library's `ast`, and asserts a non-blank docstring on every module, class and
+function at **every** visibility and **every** nesting depth. It exists
 because `D101`, `D102`, `D103` and `D106` are public-declaration checks, so — measured
 against the pinned ruff rather than inferred — a declaration is invisible to them when
 its own name carries a single leading underscore, when any enclosing class is privately

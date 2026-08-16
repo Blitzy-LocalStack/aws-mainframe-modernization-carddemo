@@ -150,13 +150,20 @@ public final class MessagingCorrelationId {
      * narrowest means no identifier this system stores can reach a log through this attribute, and
      * anything shorter cannot be one of them, so the bound is exactly as wide as it needs to be.</p>
      *
-     * <p>Assumptions: this is deliberately LOWER than the thirteen
-     * {@code com.carddemo.common.web.CorrelationIdFilter} uses, and the two are not in conflict. That
-     * filter's bound answers "is this a card number", because its consequence is to REFUSE a caller's
-     * chosen identity and it must refuse as narrow a class as possible. This bound answers "could this be
-     * any identifier at all", because its consequence is only to redact a LOG rendering while the value
-     * is still echoed in full -- so a false positive costs a log line's precision and nothing else, and
-     * the bound can afford to be conservative where the filter's cannot.</p>
+     * <p>⚠️ Refactoring Rationale: this bound now MATCHES {@code com.carddemo.common.web.CorrelationIdFilter},
+     * and the note that stood here explained why it was deliberately lower than that filter's thirteen.
+     * The explanation is withdrawn because the filter moved to nine, for the same reason this rule was
+     * always nine: a bound stated for the card number alone does not cover the customer, national and
+     * account identifiers the rule exists to keep out of a log. The two rules reaching the same number
+     * independently, from the same measurement, is the outcome to expect -- so the agreement is recorded
+     * rather than either constant being made to read from the other, because the two answer for different
+     * transports and a future change to one must not silently move the other.</p>
+     *
+     * <p>Assumptions: what still differs is the CONSEQUENCE, and it is the reason both can afford this
+     * bound. The filter REFUSES a request whose caller-supplied identity is shaped this way, so a false
+     * positive costs that caller a request until it prefixes a letter. This rule only redacts the LOG
+     * rendering while the value is still echoed to the requester in full, so a false positive costs a log
+     * line's precision and nothing else.</p>
      *
      * <p>Trade-offs: a legitimate correlation identity that is a bare run of nine or more digits is
      * logged as {@link #NUMERIC_IDENTITY_MARKER} rather than as itself, so an operator cannot grep the

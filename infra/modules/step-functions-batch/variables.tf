@@ -4,7 +4,7 @@
 # Purpose:
 #   The complete input contract of the `step-functions-batch` module -- the
 #   module that replaces the mainframe JCL/JES2 nightly job stream with the
-#   twelve-work-state `carddemo-daily-batch` state machine, a second and much
+#   eleven-work-state `carddemo-daily-batch` state machine, a second and much
 #   smaller state machine for on-demand reports, a third for the operator-invoked
 #   dataset export/import round trip, one shared least-privilege execution role
 #   and one encrypted log group per machine. Anything absent from this file is a
@@ -48,7 +48,7 @@
 #   remote-state read, because a module that resolves its own dependencies
 #   cannot be composed differently by a different caller.
 #
-#   Assumptions: the twelve states are NOT inputs. Their order, their catch
+#   Assumptions: the chain's states are NOT inputs. Their order, their catch
 #   handlers and the inverted condition predicates that replace the baseline's
 #   `COND=` parameters are this module's substance and live in main.tf.
 #   Exposing the state list would let one environment run a different chain
@@ -64,8 +64,8 @@
 #   argument at execution time; a Terraform variable would freeze one date into
 #   the infrastructure.
 #
-#   Trade-offs: per-state timing is ONE `map(number)` carrying all twelve state
-#   names rather than a floor plus a sparse override map. A state left out of
+#   Trade-offs: per-state timing is ONE `map(number)` carrying all twelve TIMED
+#   state names rather than a floor plus a sparse override map. A state left out of
 #   sparse overrides silently inherits a ceiling nobody chose for it, and a
 #   mistyped key does the same while the operator believes a limit was raised;
 #   requiring every key turns both into a plan-time error naming the variable.
@@ -74,8 +74,8 @@
 #
 #   Refactoring Rationale: the round trip's two states carry their ceilings in a
 #   SECOND map, `dataset_state_timeout_seconds`, rather than as two more keys in
-#   the twelve-name map above. Merging them would have widened that map's
-#   exactness check from twelve names to fourteen, and that check is what catches
+#   the eleven-name map above. Merging them would have widened that map's
+#   exactness check from eleven names to thirteen, and that check is what catches
 #   a missing or misspelled NIGHTLY ceiling -- the failure it exists to prevent.
 #   Two maps, each exact over its own machine's states, keeps both checks as
 #   strong as they were.
@@ -437,11 +437,16 @@ variable "pass_role_arns" {
 #
 # Alternatives Considered: exposing an `assign_public_ip` input was
 #   considered and rejected. main.tf sets that field to the literal
-#   `DISABLED`, because these subnets reach AWS APIs through the VPC's
-#   interface endpoints and reach the internet, where a task needs it,
-#   through the NAT gateway. A public address would therefore buy no
-#   reachability the tasks lack and would widen their exposure, so it is not
-#   a choice worth offering an environment root.
+#   `DISABLED`, because these subnets reach every AWS API this system calls
+#   through the VPC's interface endpoints, and reach nothing outside the VPC
+#   at all: infra/modules/network enumerates the application group's egress to
+#   in-VPC destinations only, so a public address would buy no reachability the
+#   tasks lack while widening their exposure. Refactoring Rationale: this note
+#   said a task reaches the internet "where it needs it" through the NAT
+#   gateway. That was true while an unrestricted 443 egress rule stood in the
+#   network module; the rule is withdrawn, so a batch task has no outbound path
+#   past the endpoints, and a new external dependency has to arrive as a named
+#   egress rule there rather than being assumed available here.
 # -----------------------------------------------------------------------------
 
 # Assumptions: these are the PRIVATE-APPLICATION tier specifically -- not
@@ -533,11 +538,13 @@ variable "dataset_bucket_name" {
 #   only then to the terminal failure, so a failed nightly run notifies
 #   instead of failing silently. That is the analogue of the job log and the
 #   operator console the baseline relied on -- the baseline reported a failed
-#   step through `NOTIFY=&SYSUID` on the job card, and routing all twelve
-#   states' catch handlers through one topic is what makes any of them reach
-#   the same place.
+#   step through `NOTIFY=&SYSUID` on the job card, and routing every catch
+#   handler in the chain through one topic is what makes any of them reach
+#   the same place. The count of handlers is deliberately not quoted here: two
+#   states inside the StageSeedDatasets branch raise to the enclosing Parallel's
+#   catch instead of carrying one, which is recorded at those states.
 variable "notification_topic_arn" {
-  description = "ARN of the SNS topic every state's catch handler publishes to before the execution reaches its terminal failure state. Published as an output by infra/modules/observability and passed in by the environment root. It replaces the baseline's job-card NOTIFY and job log; routing all twelve states through one topic is what makes a failure in any of them reach the same place rather than failing silently."
+  description = "ARN of the SNS topic every state's catch handler publishes to before the execution reaches its terminal failure state. Published as an output by infra/modules/observability and passed in by the environment root. It replaces the baseline's job-card NOTIFY and job log; routing every catch handler in the chain through one topic is what makes a failure anywhere in it reach the same place rather than failing silently."
 
   type = string
 
@@ -717,8 +724,8 @@ variable "reconcile_interval_minutes" {
 }
 
 # Trade-offs: the default is the most verbose setting rather than the
-#   cheapest. A nightly chain runs once, so volume is bounded by twelve
-#   states rather than by a request rate, and the first question asked after
+#   cheapest. A nightly chain runs once, so volume is bounded by one pass over
+#   the chain's states rather than by a request rate, and the first question asked after
 #   a failure -- which state failed and what did it receive -- is answered
 #   only by the full transition history.
 variable "log_level" {
@@ -797,7 +804,7 @@ variable "log_include_authorization_execution_data" {
 # -----------------------------------------------------------------------------
 # Function-backed states -- the operator bracket and the statistics refresh
 #
-# Three of the twelve states are a single API call each and are therefore backed
+# Three of the eleven work states are a single API call each and are therefore backed
 # by functions rather than tasks. They are declared as three separate inputs
 # rather than one list, because each is invoked at a specific position in the
 # chain and a list would lose which is which.
@@ -1005,6 +1012,14 @@ variable "dataset_staging_root" {
   }
 }
 
+# Assumptions: this input STANDS, and that is a decision rather than an oversight. It has exactly
+#   one consumer -- the VerifyMigration state's `--sql-root` argument -- and that state is retained,
+#   nested inside the StageSeedDatasets Parallel where it gates business processing on a whole-
+#   registry verdict without adding a twelfth top-level work state. Because the consumer is
+#   retained, infra/.tflint.hcl's terraform_unused_declarations rule is satisfied by use rather
+#   than by removal, and `verify-all` is the one verb in
+#   data-migration/src/carddemo_migration/cli.py that both accepts `--sql-root` and refuses a
+#   dataset selector, so the value still has somewhere to go and the gate still cannot be narrowed.
 # Assumptions: this is the directory holding the `sql` tree inside the data-migration image, and
 #   it is stated here because the container cannot derive it. The two committed verification
 #   queries are read from <root>/sql/verify/, and the package resolves that root from its own
@@ -1217,11 +1232,28 @@ variable "stage_datasets_max_concurrency" {
   validation {
     # Assumptions: the floor of 1 is what the Map itself requires -- 0 is
     #   the service's spelling of UNBOUNDED, so accepting it would silently
-    #   turn the deliberate bound above into no bound at all. The ceiling of
-    #   10 is the number of default branches, past which the value cannot
-    #   increase parallelism and only obscures the intent.
-    condition     = var.stage_datasets_max_concurrency == floor(var.stage_datasets_max_concurrency) && var.stage_datasets_max_concurrency >= 1 && var.stage_datasets_max_concurrency <= 10
-    error_message = "stage_datasets_max_concurrency must be a whole number from 1 to 10; 0 is rejected because the service reads it as unbounded concurrency."
+    #   turn the deliberate bound above into no bound at all.
+    # Refactoring Rationale: the ceiling is 11, and it was 10 while being
+    #   justified as "the number of default branches". That was wrong on its
+    #   own terms: var.seed_datasets declares ELEVEN datasets by default, so
+    #   10 sat one below full fan-out and the stated reason -- that the value
+    #   cannot increase parallelism past the ceiling -- was the one thing it
+    #   did not achieve. It was raised rather than re-justified because the
+    #   sentence describes a real and useful property, and 11 is the value
+    #   that actually has it: an operator who wants a fully parallel refresh
+    #   can now ask for one, and anything beyond 11 is still refused because
+    #   it would be inert.
+    # Trade-offs: this ceiling is NOT the Aurora capacity control, and raising
+    #   it does not weaken one. The concurrent-load bound is the DEFAULT of 3
+    #   together with the root's freedom to lower it; the reason a full
+    #   eleven-branch fan-out is expensive -- one Aurora connection and one
+    #   bulk-copy stream per branch, against the same writer the chain is
+    #   about to post through -- is recorded at the Map in main.tf. If a root
+    #   ever supplied a seed_datasets list longer than eleven, this ceiling
+    #   would bound it below full fan-out; that is a safety property rather
+    #   than a defect, and the load rationale at the Map still applies.
+    condition     = var.stage_datasets_max_concurrency == floor(var.stage_datasets_max_concurrency) && var.stage_datasets_max_concurrency >= 1 && var.stage_datasets_max_concurrency <= 11
+    error_message = "stage_datasets_max_concurrency must be a whole number from 1 to 11; 0 is rejected because the service reads it as unbounded concurrency, and 11 is the number of datasets var.seed_datasets declares by default."
   }
 }
 
@@ -1241,7 +1273,7 @@ variable "stage_datasets_max_concurrency" {
 #   neutral default but an outage the flag makes worse. A conservative
 #   ceiling on every state is therefore safer than none.
 variable "state_timeout_seconds" {
-  description = "Ceiling on each of the twelve work states, keyed by the state name exactly as main.tf spells it. The default puts the migration verification gate at the top ceiling because it re-reads every staged record and runs both committed whole-migration queries, then the four next-longest states -- seed staging, posting, interest and statements -- below it, the three dataset-writing states in the middle, and the three states that only toggle a flag or refresh statistics at the bottom. Every key must be present, so a state can never be left without a timeout: a state with no ceiling waits indefinitely, which holds the whole chain open and leaves the online read-only flag set until an operator intervenes."
+  description = "Ceiling on each of the twelve TIMED states of the nightly chain -- the eleven top-level work states AAP section 0.4.1.7 fixes, plus VerifyMigration, which is not a twelfth top-level state but runs inside the StageSeedDatasets branch and still needs its own ceiling -- keyed by the state name exactly as main.tf spells it. The default puts the migration verification gate at the top ceiling because it re-reads every staged record and runs both committed whole-migration queries, then the four next-longest states -- seed staging, posting, interest and statements -- below it, the three dataset-writing states in the middle, and the three states that only toggle a flag or refresh statistics at the bottom. Every key must be present, so a state can never be left without a timeout: a state with no ceiling waits indefinitely, which holds the whole chain open and leaves the online read-only flag set until an operator intervenes."
 
   type = map(number)
 
@@ -1252,13 +1284,17 @@ variable "state_timeout_seconds" {
   #   AND runs three verification passes over that one dataset. The largest family alone
   #   -- the daily-transaction extract against ledger.daily_transactions -- costs a hash
   #   of the destination table per load.
-  # Assumptions: VerifyMigration is sized above it. It is three passes over the whole
-  #   migration, not one dataset: a server-side row-count report, a per-record digest
-  #   comparison for each of the ten seeded datasets with the target rows streamed back,
-  #   and an exact money-total report. The digest pass reads both sides of every record.
+  # Refactoring Rationale: two further entries -- LoadSeedDatasets and
+  #   ReconcileTransactionSequence -- were authored alongside it and are also NOT here,
+  #   because the states they timed are withdrawn in main.tf. See the withdrawal
+  #   recorded there: the refresh state already loads each dataset and already advances
+  #   the identifier allocator, so both would have timed a second pass over work that
+  #   had been done.
   default = {
-    # Refactoring Rationale: VerifyMigration is the entry added to the eleven this map
-    #   used to carry, and it carries the LARGEST ceiling of any state. It re-reads every
+    # Refactoring Rationale: VerifyMigration is the twelfth entry beside the eleven
+    #   top-level work states, and it carries the LARGEST ceiling of any state. It is a
+    #   timed state without being a top-level one -- it runs inside the StageSeedDatasets
+    #   branch, for the reason recorded at that state in main.tf. It re-reads every
     #   staged record and runs both committed whole-migration queries on a SELECT-only
     #   session, which is the most work any single state does; 10800 is three hours, the
     #   same order as the two seven-two-hundred states, with headroom because a gate that
@@ -1289,21 +1325,26 @@ variable "state_timeout_seconds" {
   }
 
   validation {
-    # Assumptions: the twelve names are fixed by main.tf's own state list and are
+    # Assumptions: the twelve TIMED names are fixed by main.tf's own state list and are
     #   spelled here character for character; the error message carries the
     #   required set. Both directions matter -- a MISSING key would leave that
     #   state without a ceiling, and a key such as "PostTransaction" would apply
     #   cleanly while posting ran unbounded and the operator believed a limit had
     #   been set. Exactness needs both halves of the condition: `setsubtract`
     #   proves every required name is present but says nothing about an extra
-    #   one, and a map holds no duplicate keys, so twelve keys that include all
-    #   twelve required names are exactly those names. Terraform has no
+    #   one, and a map holds no duplicate keys, so eleven keys that include all
+    #   eleven required names are exactly those names. Terraform has no
     #   symmetric-difference function, which is why the count carries the second
     #   half.
-    # Refactoring Rationale: the count moved from eleven to twelve when the chain
-    #   gained the state that stands between staging an extract and posting against it,
-    #   VerifyMigration. It was briefly written as fourteen, alongside two further
-    #   states that are withdrawn in main.tf; this check is what makes the count a
+    # Refactoring Rationale: this map holds TWELVE names while the nightly chain has
+    #   ELEVEN top-level work states, and the difference is deliberate rather than
+    #   drift. The twelfth name, VerifyMigration, is the verification gate AAP
+    #   section 0.9.2 mandates as a first-class deliverable and section 0.7.7 gives
+    #   three passes, but which section 0.4.1.7 never gave a state; it therefore runs
+    #   INSIDE the StageSeedDatasets branch, where it is a timed state that needs a
+    #   ceiling without being a top-level state that would change the published
+    #   topology. The count was briefly written as fourteen, alongside two further
+    #   states that are withdrawn in main.tf. This check is what makes the count a
     #   measured property of the graph rather than a tally, because a name here with no
     #   state and a state with no name here both fail the plan naming this variable.
     condition = length(var.state_timeout_seconds) == 12 && length(setsubtract([
@@ -1320,7 +1361,7 @@ variable "state_timeout_seconds" {
       "AnalyzeTables",
       "ResumeOnlineWrites",
     ], keys(var.state_timeout_seconds))) == 0
-    error_message = "state_timeout_seconds must hold exactly one entry for each of the twelve work states, named as main.tf spells them: QuiesceOnlineWrites, StageSeedDatasets, VerifyMigration, PreflightDailyTransactions, PostTransactions, CalculateInterest, BackupTransactions, CombineTransactions, GenerateStatements, GenerateReports, AnalyzeTables, ResumeOnlineWrites."
+    error_message = "state_timeout_seconds must hold exactly one entry for each of the twelve timed states -- the eleven top-level work states plus the nested VerifyMigration gate -- named as main.tf spells them: QuiesceOnlineWrites, StageSeedDatasets, VerifyMigration, PreflightDailyTransactions, PostTransactions, CalculateInterest, BackupTransactions, CombineTransactions, GenerateStatements, GenerateReports, AnalyzeTables, ResumeOnlineWrites."
   }
 
   validation {
@@ -1441,7 +1482,7 @@ variable "cancellation_max_attempts" {
 }
 
 variable "cancellation_state_timeout_seconds" {
-  description = "Ceiling on each individual state of the residual-task cancellation sub-chain: the ListTasks discovery call and the two Map states that stop and then confirm the tasks. Held separately from state_timeout_seconds because that map's validation asserts exactly the eleven names of the nightly work chain, and these states are failure-path recovery rather than work."
+  description = "Ceiling on each individual state of the residual-task cancellation sub-chain: the ListTasks discovery call and the two Map states that stop and then confirm the tasks. Held separately from state_timeout_seconds because that map's validation asserts exactly the twelve timed names of the nightly work chain, and these states are failure-path recovery rather than work."
   type        = number
   default     = 60
 
@@ -1475,13 +1516,13 @@ variable "cancellation_max_concurrency" {
 #   bracket's lease length, so the advertised expiry and the enforced ceiling
 #   agree by construction.
 variable "state_machine_timeout_seconds" {
-  description = "Ceiling on a single daily-batch execution, applied at the top level of the state machine definition rather than to any one state. It bounds the whole chain: an execution that stalls where no individual state's timeout applies would otherwise wait indefinitely, holding the online read-only flag set, because the resume state runs only after the chain finishes or fails. The ceiling caps how long the flag can be held rather than releasing it -- a timed-out execution runs no further state -- so release on that path comes from the out-of-execution watchdog rule, and this same value is published to the quiesce call as the bracket's lease length. The default is validated against the aggregate SEQUENTIAL budget of the twelve work states rather than against the largest single one, because the chain runs them one after another."
+  description = "Ceiling on a single daily-batch execution, applied at the top level of the state machine definition rather than to any one state. It bounds the whole chain: an execution that stalls where no individual state's timeout applies would otherwise wait indefinitely, holding the online read-only flag set, because the resume state runs only after the chain finishes or fails. The ceiling caps how long the flag can be held rather than releasing it -- a timed-out execution runs no further state -- so release on that path comes from the out-of-execution watchdog rule, and this same value is published to the quiesce call as the bracket's lease length. The default is validated against the aggregate SEQUENTIAL budget of the twelve timed states rather than against the largest single one, because the chain runs them one after another."
   type        = number
   # Refactoring Rationale: the default is 61200 where it read 46800, and the raise is a
   #   MEASURED correction rather than headroom taken for comfort. The floor below is the
   #   SUM of the per-state ceilings plus two further allowances, and at the defaults it
   #   evaluates to 58920 -- 54600 for the twelve sequential ceilings, 2520 for the retry
-  #   waits at twelve states times 210 seconds each, 1500 for the cancellation drain and
+  #   waits at twelve timed states times 210 seconds each, 1500 for the cancellation drain and
   #   300 for the second ResumeOnlineWrites. 46800 was below that, so the module's own
   #   validation refused its own default, and a caller who accepted the default got a
   #   plan-time error naming this variable. It was already below the floor at eleven
@@ -1507,7 +1548,7 @@ variable "state_machine_timeout_seconds" {
     #   detect that: 28800 is comfortably above the largest single ceiling of 7200.
     # Assumptions: the floor is the sum of three named terms, each of which is a
     #   real thing the ceiling has to cover.
-    #     1. sequential work -- every one of the twelve states running to its own
+    #     1. sequential work -- every one of the twelve timed states running to its own
     #        ceiling, in order, which is the shape of the chain.
     #     2. retry waits -- the geometric backoff each state may spend before its
     #        final attempt. This is the WAITS only, not additional whole attempts;
@@ -1547,7 +1588,7 @@ variable "state_machine_timeout_seconds" {
       #   allowance. The entry-count assertion that authoring relied on is kept, at the
       #   exactness check on var.state_timeout_seconds itself.
     )
-    error_message = "state_machine_timeout_seconds must be a whole number of seconds, at most 86400, and at least the aggregate sequential budget of the chain: the sum of all twelve state_timeout_seconds values, plus each state's geometric retry waits, plus the failure path's cancellation drain allowance and a second ResumeOnlineWrites. A ceiling below that aborts a healthy sequential run at the top level, which runs no further state and therefore leaves the online-write bracket engaged with no notification."
+    error_message = "state_machine_timeout_seconds must be a whole number of seconds, at most 86400, and at least the aggregate sequential budget of the chain: the sum of all eleven state_timeout_seconds values, plus each state's geometric retry waits, plus the failure path's cancellation drain allowance and a second ResumeOnlineWrites. A ceiling below that aborts a healthy sequential run at the top level, which runs no further state and therefore leaves the online-write bracket engaged with no notification."
   }
 }
 
@@ -1568,7 +1609,7 @@ variable "adhoc_report_timeout_seconds" {
     #   so the floor is derived from that entry rather than from a literal that
     #   would silently become too low when a caller raised the report state's own
     #   ceiling. The key is indexed rather than looked up with a fallback because
-    #   state_timeout_seconds is validated to hold every one of the twelve names.
+    #   state_timeout_seconds is validated to hold every one of the eleven names.
     condition     = var.adhoc_report_timeout_seconds <= 86400 && floor(var.adhoc_report_timeout_seconds) == var.adhoc_report_timeout_seconds && var.adhoc_report_timeout_seconds >= var.state_timeout_seconds["GenerateReports"]
     error_message = "adhoc_report_timeout_seconds must be a whole number of seconds, at most 86400, and at least as large as the ceiling the report state itself receives -- the GenerateReports entry in state_timeout_seconds."
   }
@@ -1606,10 +1647,9 @@ variable "adhoc_report_timeout_seconds" {
 
 # Alternatives Considered: NO `assign_public_ip` input; recorded in full on
 #   the networking section
-#   above -- main.tf sets the literal DISABLED because these tasks reach AWS
-#   APIs through interface endpoints and the internet through the NAT
-#   gateway, so a public address would add exposure without adding
-#   reachability.
+#   above -- main.tf sets the literal DISABLED because these tasks reach every
+#   AWS API they call through interface endpoints and reach nothing outside the
+#   VPC, so a public address would add exposure without adding reachability.
 
 # Assumptions: NO bucket, prefix or lifecycle input beyond
 #   `dataset_bucket_name`. The bucket itself, the ten generation-dataset prefix
@@ -1634,7 +1674,7 @@ variable "adhoc_report_timeout_seconds" {
 # -----------------------------------------------------------------------------
 
 variable "dataset_state_timeout_seconds" {
-  description = "Per-state ceiling for the two work states of the operator-invoked dataset round trip, keyed by state name: ExportDataset and ImportDataset. Held in its own map rather than merged into state_timeout_seconds because that variable's validation asserts exactly the twelve names of the nightly chain, and widening it would weaken the check that catches a missing or misspelled nightly ceiling."
+  description = "Per-state ceiling for the two work states of the operator-invoked dataset round trip, keyed by state name: ExportDataset and ImportDataset. Held in its own map rather than merged into state_timeout_seconds because that variable's validation asserts exactly the eleven names of the nightly chain, and widening it would weaken the check that catches a missing or misspelled nightly ceiling."
   type        = map(number)
 
   default = {
@@ -1745,5 +1785,38 @@ variable "authorization_extract_timeout_seconds" {
     #   machines in this module.
     condition     = var.authorization_extract_timeout_seconds <= 86400 && floor(var.authorization_extract_timeout_seconds) == var.authorization_extract_timeout_seconds && var.authorization_extract_timeout_seconds >= max(var.authorization_state_timeout_seconds["UnloadAuthorizations"], var.authorization_state_timeout_seconds["LoadAuthorizations"])
     error_message = "authorization_extract_timeout_seconds must be a whole number of seconds, at most 86400, and at least the LARGER of the two entries in authorization_state_timeout_seconds, because the export and the load are alternatives rather than a sequence."
+  }
+}
+
+# -----------------------------------------------------------------------------
+# The maximum permissions the role this module creates may ever hold
+# -----------------------------------------------------------------------------
+# WHY : Assumptions: a permissions boundary is the only control that bounds what
+#       this module's composed inline policies can add up to, because it is
+#       evaluated IN ADDITION TO every identity policy -- a statement the boundary
+#       does not permit is denied even where an inline policy allows it. Attaching
+#       it here rather than trusting the caller means a root that widens an
+#       ARN list passed into this module cannot widen past the account's ceiling.
+# WHY : ⚠️ Refactoring Rationale: this input did not exist, and the roles
+#       created here carried NO boundary at all, while
+#       infra/envs/*/variables.tf described its `permissions_boundary_arn` as
+#       applying to "every role this deployment creates". That description was the
+#       promise; this input is what makes it true. infra/modules/ecs-service already
+#       bounded its two roles this way, so the shape here is deliberately identical
+#       to that one rather than a second convention.
+# WHY : Assumptions: the boundary is owned by the ACCOUNT and is supplied, never
+#       created here. A boundary a deployment can rewrite bounds nothing.
+#       Trade-offs: the input is required and has no default, so a caller must own a
+#       boundary policy before it can use this module. Accepted for the same reason
+#       ecs-service accepts it: making it optional leaves the control switched off in
+#       exactly the environments least likely to notice.
+variable "permissions_boundary_arn" {
+  description = "Same-account customer-managed IAM policy ARN used as the permissions boundary on each of the four state-machine execution roles this module creates. Required so no capability this module composes can exceed the account's deployment boundary. Supplied by the caller; never created here."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:policy/[A-Za-z0-9+=,.@_/-]+$", var.permissions_boundary_arn))
+    error_message = "permissions_boundary_arn must be an anchored customer-managed IAM policy ARN in a twelve-digit AWS account."
   }
 }

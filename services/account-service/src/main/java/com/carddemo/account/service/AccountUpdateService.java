@@ -715,6 +715,57 @@ public class AccountUpdateService {
      */
 
     /**
+     * Runs the same edits {@link #update} runs and reports their verdict, writing nothing.
+     *
+     * <p>Assumptions: this exists because the baseline decides whether to ADVANCE on the strength of
+     * those edits, one turn before anything is written. {@code 2000-DECIDE-ACTION}'s show-details arm
+     * reads {@code IF INPUT-ERROR OR NO-CHANGES-DETECTED} and performs {@code CONTINUE} -- leaving the
+     * action where it is -- and only otherwise sets {@code ACUP-CHANGES-OK-NOT-CONFIRMED}, at
+     * {@code app/cbl/COACTUPC.cbl} L2584 to L2591. The edits have therefore already run by the time
+     * that decision is taken, and only the LATER confirmation turn performs
+     * {@code 9600-WRITE-PROCESSING}. A client with no way to ask for the verdict alone can only
+     * either advance without having validated -- claiming "Changes validated" on the strength of
+     * nothing -- or write in order to find out, which is the one thing the first turn must not do.</p>
+     *
+     * <p>Assumptions: the verdict is RETURNED rather than thrown, which is the whole difference from
+     * {@link #update}. That method calls {@code refuseWhenAnyEditFailed} so a refusal becomes HTTP 400,
+     * because a write that cannot proceed is a failed request; here a refusal is the successful ANSWER
+     * to the question asked, so it travels as a 200 body. The two share
+     * {@link #editMapInputs(AccountUpdateRequest, Account, Customer)} exactly, so the verdict a caller
+     * sees here is the verdict the write would reach -- had they diverged, a screen could show a green
+     * validation and then fail the save on the same values.</p>
+     *
+     * <p>Trade-offs: the rows are read again by the later write rather than carried over, so a value
+     * that passes here can still be refused there. That is unavoidable and is the same window
+     * {@link #update}'s own re-read comment describes: another session may commit in between. The
+     * window is narrowed, not closed, and the conflict outcome remains the mechanism that reports it.
+     * Holding a transaction open across the two turns was the alternative and is rejected for the
+     * reason recorded on the read split below -- it would pin a connection and two row locks across
+     * an operator's think time.</p>
+     *
+     * <p>Trade-offs: no precondition header is required, unlike the write. A verdict changes nothing,
+     * so there is no state for a precondition to protect; demanding one would only stop a client
+     * asking a question it is entitled to ask.</p>
+     *
+     * @param accountId the account whose stored rows the edits compare against
+     * @param request the submitted edit to judge; must not be {@code null}
+     * @return the verdict those edits reached, an {@link EditVerdict} that is never {@code null}
+     * @throws NullPointerException if {@code request} is {@code null}
+     * @throws NoSuchElementException if the account or its customer is absent, which the shared advice
+     *     renders as HTTP 404 exactly as it does for the write
+     */
+    public EditVerdict validateOnly(long accountId, AccountUpdateRequest request) {
+        Objects.requireNonNull(request, "request must not be null");
+
+        LoadedPair loaded = this.readTransaction.execute(status ->
+                new LoadedPair(loadAccount(accountId), loadCustomer(accountId)));
+        LoadedPair before = Objects.requireNonNull(loaded,
+                "the read transaction returned no rows, which its callback cannot do");
+
+        return editMapInputs(request, before.account(), before.customer());
+    }
+
+    /**
      * Edits a submitted change, applies it to both rows and commits, or refuses it.
      *
      * <p>Purpose: this is the migrated form of {@code 9600-WRITE-PROCESSING} at
@@ -848,6 +899,83 @@ public class AccountUpdateService {
 
         return Objects.requireNonNull(written,
                 "the write transaction returned no response, which its callback cannot do");
+    }
+
+    /**
+     * Edits a submitted change and answers what the edits found, writing nothing.
+     *
+     * <p>Purpose: this is the baseline's VALIDATION turn, which is a distinct turn from its write turn
+     * and was reachable through no operation until this one existed. {@code 2000-DECIDE-ACTION}'s
+     * show-details arm at {@code app/cbl/COACTUPC.cbl} L2582 to L2590 moves to
+     * {@code 88 ACUP-CHANGES-OK-NOT-CONFIRMED} -- and paints
+     * {@code Changes validated.Press F5 to save} -- only once {@code 1200-EDIT-MAP-INPUTS} has run every
+     * edit and the comparison has found something to change. Only the LATER PF5 turn performs
+     * {@code 9600-WRITE-PROCESSING}. So the baseline validates on Enter and writes on F5, and a client
+     * with only {@link #update} available can reach the second without the first.</p>
+     *
+     * <p>Refactoring Rationale: this is the first three phases of {@link #update} and nothing else -- the
+     * read-only load, {@link #editMapInputs}, then {@link #refuseWhenAnyEditFailed} -- and it calls the
+     * same two members rather than restating their logic. That is the whole point: the thirty-six
+     * non-key edits, their order, their wording and their allow-list lookups are declared once, so the
+     * turn that validates and the turn that writes cannot disagree about what is acceptable. A second
+     * validator, whether authored here or in a browser, would be a copy that drifts, and the drift would
+     * present as a submission a screen accepted and the write then refused.</p>
+     *
+     * <p>Assumptions: NO precondition is taken and none is needed, because nothing is written. A
+     * revision names the state a write will replace; this method replaces no state, so requiring one
+     * would refuse a caller for a stale token on a turn that cannot overwrite anything, and the write
+     * turn checks the precondition against rows it re-reads for itself. Alternatives Considered:
+     * accepting one anyway for symmetry, and answering 409 when it is stale. Rejected because it would
+     * make the validation turn fail for a reason the baseline's validation turn has no notion of, and
+     * the operator's remedy -- re-read and retype -- would be demanded before they had been told whether
+     * their edits were even acceptable.</p>
+     *
+     * <p>Assumptions: the answer echoes the STORED rows rather than the submission, which is what
+     * {@link AccountMapper#toAccountUpdateResponse} composes, and a caller MUST NOT re-seed its form
+     * from them. The two channels and the field-error array are what this turn produces; the record
+     * members are present because the response shape is shared with the write turn, where redisplaying
+     * the stored state is the point ({@code 3203-SHOW-UPDATED-VALUES}). Alternatives Considered: a
+     * narrower response carrying only the message and the array. Rejected because a second shape would
+     * have to be published, documented and kept in step with the first for the sake of omitting members
+     * a caller already holds from its read.</p>
+     *
+     * <p>Assumptions: the two aggregate sentences are the baseline's own and are selected by the same
+     * test the write turn uses -- {@link #MESSAGE_NO_CHANGES_DETECTED} when the comparison found nothing
+     * to change and {@link #MESSAGE_UPDATE_ACCEPTED} otherwise. {@code Looks Good.... so far} is
+     * precisely the baseline's VALIDATION acknowledgement, latched into {@code WS-RETURN-MSG} by
+     * {@code 1200-EDIT-MAP-INPUTS} when every edit passed, so this turn is where it belongs.</p>
+     *
+     * @param accountId the account whose submitted edit is to be checked
+     * @param request the submitted change, an {@link AccountUpdateRequest}; must not be {@code null}
+     * @return the stored state with the aggregate sentence the edits reached and an empty field-error
+     *     array, an {@link AccountUpdateResponse}, never {@code null}
+     * @throws NullPointerException if {@code request} is {@code null}
+     * @throws NoSuchElementException if the account or its customer is absent
+     * @throws ClientInputException if any edit refused a submitted value, carrying one entry per
+     *     offending request property and the first refusal's wording; the shared advice renders it as
+     *     HTTP 400
+     * @throws IllegalArgumentException as the parent of the above, since {@link ClientInputException}
+     *     extends it and a caller may catch either
+     */
+    public AccountUpdateResponse validateEdits(long accountId, AccountUpdateRequest request) {
+        Objects.requireNonNull(request, "request must not be null");
+
+        // WHY : Assumptions: the load is the same short read-only unit of work the write turn opens, and
+        //       it ends before the edits run for the same reason recorded there -- the edits issue up to
+        //       four synchronous calls to reference-service, and holding a connection and two row locks
+        //       across them would let a slow reference-service block every other writer of these rows.
+        LoadedPair loaded = this.readTransaction.execute(status ->
+                new LoadedPair(loadAccount(accountId), loadCustomer(accountId)));
+        LoadedPair before = Objects.requireNonNull(loaded,
+                "the read transaction returned no rows, which its callback cannot do");
+
+        EditVerdict verdict = editMapInputs(request, before.account(), before.customer());
+        refuseWhenAnyEditFailed(verdict);
+
+        return this.accountMapper.toAccountUpdateResponse(before.account(),
+                this.customerMapper.toCustomerDetail(before.customer()),
+                verdict.noChangesFound() ? MESSAGE_NO_CHANGES_DETECTED : MESSAGE_UPDATE_ACCEPTED,
+                List.of());
     }
 
     /**

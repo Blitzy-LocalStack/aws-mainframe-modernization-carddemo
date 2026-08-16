@@ -216,7 +216,7 @@ graph TB
 %% These are the TARGET dependency edges this record decides, not a delivered-state
 %% inventory -- see the note immediately below the diagram.
 %% Every other context reads and writes only its own schema.
-%% The reporting edges are drawn to the three schemas the seven views actually read
+%% The reporting edges are drawn to the three schemas the eight views actually read
 %% -- ledger, account and reference. No view reads the card schema, so no edge is
 %% drawn to CARD even though the NOLOGIN owner role holds a read grant there; an
 %% edge for an unexercised grant would overstate the coupling this diagram is for.
@@ -386,7 +386,7 @@ reports from them. If it owned any table those contexts read, every context that
 writes the data it reports on would depend on the reporting context for part of its
 own domain, inverting the dependency direction for no gain. So the boundary is
 drawn so that **the reporting service role can read no table anywhere**: it reads
-seven views, and it is the only context whose own role holds no table privilege at
+eight views, and it is the only context whose own role holds no table privilege at
 all.
 
 That sentence is deliberately about the ROLE rather than about the schema, because
@@ -395,9 +395,9 @@ boundary. They are separated below, each with the artifact that fixes it.
 
 | The question | The answer | Where it is fixed |
 |---|---|---|
-| What does the `reporting` schema physically contain? | **One table and seven views.** The table is `reporting.card_grouping_key`; the views are `v_report_transactions`, `v_statement_transactions`, `v_transaction_types`, `v_transaction_categories`, `v_accounts`, `v_customers` and `v_card_xref`, each created `WITH (security_barrier)`. | [`data-migration/sql/V1__reporting_views.sql`](../../data-migration/sql/V1__reporting_views.sql) |
-| Who owns those objects? | **`carddemo_reporting_owner`**, a `NOLOGIN` role. It owns the schema, the table and all seven views, and it is the principal that holds the cross-schema read grants the views need. Nothing authenticates as it. | `V0__schemas_and_roles.sql` (schema and role) and `V1__reporting_views.sql` (`ALTER ... OWNER TO`, once per object) |
-| What can the service actually read at run time? | **The seven views and nothing else.** `carddemo_reporting` holds `USAGE` on `reporting` and `SELECT` on each view by name; `CREATE` on the schema is revoked; every privilege on `ledger`, `account`, `card` and `reference` is explicitly revoked from it, at both table and schema level; and `reporting.card_grouping_key` is revoked from it by name, so the one physical table in its own schema is not readable by it either. | `V0__schemas_and_roles.sql` §5 and the per-view grants in `V1__reporting_views.sql` |
+| What does the `reporting` schema physically contain? | **One table and eight views.** The table is `reporting.card_grouping_key`; the views are `v_report_transactions`, `v_statement_transactions`, `v_transaction_types`, `v_transaction_categories`, `v_accounts`, `v_customers`, `v_card_xref` and `v_transaction_category_balances`, each created `WITH (security_barrier)`. | [`data-migration/sql/V1__reporting_views.sql`](../../data-migration/sql/V1__reporting_views.sql) |
+| Who owns those objects? | **`carddemo_reporting_owner`**, a `NOLOGIN` role. It owns the schema, the table and all eight views, and it is the principal that holds the cross-schema read grants the views need. Nothing authenticates as it. | `V0__schemas_and_roles.sql` (schema and role) and `V1__reporting_views.sql` (`ALTER ... OWNER TO`, once per object) |
+| What can the service actually read at run time? | **The eight views and nothing else.** `carddemo_reporting` holds `USAGE` on `reporting` and `SELECT` on each view by name; `CREATE` on the schema is revoked; every privilege on `ledger`, `account`, `card` and `reference` is explicitly revoked from it, at both table and schema level; and `reporting.card_grouping_key` is revoked from it by name, so the one physical table in its own schema is not readable by it either. | `V0__schemas_and_roles.sql` §5 and the per-view grants in `V1__reporting_views.sql` |
 
 Refactoring Rationale: this section previously said the schema "holds **no tables at
 all** — only read-only views over the other seven schemas". Both halves were wrong,
@@ -408,6 +408,24 @@ And the views span **three** source schemas — `ledger`, `account` and `referen
 not seven: no view reads `auth`, `authorization`, `batch` or `card`. The corrected
 form states the property that is actually true and actually load-bearing, which is
 about the reachable privilege of the role rather than the emptiness of the schema.
+Refactoring Rationale: the view COUNT in this record then went stale in seven places
+at once — the two rows above, the ownership row, the diagram comment, the role
+sentence before it, the owner-grant paragraph after it and the drift-resistance
+paragraph near the foot. All seven said **seven** views. There are eight: the eighth
+is `v_transaction_category_balances`, added with the category-balance report of
+`app/jcl/PRTCATBL.jcl`, and it is named in the enumeration above rather than folded
+silently into a larger number.
+[`docs/architecture/data-model-and-schema-mapping.md`](../architecture/data-model-and-schema-mapping.md)
+— which owns the schema inventory this record cites rather than duplicates — already
+carried eight and already recorded the eighth view's arrival, so this record was the
+one document disagreeing with the authority it defers to. The four-schema grant
+argument beneath is unaffected and was re-checked rather than assumed: the eighth
+view reads `ledger.transaction_category_balances` alone, so the views still span
+`ledger`, `account` and `reference` and the `card` grant is still unexercised.
+Trade-offs: enumerating the view names beside the count is what makes the next
+divergence visible — a bare count can be raised by one without anyone checking which
+object arrived, and a count written in seven places is the shape that failed here.
+
 An emptiness claim is also the more fragile of the two: it would be falsified by the
 next helper object anyone adds, whereas the privilege claim is falsified only by a
 grant, which is the thing the boundary is about.
@@ -422,7 +440,7 @@ the invariant, and the invariant survives the table's existence intact.
 
 Assumptions: the owner role's read grants are broader than current use, and that gap
 is recorded rather than tidied away. It holds `USAGE` plus `SELECT` on `ledger`,
-`account`, `card` and `reference` — four schemas — while the seven views read only
+`account`, `card` and `reference` — four schemas — while the eight views read only
 three of them. The `card` grant is unexercised today. It is left in place because
 `CBSTM03A` and `CBSTM03B` are the statement programs assigned to this context and
 their migration is not yet complete, so a statement view over `card.cards` is a
@@ -983,7 +1001,7 @@ Mitigated by construction rather than by policy: `carddemo_reporting` is granted
 table in that schema is revoked from it by name — so acquiring write access would
 take a new grant, and a new grant is a change visible in a migration and in this
 record. Two further properties make the drift harder rather than merely visible: the
-seven views are created `WITH (security_barrier)` and left non-`security_invoker`, so
+eight views are created `WITH (security_barrier)` and left non-`security_invoker`, so
 they execute with the owner's rights rather than the caller's, and the owner is
 `NOLOGIN`, so the principal that does hold cross-schema reads has no way to
 authenticate at all.

@@ -66,7 +66,7 @@ import com.carddemo.common.money.Money;
  * copybook-to-record mapping with a mapping framework. Both were rejected for the same measurable
  * reason. Lombok is not used, because an accessor it generates has no source location at which the
  * Javadoc this tree requires could be written, and the gate at
- * {@code config/checkstyle/checkstyle.xml} L363 to L366 sets
+ * {@code config/checkstyle/checkstyle.xml} L356 to L359 sets
  * {@code allowMissingPropertyJavadoc} to false with {@code allowedAnnotations} cleared to empty, so a
  * generated member would fail rather than be waived. MapStruct is not used, because the mapping this
  * contract is the far side of is not mechanical: it drops padding, masks two identifiers, truncates
@@ -276,15 +276,36 @@ public record AccountViewResponse(
    * decision.</p>
    *
    * <p>Assumptions: neither screen's rendering is the value, which is the reason an amount is
-   * transported rather than a formatted field. The view program moves all five amounts straight from
-   * their {@code PIC S9(10)V99} record fields into {@code PIC X(15)} screen fields with no edit mask
-   * whatsoever, at {@code app/cbl/COACTVWC.cbl} L475, L477, L479, L482 and L485. The update program
-   * renders the same values through a mask, declaring
-   * {@code WS-EDIT-CURRENCY-9-2 PIC X(15)} at {@code app/cbl/COACTUPC.cbl} L370 beside
-   * {@code WS-EDIT-CURRENCY-9-2-F PIC +ZZZ,ZZZ,ZZZ.99} at L371, whose picture measures fifteen
-   * characters and is exactly why the screen amount width is fifteen rather than the twelve bytes the
-   * value occupies in storage. Two screens, two renderings, one value: this contract carries the value
-   * at a scale of two and leaves rendering to the client.</p>
+   * transported rather than a formatted field. Both baseline screens render these five amounts
+   * through the SAME {@code +ZZZ,ZZZ,ZZZ.99} edit mask, reached by two different mechanisms, and the
+   * mechanism is what differs rather than the presentation. On the view screen the MAPSET edits:
+   * {@code app/bms/COACTVW.bms} declares {@code PICOUT='+ZZZ,ZZZ,ZZZ.99'} at L120, L141, L162, L174
+   * and L195, and the generated symbolic map declares those five fields with that picture rather than
+   * as character fields -- {@code ACRDLIMO} at {@code app/cpy-bms/COACTVW.CPY} L302, {@code ACSHLIMO}
+   * L314, {@code ACURBALO} L326, {@code ACRCYCRO} L332 and {@code ACRCYDBO} L344 -- so the program's
+   * five moves at {@code app/cbl/COACTVWC.cbl} L475, L477, L479, L482 and L485 hand the raw record
+   * field to a field that edits it, and that program's own {@code EDIT-FIELD-9-2 PIC
+   * +ZZZ,ZZZ,ZZZ.99} is commented out at L69 for exactly that reason. On the update screen the
+   * PROGRAM edits: {@code app/bms/COACTUP.bms} carries no {@code PICOUT} at all and its symbolic map
+   * declares {@code ACRDLIMO PIC X(15)} at {@code app/cpy-bms/COACTUP.CPY} L416 and {@code ACURBALO
+   * PIC X(15)} at L464, so {@code app/cbl/COACTUPC.cbl} declares {@code WS-EDIT-CURRENCY-9-2 PIC
+   * X(15)} at L370 beside {@code WS-EDIT-CURRENCY-9-2-F PIC +ZZZ,ZZZ,ZZZ.99} at L371 and moves the
+   * edited result into the unedited field. Either way the picture measures fifteen characters, which
+   * is why the screen amount width is fifteen rather than the twelve bytes the value occupies in
+   * storage.</p>
+   *
+   * <p>Refactoring Rationale: this paragraph previously stated that the VIEW program moved its five
+   * amounts into {@code PIC X(15)} screen fields "with no edit mask whatsoever" and concluded "two
+   * screens, two renderings". Both halves were wrong, and they were wrong together: the {@code
+   * X(15)}-with-no-mask description belongs to the UPDATE mapset and had been attributed to the view
+   * mapset, which produced a conclusion that the two screens present these amounts differently when
+   * in fact they present them identically. The correction matters beyond accuracy, because the browser
+   * screen that renders this contract used the claim as its justification for painting the wire text
+   * raw. This contract still carries the value at a scale of two and still leaves RENDERING to the
+   * client; what changed is that the client now has the mask to render, and one implementation of it
+   * serves both screens because the baseline has one mask, not two. Registered as
+   * {@code D-MONEY-MASK-NO-TRUNCATION}, which also records what the browser does with a value too
+   * wide for the mask's nine integer positions.</p>
    *
    * <h2>Two documented absences and one rename</h2>
    *

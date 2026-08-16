@@ -164,11 +164,31 @@ and the record loop at `:200-226` performs that paragraph once per record:
 
 | Output | Before | Arithmetic | After | Encoded |
 |---|---|---|---|---|
-| `TRAN-CAT-BAL` for `00000000007 / 01 / 0001` | `+0.00` | `0.00 + 2065.00` | **`+2065.00`** | `0000206500{` |
-| `ACCT-CURR-BAL` | `+193.00` | `193.00 + 2065.00` | **`+2258.00`** | `00000225800{` |
-| `ACCT-CURR-CYC-CREDIT` | `+0.00` | `0.00 + 2065.00` | **`+2065.00`** | `00000206500{` |
+| `TRAN-CAT-BAL` for `00000000007 / 01 / 0001` | `+0.00` | `0.00 + 2065.00` | **`+2065.00`** | `0000020650{` |
+| `ACCT-CURR-BAL` | `+193.00` | `193.00 + 2065.00` | **`+2258.00`** | `00000022580{` |
+| `ACCT-CURR-CYC-CREDIT` | `+0.00` | `0.00 + 2065.00` | **`+2065.00`** | `00000020650{` |
 | `ACCT-CURR-CYC-DEBIT` | `+0.00` | untouched -- `:551` runs only for a negative amount | **`+0.00`** | `00000000000{` |
 | `ACCT-CREDIT-LIMIT` | `+2065.00` | never written by this job | **`+2065.00`** | `00000020650{` |
+
+Assumptions: every cell in the `Encoded` column is the field's **whole** fixed-width value, so its
+length is the field's `PICTURE` width exactly -- eleven bytes for `TRAN-CAT-BAL` at `S9(09)V99`,
+twelve for the four `ACCT-*` fields at `S9(10)V99` -- and the trailing overpunch character is the
+**last digit position**, not a sign appended after the digits. Derive a cell by writing the value
+at the field's width with the implied decimal removed (`+2065.00` at `S9(09)V99` is
+`00000206500`), then replacing the final digit with its positive-zone letter (`0` becomes `{`).
+The last two rows are checkable against bytes on disk without doing any of that arithmetic:
+`00000020650{` and `00000000000{` are the literal `ACCT-CREDIT-LIMIT` and `ACCT-CURR-CYC-DEBIT`
+bytes in this folder's `acctdata.txt`, because this job never writes either field.
+
+Assumptions: the first three cells above are corrected values. They read `0000206500{`, `00000225800{` and
+`00000206500{`, each the right **width** and a factor of ten high, because each was built by
+appending `{` to a complete digit string instead of overpunching the digit string's last byte. The
+three claimed values in the `After` column were always correct, so nothing here disagreed with the
+arithmetic two columns to its left, and no test reads this table -- which is exactly why it went
+unnoticed. Section 5.3 below warns about the mirror-image mistake in the reading direction (taking
+`0000005047G` for `+50.47`), and these three cells committed the same class of error in the
+writing direction; both are recorded so a reader who hand-encodes a new expectation from this table
+has the rule and the counter-example together.
 
 **Those three writes are one commit.** Master section 7.1.5 (the reject payload, the unit of work
 and the category-balance branch) fixes the migrated shape: **one commit per record**, opened by a
@@ -660,23 +680,41 @@ leaves fixed point.
 
 ## 10. What drives this corpus, and what reads it
 
-This corpus is a **driven input**, not a mirror. `PostTransactionsJobParityIT` resolves each
-scenario under `/fixtures/posting/`, seeds the masters from these bytes, launches the posting job
-and compares the resulting transaction master, category balances, account master and reject stream
-against `tests/golden/posting/boundary_exact_limit` -- so an edit here changes what the parity run
-asserts. `BatchFixtureContractTest` additionally holds every file in this folder to its declared
-geometry and to the values that make the scenario discriminating, so a layout mistake is caught in
-this module rather than surfacing later as an unexplained comparison failure.
+This corpus is a **driven input**, and **three** classes read it. `PostTransactionsJobParityIT`
+resolves each scenario under `/fixtures/posting/`, seeds the masters from these bytes, launches the
+posting job and compares the resulting transaction master, category balances, account master and reject
+stream against `tests/golden/posting/boundary_exact_limit`. `PostTransactionsJobTest` resolves the same
+scenario under `fixtures/posting/` at the unit tier and seeds all four relations from the same bytes,
+so both tiers read this folder. `BatchFixtureContractTest` additionally holds every file here to its
+declared geometry, to the values that make the scenario discriminating -- for this folder, the one-cent
+pair against the seeded credit limit -- and to its committed SHA-256, so a layout mistake or an
+unintended byte change is caught in this module rather than surfacing later as an unexplained
+comparison failure.
 
-Assumptions: this is stated explicitly because the three families in this tree behave differently
-and the difference is invisible from the files themselves. Master section 10 is the authority for
-the `posting/**` family: it records that `PostTransactionsJobParityIT` declares `/fixtures/posting/`
-as its seed root and compares against `tests/golden/posting/<scenario>`, and that each posting
-README says so. Master section 1.5 (which scenarios drive a job in this module) is the authority for
-the other two: `preflight/**` is opened directly by `PreflightDailyTransactionsJobTest`, while
-`interest/**` is a mirror whose consuming test resolves its inputs under the repository root and so
-never reads this tree at all. A reader who assumed these bytes drive nothing would edit them
-expecting no consequence, which is the most expensive mistake this folder admits.
+Assumptions: master section 10 is the authority for the `posting/**` family: it records that
+`PostTransactionsJobParityIT` declares `/fixtures/posting/` as its seed root and compares against
+`tests/golden/posting/<scenario>`, and that each posting README says so.
+
+Assumptions: this section exists because two record files sitting in the same tree can differ in
+whether a job opens them, and the difference is invisible from the layout. Master section 1.5 holds the
+measurement, taken from the resource root each consuming class declares rather than from prose: all four
+files in every one of the NINE `posting/**` scenarios are opened -- by `PostTransactionsJobTest` under
+the classpath prefix `fixtures/posting/` and by `PostTransactionsJobParityIT` under `/fixtures/posting/`
+-- all four files in every one of the THREE `interest/**` scenarios are opened by
+`CalculateInterestJobTest` under `fixtures/interest/`, and `PreflightDailyTransactionsJobTest` opens the
+three `preflight/**` feed files plus `preflight/unmatched_card/acctdata.txt` under
+`fixtures/preflight/`. **53 of the 62 record files in this tree are live job input**; master section 1.5
+names the nine that are not.
+
+Assumptions: this paragraph previously said the sibling `preflight/**` and `interest/**` families were
+mirrors that no test in this module read, and that `CalculateInterestJobTest` resolved its inputs from
+the repository-root `tests/fixtures/interest/` tree. Both claims were false. That class declares
+`FIXTURE_INTEREST_ROOT` as the classpath prefix `fixtures/interest/` and loads through
+`getClassLoader().getResourceAsStream(...)`, so it reads this tree; it DISCUSSES the reference oracle
+tree in its prose, and the two were conflated -- a path named in a docstring is not a path being opened.
+The correction matters in exactly the direction the paragraph was warning about: a reader told that a
+sibling directory was inert would carry that belief into it and edit a live job input believing the
+change was free.
 
 ---
 

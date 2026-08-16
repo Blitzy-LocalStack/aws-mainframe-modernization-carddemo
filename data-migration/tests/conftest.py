@@ -1834,6 +1834,7 @@ class FakeAuroraCursor:
             else tuple(_reject_float(value, context="a bound parameter") for value in params)
         )
         self.connection.database.record_statement(statement, bound)
+        self.connection.note_transaction_statement(statement)
         # WHY : Assumptions: an arranged failure is raised AFTER the statement is recorded, so a
         #   test can assert which statement failed as well as what the failure did. Raising first
         #   would lose the record of the attempt, and "the merge was never issued" and "the merge
@@ -2128,6 +2129,81 @@ class FakeAuroraConnection:
         self.commits = 0
         self.rollbacks = 0
         self.closed = False
+        # WHY : Assumptions: the double models the DRIVER's implicit transaction, not just a
+        #   statement log. psycopg opens a transaction on the first execute of a connection whose
+        #   autocommit is off, and every cursor on that connection shares it, so "how many
+        #   statements has this transaction already run" is a real property of the boundary this
+        #   class stands in for. It is carried here rather than on the cursor for exactly that
+        #   reason: two cursors must see one transaction.
+        self.statements_in_transaction = 0
+        # WHY : Assumptions: the transaction's declared MODES are tracked beside the count, because
+        #   the ordering rule needs to tell a first establishment from an idempotent re-statement.
+        #   A set of normalised mode texts is enough for that question and says nothing about modes
+        #   this package never issues.
+        self.transaction_modes: set[str] = set()
+
+    def note_transaction_statement(self, statement: str) -> None:
+        """Record one statement against this connection's transaction and hold its ordering rule.
+
+        Purpose
+        -------
+        Model the one ordering rule a real server has about the statements this package issues:
+        ``SET TRANSACTION`` states properties OF a transaction and therefore belongs at its
+        start, before anything has run in it.
+
+        Parameters
+        ----------
+        statement : str
+            The SQL text just executed on any cursor of this connection.
+
+        Returns
+        -------
+        None
+            Advances this transaction's statement count.
+
+        Raises
+        ------
+        FakeClientContractError
+            If ``SET TRANSACTION`` arrives after another statement has already run in the same
+            transaction.
+        """
+        # WHY : Refactoring Rationale: this rule exists because the double previously modelled a
+        #   statement LOG and nothing else, so it recorded `select current_user` followed by
+        #   `SET TRANSACTION READ ONLY` without objection and a test asserting that order passed
+        #   -- while the comment beside the assertion said the setting had to come first. A fake
+        #   that accepts every order can neither confirm nor refute an ordering claim, which is the
+        #   one thing those two aggregate passes needed it for.
+        # WHY : Trade-offs: the modelled rule is STRICTER than PostgreSQL 17, which was measured to
+        #   accept a mid-transaction tightening of the access mode and to refuse only
+        #   `SET TRANSACTION ISOLATION LEVEL` after a query, with SQLSTATE 25001. The stricter rule
+        #   is deliberate: it is the position the SQL standard gives the whole `SET TRANSACTION`
+        #   family and the one a pooler or proxy may enforce, so holding this package to it here
+        #   keeps the emitted sequence portable instead of resting on one engine's leniency. The
+        #   cost is that a legitimate-on-PostgreSQL late tightening would fail this suite; nothing
+        #   in this package issues one, and a future caller that wants to should have to say so.
+        # WHY : Assumptions: the match is on the `SET TRANSACTION` prefix only, so `SET LOCAL` and
+        #   `SET SESSION CHARACTERISTICS` are unaffected -- neither is position-restricted, and the
+        #   session-level form is exactly what `verify/session.py` uses for that reason.
+        # WHY : Trade-offs: re-stating a mode the transaction ALREADY holds is admitted, and that
+        #   exception is what keeps the rule usable rather than merely strict. The verification gate
+        #   runs three passes over one connection without committing between them, so the second and
+        #   third pass each re-assert `READ ONLY` on a transaction the first one already made read
+        #   only -- an idempotent no-op on any server, and not the defect this rule exists to catch.
+        #   What it catches is the FIRST establishment of a mode arriving late, which is the case
+        #   where the statements already run were governed by a different mode than the ones after
+        #   it.
+        normalised = " ".join(statement.strip().upper().split())
+        if normalised.startswith("SET TRANSACTION"):
+            mode = normalised[len("SET TRANSACTION") :].strip().rstrip(";")
+            if self.statements_in_transaction and mode not in self.transaction_modes:
+                raise FakeClientContractError(
+                    f"{statement.strip()!r} was issued after"
+                    f" {self.statements_in_transaction} statement(s) had already run in this"
+                    " transaction; SET TRANSACTION states a property OF a transaction and must be"
+                    " its first statement, so a server may refuse it here"
+                )
+            self.transaction_modes.add(mode)
+        self.statements_in_transaction += 1
 
     def cursor(self, name: str | None = None) -> FakeAuroraCursor:
         """Return a new cursor over this connection, server-side when a name is given.
@@ -2214,6 +2290,12 @@ class FakeAuroraConnection:
             raise arranged_failure
         self.commits += 1
         self.database.commits += 1
+        # WHY : Assumptions: a successful commit ENDS the transaction, so the next statement opens
+        #   a new one and a `SET TRANSACTION` is legitimate again. Without this the order check
+        #   below would refuse the second unit of work on a reused connection, which is a shape the
+        #   loaders genuinely use.
+        self.statements_in_transaction = 0
+        self.transaction_modes.clear()
 
     def rollback(self) -> None:
         """Record a rollback of the current unit of work.
@@ -2242,6 +2324,11 @@ class FakeAuroraConnection:
         #   connection whose rollback fails has no committed work either way.
         self.rollbacks += 1
         self.database.rollbacks += 1
+        # WHY : Assumptions: the transaction is discarded whether or not the rollback itself
+        #   fails, because a connection whose rollback failed holds no usable transaction either
+        #   way. Resetting before the arranged failure keeps that true for both outcomes.
+        self.statements_in_transaction = 0
+        self.transaction_modes.clear()
         arranged_failure = self.database.rollback_failure()
         if arranged_failure is not None:
             raise arranged_failure

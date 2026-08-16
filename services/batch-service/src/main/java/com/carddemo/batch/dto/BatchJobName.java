@@ -37,7 +37,7 @@ import java.util.Objects;
  *
  * <p>Trade-offs: the constants are declared in nightly execution order -- preflight, post,
  * interest, backup, combine -- and then the two unscheduled jobs, so a maintainer reading this file
- * top to bottom maps it straight onto states 4 through 8 of the twelve-state chain. The cost of
+ * top to bottom maps it straight onto states 3 through 7 of the eleven-state chain. The cost of
  * encoding an order in a declaration is that the order becomes reachable as a number:
  * <b>{@link #ordinal()} is NOT part of any contract this type carries, and must never be persisted,
  * transmitted, stored in the durable step ledger or written into an orchestration definition.</b>

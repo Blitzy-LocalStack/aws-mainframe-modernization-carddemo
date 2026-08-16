@@ -21,7 +21,7 @@ import jakarta.validation.constraints.Size;
  * that outcome the service classified it as an integration failure, so the very first sign-on of every
  * provisioned user answered HTTP 500 and no operation existed through which a permanent password could
  * be set. The edge was already forwarding the answer path: {@code POST /api/v1/auth/challenge} is one
- * of the three deliberately unauthenticated route keys in
+ * of the four deliberately unauthenticated route keys in
  * {@code infra/modules/api-gateway-http/variables.tf}, so the gateway routed an operation the service
  * did not serve.
  *

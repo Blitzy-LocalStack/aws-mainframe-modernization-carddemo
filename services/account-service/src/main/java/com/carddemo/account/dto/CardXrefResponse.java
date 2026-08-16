@@ -116,8 +116,8 @@ package com.carddemo.account.dto;
  * <p>Alternatives Considered: a class with generated accessors was weighed against a Java 21 {@code record},
  * and the record is used. No accessor-generation library is a dependency of this module, for a mechanical
  * reason rather than a stylistic one: {@code config/checkstyle/checkstyle.xml} configures
- * {@code MissingJavadocMethod} with {@code allowMissingPropertyJavadoc} false at L365 and clears
- * {@code allowedAnnotations} at L366, so an accessor must carry a docstring of its own, and a generated
+ * {@code MissingJavadocMethod} with {@code allowMissingPropertyJavadoc} false at L358 and clears
+ * {@code allowedAnnotations} at L359, so an accessor must carry a docstring of its own, and a generated
  * member has nowhere to hold one. The Explainability rule's presence clause at its L15 grants no exemption
  * either. A record's canonical accessors are documented instead by the type-level parameter tags below, which
  * {@code JavadocType} requires in full because {@code allowMissingParamTags} is false at L413 and

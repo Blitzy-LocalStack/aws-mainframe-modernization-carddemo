@@ -51,7 +51,7 @@ below is owned by exactly one sibling module:
 | log groups, dashboards, alarms, SNS topic | `observability` |
 | the four customer-managed keys | `kms` |
 | container image repositories | `ecr` |
-| the twelve-state nightly batch state machine, whose task states run in this cluster | `step-functions-batch` |
+| the eleven-state nightly batch state machine, whose task states run in this cluster | `step-functions-batch` |
 
 **This module calls no sibling module.** It consumes only its own ten variables,
 reads no data source, and declares no dependency on any other module.
@@ -87,10 +87,10 @@ than a preference: batch steps run longer than Lambda's fifteen-minute execution
 ceiling, and a step that cannot finish inside the ceiling cannot run there at
 all.
 
-Assumptions: Lambda remains the right host for exactly three of the twelve states
+Assumptions: Lambda remains the right host for exactly three of the eleven states
 in the nightly chain, which is what "glue" means here precisely — state 1
-`QuiesceOnlineWrites` sets a read-only flag in Parameter Store, state 11
-`AnalyzeTables` runs `VACUUM ANALYZE`, and state 12 `ResumeOnlineWrites` clears
+`QuiesceOnlineWrites` sets a read-only flag in Parameter Store, state 10
+`AnalyzeTables` runs `VACUUM ANALYZE`, and state 11 `ResumeOnlineWrites` clears
 the flag. Each is short, stateless and well inside the ceiling. The
 data-moving states between them are the ones that need a task, and they run in
 this cluster. See [ADR-005](../../../docs/adr/ADR-005-batch-orchestration.md) and

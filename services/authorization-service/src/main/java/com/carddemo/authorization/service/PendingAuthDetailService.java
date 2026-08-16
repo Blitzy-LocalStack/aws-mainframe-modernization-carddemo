@@ -272,11 +272,11 @@ public class PendingAuthDetailService {
         Objects.requireNonNull(subject, "subject must not be null");
         PendingAuthDetailKey key = this.mapper.openKey(selector, subject);
 
-        // WHY : Trade-offs: the not-found message names NEITHER the account nor the two clock values the
-        //       selector redeemed to. A diagnostic naming them would be more useful to an operator and
-        //       would also place an account identifier in a response body and a log line, which is the one
-        //       destination the masking this context applies at its edge does not reach. The correlation
-        //       identity on the response is the handle into server-side diagnostics instead.
+        // Trade-offs: the not-found message names NEITHER the account nor the two clock values the
+        // selector redeemed to. A diagnostic naming them would be more useful to an operator and
+        // would also place an account identifier in a response body and a log line, which is the one
+        // destination the masking this context applies at its edge does not reach. The correlation
+        // identity on the response is the handle into server-side diagnostics instead.
         PendingAuthDetail detail = this.details.findById(key)
                 .orElseThrow(() -> new NoSuchElementException(
                         "the selector names no pending authorization"));
@@ -360,11 +360,11 @@ public class PendingAuthDetailService {
             return null;
         }
 
-        // WHY : Assumptions: the stored field is fixed-width and space-padded, so a code arriving from the
-        //       segment may carry trailing blanks that the table's four-character keys do not. Trimming
-        //       before the lookup is what makes a padded 'a code plus blanks' find its entry; comparing
-        //       the raw value would miss every entry and send every authorization down the no-entry
-        //       branch, which is a failure that produces a plausible screen rather than an error.
+        // Assumptions: the stored field is fixed-width and space-padded, so a code arriving from the
+        // segment may carry trailing blanks that the table's four-character keys do not. Trimming
+        // before the lookup is what makes a padded 'a code plus blanks' find its entry; comparing
+        // the raw value would miss every entry and send every authorization down the no-entry
+        // branch, which is a failure that produces a plausible screen rather than an error.
         return DECLINE_REASON_DESCRIPTIONS.get(reasonCode.trim());
     }
 
@@ -430,7 +430,7 @@ public class PendingAuthDetailService {
      * normal outcome into an exceptional one, and a {@code null} would carry the verbatim message
      * nowhere.
      *
-     * <p>⚠️ Assumptions: an EXHAUSTED chain and an ABSENT ANCHOR are two different outcomes and are
+     * <p>Assumptions: an EXHAUSTED chain and an ABSENT ANCHOR are two different outcomes and are
      * reported differently -- the first as the end-of-data message on a 200, the second as the same
      * not-found condition {@link #read} raises. The distinction belongs to the caller: exhaustion means
      * the authorization it is showing is the oldest one, while an absent anchor means the authorization it
@@ -453,25 +453,21 @@ public class PendingAuthDetailService {
         Objects.requireNonNull(subject, "subject must not be null");
         PendingAuthDetailKey key = this.mapper.openKey(selector, subject);
 
-        // WHY : ⚠️ Refactoring Rationale: the anchor is READ before the step, and it previously was not.
-        //       Without it this method stepped from a position that need not exist: a selector whose row
-        //       the expiry sweep had removed was answered 200 with the next older authorization, while the
-        //       two sibling reads on the same selector answered 404. A caller therefore received a
-        //       plausible authorization it had not asked for, with nothing in the answer to say that the
-        //       one it did ask for was gone -- and the 404 the document publishes for this route was
-        //       unreachable, because the only other outcome is the end-of-data arm below.
-        // WHY : ⚠️ Assumptions: this is faithful to the reference rather than merely contract-driven.
-        //       READ-NEXT-AUTH-RECORD at L493 to L519 issues an unqualified get-next, which advances from
-        //       the position an earlier successful get-unique established; there is no position to advance
-        //       from when that retrieval found nothing, so the reference cannot reach its get-next with a
-        //       missing anchor either.
-        // WHY : ⚠️ Trade-offs: one extra primary-key lookup per forward step, inside the same read-only
-        //       transaction. The alternative -- inferring the anchor's existence from the successor query
-        //       -- cannot distinguish an anchor the sweep removed from an anchor that is genuinely the
-        //       oldest row, and those two states must answer 404 and 200 respectively.
-        // WHY : ⚠️ Assumptions: the diagnostic is the SAME sentence #read raises, deliberately, so the
-        //       three reads of one selector are indistinguishable in their absence reporting; it names
-        //       neither the account nor the clock values for the reason recorded on that method.
+        // Assumptions: the anchor is read before the step, so a selector whose row the expiry sweep has
+        //   removed answers 404 exactly as the two sibling reads of the same selector do. Stepping from a
+        //   position that need not exist would answer 200 with the next older authorization and give the
+        //   caller nothing to say the row it asked for is gone.
+        // Assumptions: reading the anchor first is faithful to the reference rather than merely
+        //   contract-driven. READ-NEXT-AUTH-RECORD at L493 to L519 issues an unqualified get-next, which
+        //   advances from the position an earlier successful get-unique established, so the reference
+        //   cannot reach its get-next with a missing anchor either.
+        // Trade-offs: one extra primary-key lookup per forward step, inside the same read-only
+        //   transaction. Inferring the anchor's existence from the successor query instead cannot
+        //   distinguish an anchor the sweep removed from an anchor that is genuinely the oldest row, and
+        //   those two states must answer 404 and 200 respectively.
+        // Assumptions: the diagnostic is the same sentence #read raises, so the three reads of one
+        //   selector are indistinguishable in their absence reporting, and it names neither the account
+        //   nor the clock values for the reason recorded on that method.
         this.details.findById(key)
                 .orElseThrow(() -> new NoSuchElementException(
                         "the selector names no pending authorization"));
@@ -743,11 +739,40 @@ public class PendingAuthDetailService {
          * {@code null} with no indication of why. Refusing the impossible combinations at construction
          * means every instance that exists describes one of the two outcomes L504 to L506 can reach.
          *
+         * <p>Refactoring Rationale: the MESSAGE is checked too, and it was not. The two checks below on
+         * the authorization alone left three combinations constructible that this record's own
+         * documentation and the published schema both prohibit: {@code (null, true, null)}, an
+         * exhaustion carrying no text where the contract declares text present; {@code (null, true,
+         * "anything")}, an exhaustion carrying wording no reference line produces; and
+         * {@code (authorization, false, "anything")}, a successful move carrying an exhaustion message
+         * beside the authorization it found. Each would have reached a client as a well-formed 200 whose
+         * message member disagreed with its {@code endOfData} member, and the screen would either show
+         * no boundary text at the boundary or show boundary text mid-chain. A record whose invariant is
+         * stated in prose and enforced in part is worse than one that states less, because a reader
+         * stops checking.</p>
+         *
+         * <p>Alternatives Considered: modelling the two outcomes as separate types under a sealed
+         * interface, which makes the impossible combinations unrepresentable rather than rejected.
+         * Rejected on blast radius against benefit: the two outcomes are serialised as ONE JSON object
+         * whose three members are all required by
+         * {@code openapi/authorization-api.yaml}, so a sealed pair would need a mapping layer back to
+         * that single shape, and every caller and test would move from reading two members to a pattern
+         * match. The compact constructor gives the same guarantee at the only point an instance can come
+         * into existence, which is where the guarantee has to hold.</p>
+         *
+         * <p>Assumptions: the exhaustion message is compared for EQUALITY against
+         * {@link #LAST_AUTHORIZATION_REACHED} rather than merely required to be non-null. The reference
+         * shows exactly one boundary sentence, and this record is where its verbatim-text guarantee is
+         * enforceable at all -- a non-null check would admit any wording, which is the second of the
+         * three combinations above and the one a reader is least likely to notice.</p>
+         *
          * @param authorization the next older authorization, or {@code null} when the chain is exhausted
          * @param endOfData whether the step found no further authorization
          * @param message the verbatim exhaustion message, or {@code null} when an authorization was found
-         * @throws IllegalArgumentException if an authorization is present alongside the end-of-data flag,
-         *     or if neither an authorization nor the end-of-data flag is present
+         * @throws IllegalArgumentException if an authorization is present alongside the end-of-data flag;
+         *     if neither an authorization nor the end-of-data flag is present; if an exhausted step
+         *     carries anything other than {@link #LAST_AUTHORIZATION_REACHED} as its message; or if a
+         *     step that found an authorization carries a message at all
          */
         public NextAuthorization {
             if (endOfData && authorization != null) {
@@ -757,6 +782,14 @@ public class PendingAuthDetailService {
             if (!endOfData && authorization == null) {
                 throw new IllegalArgumentException(
                         "a forward step that found an authorization must carry it");
+            }
+            if (endOfData && !LAST_AUTHORIZATION_REACHED.equals(message)) {
+                throw new IllegalArgumentException(
+                        "an exhausted forward step carries exactly the reference exhaustion message");
+            }
+            if (!endOfData && message != null) {
+                throw new IllegalArgumentException(
+                        "a forward step that found an authorization carries no message");
             }
         }
     }

@@ -19,10 +19,15 @@
 #
 # Parameters:
 #   variables.tf owns the complete input contract -- twelve required and
-#   sixteen optional inputs, in five categories:
+#   twenty-one optional inputs, in five categories. The optional figure is a
+#   measurement of the `default =` declarations in that file rather than a
+#   recollection: it read sixteen while twenty were declared, so the sentence
+#   understated the surface a caller may configure by four.
+#   The five categories:
 #     naming and tagging ......... `name_prefix`, `environment`, `tags`
 #     the log encryption key ..... `kms_key_arn`
 #     retention and group set .... `log_retention_days`, `log_group_names`,
+#                                  `state_machine_log_group_names`,
 #                                  `access_log_bucket_force_destroy`
 #     notification ............... `alarm_email_endpoints`
 #     producer identifiers and
@@ -38,8 +43,9 @@
 # Return values:
 #   outputs.tf publishes the notification topic ARN and name, the access-log
 #   bucket name and ARN, the created log-group names and ARNs, the dashboard
-#   name and ARN, and the merged map of alarm ARNs, so a root can wire a
-#   producer or an operator runbook without reconstructing a name or an ARN.
+#   name and ARN, the per-machine metric-filter and execution-failure alarm
+#   names, and the merged map of alarm ARNs, so a root can wire a producer or an
+#   operator runbook without reconstructing a name or an ARN.
 #
 # Declarations:
 #   Purpose for every declaration in this file is stated here, in the one block a
@@ -49,6 +55,12 @@
 #     data sources, and every one of them is referenced below.
 #   - `aws_cloudwatch_log_group.managed`: one group per producer that owns no
 #     log-group resource of its own, named exactly as the root supplies it.
+#   - `aws_cloudwatch_log_metric_filter.state_machine_execution_failure`: one
+#     filter per state machine the root names in `state_machine_log_group_names`,
+#     counting the terminal ExecutionFailed and ExecutionTimedOut events out of
+#     that machine's own execution log group.
+#     This module reads those groups and never creates them; the batch module
+#     owns their lifecycle.
 #   - `aws_sns_topic.alerts`: the single destination every alarm below publishes
 #     to, and the successor to the baseline's per-job operator notification.
 #   - `data aws_iam_policy_document.alerts`: the topic's resource policy, built as
@@ -114,6 +126,25 @@
 #       environment root itself configured. Has the cluster exhausted the capacity
 #       it is permitted to add? Review the workload, and raise the declared
 #       maximum only where the pressure is expected.
+#     - `aurora_connections`: the cluster's connection count reaches the budget
+#       every configured pool could open at full autoscale. Is the cluster running
+#       out of connections before it runs out of capacity? Reduce a pool size or a
+#       maximum task count. Created only when the root supplies the budget.
+#     - `cloudfront_5xx`: the distribution's server-error RATE reaches the
+#       configured percentage. Is the static delivery path failing, as distinct
+#       from the API path? Compare the origin bucket's access log before
+#       redeploying the built assets. Created only when the root supplies a
+#       distribution identifier, asks for the alarm and the provider region is the
+#       one region CloudFront publishes distribution metrics to.
+#     - `state_machine_execution_failure`: a state machine logged a terminal
+#       ExecutionFailed or ExecutionTimedOut event in its own execution log group.
+#       An abort is excluded, matching the disposition of the service-level
+#       ExecutionsAborted metric. Did an execution of THIS machine end without doing
+#       its work? Read that machine's execution history in the group the alarm
+#       description names, correct the cause and redrive. One alarm per machine,
+#       so it covers the three operator-invoked machines that `batch_failure`
+#       -- dimensioned on the daily machine alone -- cannot see, and the in-graph
+#       failures a caught state never reports to `ExecutionsFailed`.
 #
 # Exceptions or errors:
 #   - `kms_key_arn` is required and rejects null. variables.tf records that
@@ -131,13 +162,18 @@
 #     ownership conflict, which is why this module creates only groups
 #     explicitly listed by the root and never recreates groups owned by ECS,
 #     API Gateway, Step Functions or the network module.
-#   - CloudFront publishes its distribution metrics in one fixed region only,
-#     so CloudFront appears here as a dashboard widget and never as an alarm.
-#     An alarm on such a metric created under any other provider region
-#     receives no datapoint and stays in INSUFFICIENT_DATA -- configured in
-#     appearance, unable to fire in fact. versions.tf declares no
-#     `configuration_aliases` precisely because of that choice, so adding a
-#     CloudFront alarm requires changing both files together.
+#   - CloudFront publishes its distribution metrics in ONE fixed region only, so
+#     the distribution alarm is created only when the provider region is that
+#     region and the root asks for it; under any other region CloudFront appears
+#     here as a dashboard widget alone. An alarm on such a metric created
+#     elsewhere receives no datapoint and stays in INSUFFICIENT_DATA --
+#     configured in appearance, unable to fire in fact -- which is why the
+#     resource is region-gated rather than unconditional. versions.tf declares no
+#     `configuration_aliases` precisely because of that choice, so serving a
+#     second region requires changing both files together. An earlier revision of
+#     this sentence said CloudFront never appears as an alarm at all, which
+#     described the region-gated case as a blanket absence and contradicted both
+#     the resource below and `create_cloudfront_alarm`'s own contract.
 #   - Input validation rejects a malformed metric dimension before any resource
 #     is evaluated, so a full ARN passed where a load balancer's ARN suffix
 #     belongs fails while planning rather than producing a permanently empty
@@ -327,6 +363,19 @@ locals {
     timed_out = "ExecutionsTimedOut"
     throttled = "ExecutionThrottled"
   }
+
+  # WHY : Refactoring Rationale: the custom namespace is named ONCE here and read by
+  #       both the dashboard's meter search and the state-machine failure filters
+  #       further down. It used to be spelled as a literal inside the search
+  #       expressions alone, which was tolerable while nothing else wrote to it;
+  #       a filter that published into a differently-spelled namespace would create
+  #       a second, near-identically-named namespace and an alarm addressing the
+  #       wrong one would sit in INSUFFICIENT_DATA without anything failing.
+  # WHY : Assumptions: the value matches what the container workloads already export
+  #       -- infra/modules/ecs-service configures its metric sink with the same
+  #       namespace -- so this local records the estate's existing choice rather than
+  #       introducing one.
+  application_metric_namespace = "CardDemo"
 
   # WHY : Assumptions: the caller's map is the BASE and these two keys are layered
   #       over it, so a root cannot accidentally drop the module attribution while
@@ -1029,14 +1078,26 @@ locals {
 
   # WHY : Refactoring Rationale: this widget exists because the application metric
   #       pipeline had a producer and no consumer. Every service declares the
-  #       Actuator and a Prometheus registry, the shared kernel's meter filter
-  #       stamps three common tags on each meter, and the telemetry sidecar in
-  #       infra/modules/ecs-service scrapes that endpoint and exports it through
-  #       CloudWatch EMF into the `CardDemo` namespace -- and before this widget,
-  #       nothing in this module read that namespace at all. Meters were therefore
-  #       being collected, stored and billed while being visible nowhere, which is
-  #       the one state worse than not collecting them: the cost is paid and the
-  #       benefit is not.
+  #       Actuator and a Prometheus registry, and the shared kernel's meter filter
+  #       stamps three common tags on each meter, while before this widget nothing in
+  #       this module read the `CardDemo` namespace at all.
+  # WHY : Refactoring Rationale: that paragraph also named a telemetry sidecar in
+  #       infra/modules/ecs-service as the component scraping the Actuator endpoint
+  #       and exporting through CloudWatch EMF, and concluded that meters "were
+  #       therefore being collected, stored and billed while being visible nowhere".
+  #       The sidecar is withdrawn -- it is outside the frozen specification and was
+  #       forcing an eleventh ECR repository and a ninth interface endpoint, both also
+  #       outside it -- so the claim would now overstate what exists in two directions
+  #       at once: nothing scrapes the endpoint, and nothing is therefore being billed
+  #       for storage either.
+  #       Trade-offs: this widget consequently has a namespace with no publisher until
+  #       a scraper is introduced that fits the specification's endpoint and repository
+  #       counts. It is kept rather than deleted because the producer half is real and
+  #       unchanged -- every service exposes the meters with the common tags -- so what
+  #       is missing is one collector, not a metric contract; and an empty widget on the
+  #       operations dashboard states that absence to an operator, where a deleted
+  #       widget would hide it. docs/architecture/observability.md records the same gap
+  #       in the same terms.
   # WHY : Assumptions: the series are selected by SEARCH expression rather than by
   #       an explicit metric list, and that is forced by how the exporter publishes.
   #       It runs with no dimension roll-up and with resource-to-telemetry conversion
@@ -1073,8 +1134,8 @@ locals {
       view   = "timeSeries"
       period = var.alarm_period_seconds
       metrics = [
-        [{ expression = "SEARCH('{CardDemo} http_server_requests', 'Sum', ${var.alarm_period_seconds})", label = "HTTP server requests", id = "requests" }],
-        [{ expression = "SEARCH('{CardDemo} jvm_memory_used', 'Average', ${var.alarm_period_seconds})", label = "JVM heap in use", id = "heap" }],
+        [{ expression = "SEARCH('{${local.application_metric_namespace}} http_server_requests', 'Sum', ${var.alarm_period_seconds})", label = "HTTP server requests", id = "requests" }],
+        [{ expression = "SEARCH('{${local.application_metric_namespace}} jvm_memory_used', 'Average', ${var.alarm_period_seconds})", label = "JVM heap in use", id = "heap" }],
       ]
     }
   }]
@@ -1682,6 +1743,117 @@ resource "aws_cloudwatch_metric_alarm" "batch_failure" {
 
   tags = merge(local.tags, {
     Signal = "batch-${each.key}"
+  })
+}
+
+# -----------------------------------------------------------------------------
+# State-machine execution failures, read out of the execution log groups.
+# -----------------------------------------------------------------------------
+
+# WHY : Refactoring Rationale: this pair of resources is what makes
+#       infra/modules/step-functions-batch's published log-group contract true. That
+#       module creates one execution log group per machine and its outputs state that
+#       this module attaches metric filters and log-based alarms to those exact groups;
+#       until now nothing here consumed them, so the sentence described a wiring that
+#       did not exist. The wiring is worth having on its own terms, which is why the
+#       claim was closed by building it rather than by deleting the sentence: the
+#       AWS/States alarms above carry the DAILY machine's ARN as their only dimension,
+#       so a failed ad-hoc report, dataset round trip or authorization extract raised no
+#       signal anywhere.
+# WHY : Alternatives Considered: (1) letting this module derive the group names from the
+#       convention the owning module follows -- /aws/vendedlogs/states/ followed by the
+#       machine name. Rejected because it makes the name an implicit contract nothing
+#       validates, so a rename there would leave this filter attached to a group that no
+#       longer receives events, and a filter over a silent group reports zero rather than
+#       failing. (2) Alarming on ExecutionsFailed per machine instead. Rejected because
+#       that metric counts whole executions, and every state in the batch graph catches
+#       its own failure into a notification path, so an execution can log a terminal
+#       failure event without the service-level counter moving.
+# WHY : Assumptions: the pattern matches the two TERMINAL FAILURE history events -- a
+#       failure and a timeout -- and deliberately neither TaskFailed nor
+#       ExecutionAborted. A task failure is retried by the state's own Retry block, so
+#       alarming on it would report every transient retry the graph then recovered from.
+#       An ABORT is excluded for the reason this module already records for the
+#       service-level ExecutionsAborted metric: an abort is ordinarily somebody's
+#       deliberate act, so alarming on it notifies whoever just performed the stop. The
+#       two events kept fire once per execution that ended badly without anyone asking
+#       it to.
+resource "aws_cloudwatch_log_metric_filter" "state_machine_execution_failure" {
+  for_each = var.state_machine_log_group_names
+
+  name           = "${local.name_stem}-${replace(each.key, "_", "-")}-execution-failures"
+  log_group_name = each.value
+
+  # WHY : Assumptions: the pattern reads the `type` member of the vended JSON event
+  #       record, which is the field Step Functions writes its history event type into,
+  #       and it is expressed as a JSON filter rather than a text search so a log line
+  #       that merely CONTAINED the words cannot match.
+  pattern = "{ $.type = \"ExecutionFailed\" || $.type = \"ExecutionTimedOut\" }"
+
+  metric_transformation {
+    # WHY : Assumptions: one metric NAME per machine rather than one name with a
+    #       machine dimension, because a metric filter can only set a dimension from a
+    #       field it extracts from the event, and the machine identity is not carried in
+    #       the event body. Per-machine names are what let each alarm below address one
+    #       machine.
+    name = "state_machine_execution_failures_${each.key}"
+
+    # WHY : Assumptions: the same `CardDemo` namespace the container workloads export
+    #       their meters into, so an operator has one namespace to search rather than
+    #       two. The dashboard's application-meter widget searches that namespace by
+    #       metric-name token -- http_server_requests and jvm_memory_used -- so these
+    #       series do not appear in it and it stays a panel of application meters.
+    namespace = local.application_metric_namespace
+
+    value = "1"
+
+    # WHY : Assumptions: a zero is emitted for every non-matching event, so the series
+    #       reports a real zero while a machine is running cleanly instead of reporting
+    #       nothing. Without it the alarm would spend every quiet period in
+    #       INSUFFICIENT_DATA, which is indistinguishable from a control that is not
+    #       wired up -- the exact failure mode this module avoids elsewhere by refusing
+    #       to alarm on a function that does not exist.
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+# WHY : Assumptions: one alarm per machine, at a threshold of one event, because a
+#       terminal failure is not a rate to be tuned -- a single one means an execution
+#       ended without doing its work. The evaluation window is one period for the same
+#       reason the batch alarms above use one: the machines run once per night or once
+#       per operator request, so there is no second execution inside a window to
+#       corroborate the first and requiring one would leave a failed run unreported.
+# WHY : Trade-offs: the alarm notifies and recovers on the same topic as every other
+#       alarm here rather than on a per-machine topic. One destination means an operator
+#       subscribes once; the machine is identifiable from the alarm name and from the
+#       metric name, so nothing is lost by not partitioning the topic.
+resource "aws_cloudwatch_metric_alarm" "state_machine_execution_failure" {
+  for_each = var.state_machine_log_group_names
+
+  alarm_name          = "${local.name_stem}-${replace(each.key, "_", "-")}-execution-failures"
+  alarm_description   = "Condition: the ${each.key} state machine logged a terminal ExecutionFailed or ExecutionTimedOut event. Question: did an execution end without completing its work? Action: read the execution history in ${each.value}, correct the cause and redrive the execution."
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  threshold           = 1
+  evaluation_periods  = 1
+  datapoints_to_alarm = 1
+  period              = var.alarm_period_seconds
+  namespace           = local.application_metric_namespace
+  metric_name         = aws_cloudwatch_log_metric_filter.state_machine_execution_failure[each.key].metric_transformation[0].name
+  statistic           = "Sum"
+
+  # WHY : Assumptions: missing data is not breaching, which is the same disposition every
+  #       other alarm here takes. The filter's default value already publishes a zero
+  #       whenever the group receives any event, so the only way this metric goes missing
+  #       is a machine that has not been invoked at all -- which is a quiet night rather
+  #       than a failure.
+  treat_missing_data = "notBreaching"
+  actions_enabled    = true
+  alarm_actions      = [aws_sns_topic.alerts.arn]
+  ok_actions         = [aws_sns_topic.alerts.arn]
+
+  tags = merge(local.tags, {
+    Signal = "state-machine-execution-failures-${each.key}"
   })
 }
 

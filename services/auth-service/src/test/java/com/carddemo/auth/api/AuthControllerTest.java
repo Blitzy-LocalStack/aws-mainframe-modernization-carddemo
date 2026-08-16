@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -17,7 +18,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.carddemo.auth.config.SecurityConfig;
 import com.carddemo.auth.dto.SignOnRequest;
 import com.carddemo.auth.dto.SignOnResponse;
+import com.carddemo.auth.dto.TokenRefreshRequest;
 import com.carddemo.auth.service.CognitoIdentityService;
+import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.security.JwtRoleConverter;
@@ -235,6 +238,36 @@ class AuthControllerTest {
      * asserted free of exactly the class of detail those codes represent.</p>
      */
     private static final String PROVIDER_DIAGNOSTIC = "RESP=13 RESP2=80 provider-internal detail";
+
+    /**
+     * The renewal token a caller presents on the renewal route.
+     *
+     * <p>Assumptions: the literal is long and distinctive rather than short, because two cases assert
+     * its ABSENCE from a response body and a short value could occur inside an unrelated member by
+     * coincidence -- which would make a leak assertion pass or fail for reasons unconnected to the
+     * leak.</p>
+     */
+    private static final String PRESENTED_RENEWAL_TOKEN =
+            "presented-renewal-token-eyJjdHkiOiJKV1QiLCJlbmMiOiJBMjU2R0NNIn0";
+
+    /**
+     * The access token a renewed set carries, distinct from the sign-on's.
+     *
+     * <p>Assumptions: deliberately different from the value {@code authenticatedOutcome} issues, so a
+     * case asserting the renewed token cannot pass against a body composed by the sign-on path.</p>
+     */
+    private static final String RENEWED_ACCESS_TOKEN = "renewed-access-token";
+
+    /**
+     * The renewal request's identifier member name, as the transport spells it.
+     *
+     * <p>Assumptions: named here rather than inline because two field-error assertions key on it, and
+     * a rename that reached only one of them would leave the pair disagreeing about the same member.
+     */
+    private static final String RENEWAL_IDENTIFIER_MEMBER = "userId";
+
+    /** The renewal request's token member name, as the transport spells it. */
+    private static final String RENEWAL_TOKEN_MEMBER = "refreshToken";
 
     /**
      * The opaque token value a request presents in its authorization header.
@@ -858,6 +891,242 @@ class AuthControllerTest {
                 Arrays.stream(SignOnRequest.class.getRecordComponents())
                         .map(RecordComponent::getName)
                         .toList());
+    }
+
+    /**
+     * Asserts the renewal route is served unauthenticated and answers the renewed token set.
+     *
+     * <p>Refactoring Rationale: this operation had no boundary assertion of any kind. It appeared in
+     * this package only as a path string in an operation census, and in the service package only as
+     * one parameterised refusal, so nothing established that the route was SERVED -- and the property
+     * that matters most about it is exactly that. The renewal is published without a token on purpose,
+     * because the token it would carry is the one being renewed and a caller whose access token has
+     * already expired must still be able to renew; if the chain ever stopped opening this path, every
+     * expired session would be forced back through a credential prompt and the census string would
+     * still pass.</p>
+     *
+     * <p>Assumptions: no authorization header is sent. That is what makes this a test of the chain's
+     * open-path rule for the renewal rather than of a token's authority, and it is the reachable form
+     * of the condition: a caller renewing has, by hypothesis, nothing valid to present.</p>
+     *
+     * <p>Assumptions: the renewed body is asserted to carry a NULL renewal token rather than the
+     * value the substituted exchange was given. The pool does not reissue one -- the caller keeps the
+     * token it already holds -- and the response shape declares that member nullable for exactly this
+     * reason. A body that echoed a renewal token back would tell a client to replace a token that is
+     * still the valid one.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("the renewal route is served unauthenticated and answers the renewed token set")
+    void theRenewalRouteIsServedUnauthenticated() throws Exception {
+        when(identityService.refresh(any(TokenRefreshRequest.class)))
+                .thenReturn(renewedOutcome());
+
+        mockMvc.perform(renewal(SUBMITTED_IDENTIFIER, PRESENTED_RENEWAL_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.outcome").value(SignOnResponse.OUTCOME_AUTHENTICATED))
+                .andExpect(jsonPath("$.userId").value(ISSUED_IDENTIFIER))
+                .andExpect(jsonPath("$.accessToken").value(RENEWED_ACCESS_TOKEN))
+                .andExpect(jsonPath("$.refreshToken").doesNotExist());
+    }
+
+    /**
+     * Asserts a blank renewal member is refused 400, keyed to that member, and ACCUMULATES.
+     *
+     * <p>Purpose: the renewal's refusal shape differs deliberately from the sign-on's, and this case
+     * is what records the difference as a measured fact rather than an assumption. The sign-on LATCHES
+     * -- its request record implements the declared-order interface, so the aggregate sentence is the
+     * first offending field's own, reproducing a reference program that stops at the first failure.
+     * The renewal has no reference counterpart at all, so there is no latching order to reproduce; its
+     * record deliberately does not implement that interface, and the consequence is registered as
+     * {@code D-ERROR-ACCUMULATION}: a generic aggregate with one entry per offending field.</p>
+     *
+     * <p>Measured: asserting the identifier's own sentence as the AGGREGATE fails here, answering
+     * {@code Please correct the highlighted fields}. That is the correct behaviour and the expectation
+     * was the wrong one -- which is exactly why the case now asserts the aggregate and the per-field
+     * sentence separately. A case that asserted only the status would have been satisfied by either
+     * shape and would have recorded neither.</p>
+     *
+     * <p>Assumptions: each member is blanked ALONE first, so a single-entry array makes the positional
+     * assertion meaningful; the both-blank submission is then asserted by COUNT rather than by
+     * position, because with no declared order the provider's evaluation order is undefined and an
+     * assertion on which entry came first would be asserting the provider rather than the contract.</p>
+     *
+     * <p>Assumptions: the exchange is asserted never to have been reached. A renewal refused after
+     * delegating would already have presented a blank token to the pool, and the status alone cannot
+     * tell that apart from a refusal at the boundary.</p>
+     *
+     * @throws Exception if any request cannot be performed
+     */
+    @Test
+    @DisplayName("a blank renewal member answers 400 keyed to that member and accumulates")
+    void aBlankRenewalMemberIsRefusedAndAccumulates() throws Exception {
+        mockMvc.perform(renewal(BLANK_SUBMISSION, PRESENTED_RENEWAL_TOKEN))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
+                .andExpect(jsonPath("$.message")
+                        .value(GlobalExceptionHandler.MESSAGE_VALIDATION_FAILED))
+                .andExpect(jsonPath("$.fieldErrors.length()").value(1))
+                .andExpect(jsonPath("$.fieldErrors[0].field").value(RENEWAL_IDENTIFIER_MEMBER))
+                .andExpect(jsonPath("$.fieldErrors[0].message").value(MESSAGE_IDENTIFIER_REQUIRED));
+
+        mockMvc.perform(renewal(SUBMITTED_IDENTIFIER, BLANK_SUBMISSION))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors.length()").value(1))
+                .andExpect(jsonPath("$.fieldErrors[0].field").value(RENEWAL_TOKEN_MEMBER));
+
+        mockMvc.perform(renewal(BLANK_SUBMISSION, BLANK_SUBMISSION))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors.length()").value(2));
+
+        verify(identityService, never()).refresh(any(TokenRefreshRequest.class));
+    }
+
+    /**
+     * Asserts a refused renewal token answers 401 with the sign-on-again sentence and no field entry.
+     *
+     * <p>Purpose: this is the case that distinguishes the renewal's refusal from the sign-on's, and
+     * the distinction is deliberate rather than incidental. The reference's wrong-credential sentence
+     * would be actively misleading here, because no credential was presented at all -- so the adapter
+     * declares a second handler mapping this one closed type onto its own fixed sentence. A single
+     * widened handler would answer this path with the credential sentence and would keep every other
+     * case in this class green.</p>
+     *
+     * <p>Assumptions: the body is asserted to carry NO field entry and none of the diagnostic the
+     * refusal carried. Every reason a renewal can be refused for -- expired, revoked, mismatched --
+     * reaches this one status with this one sentence, because the remedy is identical in all of them
+     * and naming which applied would tell an unauthenticated caller a fact about the pool's state.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a refused renewal token answers 401 with the sign-on-again sentence")
+    void aRefusedRenewalTokenAnswersTheSessionSentence() throws Exception {
+        when(identityService.refresh(any(TokenRefreshRequest.class)))
+                .thenThrow(sessionRefusal());
+
+        String body = mockMvc.perform(renewal(SUBMITTED_IDENTIFIER, PRESENTED_RENEWAL_TOKEN))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.message")
+                        .value(CognitoIdentityService.MESSAGE_SESSION_REFUSED))
+                .andExpect(jsonPath("$.code")
+                        .value(ApiErrorSecurityHandlers.CODE_UNAUTHENTICATED))
+                .andExpect(jsonPath("$.fieldErrors.length()").value(0))
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+
+        assertThat(body)
+                .as("the credential sentence belongs to a presented credential, and none was")
+                .doesNotContain(AuthController.MESSAGE_CREDENTIAL_REFUSED);
+        assertThat(body)
+                .as("no diagnostic the pool produced may reach an unauthenticated caller")
+                .doesNotContain(PROVIDER_DIAGNOSTIC);
+    }
+
+    /**
+     * Asserts a renewal that could not be evaluated answers a leak-free 500 and no token set.
+     *
+     * <p>Assumptions: the failure raised is the standard illegal-state one, which is what the service
+     * declares for a renewal it could not evaluate at all, and the assertion is that the answer is a
+     * fault rather than either 200 or 401. A renewal rendered as 401 would tell a client its token was
+     * rejected when in fact nothing judged it, and the client would discard a token that is still
+     * good.</p>
+     *
+     * <p>Assumptions: the body is asserted free of the diagnostic AND of the presented token. A token
+     * echoed into a fault body reaches the logs of everything between the caller and the service,
+     * which for a long-lived renewal token is the most damaging value this operation handles.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("an unevaluable renewal answers a leak-free 500 and never a token set")
+    void anUnevaluableRenewalAnswersALeakFreeFault() throws Exception {
+        when(identityService.refresh(any(TokenRefreshRequest.class)))
+                .thenThrow(new IllegalStateException(PROVIDER_DIAGNOSTIC));
+
+        MvcResult result = mockMvc.perform(renewal(SUBMITTED_IDENTIFIER, PRESENTED_RENEWAL_TOKEN))
+                .andReturn();
+
+        assertThat(result.getResponse().getStatus())
+                .as("an unevaluated renewal is a fault, not a rejected token")
+                .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value())
+                .isNotEqualTo(HttpStatus.UNAUTHORIZED.value())
+                .isNotEqualTo(HttpStatus.OK.value());
+
+        String body = result.getResponse().getContentAsString();
+        assertThat(body)
+                .as("no token set may be answered when none was issued")
+                .doesNotContain(RENEWED_ACCESS_TOKEN);
+        assertThat(body)
+                .as("the presented renewal token is the most damaging value here and must not travel")
+                .doesNotContain(PRESENTED_RENEWAL_TOKEN)
+                .doesNotContain(PROVIDER_DIAGNOSTIC);
+    }
+
+    /**
+     * Builds the refusal the service raises for a rejected session or renewal token.
+     *
+     * <p>Assumptions: constructed reflectively because the type's constructor is not public, and it is
+     * deliberately not public -- the refusal is the service's to raise and nothing outside that package
+     * should be able to manufacture one. Widening the constructor to suit a test would remove that
+     * property from production code for the benefit of test code, so the sibling
+     * {@code RefusalRenderingTest} established this idiom and this case follows it rather than
+     * introducing a second answer to the same question.</p>
+     *
+     * <p>Assumptions: an unresolvable constructor fails loudly. A rename would otherwise leave the
+     * cases using this helper unable to compile or, worse, passing against some other refusal type
+     * whose handler renders a different sentence.</p>
+     *
+     * @return the refusal to hand to the substituted exchange; never {@code null}
+     * @throws IllegalStateException if the constructor cannot be resolved, which a rename would cause
+     */
+    private static CognitoIdentityService.SessionRefusedException sessionRefusal() {
+        try {
+            var constructor = CognitoIdentityService.SessionRefusedException.class
+                    .getDeclaredConstructor(String.class);
+            constructor.setAccessible(true);
+            return constructor.newInstance(PROVIDER_DIAGNOSTIC);
+        } catch (ReflectiveOperationException unresolvable) {
+            throw new IllegalStateException(
+                    "the session refusal's constructor could not be resolved", unresolvable);
+        }
+    }
+
+    /**
+     * Builds a renewal request carrying the two submitted values as a JSON body.
+     *
+     * <p>Assumptions: serialised from the request record itself rather than assembled as text, for the
+     * same reason the sign-on helper is -- a member the contract renames cannot leave this file still
+     * sending the old name and still compiling.</p>
+     *
+     * @param identifier the value to submit as the identifier; may be blank, which is a case under
+     *     assertion, and must not be {@code null}
+     * @param renewalToken the value to submit as the renewal token; may be blank, which is a case
+     *     under assertion, and must not be {@code null}
+     * @return the request to perform, with the JSON content type set; never {@code null}
+     */
+    private static MockHttpServletRequestBuilder renewal(String identifier, String renewalToken) {
+        return post(AuthController.REFRESH_PATH)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(MAPPER.writeValueAsString(
+                        new TokenRefreshRequest(identifier, renewalToken)));
+    }
+
+    /**
+     * Builds the renewed token set the substituted exchange answers a good renewal with.
+     *
+     * <p>Assumptions: the renewal-token member is null, which is what the pool's own behaviour
+     * produces -- it does not reissue one. Supplying a value here would let the case that asserts the
+     * member is absent from the body pass for the wrong reason, by omitting a value that was never
+     * there rather than by suppressing one that was.</p>
+     *
+     * @return the renewed outcome, renewal token deliberately absent; never {@code null}
+     */
+    private static SignOnResponse renewedOutcome() {
+        return new SignOnResponse(SignOnResponse.OUTCOME_AUTHENTICATED, ISSUED_IDENTIFIER,
+                RENEWED_ACCESS_TOKEN, "renewed-identity-token", null, "Bearer", 3600);
     }
 
     /**

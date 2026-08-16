@@ -13,8 +13,8 @@
  * <h2>Orientation</h2>
  *
  * <p>This context owns the {@code reference} database schema and answers for the baseline's
- * transaction-type inquiry and maintenance screens, its batch reference update, its queue-driven date
- * conversion and its date-edit utility. That enumeration is authoritative in this module's
+ * transaction-type inquiry and maintenance screens, its batch reference update, the synchronous half of
+ * its date conversion and its date-edit utility. That enumeration is authoritative in this module's
  * {@code com.carddemo.reference} charter, which also lists the layer subpackages and what each one
  * holds. This charter names the context only far enough to orient a reader and defers to that one.</p>
  *
@@ -27,7 +27,7 @@
  * repository ruleset audits at-clause bodies for emptiness, so an invented empty at-clause would be
  * reported rather than credited.</p>
  *
- * <h2>The four configuration types, and what each one owns</h2>
+ * <h2>The three configuration types, and what each one owns</h2>
  *
  * <p>Assumptions: the inventory below is the package contract the migration plan assigns, and each
  * entry carries its own marker for whether that contract is discharged on disk. Naming a type here is
@@ -37,7 +37,7 @@
  *
  * <p>Refactoring Rationale: the revision this replaces described the package as holding "two
  * concerns" and named a datasource binding without naming the type contracted to hold it, while saying
- * nothing at all about the queue client already sitting beside it or the interface-document metadata.
+ * nothing at all about the queue client then sitting beside it or the interface-document metadata.
  * A charter is consulted precisely to learn the division of ownership without opening every file, so
  * an inventory shorter than the contract sends a reader to the wrong package for a binding and, worse
  * here, reads as licence to put a new binding wherever it happens to fit. Per-entry markers are what
@@ -62,18 +62,6 @@
  *       a tokenless collector on the task can read them and nothing off the task can. Whatever no
  *       rule matches is denied rather than merely required to be authenticated.</dd>
  *
- *   <dt>{@code SqsConfig} -- LANDED</dt>
- *   <dd>The queue client this context publishes its date-conversion reply and its error output with.
- *       Assumptions: the queue NAMES are not held here and resolve from configuration, which is the
- *       arrangement the baseline already used, since
- *       {@code app/app-vsam-mq/cbl/CODATE01.cbl} initialises its queue-name fields to spaces and
- *       fills them at run time. Assumptions: the consuming side needs no bean here either, because
- *       the messaging starter auto-configures the listener container the annotated consumer binds to,
- *       and the bounded receive wait the baseline expresses in code is expressed as a property of that
- *       annotation instead. Declaring a container factory here would stand a second one beside the
- *       auto-configured one, and the two could disagree about which account and region they
- *       address.</dd>
- *
  *   <dt>{@code DataSourceConfig} -- LANDED</dt>
  *   <dd>The pool this whole context reads and writes through, and the startup proof that the
  *       connections it hands out resolve an unqualified table name in the {@code reference} schema. It
@@ -89,6 +77,21 @@
  *       several hops from its cause.</dd>
  *
  * </dl>
+ *
+ * <p>⚠️ Refactoring Rationale: the roster above enumerated FOUR types and now enumerates three, because
+ * {@code SqsConfig} is withdrawn rather than left standing empty. It existed to supply the queue client
+ * that this context's date-inquiry consumer published its reply and its error output with, and that
+ * consumer is gone: the baseline drives both inquiry programs from ONE request destination,
+ * {@code DEFINE QLOCAL('CARDDEMO.REQUEST.QUEUE')} at {@code app/app-vsam-mq/README.md} L53, and a queue
+ * admits exactly one owning consumer, so the queue is owned by the account context and answered there
+ * for both function codes. With no producer and no consumer left in this module there is nothing for a
+ * queue client to serve, and a bean that nothing injects is not inert -- it would keep a messaging
+ * dependency, a region requirement and a credential path on a module that needs none of the three, and
+ * it would read as evidence of a message flow a reader would then go looking for. Assumptions: the
+ * corresponding {@code spring.cloud.aws} keys and the three inquiry queue-name variables are withdrawn
+ * from {@code application.yml} in the same change, so no configuration survives its consumer either;
+ * {@code ReferenceServiceStructureTest} asserts the module declares no queue consumer, which is what
+ * keeps the withdrawal from being reversed by accident.</p>
  *
  * <p>Refactoring Rationale: {@code DataSourceConfig} was listed here as PLANNED and then recorded as
  * WITHDRAWN, on the argument that the schema pin and the pool sizing are both declared in this module's

@@ -12,11 +12,11 @@
  * published length and alphabet; neither addresses anything real.
  */
 
-// Assumptions: every test API is imported rather than taken from an ambient
-// global, because ui/vitest.config.ts sets `globals: false` and records that as a
-// contract: ambient test globals are declared per PROJECT, so admitting them here
-// would make `expect` and `vi` visible to production screens as well, where a
-// stray call would compile.
+// Assumptions: every test API is imported rather than taken from an ambient global, because
+// ui/tsconfig.json keeps its `types` list EMPTY -- so nothing is declared ambiently and an omitted
+// import fails to compile on the symbol it omitted. The runner's own `globals` option is set to
+// `true`, for the separate reason recorded beside it, so the enforcing mechanism is the empty
+// `types` list and never that option.
 import { describe, expect, it } from 'vitest';
 
 import {

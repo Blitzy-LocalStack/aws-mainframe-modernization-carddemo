@@ -68,6 +68,12 @@ module "eventbridge_scheduler" {
   state_machine_arn = module.step_functions.daily_state_machine_arn
   dead_letter_arn   = module.sqs.error_queue_arn
 
+  # Required. Bounds the invocation role this module creates -- the identity that can
+  # start batch work unattended, holding states:StartExecution on the nightly chain and
+  # sqs:SendMessage on the dead-letter target. The module asserts the ARN names THIS
+  # account, because a cross-account boundary is accepted by IAM and then bounds nothing.
+  permissions_boundary_arn = var.permissions_boundary_arn
+
   # Optional. Shown to make the two conjoined retry settings visible together;
   # both already default to the values below.
   maximum_retry_attempts       = 5
@@ -681,6 +687,7 @@ changing the stack's shape.
 |------|-------------|------|---------|:--------:|
 | <a name="input_dead_letter_arn"></a> [dead\_letter\_arn](#input\_dead\_letter\_arn) | ARN of the SQS queue that receives an invocation EventBridge Scheduler could not deliver to the state machine. This is what makes a failed nightly trigger captured and inspectable rather than silently lost. | `string` | n/a | yes |
 | <a name="input_environment"></a> [environment](#input\_environment) | Environment this schedule belongs to. Supplies the `-<env>` suffix that keeps the dev and prod copies of every resource this module creates distinct. Accepted values: dev, prod. | `string` | n/a | yes |
+| <a name="input_permissions_boundary_arn"></a> [permissions\_boundary\_arn](#input\_permissions\_boundary\_arn) | Same-account customer-managed IAM policy ARN used as the permissions boundary on the scheduler invocation role this module creates. Required so no capability this module composes can exceed the account's deployment boundary. Supplied by the caller; never created here. | `string` | n/a | yes |
 | <a name="input_state_machine_arn"></a> [state\_machine\_arn](#input\_state\_machine\_arn) | ARN of the `carddemo-daily-batch` Step Functions state machine this schedule starts. Published as an output by infra/modules/step-functions-batch and passed in by the environment root; the schedule's IAM role is granted states:StartExecution on exactly this value. | `string` | n/a | yes |
 | <a name="input_dead_letter_kms_key_arn"></a> [dead\_letter\_kms\_key\_arn](#input\_dead\_letter\_kms\_key\_arn) | Customer-managed KMS key encrypting the dead-letter queue, when that queue is CMK-encrypted; null when it relies on SQS-managed encryption. Controls whether the schedule's role is additionally granted kms:GenerateDataKey and kms:Decrypt on that key. | `string` | `null` | no |
 | <a name="input_flexible_time_window_minutes"></a> [flexible\_time\_window\_minutes](#input\_flexible\_time\_window\_minutes) | Width in whole minutes of the window an invocation may be shifted within. Must be null when flexible\_time\_window\_mode is OFF and must be an integer from 1 to 1440 when the mode is FLEXIBLE. | `number` | `null` | no |

@@ -104,7 +104,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * {@code .card}, {@code .transaction}, {@code .reference}, {@code .batch}, {@code .authorization}
  * and {@code .reporting}. What is given up is the convenience of one root covering everything; what
  * it buys is a deployable that cannot couple to another context by accident, and the risk is
- * counted rather than hypothetical: {@code services/pom.xml} L242 to L250 declares nine modules,
+ * counted rather than hypothetical: {@code services/pom.xml} L233 to L241 declares nine modules,
  * one shared kernel and eight bounded contexts, so every one of those seven roots is on this
  * build's own reactor path and would be reachable from the wider root. The
  * boundary is enforced by the layering rules at
@@ -136,7 +136,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * {@code System.setProperty} occurrences is zero, zero and zero.</p>
  *
  * <p>Assumptions: the management endpoints are configured nowhere in this file. They arrive from
- * {@code spring-boot-starter-actuator}, declared at {@code services/auth-service/pom.xml} L217, and
+ * {@code spring-boot-starter-actuator}, declared at {@code services/auth-service/pom.xml} L208, and
  * their exposure is pinned in {@code application.yml}, whose management block admits health, info,
  * metrics and prometheus. {@code GET /actuator/health} is therefore framework-provided, and it is
  * deliberately absent from the contract of record: the runtime surface of this service is the eight
@@ -189,8 +189,8 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * program, for instance the duplicate-key sentence {@code User ID already exist...} at
  * {@code app/cbl/COUSR01C.cbl} L263, and each is asserted character for character. The audit that
  * governs this file is pass or fail with no tolerated warning level, because the documentation gate
- * is bound to Maven's {@code validate} phase at {@code services/pom.xml} L850 with
- * {@code failOnViolation} true at L939 and {@code violationSeverity} at warning at L940, so a
+ * is bound to Maven's {@code validate} phase at {@code services/pom.xml} L841 with
+ * {@code failOnViolation} true at L930 and {@code violationSeverity} at warning at L931, so a
  * warning and a failure are one outcome. The graded condition-code rubric of the COBOL suite, under
  * which code 4 counts as a passing result, describes no build in this tree, and reading a build
  * here through it would treat a real violation as acceptable.</p>

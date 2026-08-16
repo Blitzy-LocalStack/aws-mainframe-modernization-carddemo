@@ -177,26 +177,34 @@
  *       a class that starts a Spring context and returns a process exit status is neither a business
  *       rule nor a layer the import rules name, and putting it among the services would make the
  *       service package's charter untrue.</li>
- *   <li>{@code .config} - {@code SecurityConfig}, {@code OpenApiConfig}, {@code SqsConfig},
- *       {@code InternalIdentityConfig} and {@code MessagingIdentityConfig}. {@code SqsConfig} is
+ *   <li>{@code .config} - six classes: {@code SecurityConfig}, {@code OpenApiConfig},
+ *       {@code SqsConfig}, {@code DataSourceConfig}, {@code JsonReadConfig} and
+ *       {@code InternalIdentityConfig}. {@code SqsConfig} is
  *       present because this module's own POM puts a queue starter and a queue client on the
  *       classpath; a sibling context that declares neither carries no such class, and adding one
- *       there would configure a client nothing can inject. Of the two identity classes, one mints the
- *       service token the account context demands on the three calls made to it -- a credential this
- *       context cannot operate without -- and the other keys the single tokeniser this context holds.
- *       Refactoring Rationale: that second class was described here as what keeps a primary account
- *       number out of queue metadata, and it no longer does: specification &sect;0.4.1.8 freezes the reply
- *       queue's {@code MessageGroupId} as {@code card_num} and its {@code MessageDeduplicationId} as
- *       {@code transaction_id}, so both are emitted literally and the resulting metadata exposure is
- *       registered as a divergence rather than derived away. The class and its charter entry in
- *       {@code .config} record what it supplies now. Refactoring Rationale: this bullet listed
- *       {@code DataSourceConfig} and closed the set at four. That class does not exist in this
- *       module -- the {@code authorization} search-path pin it was credited with is declared in this
- *       module's {@code application.yml} -- and the closure at four excluded both identity classes,
- *       so a reader acting on this bullet would have looked for a setting in a missing class and
- *       treated two required credentials as not belonging here. The package's own charter at
- *       {@code com.carddemo.authorization.config} is the authority and carries the full reasoning
- *       for each entry.</li>
+ *       there would configure a client nothing can inject. {@code InternalIdentityConfig} is the only
+ *       one of the six that reads a secret: it mints the service token the account context demands on
+ *       the three calls made to it, a credential this context cannot operate without.
+ *       ⚠️ Refactoring Rationale: this bullet has been wrong in three separate ways and each is
+ *       recorded, because the corrections point in opposite directions and a reader who saw only the
+ *       latest would not know which way the set had moved. It once listed {@code DataSourceConfig} and
+ *       closed the set at four; the closure at four was wrong, and so was the follow-up correction
+ *       that struck {@code DataSourceConfig} out on the ground that no such class exists in this
+ *       module. It does exist, beside its five siblings; it sizes the connection pool, bounds the
+ *       session with four ordered timeouts, and VERIFIES after startup that a connection really
+ *       resolves the {@code authorization} schema -- while this module's {@code application.yml} is
+ *       what declares the search-path pin itself. That the pin is declared there and checked here is
+ *       the distinction the striking-out conflated into the class not existing at all. {@code JsonReadConfig} was missing from every earlier version of the list. And a
+ *       seventh name, {@code MessagingIdentityConfig}, stood here as a second identity class said to
+ *       keep a primary account number out of queue metadata; it no longer did, because specification
+ *       &sect;0.4.1.8 freezes the reply queue's {@code MessageGroupId} as {@code card_num} and its
+ *       {@code MessageDeduplicationId} as {@code transaction_id}, so both are emitted literally and
+ *       the resulting metadata exposure is registered as a divergence rather than derived away -- and
+ *       the class is now WITHDRAWN outright, along with the container secret that keyed it, because
+ *       nothing injected the bean that remained. The package's own charter at
+ *       {@code com.carddemo.authorization.config} is the authority, carries the full reasoning for
+ *       each entry and for that withdrawal, and is re-measured against its own directory on every
+ *       build; this bullet is a pointer to it and is deliberately the shorter of the two.</li>
  * </ul>
  *
  * <p><strong>Package roots and the layering contract.</strong> Nine roots are set across the

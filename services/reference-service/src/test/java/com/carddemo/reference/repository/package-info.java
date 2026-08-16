@@ -11,7 +11,7 @@
 //  (1) Assumptions: this file is load-bearing rather than decorative, because
 //      two Checkstyle modules split one obligation between them and neither
 //      half can be satisfied by the other. config/checkstyle/checkstyle.xml
-//      declares JavadocPackage at Checker level, line 245, which inspects the
+//      declares JavadocPackage at Checker level, line 238, which inspects the
 //      file system and asserts only that a package-info.java exists for this
 //      directory; it declares MissingJavadocPackage inside TreeWalker, line
 //      378, which reads the parsed file and asserts that it carries Javadoc. A
@@ -109,19 +109,42 @@
  * {@code NonEmptyAtclauseDescription}, so an invented empty tag would be reported rather than
  * credited. For the same reason no authorship, version or availability tag appears: the modules that
  * would require them, {@code JavadocStyle}, {@code WriteTag} and {@code JavadocParagraph}, are
- * deliberately absent from {@code config/checkstyle/checkstyle.xml}, recorded there at lines 568 to
- * 576.</p>
+ * deliberately absent from {@code config/checkstyle/checkstyle.xml}, recorded there at lines 561 to
+ * 569.</p>
  *
  * <h2>The inventory this package owns, and the shared base that has a file of its own</h2>
  *
- * <p>Assumptions: the closed set is <b>eleven compilation units</b> -- this charter, the shared
- * container fixture {@code ReferencePersistenceBase}, and nine integration-test classes. The naming rule
- * is that a class takes the name of the interface it covers with {@code IT} appended, and the nine are
+ * <p>Assumptions: the closed set is <b>twelve compilation units</b> -- this charter, the shared
+ * container fixture {@code ReferencePersistenceBase}, and ten integration-test classes. The naming rule
+ * is that a class takes the name of the type it covers with {@code IT} appended, and the ten are
  * {@code TransactionTypeRepositoryIT}, {@code TransactionCategoryRepositoryIT},
  * {@code DisclosureGroupRepositoryIT}, {@code UsPhoneAreaCodeRepositoryIT},
  * {@code PhoneAreaCodeRepositoryIT}, {@code UsStateRepositoryIT},
- * {@code UsStateZipPrefixRepositoryIT}, {@code StateRepositoryIT} and
- * {@code StateZipPrefixRepositoryIT}.</p>
+ * {@code UsStateZipPrefixRepositoryIT}, {@code StateRepositoryIT},
+ * {@code StateZipPrefixRepositoryIT} and {@code InquiryReplyLedgerIT}.</p>
+ *
+ * <p>Refactoring Rationale: the set grew from eleven to twelve when the main tree gained
+ * {@code InquiryReplyLedger} -- the one CLASS in the data-access package, and therefore the one member
+ * here whose covered type is not an interface. The naming rule is unchanged and is simply stated over
+ * types rather than over interfaces. Assumptions: that class earns an engine-backed test of its own
+ * rather than a substituted one because every property it holds is the ENGINE's: an
+ * {@code INSERT ... ON CONFLICT DO NOTHING} reporting zero affected rows on a second claim, two
+ * {@code CHECK} constraints, and a guarded {@code UPDATE} reporting whether it retired a row. A
+ * substituted ledger would answer whatever a stub was told to and would pass against a statement
+ * carrying a typo.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: the twelfth unit is {@code AddressLookupPagingIT}, and it is the one
+ * exception to the naming rule above, deliberately. It covers no single interface: it walks each of the
+ * three seeded allow-lists page by page through {@code AddressLookupService}, which reads all three
+ * repositories, so no interface name would describe it and any one of the three would misdescribe it. It
+ * is HERE rather than in the service test package because it extends this package's shared container
+ * fixture and needs nothing that fixture does not already provide, and standing up a second engine in
+ * another package to obey a naming rule would cost the slowest part of this module's build to gain a
+ * filename. Assumptions: it exists because the property it asserts was previously asserted at the HTTP
+ * boundary against a single page carrying an entire domain -- 490 rows where the browse publishes 20 and
+ * the schema declares 20 as its maximum -- so the multi-page continuation a client actually performs was
+ * exercised by nothing, and the two failures that continuation exposes, a row repeated at every boundary
+ * and a row skipped, were both invisible.</p>
  *
  * <p>⚠️ Refactoring Rationale: this paragraph claimed eight units and named seven classes while the
  * directory held ten, and both halves of the discrepancy are corrected here rather than one of them.
@@ -147,14 +170,32 @@
  * interface's name. Trade-offs: the cost is one more file and a second class reading rows the first
  * already reads, and the shared container base means it is not a second engine start.</p>
  *
- * <p>Refactoring Rationale: the last three names carry the {@code Us} prefix because the interfaces
- * they cover carry it -- the main tree declares {@code UsPhoneAreaCodeRepository},
- * {@code UsStateRepository} and {@code UsStateZipPrefixRepository}, over the tables
- * {@code reference.us_phone_area_codes}, {@code reference.us_states} and
- * {@code reference.us_state_zip_prefixes}. The unprefixed forms are recorded here as <b>not</b> the
+ * <p>Refactoring Rationale: two names carry the {@code Us} prefix because the interfaces
+ * they cover carry it -- the main tree declares {@code UsPhoneAreaCodeRepository} and
+ * {@code UsStateZipPrefixRepository}, over the tables
+ * {@code reference.us_phone_area_codes} and
+ * {@code reference.us_state_zip_prefixes}. Their unprefixed forms are recorded here as <b>not</b> the
  * names to use, because they are the forms a reader working from the table's informal name would
  * reach for, and a class named for a subject it does not cover breaks the property the whole naming
  * rule buys: that the interface under test is derivable from the test's own name.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: the state interface is the ONE that moved the other way, and it moved by
+ * a rename in the main tree rather than by anything decided here. {@code UsStateRepository} is now
+ * {@code StateRepository}, the name this package's checkpoint contract assigns to the interface over
+ * {@code UsState}; the entity and the table keep their prefixed names. Two consequences follow for this
+ * roster. {@code UsStateRepositoryIT} is renamed {@code StateRepositoryWalkIT}, because a test named for
+ * a type that no longer exists is exactly the failure the naming rule guards against. And
+ * {@code StateRepositoryIT}, previously one of the two classes this charter recorded as an unlisted
+ * duplication, is now the canonically-named test of a canonically-named interface. Assumptions: the two
+ * classes are RETAINED as a pair rather than merged, and both still name the interface under test, which
+ * is the property the rule buys; they divide by subject -- the domain, the key width and the primary key
+ * in one, the three keyset walks and the keyed finder in the other -- and {@code StateRepositoryIT}
+ * reasons about its own cardinality read on the basis that the walks are covered elsewhere, so the
+ * division is load-bearing documentation. Trade-offs: the {@code us_state_zip_prefixes} pair is
+ * untouched and its unprefixed member, {@code StateZipPrefixRepositoryIT}, still names an interface that
+ * does not exist -- the duplication this charter already records -- because nothing in this change
+ * assigns that interface a new name and renaming it on the strength of a neighbouring change would be a
+ * decision taken in the wrong place.</p>
  *
  * <p>⚠️ Refactoring Rationale: <b>the shared container fixture now has a file of its own,
  * {@code ReferencePersistenceBase.java}.</b> It was previously a second, package-private, top-level type
@@ -165,8 +206,18 @@
  * emitted. Checkstyle's silence on the arrangement, which the old paragraph cited in its favour, is not
  * evidence the compiler is silent too. A charter naming eleven files serves the enumerability the closed
  * set exists for exactly as well as one naming eight, so the count is restated and the warnings are
- * gone. Assumptions: the fixture keeps its name and stays package-private, because the nine test classes
+ * gone. Assumptions: the fixture keeps its name and stays package-private, because the ten test classes
  * resolve it by simple name with no import between them and it.</p>
+ *
+ * <p>Refactoring Rationale: the shared fixture's nested configuration now declares ONE bean,
+ * {@code InquiryReplyLedger}. Assumptions: it has to be declared rather than discovered, because that
+ * configuration enables Spring Data repositories and component-scans nothing, so the one authored class
+ * in the data-access package would otherwise be absent from the context while every interface beside it
+ * resolved. Alternatives Considered: a component scan over the main-tree repository package -- rejected
+ * because such a scan also reaches the nested configuration classes of the test files in THIS package,
+ * and the duplicate definitions end context load. Alternatives Considered: a nested configuration inside
+ * {@code InquiryReplyLedgerIT} -- rejected because a second configuration class starts a second cached
+ * context against the same engine, which is the cost this fixture exists to avoid.</p>
  *
  * <h2>The runner split is carried by the class-name suffix alone</h2>
  *
@@ -307,12 +358,12 @@
  *       text. Two copybooks declare the field numeric, which is why this is ruled rather than assumed;
  *       {@code app/app-transaction-type-db2/ddl/TRNTYCAT.ddl} line 3 declares
  *       {@code TRC_TYPE_CATEGORY CHAR(4) NOT NULL} and line 5 places it in the primary key, and
- *       {@code V1__reference.sql} follows it with {@code cat_cd CHAR(4) NOT NULL} at line 203 inside
- *       the composite primary key at line 234.</li>
+ *       {@code V1__reference.sql} follows it with {@code cat_cd CHAR(4) NOT NULL} at line 192 inside
+ *       the composite primary key at line 223.</li>
  *   <li><b>A disclosure account-group id is ten characters wide and is never trimmed</b>, on either
  *       side of a comparison, because its trailing spaces are part of the stored key.</li>
  *   <li><b>The rate is an exact scaled decimal.</b> {@code V1__reference.sql} declares
- *       {@code interest_rate NUMERIC(6,2) NOT NULL} at line 337 and the Java carries it as
+ *       {@code interest_rate NUMERIC(6,2) NOT NULL} at line 326 and the Java carries it as
  *       {@code java.math.BigDecimal} at scale two. Binary floating-point types are excluded from every
  *       position on this path, and the shared architecture test already rejects them in a field, a
  *       parameter or a return type across the whole migration root, so a declaration of one fails the
@@ -333,7 +384,7 @@
  *   <li><b>An optimistic-lock counter exists on two of the six entities and on no others.</b>
  *       {@code TransactionType} and {@code TransactionCategory} map one onto the
  *       {@code version BIGINT NOT NULL DEFAULT 0} column that {@code V1__reference.sql} declares for
- *       their tables at lines 151 and 223; {@code DisclosureGroup}, {@code UsPhoneAreaCode},
+ *       their tables at lines 140 and 212; {@code DisclosureGroup}, {@code UsPhoneAreaCode},
  *       {@code UsState} and {@code UsStateZipPrefix} have none, because their tables declare none.
  *       Refactoring Rationale: this charter was drafted against the premise that no such counter
  *       existed anywhere in the context, and that premise is false; asserting an absent counter on the
@@ -427,7 +478,7 @@
  *   <li><b>The foreign key demonstrably refuses a delete of a referenced transaction type, at the
  *       database level.</b> {@code app/app-transaction-type-db2/ddl/TRNTYCAT.ddl} declares it across
  *       lines 6 and 7 as a foreign key on the category table's type column referencing the type table,
- *       with the restrict action; {@code V1__reference.sql} reproduces it at lines 267 and 268. The
+ *       with the restrict action; {@code V1__reference.sql} reproduces it at lines 256 and 257. The
  *       refusal travels a fixed chain: the reference platform's referential-constraint failure becomes
  *       the PostgreSQL foreign-key-violation state, which the framework translates into a
  *       data-integrity exception, which {@code com.carddemo.common.error.GlobalExceptionHandler}
@@ -459,7 +510,7 @@
  *       general-purpose sublist at line 521 with 410, and an easily-recognisable sublist at line 931
  *       with 80. The two sublists share no member, their union is set-equal to the full list in both
  *       directions, and 410 plus 80 is exactly 490. {@code V1__reference.sql} carries that as one
- *       {@code CHAR(1) NOT NULL} classification column at line 393 under the check constraint at line
+ *       {@code CHAR(1) NOT NULL} classification column at line 382 under the check constraint at line
  *       407 admitting two values, so the partition is total by the not-null, two-valued by the check,
  *       and disjoint because it is one column per row. Assumptions: <b>the arithmetic is the
  *       authority.</b> Should a description of these lists as overlapping be encountered anywhere, it

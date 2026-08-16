@@ -1,9 +1,10 @@
 package com.carddemo.batch.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.carddemo.batch.config.BatchConfig;
 import com.carddemo.batch.domain.DailyTransaction;
+import com.carddemo.batch.service.DailyFeedWatermarkService;
 import com.carddemo.common.money.Money;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
@@ -12,8 +13,6 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
-import java.util.function.Function;
-import java.util.stream.Stream;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -30,30 +29,40 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
-import org.springframework.transaction.IllegalTransactionStateException;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * Holds the UNBOUNDED forward-only cursor over {@code ledger.daily_transactions} against a real
- * engine, which is the one member of {@link DailyTransactionRepository} no other class exercises.
+ * Holds the ORDERING and POSITIONING contract of {@code ledger.daily_transactions} against a real
+ * engine, at the chunk boundary the nightly chain itself crosses.
  *
- * <h2>Purpose, and the single property this class owns</h2>
+ * <h2>Purpose, and the properties this class owns</h2>
  *
- * <p>Purpose: {@link DailyTransactionRepository} declares two reads over the unposted feed, and they
- * have genuinely different lifetimes. One is a lazily-populated cursor over the WHOLE feed, held open
- * for the duration of a caller's transaction; the other is a bounded chunk that is read, committed and
- * resumed from. The bounded one is already proved beside this file. This class proves the cursor: that
- * it delivers every row in ingestion order across more than one round trip to the engine, that it
- * refuses to open at all when the caller holds no transaction, that it closes, and that it is empty
- * rather than broken over an empty feed. It then proves the one boundary the bounded finder's own
- * chunked scan cannot state as a property -- that the continuation predicate EXCLUDES the ordinal it is
- * given -- and audits the interface's reachable surface for the mutators and the row-counting window it
- * must not expose.</p>
+ * <p>Purpose: {@link DailyTransactionRepository} declares one read over the unposted feed, a capped
+ * continuation from a caller-held ordinal, and both migrated jobs drive their whole pass through it.
+ * This class proves the four properties of that read which only a real engine can establish: that the
+ * delivered order comes from the ordering clause and not from the order the rows happen to be stored
+ * in, that the cap is honoured statement by statement across the PRODUCTION chunk boundary, that the
+ * position is a KEY and therefore cannot skip an unread row when the already-read part of the feed
+ * changes underneath it, and that the continuation predicate EXCLUDES the ordinal it is given. It then
+ * audits the interface's reachable surface for the mutators and the row-counting window it must not
+ * expose, and asserts the money column's round trip.</p>
  *
- * <p>The cursor is the migrated form of a sequential read rather than a convenience over one.
+ * <p>Refactoring Rationale: this class was written around a second member the interface no longer
+ * declares -- an unbounded, lazily-populated {@code Stream} over the whole feed -- and the withdrawal is
+ * recorded here because the class's whole shape followed from it. That cursor had no caller in the
+ * module: both jobs read chunked, and both begin from
+ * {@code DailyFeedWatermarkService.NOTHING_CONSUMED}, so the continuation finder already covered the
+ * first chunk. Two of the properties asserted here were consequences of the cursor rather than of the
+ * feed -- that it refused to open outside a transaction, and that more rows came back than one driver
+ * fetch window held -- and the second of those could not be observed at all through a terminal
+ * {@code toList}, which reads identically whether the driver streamed or buffered. Both are replaced by
+ * properties of the read that ships, stated so that a regression fails here rather than in a nightly
+ * run.</p>
+ *
+ * <p>The chunked walk is the migrated form of a sequential read rather than a convenience over one.
  * {@code app/cbl/CBTRN02C.cbl:29-32} selects the feed {@code ORGANIZATION IS SEQUENTIAL} with
  * {@code ACCESS MODE IS SEQUENTIAL} and declares no record key, and the driving loop at
  * {@code app/cbl/CBTRN02C.cbl:202-219} advances it through the single {@code READ} at
@@ -89,10 +98,14 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * relaxed in one while the other still passes, and nothing is then able to report the divergence.</p>
  *
  * <ul>
- *   <li>{@code CrossSchemaFeedRepositoryIT} owns the BOUNDED chunked scan of this same feed -- the
- *       walk-by-cursor-until-empty loop, its chunk count, and the harness post-state. This class
- *       deliberately does not repeat that loop; it asserts the cursor's exclusivity as a named boundary
- *       instead, which a loop that merely terminates cannot state.</li>
+ *   <li>{@code CrossSchemaFeedRepositoryIT} owns the harness post-state and a chunked walk of this same
+ *       feed at a SYNTHETIC cap of two over five identity-assigned rows, where physical order and
+ *       ordinal order coincide. This class does not repeat that arrangement, and the difference is the
+ *       reason both exist: an arrangement whose storage order already matches the asserted order passes
+ *       with the ordering clause deleted, so it establishes that the loop terminates and covers the feed
+ *       rather than that the order is the engine's. This class arranges the rows in the exact REVERSE
+ *       and crosses the cap {@code BatchConfig.CHUNK_SIZE} actually sets, so the sequence it asserts is
+ *       one only the ordering clause can produce and the boundary it crosses is the deployed one.</li>
  *   <li>{@code PostingUnitOfWorkIT} owns the three-write atomicity proof, the account and transaction
  *       writes, and the daily-subset finder's window. Nothing here writes either of those tables.</li>
  *   <li>{@code BatchRunRepositoryIT} owns {@code batch.batch_run} and the uniqueness over the run and
@@ -172,33 +185,42 @@ class DailyTransactionRepositoryIT {
             "db/testharness/test-harness-schemas-and-foreign-tables.sql";
 
     /**
-     * The rows-per-round-trip window the cursor's own query hint fixes.
+     * The rows-per-statement cap both migrated jobs pass to the continuation finder.
      *
-     * <p>Assumptions: the value is the constant {@link DailyTransactionRepository} declares on the
-     * cursor as a fetch-size hint, and the test profile happens to set the same number as the session
-     * default. Only the hint governs the statement under test, so this constant tracks the hint. It is
-     * held here as a named quantity because the row count below is derived from it rather than chosen.</p>
+     * <p>Assumptions: this is {@link BatchConfig#CHUNK_SIZE} itself and not a copy of its value, so the
+     * arrangement below tracks production rather than restating it. Both consumers pass exactly this
+     * constant -- {@code job/PreflightDailyTransactionsJob.java} and {@code job/PostTransactionsJob.java}
+     * each wrap it in a {@code Limit} -- so a case arranged one row beyond it is arranged one row beyond
+     * the boundary the nightly chain actually crosses.</p>
+     *
+     * <p>Refactoring Rationale: this constant used to be a locally written {@code 100} standing for the
+     * fetch-size hint on a lazily-populated cursor that this interface no longer declares. Binding it to
+     * the production constant is what removes the possibility of the two drifting: a chunk size raised in
+     * {@code BatchConfig} moves this arrangement with it instead of leaving a case that no longer crosses
+     * a boundary while still claiming to.</p>
      */
-    private static final int CURSOR_FETCH_SIZE = 100;
+    private static final int CHUNK_SIZE = BatchConfig.CHUNK_SIZE;
 
     /**
-     * The number of rows the cursor cases arrange, one more than a single round trip carries.
+     * The number of rows the chunk cases arrange, one more than a single statement may return.
      *
-     * <p>Trade-offs: arranging strictly more rows than the fetch window costs an extra hundred inserts
-     * per case, and that cost is accepted deliberately. A walk fitting inside one round trip never asks
-     * the driver for a second batch, so it would pass identically whether the cursor streamed or
-     * buffered the whole result -- and the streaming contract is the property this class exists to hold.
-     * One row beyond the window is the smallest arrangement that forces the second fetch, so the price
-     * paid is the minimum that buys the proof.</p>
+     * <p>Trade-offs: arranging strictly more rows than the cap costs an extra hundred inserts per case,
+     * and that cost is accepted deliberately. A walk fitting inside one statement never asks for a second
+     * one, so it would pass identically against a reader that ignored the cap entirely and returned the
+     * whole feed -- and honouring the cap is the property these cases exist to hold. One row beyond it is
+     * the smallest arrangement that forces the second statement, so the price paid is the minimum that
+     * buys the proof.</p>
      */
-    private static final int ROWS_ACROSS_FETCH_BOUNDARY = CURSOR_FETCH_SIZE + 1;
+    private static final int ROWS_ACROSS_CHUNK_BOUNDARY = CHUNK_SIZE + 1;
 
     /**
-     * The number of rows the cursor-boundary and money cases arrange.
+     * The number of rows the predicate, positioning and money cases arrange.
      *
-     * <p>Assumptions: these cases assert a predicate and a column round trip rather than a fetch
-     * boundary, so the row count only has to be large enough to place a cursor with rows on both sides
-     * of it. Five leaves two rows before the probed ordinal and two after.</p>
+     * <p>Assumptions: these cases assert a predicate, a positioning discipline and a column round trip
+     * rather than a chunk boundary, so the row count only has to be large enough to place a resume point
+     * with rows on both sides of it. Five leaves two rows before the probed ordinal and two after, which
+     * is also what lets the positioning case remove a row from the already-read part while still having
+     * unread rows left to skip.</p>
      */
     private static final int ROWS_FOR_CURSOR_PROBES = 5;
 
@@ -312,11 +334,12 @@ class DailyTransactionRepositoryIT {
      * then names whichever class happened to run second. Trade-offs: the accepted cost is a fourth
      * container start and a fourth copy of this declaration, paid whenever the declaration changes.</p>
      *
-     * <p>Alternatives Considered: an in-memory engine. Rejected because the property under test is an
-     * engine behaviour -- a server-side cursor delivering an ordered result in more than one batch --
-     * which a substitute implements differently or not at all, so a passing assertion would say nothing
-     * about the engine the nightly chain runs against. No embedded driver is on this module's
-     * classpath.</p>
+     * <p>Alternatives Considered: an in-memory engine. Rejected because the properties under test are
+     * engine behaviours -- an ordering clause over a column whose values contradict the physical order,
+     * a row cap applied per statement, and a keyed continuation that a committed delete inside the
+     * already-read range does not disturb -- which a substitute implements differently or not at all, so
+     * a passing assertion would say nothing about the engine the nightly chain runs against. No embedded
+     * driver is on this module's classpath.</p>
      */
     @Container
     static final PostgreSQLContainer POSTGRES =
@@ -327,12 +350,14 @@ class DailyTransactionRepositoryIT {
     private DailyTransactionRepository feed;
 
     /**
-     * The transaction boundary the cursor requires and every arrange step commits inside.
+     * The boundary every arrange step commits inside, and the one two cases commit deliberately between
+     * reads.
      *
-     * <p>Assumptions: a boundary is mandatory rather than convenient. The cursor declares
-     * {@code Propagation.MANDATORY}, so it refuses to open unless a caller already holds a transaction,
-     * and each arrange step is committed on its own so the walk that follows reads a committed table
-     * rather than its own open transaction's buffer.</p>
+     * <p>Assumptions: each arrange step is committed on its own so the walk that follows reads a
+     * committed table rather than its own open transaction's buffer. Two cases use it for a second
+     * purpose -- committing an unrelated statement, and committing a delete, BETWEEN two chunk reads --
+     * because a position held as an ordinal survives a commit that a position held inside a database
+     * cursor would not, and that difference is why the read under test is the one both jobs use.</p>
      */
     @Autowired
     private TransactionTemplate transactionTemplate;
@@ -369,10 +394,11 @@ class DailyTransactionRepositoryIT {
      * Empties the feed and opens a JDBC handle before each case.
      *
      * <p>Assumptions: the rows are deleted rather than each case being wrapped in a rolled-back
-     * transaction. The cursor joins the caller's transaction by declaration, so an enclosing test
-     * transaction would make every walk read that transaction's own uncommitted buffer -- which is
-     * exactly the reading the arrange step is designed to avoid, and it would pass whether the engine
-     * ordered the result or not. Deleting between cases keeps each one independent in the spirit
+     * transaction. An enclosing test transaction would make every walk read that transaction's own
+     * uncommitted buffer -- which is exactly the reading the arrange step is designed to avoid -- and it
+     * would also make the two cases that commit BETWEEN reads assert nothing, because the commit they
+     * depend on could not happen inside a boundary the test still held open. Deleting between cases keeps
+     * each one independent in the spirit
      * {@code tests/README.md} section 11 states for the reference suite, which is what lets any single
      * case here be run alone and still mean something.</p>
      *
@@ -392,31 +418,53 @@ class DailyTransactionRepositoryIT {
     }
 
     /**
-     * Confirms the cursor delivers every row in ingestion order and keeps that order past the point
-     * where the driver must fetch again.
+     * Confirms the chunked walk delivers every row in ingestion order and keeps that order past the
+     * point where it must issue a second statement.
      *
      * <p>This is the migrated form of the read loop at {@code app/cbl/CBTRN02C.cbl:202-219}, whose file
      * is declared {@code ORGANIZATION IS SEQUENTIAL} with {@code ACCESS MODE IS SEQUENTIAL} at
      * {@code app/cbl/CBTRN02C.cbl:29-32}. The reference covers the dataset once, front to back, and the
-     * assertion below is that the migrated cursor covers it in the same direction and in a total
+     * assertion below is that the migrated walk covers it in the same direction and in a total
      * order.</p>
+     *
+     * <p>Refactoring Rationale: the chunks are inspected SEPARATELY, before being flattened, and that is
+     * the point of the case rather than a detail of it. This case used to reduce one unbounded cursor
+     * with {@code Stream::toList} and then assert that more rows came back than the driver's fetch
+     * window held -- which is true of a cursor that streamed row by row and equally true of a driver
+     * that buffered the entire result client-side and handed it over in one piece, so it certified a
+     * streaming property it could not observe. A capped read is observable: the first chunk of a feed
+     * one row longer than the cap must hold exactly the cap, and a reader that ignored the cap fails
+     * that assertion on the very first statement.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the cursor delivers every row in ingestion order across a fetch boundary")
-    void theCursorDeliversEveryRowInIngestionOrderAcrossAFetchBoundary() {
-        this.seedFeedWithDescendingIdentifiers(ROWS_ACROSS_FETCH_BOUNDARY);
+    @DisplayName("the chunked walk delivers every row in ingestion order across a chunk boundary")
+    void theWalkDeliversEveryRowInIngestionOrderAcrossAChunkBoundary() {
+        this.seedFeedWithDescendingIdentifiers(ROWS_ACROSS_CHUNK_BOUNDARY);
+
+        List<List<DailyTransaction>> chunks = this.walkedChunks();
+
+        assertThat(chunks)
+                .as("a feed one row longer than the %s-row cap is drawn in exactly two statements, so"
+                        + " the boundary was genuinely crossed", CHUNK_SIZE)
+                .hasSize(2);
+        assertThat(chunks.getFirst())
+                .as("the first statement returns the cap and not the whole feed, which is the assertion"
+                        + " a reader ignoring the cap cannot pass")
+                .hasSize(CHUNK_SIZE);
+        assertThat(chunks.getLast())
+                .as("the second statement returns the single remaining row")
+                .hasSize(1);
+        assertThat(chunks)
+                .as("no statement returns more rows than the cap it was given")
+                .allSatisfy(chunk -> assertThat(chunk).hasSizeLessThanOrEqualTo(CHUNK_SIZE));
 
         List<DailyTransaction> walked = this.walkedRows();
 
         assertThat(walked)
-                .as("the walk is unbounded, so it delivers the whole feed rather than a window of it")
-                .hasSize(ROWS_ACROSS_FETCH_BOUNDARY);
-        assertThat(walked.size())
-                .as("the arrangement exceeds the %s-row fetch window, so the driver was made to fetch"
-                        + " more than once", CURSOR_FETCH_SIZE)
-                .isGreaterThan(CURSOR_FETCH_SIZE);
+                .as("the walk covers the whole feed rather than stopping at the first boundary")
+                .hasSize(ROWS_ACROSS_CHUNK_BOUNDARY);
 
         List<Long> ordinals = ordinalsOf(walked);
         // Assumptions: sorted-and-no-duplicates together mean STRICTLY ascending, and the pair is
@@ -440,7 +488,7 @@ class DailyTransactionRepositoryIT {
                 .isEqualTo(1L);
         assertThat(ordinals.getLast())
                 .as("the row delivered LAST is the row written FIRST, closing the reversal at both ends")
-                .isEqualTo((long) ROWS_ACROSS_FETCH_BOUNDARY);
+                .isEqualTo((long) ROWS_ACROSS_CHUNK_BOUNDARY);
 
         assertThat(identifiersOf(walked))
                 .as("the transaction identifiers arrive descending, because they ascend with the storage"
@@ -449,7 +497,7 @@ class DailyTransactionRepositoryIT {
     }
 
     /**
-     * Confirms the cursor orders by the ingestion ordinal and not by the processing stamp, which is
+     * Confirms the walk orders by the ingestion ordinal and not by the processing stamp, which is
      * absent from every row it returns.
      *
      * <p>{@code app/cpy/CVTRA06Y.cpy} declares {@code DALYTRAN-PROC-TS} on the feed record, and the name
@@ -462,8 +510,8 @@ class DailyTransactionRepositoryIT {
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the cursor orders by the ingestion ordinal while every row's processing stamp is absent")
-    void theCursorOrdersByTheIngestionOrdinalAndNeverByTheProcessingStamp() {
+    @DisplayName("the walk orders by the ingestion ordinal while every row's processing stamp is absent")
+    void theWalkOrdersByTheIngestionOrdinalAndNeverByTheProcessingStamp() {
         this.seedFeedWithDescendingIdentifiers(ROWS_FOR_CURSOR_PROBES);
 
         List<DailyTransaction> walked = this.walkedRows();
@@ -491,45 +539,105 @@ class DailyTransactionRepositoryIT {
     }
 
     /**
-     * Confirms the cursor refuses to open when the caller holds no transaction.
+     * Confirms a chunk read needs no enclosing transaction and survives one committing between chunks,
+     * which is what lets both jobs commit per record while still walking the feed once.
      *
      * <p>This proof has NO baseline counterpart and the absence is stated rather than implied: a
-     * sequential {@code OPEN} in the reference needs no transaction because the reference has none to
-     * need. The property is a target-side consequence of returning a lazily-populated cursor, which stays
-     * valid only for the duration of the transaction that opened it, and the interface declares
-     * {@code Propagation.MANDATORY} precisely so that the mistake is refused at the call site.</p>
+     * sequential {@code READ} in the reference needs no transaction because the reference has none to
+     * need. The property is a target-side one, and it is the property the migrated jobs depend on:
+     * {@code job/PostTransactionsJob.java} commits each posted record on its own boundary and then asks
+     * for the next chunk, so a read that required an enclosing transaction -- or that lost its position
+     * when one committed -- could not be driven that way at all.</p>
+     *
+     * <p>Refactoring Rationale: this case previously asserted that the withdrawn cursor REFUSED to open
+     * outside a transaction, which was true of a lazily-populated result declared
+     * {@code Propagation.MANDATORY} and is not a property the remaining member has or should have. The
+     * assertion is inverted rather than deleted, because the underlying question -- what transaction does
+     * a feed read need -- still has an answer that a reader needs and that a later edit could break: a
+     * {@code MANDATORY} annotation added to the continuation finder would fail this case immediately
+     * instead of failing the nightly chain.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the cursor refuses to open when the caller holds no transaction")
-    void theCursorRefusesToOpenWithNoTransactionHeld() {
+    @DisplayName("a chunk read needs no enclosing transaction and resumes across a commit")
+    void aChunkReadNeedsNoEnclosingTransactionAndResumesAcrossACommit() {
         this.seedFeedWithDescendingIdentifiers(ROWS_FOR_CURSOR_PROBES);
 
-        // Assumptions: the call is wrapped in a closing block even though it is expected to throw. If the
-        //     declaration were ever relaxed and the call SUCCEEDED, the unwrapped form would leak the
-        //     cursor it opened into the rest of the class, so the failure of this case would be followed
-        //     by unrelated failures elsewhere and the first report would not be the useful one.
-        assertThatThrownBy(() -> {
-            try (Stream<DailyTransaction> rows = this.feed.findAllByOrderByIngestSeqAsc()) {
-                rows.count();
-            }
-        })
-                .as("a walk opened with no enclosing transaction is refused outright rather than"
-                        + " returning a cursor that is already closed")
-                .isInstanceOf(IllegalTransactionStateException.class);
+        List<DailyTransaction> first = this.feed.findByIngestSeqGreaterThanOrderByIngestSeqAsc(
+                DailyFeedWatermarkService.NOTHING_CONSUMED, Limit.of(2));
 
-        // Alternatives Considered: asserting the framework's message text as well as the type. Rejected
-        //     because the wording is not part of any contract this project controls, so pinning it would
-        //     convert a framework upgrade into a failure of a case that is about propagation.
-        assertThat(this.walkedRows())
-                .as("the same walk inside a transaction succeeds, so the refusal above is about the"
-                        + " missing boundary and not about the feed or the mapping")
-                .hasSize(ROWS_FOR_CURSOR_PROBES);
+        assertThat(first)
+                .as("the read succeeds with no transaction open at the call site, which is how a job"
+                        + " that commits per record is able to ask for its next chunk")
+                .hasSize(2);
+
+        // Assumptions: an unrelated transaction is opened and COMMITTED between the two reads, standing
+        //     for the per-record commit the posting job performs while walking. A position held inside a
+        //     database cursor would not survive that commit; a position held as an ordinal is a value the
+        //     caller owns, so it does. That difference is the whole reason the continuation finder is the
+        //     member both jobs use.
+        this.transactionTemplate.executeWithoutResult(
+                status -> this.jdbc.queryForObject("SELECT 1", Integer.class));
+
+        List<Long> continued = ordinalsOf(this.feed.findByIngestSeqGreaterThanOrderByIngestSeqAsc(
+                first.getLast().getIngestSeq(), Limit.of(ROWS_FOR_CURSOR_PROBES)));
+
+        assertThat(continued)
+                .as("the walk resumes after the commit at the very next ordinal and covers the remainder"
+                        + " exactly once")
+                .containsExactly(3L, 4L, 5L);
     }
 
     /**
-     * Confirms the cursor over an empty feed delivers no row rather than failing or wrapping.
+     * Confirms the walk positions by KEY and not by counting rows, so a row leaving the part already
+     * read cannot make the next chunk skip an unread row.
+     *
+     * <p>This is the one behaviour the reference cannot lose and the target most easily could. The
+     * posting feed is loaded by one process while a job walks it, and
+     * {@code app/cbl/CBTRN02C.cbl:202-219} advances a sequential dataset whose position is a physical
+     * one that no concurrent change can shift. Positioning by counting rows from the start of an ordered
+     * set has no such property: a row that leaves the already-read part pulls every later row one place
+     * earlier, so the next window starts one row late and an unread row is never returned at all.</p>
+     *
+     * <p>Assumptions: the arrangement removes a row from INSIDE the part already read, which is the
+     * direction that produces a skip rather than a repeat, and the removal is committed before the
+     * continuation is issued. With a cap of two over five rows, a counted second window would begin at
+     * the third row of a table that now holds four, returning ordinals 4 and 5 and silently dropping
+     * ordinal 3 -- so the assertion below distinguishes the two disciplines by their results and not by
+     * inspecting how the query was built. Alternatives Considered: asserting the generated SQL carries no
+     * {@code OFFSET}. Rejected because it holds only for the statement forms a reader thought to
+     * prohibit, whereas a skipped row is the failure itself and is visible however the read is
+     * expressed.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a row leaving the already-read part cannot make the next chunk skip an unread row")
+    void aRowLeavingTheReadPartCannotMakeTheNextChunkSkipAnUnreadRow() {
+        this.seedFeedWithDescendingIdentifiers(ROWS_FOR_CURSOR_PROBES);
+
+        List<DailyTransaction> read = this.feed.findByIngestSeqGreaterThanOrderByIngestSeqAsc(
+                DailyFeedWatermarkService.NOTHING_CONSUMED, Limit.of(2));
+        long resumeFrom = read.getLast().getIngestSeq();
+        this.transactionTemplate.executeWithoutResult(status -> this.jdbc.update(
+                "DELETE FROM ledger.daily_transactions WHERE ingest_seq = ?",
+                read.getFirst().getIngestSeq()));
+
+        List<Long> continued = ordinalsOf(this.feed.findByIngestSeqGreaterThanOrderByIngestSeqAsc(
+                resumeFrom, Limit.of(2)));
+
+        assertThat(continued)
+                .as("the continuation still begins at the first unread ordinal, where a counted window"
+                        + " would have begun one row later and dropped ordinal 3 entirely")
+                .containsExactly(3L, 4L);
+        assertThat(continued)
+                .as("and it returns no row the first chunk already delivered")
+                .doesNotContain(ordinalsOf(read).toArray(new Long[0]));
+    }
+
+    /**
+     * Confirms the walk over an empty feed delivers no row rather than failing or wrapping.
      *
      * <p>An empty feed is a legitimate input rather than an error, and the reference suite ships the
      * vector for it: {@code tests/fixtures/posting/empty_input/dailytran.txt} is an empty file. A
@@ -539,8 +647,8 @@ class DailyTransactionRepositoryIT {
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the cursor over an empty feed delivers no row")
-    void theCursorOverAnEmptyFeedDeliversNoRow() {
+    @DisplayName("the walk over an empty feed delivers no row")
+    void theWalkOverAnEmptyFeedDeliversNoRow() {
         List<DailyTransaction> walked = this.walkedRows();
 
         assertThat(walked)
@@ -640,7 +748,7 @@ class DailyTransactionRepositoryIT {
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the interface declares two reads, exposing no mutator and no row-counting window")
+    @DisplayName("the interface declares one read, exposing no mutator and no row-counting window")
     void theFeedInterfaceExposesNoMutatorAndNoRowCountingWindow() {
         // Alternatives Considered: proving the read-only property by calling a mutator and asserting the
         //     failure. Impossible AND weaker. Impossible because the narrow base type contributes no
@@ -655,12 +763,16 @@ class DailyTransactionRepositoryIT {
             memberNames.add(member.getName());
         }
 
+        // Refactoring Rationale: this closed set used to name TWO reads, and the second of them --
+        //     findAllByOrderByIngestSeqAsc, an unbounded lazily-populated cursor -- had no caller
+        //     anywhere in the module. A closed-set assertion over a member nothing invokes does not
+        //     protect a contract; it FREEZES a surface, so the method could not be removed without
+        //     failing a test that was the only thing keeping it. The member is withdrawn and the set is
+        //     now the one read both jobs actually issue.
         assertThat(memberNames)
-                .as("the reachable surface is exactly the two reads, so no write, update or delete"
+                .as("the reachable surface is exactly the one read, so no write, update or delete"
                         + " exists to be called")
-                .containsExactlyInAnyOrder(
-                        "findAllByOrderByIngestSeqAsc",
-                        "findByIngestSeqGreaterThanOrderByIngestSeqAsc");
+                .containsExactly("findByIngestSeqGreaterThanOrderByIngestSeqAsc");
 
         assertThat(DailyTransactionRepository.class.getInterfaces())
                 .as("the base type is the bare marker rather than a create-read-update-delete base,"
@@ -674,8 +786,8 @@ class DailyTransactionRepositoryIT {
         // Alternatives Considered: a blacklist naming the row-counting request and page types the
         //     charter prohibits across this package. Rejected in favour of the closed whitelist below,
         //     which is strictly stronger: a blacklist admits any row-counting request type nobody thought
-        //     to name, whereas a whitelist rejects every type that is not one of the two the contract
-        //     actually uses. The prohibition itself has a concrete consequence rather than a preference
+        //     to name, whereas a whitelist rejects every type that is not one the contract actually uses.
+        //     The prohibition itself has a concrete consequence rather than a preference
         //     behind it -- positioning by counting rows from the start of an ordered set means an insert
         //     landing before the cursor changes how many rows precede it, so such a scan skips rows it
         //     never read and returns rows it already read. This feed is exposed to exactly that, being
@@ -683,9 +795,8 @@ class DailyTransactionRepositoryIT {
         //     the ordering no matter what is inserted around it.
         for (Method member : members) {
             assertThat(member.getReturnType())
-                    .as("a read returns either the lazy cursor or a bounded list, and nothing that"
-                            + " carries a page of counted rows")
-                    .isIn(Stream.class, List.class);
+                    .as("a read returns a bounded list, and nothing that carries a page of counted rows")
+                    .isEqualTo(List.class);
             for (Class<?> parameter : member.getParameterTypes()) {
                 assertThat(parameter)
                         .as("a read accepts either a continuation key or a row cap, and no request"
@@ -758,11 +869,11 @@ class DailyTransactionRepositoryIT {
      * sibling feed fixture does and what the loader does, and which was measured to be INSUFFICIENT here.
      * Identity assigns in insertion order, so ordinal order and physical order coincide -- and a scan
      * that ordered by nothing at all would then return exactly the sequence an ordered scan returns. That
-     * was verified rather than reasoned about: with identity-assigned ordinals, replacing the cursor's
+     * was verified rather than reasoned about: with identity-assigned ordinals, replacing the walk's
      * ordering with the processing stamp -- a column absent on every row, and therefore no ordering at
      * all -- left every assertion in this class passing. The arrangement below assigns the ordinal
      * EXPLICITLY and DESCENDING against insertion, so physical order is the exact reverse of the order
-     * the cursor must deliver, and an unordered or wrongly-ordered scan fails on the first pair of rows.
+     * the walk must deliver, and an unordered or wrongly-ordered scan fails on the first pair of rows.
      * The owning migration declares the column generated BY DEFAULT rather than ALWAYS, which is what
      * permits a supplied value; nothing here would work against an always-generated column, and a change
      * to that declaration would need this fixture revisited.</p>
@@ -788,7 +899,8 @@ class DailyTransactionRepositoryIT {
      * one is a fixture constant declared above, and the stamped column carries a literal instant.</p>
      *
      * @param rowCount how many rows to load, of type {@code int}; must be positive, and callers derive
-     *     it from either the fetch window or the number of rows a cursor probe needs on each side of it
+     *     it from either the production chunk cap or the number of rows a resume probe needs on each side
+     *     of its probed ordinal
      */
     private void seedFeedWithDescendingIdentifiers(int rowCount) {
         this.transactionTemplate.executeWithoutResult(status -> {
@@ -806,7 +918,7 @@ class DailyTransactionRepositoryIT {
                         TYPE_CD,
                         CATEGORY_CD,
                         SOURCE,
-                        "Daily feed cursor fixture row " + position,
+                        "Daily feed walk fixture row " + position,
                         amountFor(ordinal),
                         FIXTURE_MERCHANT_ID,
                         FIXTURE_CARD_NUM,
@@ -816,44 +928,60 @@ class DailyTransactionRepositoryIT {
     }
 
     /**
-     * Opens the unbounded cursor inside a transaction, hands it to the given reader, and closes it.
+     * Walks the whole feed the way both jobs walk it: repeated capped continuations from the last
+     * ordinal returned, until a continuation comes back empty.
      *
-     * <p>Assumptions: both halves of the call-site contract the interface declares are discharged here
-     * and nowhere else, which is what makes this the shape a sibling walk can copy. The cursor is opened
-     * INSIDE a transaction, because it declares mandatory propagation and a database cursor stays valid
-     * only for the transaction that opened it; and it is opened in a closing block, because a lazily
-     * populated result that is abandoned rather than closed holds its cursor and its connection until
-     * something else reclaims them. Consuming the result outside the boundary -- assigning the stream in
-     * one statement and iterating it in another, after the transaction has committed -- is the mistake
-     * this helper exists to make unavailable, and it fails at the first element rather than at the
-     * call.</p>
+     * <p>Assumptions: this is the production loop and not a convenience over the feed.
+     * {@code job/PreflightDailyTransactionsJob.java} and {@code job/PostTransactionsJob.java} each open
+     * with the ordinal their watermark holds -- {@code DailyFeedWatermarkService.NOTHING_CONSUMED},
+     * which is {@code 0L}, on a first run -- and then loop on the continuation finder with the same cap
+     * until it returns nothing. Reproducing that shape here means every ordering, absence and
+     * round-trip assertion in this class is made about the read the nightly chain performs rather than
+     * about a read only a test issues.</p>
      *
-     * @param <R> the type the reader reduces the walk to, chosen by the caller
-     * @param reader the function applied to the open cursor, evaluated inside the transaction that owns
-     *     it; must not be {@code null} and must not let the stream escape
-     * @return whatever the reader produced from the walk
+     * <p>Refactoring Rationale: the two helpers this replaces opened a lazily-populated cursor inside a
+     * transaction and reduced it with {@code Stream::toList}. Both are gone with the cursor itself,
+     * which had no caller in the module; and the reduction was the weaker half of the pair, because a
+     * terminal {@code toList} materialises the whole result and therefore reads identically whether the
+     * driver streamed row by row or buffered every row client-side first. The chunked walk below cannot
+     * be satisfied that way: it observes each statement's result separately, so a reader that returned
+     * more than the cap is visible in the very first chunk.</p>
+     *
+     * @return every chunk the walk drew, in order, each holding at most {@link #CHUNK_SIZE} rows and
+     *     none of them empty; an EMPTY outer list when the feed holds no rows, never {@code null}
      */
-    private <R> R walkFeed(Function<Stream<DailyTransaction>, R> reader) {
-        return this.transactionTemplate.execute(status -> {
-            try (Stream<DailyTransaction> rows = this.feed.findAllByOrderByIngestSeqAsc()) {
-                return reader.apply(rows);
+    private List<List<DailyTransaction>> walkedChunks() {
+        List<List<DailyTransaction>> chunks = new ArrayList<>();
+        long lastOrdinal = DailyFeedWatermarkService.NOTHING_CONSUMED;
+        while (true) {
+            List<DailyTransaction> chunk = this.feed.findByIngestSeqGreaterThanOrderByIngestSeqAsc(
+                    lastOrdinal, Limit.of(CHUNK_SIZE));
+            if (chunk.isEmpty()) {
+                return chunks;
             }
-        });
+            chunks.add(chunk);
+            lastOrdinal = chunk.getLast().getIngestSeq();
+        }
     }
 
     /**
-     * Walks the whole feed through the unbounded cursor and returns the rows in the order delivered.
+     * Walks the whole feed in chunks and flattens the result into the order the walk delivered.
      *
-     * <p>Assumptions: the rows are drawn off the cursor one at a time by the collector, so the walk is
-     * still the streaming read the interface's fetch-size hint configures rather than a single buffered
-     * result. What is materialised is the OUTCOME of the walk, which is what an ordering assertion has
-     * to inspect: an order is a property of a sequence and cannot be asserted one element at a time.</p>
+     * <p>Assumptions: what is materialised is the OUTCOME of the walk, which is what an ordering
+     * assertion has to inspect: an order is a property of a sequence and cannot be asserted one element
+     * at a time. The per-statement caps the walk honoured are asserted separately, by the case that
+     * inspects {@link #walkedChunks()} directly, so flattening here discards nothing that is claimed
+     * elsewhere.</p>
      *
-     * @return every row of the feed in the order the cursor delivered it, empty when the feed holds no
+     * @return every row of the feed in the order the walk delivered it, empty when the feed holds no
      *     rows and never {@code null}
      */
     private List<DailyTransaction> walkedRows() {
-        return this.walkFeed(Stream::toList);
+        List<DailyTransaction> rows = new ArrayList<>();
+        for (List<DailyTransaction> chunk : this.walkedChunks()) {
+            rows.addAll(chunk);
+        }
+        return rows;
     }
 
     /**

@@ -801,7 +801,7 @@ ALTER SCHEMA "authorization" OWNER TO carddemo_authorization_owner;
 -- either. The views therefore belong to data-migration, but necessarily to a
 -- step ordered after the per-service migrations have created the tables they
 -- read, not to this one. That step is data-migration/sql/V1__reporting_views.sql,
--- which creates the grouping-key table and seven views WITH (security_barrier),
+-- which creates the grouping-key table and eight views WITH (security_barrier),
 -- assigns each to carddemo_reporting_owner, masks the card number that every
 -- ledger-derived view publishes, and grants SELECT on each view by name -- while
 -- revoking the grouping-key table from the service role, so the one physical

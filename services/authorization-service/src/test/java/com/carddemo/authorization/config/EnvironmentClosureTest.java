@@ -74,7 +74,7 @@ class EnvironmentClosureTest {
     /**
      * The variable names both roots are not expected to publish, with the reason each is exempt.
      *
-     * <p>Assumptions: this is a CLOSED set of two, and closing it is the point of the test. Each entry
+     * <p>Assumptions: this is a CLOSED set of one, and closing it is the point of the test. Its entry
      * is delivered by a mechanism other than the two parameter maps this test reads, so requiring it there
      * would fail for a service that is correctly configured. A name that is genuinely unsupplied would
      * have to be added here to make this test pass, which is a reviewable admission rather than an
@@ -91,15 +91,23 @@ class EnvironmentClosureTest {
      * the presence of the very injection point the task-minted design exists to eliminate. Their
      * replacement is {@link #SUPPLIED_BY_CONTAINER_ENTRYPOINT}, which asserts absence rather than
      * presence.</p>
+     *
+     * <p>Refactoring Rationale: the set then held two names and now holds one.
+     * {@code CARDDEMO_MESSAGING_HMAC_KEY} was removed because the property it delivered is withdrawn
+     * along with the bean that read it, the secret both roots provisioned and the module condition that
+     * required this task to receive it. Leaving it listed would have had the same failure mode the
+     * paragraph above describes for the certificate pair, in the same direction:
+     * {@link #theExemptionsAreThemselvesDelivered()} asserts that every name here really is delivered by
+     * both roots, so an entry for a withdrawn secret would demand the roots keep provisioning it.</p>
      */
     private static final Set<String> DELIVERED_BY_ANOTHER_CHANNEL = Set.of(
             // Delivered as a Secrets Manager container secret, from local.secret_sources_by_workload.
             //
             // WHY the signing key belongs here rather than among the parameters: it is key material, so it
-            // travels through the secret channel like the messaging key, not through Parameter Store. It is
-            // additionally the only one of the two whose gate names TWO services -- it is a symmetric key,
-            // so the signing side here and the verifying side in account-service must hold the same bytes
-            // -- which is why the roots gate it on a pair and infra/modules/ecs-service asserts that pair
+            // travels through the secret channel rather than through Parameter Store. It is also the one
+            // required name of this context whose gate names TWO services -- it is a symmetric key, so the
+            // signing side here and the verifying side in account-service must hold the same bytes --
+            // which is why the roots gate it on a pair and infra/modules/ecs-service asserts that pair
             // biconditionally.
             //
             // Refactoring Rationale: the name carries the caller. This entry read
@@ -111,8 +119,7 @@ class EnvironmentClosureTest {
             // gate on it names the pair {authorization, account} -- the minting caller and the verifying
             // callee -- while transaction-service's key is gated on {transaction, account} and is not
             // published for this service at all, which is why only one of the two appears in this set.
-            "CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY",
-            "CARDDEMO_MESSAGING_HMAC_KEY");
+            "CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY");
 
     /**
      * The variable names the service binds with no fallback that NEITHER root supplies, because the
@@ -243,6 +250,15 @@ class EnvironmentClosureTest {
      * structurally identical, so a variable published by one and not the other is a defect that a union
      * check would hide -- and it is the more likely defect of the two, because a wiring change is applied
      * to one root first.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: delivery is asserted as a DELIVERY SHAPE rather than as the bare name
+     * appearing anywhere in the root, and the difference is not cosmetic. A bare-name search counts a
+     * COMMENT as delivery, so once a root carried a withdrawal record naming a variable, this case would
+     * have passed for a service that bound that variable and no root supplied it -- the exact failure the
+     * class exists to catch, reported green. The two shapes below are the only forms a root delivers in:
+     * an unquoted map key immediately before its assignment, which is how a secret-source family is
+     * written, and the quoted name, which is how a parameter entry and its {@code environment_name} are
+     * written. Prose can contain the name and matches neither.</p>
      */
     @Test
     @DisplayName("both environment roots deliver every variable the service cannot default")
@@ -256,12 +272,33 @@ class EnvironmentClosureTest {
                         || SUPPLIED_BY_CONTAINER_ENTRYPOINT.contains(name)) {
                     continue;
                 }
-                assertThat(root)
-                        .as(environment + " must deliver " + name + ", which the service binds with no"
-                                + " default and which therefore aborts context refresh when absent")
-                        .contains(name);
+                assertThat(isDelivered(root, name))
+                        .as(environment + " must deliver " + name + " as a map key or a quoted entry,"
+                                + " because the service binds it with no default and therefore aborts"
+                                + " context refresh when it is absent; a mention in a comment is not"
+                                + " a delivery")
+                        .isTrue();
             }
         }
+    }
+
+    /**
+     * Reports whether a root delivers a variable, judged by the shapes a delivery actually takes.
+     *
+     * <p>Assumptions: an unquoted name followed by an assignment is a map key in a secret-source family;
+     * a quoted name is either a parameter map's composite key or the {@code environment_name} it carries.
+     * Whitespace before the equals sign is admitted because the formatter aligns assignments within a
+     * block, so the gap between a key and its equals sign is not fixed.</p>
+     *
+     * @param root the environment root's configuration text; must not be {@code null}
+     * @param name the environment variable name to look for; must not be {@code null}
+     * @return {@code true} when the root delivers the name in either shape
+     */
+    private static boolean isDelivered(String root, String name) {
+        if (root.contains('"' + name + '"')) {
+            return true;
+        }
+        return Pattern.compile("(?m)^\\s*" + Pattern.quote(name) + "\\s*=").matcher(root).find();
     }
 
     /**
@@ -278,16 +315,21 @@ class EnvironmentClosureTest {
         for (String environment : new String[] {"dev", "prod"}) {
             String root = read("infra/envs/" + environment + "/main.tf");
 
+            // Refactoring Rationale: judged by the same delivery SHAPES as the case above rather than
+            //   by the bare name, for the same reason: a root that merely mentions a name in a comment
+            //   would otherwise satisfy an exemption whose whole purpose is to prove the name really is
+            //   delivered by its other channel.
             for (String name : DELIVERED_BY_ANOTHER_CHANNEL) {
-                assertThat(root)
+                assertThat(isDelivered(root, name))
                         .as(environment + " must deliver " + name + " as a container secret")
-                        .contains(name);
+                        .isTrue();
             }
-            assertThat(root)
-                    .as(environment + " must wire the database credential family")
-                    .contains("SPRING_DATASOURCE_USERNAME")
-                    .contains("SPRING_DATASOURCE_PASSWORD")
-                    .contains("SPRING_DATASOURCE_URL");
+            for (String name : new String[] {
+                "SPRING_DATASOURCE_USERNAME", "SPRING_DATASOURCE_PASSWORD", "SPRING_DATASOURCE_URL"}) {
+                assertThat(isDelivered(root, name))
+                        .as(environment + " must wire " + name + " in the database credential family")
+                        .isTrue();
+            }
         }
     }
 
@@ -324,6 +366,28 @@ class EnvironmentClosureTest {
                     .as(environment + " must not carry withdrawn listener-material secrets")
                     .doesNotContain("CARDDEMO_SERVER_TLS_CERTIFICATE")
                     .doesNotContain("CARDDEMO_SERVER_TLS_PRIVATE_KEY");
+            // Refactoring Rationale: the messaging tokeniser key is asserted absent for a DIFFERENT
+            // reason from the two names above, and the two reasons are kept apart deliberately. Those are
+            // absent because the task mints them for itself, so injecting them would be wrong. This one
+            // is absent because nothing reads it: the bean, the property, the secret resource and the
+            // module's admission condition were withdrawn together. Without an assertion the removal is
+            // reversible by anyone re-adding a secret block, which is how a provisioned credential with
+            // no consumer came to exist in the first place.
+            //
+            // Trade-offs: the four forms below are matched instead of the bare names, because both roots
+            // carry a WITHDRAWAL RECORD that names the variable and the local in prose -- deliberately,
+            // so an operator who finds the secret in an environment applied earlier can tell it was
+            // removed rather than mislaid. A bare-name assertion would therefore fail on the very comment
+            // that documents the removal. Each form below is a shape only real HCL produces: a map key
+            // followed by its assignment, a quoted list or `contains` argument, the quoted resource name,
+            // and the local reference.
+            assertThat(root)
+                    .as(environment + " must not provision or inject the withdrawn messaging tokeniser"
+                            + " key, which no component of this context reads")
+                    .doesNotContain("CARDDEMO_MESSAGING_HMAC_KEY =")
+                    .doesNotContain("\"CARDDEMO_MESSAGING_HMAC_KEY\"")
+                    .doesNotContain("\"messaging_hmac\"")
+                    .doesNotContain("local.messaging_hmac");
         }
     }
 
@@ -344,8 +408,17 @@ class EnvironmentClosureTest {
                 .contains("CARDDEMO_ACCOUNT_CONTEXT_BASE_URL")
                 .contains("CARDDEMO_ACCOUNT_CONTEXT_APPROVED_ORIGIN")
                 .contains("CARDDEMO_MESSAGING_REPLY_QUEUE_ALLOWLIST")
-                .contains("CARDDEMO_MESSAGING_HMAC_KEY")
                 .contains("CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY")
+                // Refactoring Rationale: CARDDEMO_MESSAGING_HMAC_KEY was asserted admitted here and the
+                // assertion is now inverted below, because admission is only correct while something
+                // binds the name. The property, its bean, the provisioned secret and the module condition
+                // are all withdrawn, so a module still admitting the name would be an injection point for
+                // a value nothing reads -- and re-adding it would pass this case rather than fail it if
+                // the assertion had merely been deleted. Trade-offs: the QUOTED form is matched, for the
+                // same reason as in the roots above -- the module documents the withdrawal in prose that
+                // names the variable, and only an admissible-name entry or a precondition argument
+                // renders it quoted.
+                .doesNotContain("\"CARDDEMO_MESSAGING_HMAC_KEY\"")
                 // Trade-offs: the undifferentiated name is asserted absent. Admission of the per-caller
                 // name does not by itself prevent the shared name being re-added alongside it, and a module
                 // admitting both would let a root inject one key into every caller again without failing

@@ -143,6 +143,10 @@ jobs:
           # in step.
           PERMISSIONS_BOUNDARY_ARN: ${{ vars.CARDDEMO_PERMISSIONS_BOUNDARY_ARN }}
           MASK_HMAC_SECRET_ARN: ${{ vars.CARDDEMO_MASK_HMAC_SECRET_ARN }}
+          # Assumptions: a repository VARIABLE rather than a secret, matching the ARN it
+          # accompanies. A key ARN identifies material without disclosing it, and holding it
+          # as a variable is what lets the plan artifact name the key a reviewer can check.
+          MASK_HMAC_SECRET_KMS_KEY_ARN: ${{ vars.CARDDEMO_MASK_HMAC_SECRET_KMS_KEY_ARN }}
           ALB_CERTIFICATE_ARN: ${{ vars.CARDDEMO_ALB_CERTIFICATE_ARN }}
           INTERNAL_SERVICE_DOMAIN_NAME: ${{ vars.CARDDEMO_INTERNAL_SERVICE_DOMAIN_NAME }}
           CLOUDFRONT_ACM_CERTIFICATE_ARN: ${{ vars.CARDDEMO_CLOUDFRONT_ACM_CERTIFICATE_ARN }}
@@ -193,6 +197,7 @@ jobs:
           jq -n \
             --arg boundary "$PERMISSIONS_BOUNDARY_ARN" \
             --arg mask "$MASK_HMAC_SECRET_ARN" \
+            --arg maskkey "$MASK_HMAC_SECRET_KMS_KEY_ARN" \
             --arg albcert "$ALB_CERTIFICATE_ARN" \
             --arg internaldns "$INTERNAL_SERVICE_DOMAIN_NAME" \
             --arg cfcert "$CLOUDFRONT_ACM_CERTIFICATE_ARN" \
@@ -206,6 +211,7 @@ jobs:
               cloudfront_api_connect_src_origins: [],
               permissions_boundary_arn: $boundary,
               mask_hmac_secret_arn: $mask,
+              mask_hmac_secret_kms_key_arn: $maskkey,
               alb_certificate_arn: $albcert,
               internal_service_domain_name: $internaldns,
               cloudfront_acm_certificate_arn: $cfcert,
@@ -244,6 +250,12 @@ jobs:
         run: |
           set -euo pipefail
           root="infra/envs/${{ inputs.environment }}"
+          # WHY : Assumptions: the operational Lambda packages are built here, before init,
+          #   because both plan and apply evaluate `filebase64sha256` over them. They are
+          #   deterministic and gitignored rather than committed, so every pipeline that
+          #   plans builds them; see infra/lambda/build_packages.py for why the provider
+          #   that used to do this was removed.
+          python3 infra/lambda/build_packages.py
           terraform -chdir="$root" init -input=false -lockfile=readonly \
             -backend-config="bucket=$TF_STATE_BUCKET" \
             -backend-config="region=$TF_STATE_REGION" \
@@ -346,111 +358,27 @@ jobs:
             "$root/deployment.auto.tfvars.json" > "$root/deployment.auto.tfvars.json.tmp"
           mv "$root/deployment.auto.tfvars.json.tmp" "$root/deployment.auto.tfvars.json"
 
-      # WHY : This step exists because the environment roots point every task's
-      #       telemetry sidecar at a PRIVATE registry reference rather than at the
-      #       upstream public one. infra/modules/network enumerates the application
-      #       tier's egress instead of allowing 0.0.0.0/0, and the public registry
-      #       has neither an interface endpoint nor a managed prefix list, so a task
-      #       pointed upstream cannot pull its sidecar -- and the sidecar is attached
-      #       to every workload by default, so no task would start. Without this
-      #       mirror the apply below would register task definitions naming an image
-      #       that was never pushed, which is the failure mode the ecr module's own
-      #       exact-set validation exists to prevent for the ten built images.
-      #       Assumptions: the tag is the UPSTREAM version, matching
-      #       local.telemetry_collector_image_tag in both roots, and NOT this
-      #       release's commit tag. The artifact is not built here, so tagging it
-      #       with a CardDemo commit would claim a provenance it does not have.
-      #       Refactoring Rationale: the push was UNCONDITIONAL, on the reasoning that
-      #       "a re-push of identical content is a no-op at the layer level" and that a
-      #       conditional would need a describe-images call whose "not found" path is
-      #       indistinguishable from a permissions failure. The first half is wrong for
-      #       this registry and the second half is answerable. infra/modules/ecr sets
-      #       image_tag_mutability to IMMUTABLE, so re-pushing an existing tag is not a
-      #       no-op -- the registry refuses it with ImageTagAlreadyExistsException -- and
-      #       because the collector tag is a fixed upstream version rather than this
-      #       release's commit, EVERY deployment after the first pushed the same tag
-      #       again. The failure therefore did not depend on anything changing: the
-      #       second deployment of any release broke here, before the apply. The two
-      #       "not found" cases are also distinguishable, because the API names the
-      #       exception, and the check below tests for that name rather than for a
-      #       non-zero status.
-      #       Refactoring Rationale: the source reference was a mutable version TAG,
-      #       accepted on the reasoning that upstream release tags are immutable by
-      #       convention. A convention is not a control, and the artifact this pulls is
-      #       the one container attached to every workload, so the pull now names the
-      #       reviewed OCI index DIGEST and the tag is used only as the mirror's label.
-      #       Assumptions: the digest below and local.telemetry_collector_image_tag in
-      #       both roots describe the same upstream artifact, and a gate in
-      #       .github/workflows/infra-ci.yml asserts the tag halves agree.
-      #       Assumptions: the mirror's own digest is NOT the upstream digest. This
-      #       copies through the local daemon, which resolves one platform manifest out
-      #       of the upstream index, so the pushed manifest is a different object with a
-      #       different digest. That is why the value recorded for Terraform is read
-      #       back from the registry rather than reused from the pull.
-      - name: Mirror the pinned telemetry collector image into the private registry
-        shell: bash
-        run: |
-          set -euo pipefail
-          repos="$(cat deploy-reports/ecr-repositories.json)"
-          collector_repository="$(jq -er '."aws-otel-collector"' <<<"$repos")"
-          collector_repository_name="${collector_repository#*/}"
-          collector_tag="v0.49.0"
-          collector_digest="sha256:d2bdfff2c377c3d71d78bd5d9ce9862fd535b12134a5739d87a07801297cf9fd"
-          upstream="public.ecr.aws/aws-observability/aws-otel-collector@${collector_digest}"
-          mirror="${collector_repository}:${collector_tag}"
-
-          # WHY : Assumptions: a describe-images failure is classified by the exception
-          #       the API names, not by its exit status. ImageNotFoundException means the
-          #       tag is absent and the mirror has work to do; anything else -- an access
-          #       denial, a throttle, a missing repository -- must fail the deployment
-          #       rather than be read as "absent" and turned into a push that then fails
-          #       for a second reason. This is what the previous comment treated as
-          #       impossible to distinguish.
-          existing=""
-          if describe_output="$(aws ecr describe-images \
-                --repository-name "$collector_repository_name" \
-                --image-ids "imageTag=${collector_tag}" \
-                --query 'imageDetails[0].imageDigest' --output text 2>describe.err)"; then
-            existing="$describe_output"
-          elif grep -q 'ImageNotFoundException' describe.err; then
-            existing=""
-          else
-            echo "[deploy] describe-images failed for ${collector_repository_name}:${collector_tag}" >&2
-            cat describe.err >&2
-            rm -f describe.err
-            exit 1
-          fi
-          rm -f describe.err
-
-          if [ -n "$existing" ]; then
-            echo "[deploy] mirror already holds ${mirror} at ${existing}; skipping the push"
-            mirror_digest="$existing"
-          else
-            docker pull "$upstream"
-            docker tag "$upstream" "$mirror"
-            docker push "$mirror"
-            mirror_digest="$(aws ecr describe-images \
-              --repository-name "$collector_repository_name" \
-              --image-ids "imageTag=${collector_tag}" \
-              --query 'imageDetails[0].imageDigest' --output text)"
-            echo "[deploy] mirrored ${upstream} to ${mirror} at ${mirror_digest}"
-          fi
-
-          # WHY : Assumptions: the digest is merged into the SAME image_digests object
-          #       the built images use, so the task definitions name the sidecar by
-          #       digest exactly as they name a service. Both roots declare
-          #       aws-otel-collector as an admissible key and prefer a digest when one is
-          #       present, so a plan run before any mirror exists still resolves the tag
-          #       form instead of failing on a missing key.
-          root="infra/envs/${{ inputs.environment }}"
-          jq --arg digest "$mirror_digest" \
-            '.image_digests["aws-otel-collector"] = $digest' \
-            "$root/deployment.auto.tfvars.json" > "$root/deployment.auto.tfvars.json.tmp"
-          mv "$root/deployment.auto.tfvars.json.tmp" "$root/deployment.auto.tfvars.json"
-          jq --arg digest "$mirror_digest" \
-            '. + {"aws-otel-collector": $digest}' \
-            deploy-reports/image-digests.json > deploy-reports/image-digests.json.tmp
-          mv deploy-reports/image-digests.json.tmp deploy-reports/image-digests.json
+      # WHY : Refactoring Rationale: a step stood here that mirrored a pinned AWS Distro
+      #       for OpenTelemetry collector image from Amazon ECR Public into this
+      #       deployment's own registry, then merged the mirror's digest into
+      #       image_digests so every task definition could name the sidecar by digest.
+      #       The whole step is WITHDRAWN because there is no sidecar to pull an image
+      #       for. infra/modules/ecs-service no longer composes one, and it no longer
+      #       does so because the collector was outside the frozen technical
+      #       specification and was forcing two topology changes that are also outside
+      #       it: an eleventh ECR repository to mirror into, against the ten of section
+      #       0.4.1.6, because Amazon ECR Public is not served by the ecr.api and
+      #       ecr.dkr interface endpoints; and a ninth interface endpoint for xray,
+      #       against the eight of section 0.4.1.9. Removing the component removes the
+      #       mirror, the eleventh repository, the extra endpoint and this step with it.
+      #       Trade-offs: what this workflow no longer does is publish a third-party
+      #       artifact it did not build, which also removes the immutable-tag hazard
+      #       the step had to be rewritten to survive -- the collector tag was a fixed
+      #       upstream version rather than a release commit, so every deployment after
+      #       the first re-pushed the same tag into an IMMUTABLE repository. Every image
+      #       this workflow pushes is now one this repository builds, tagged with the
+      #       reviewed commit, which is the property the ecr module's exact-set
+      #       validation assumes.
 
       # WHY : This gate exists because scan-on-push produced findings that nothing read.
       #       infra/modules/ecr enables image_scanning_configuration.scan_on_push for every
@@ -480,7 +408,7 @@ jobs:
       #       Trade-offs: a new advisory published against an unchanged base image can
       #       block a deployment of unrelated code, and that is the accepted cost of the
       #       gate. It fails with the repository, the tag and the severity counts, so the
-      #       required action -- advance a base-image or collector pin -- is legible from
+      #       required action -- advance a base-image pin -- is legible from
       #       the log rather than requiring a console visit.
       #       Assumptions: the deployment role needs ecr:DescribeImageScanFindings in
       #       addition to the ECR actions the push already uses. docs/runbooks/deploy.md
@@ -490,18 +418,19 @@ jobs:
         run: |
           set -euo pipefail
           repos="$(cat deploy-reports/ecr-repositories.json)"
-          collector_tag="v0.49.0"
           blocking=0
           : > deploy-reports/image-scan-findings.txt
 
+          # WHY : Refactoring Rationale: this loop selected the tag per repository,
+          #       because one repository -- the withdrawn aws-otel-collector mirror --
+          #       carried a fixed upstream version tag rather than this release's commit.
+          #       Every repository this workflow pushes to is now one this repository
+          #       builds, so every image carries the same release tag and the branch is
+          #       gone with the mirror it existed for.
           while IFS= read -r name; do
             repository="$(jq -er --arg name "$name" '.[$name]' <<<"$repos")"
             repository_name="${repository#*/}"
-            if [ "$name" = "aws-otel-collector" ]; then
-              tag="$collector_tag"
-            else
-              tag="$CARDDEMO_IMAGE_TAG"
-            fi
+            tag="$CARDDEMO_IMAGE_TAG"
 
             # WHY : Assumptions: the waiter is allowed to fail. It returns non-zero when a
             #       scan finishes in a state other than COMPLETE, and the status is read
@@ -550,7 +479,7 @@ jobs:
 
           if [ "$blocking" -ne 0 ]; then
             echo "[deploy] refusing to apply: at least one image carries a critical or high finding, or has no completed scan" >&2
-            echo "[deploy] advance the affected base-image or collector pin and rebuild; findings are summarised in deploy-reports/image-scan-findings.txt" >&2
+            echo "[deploy] advance the affected base-image pin and rebuild; findings are summarised in deploy-reports/image-scan-findings.txt" >&2
             exit 1
           fi
           echo "[deploy] image vulnerability gate: PASS"

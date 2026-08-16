@@ -176,7 +176,7 @@
 #     asserting that "this module declares neither the actuator nor the web
 #     starter -- its pom.xml argues both rejections beside its dependency set --
 #     so both namespaces would bind to nothing here". Every clause of that was
-#     inverted. pom.xml declares spring-boot-starter-actuator at L197-200 and
+#     inverted. pom.xml declares spring-boot-starter-actuator at L188-191 and
 #     spring-boot-starter-web at L223-226, and the comments beside them argue why
 #     each is PRESENT -- the actuator to give the image HEALTHCHECK a target, the
 #     web starter to carry the servlet that answers it -- not why either is
@@ -230,7 +230,7 @@
 #     part of any published contract, which is why neither springdoc nor a
 #     resource-server configuration has anything to act on. "request-driven
 #     starters are absent" was also wrong as written -- pom.xml declares
-#     spring-boot-starter-web at L223-226 precisely to carry that endpoint; what it
+#     spring-boot-starter-web at L214-217 precisely to carry that endpoint; what it
 #     declines is the SECURITY starter, under its own "THIS MODULE DECLARES NO
 #     SECURITY STARTER" heading, so the claim is narrowed to the dependency that is
 #     genuinely absent.

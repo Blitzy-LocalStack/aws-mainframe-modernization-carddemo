@@ -48,13 +48,18 @@ import { useNavigate } from 'react-router';
 
 import { isApiRequestError } from '../../api/client';
 import { addTransaction, copyLastTransaction } from '../../api/transactions';
-import type { TransactionAddOutcome, TransactionCreateRequest } from '../../api/transactions';
+import type {
+  CopiedTransactionData,
+  CopyLastTransactionRequest,
+  TransactionAddOutcome,
+  TransactionCreateRequest,
+} from '../../api/transactions';
 import type { ApiError, FieldValidationState } from '../../api/types';
 import { useServerInstant } from '../../hooks/useServerInstant';
-import { MessageBand } from '../../layout/MessageBand';
+import { useShellSlot } from '../../layout/AppShell';
+import { fieldAriaProps, fieldErrorHelp, fieldHintId } from '../../layout/fieldHelp';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
-import { PfKeyBar, UNIFORM_PF_KEY_LABELS } from '../../layout/PfKeyBar';
-import { ScreenHeader } from '../../layout/ScreenHeader';
+import { UNIFORM_PF_KEY_LABELS } from '../../layout/PfKeyBar';
 import { usePfKeys } from '../../layout/usePfKeys';
 import type { PfKeyHandlerMap } from '../../layout/usePfKeys';
 import {
@@ -66,7 +71,7 @@ import {
   padToDeclaredWidth,
 } from '../../messages/messages';
 import { MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
-import { BMS_COLOR_TOKENS, FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../../theme/tokens';
+import { BMS_TEXT_COLOR_TOKENS, FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../../theme/tokens';
 
 /*
  * WHY : Assumptions: every sentence this screen renders is imported rather than retyped, because
@@ -293,6 +298,26 @@ export interface TransactionAddFieldError {
   readonly message: string;
   /** Whether the field was blank, which alone earns the asterisk marker. */
   readonly state: FieldValidationState;
+}
+
+/**
+ * The key pair the service resolved on the last turn it answered.
+ *
+ * Purpose
+ * -------
+ * `app/cbl/COTRN02C.cbl` L193-L229 resolves whichever key the operator did not supply and writes BOTH
+ * fields: the account arm reads the cross-reference at L208 and moves the card number into `CARDNINI` at
+ * L209, the card arm reads at L219 and moves the account identifier into `ACTIDINI` at L221. This is that
+ * pair, as the service reported it, so the confirmation surface can name the record being committed.
+ *
+ * Assumptions: the card number is carried in FULL and masked only where it is displayed. A masked suffix
+ * cannot distinguish two cards on one account, which is the only comparison this pair exists to support.
+ */
+interface ResolvedKeys {
+  /** The account identifier the service resolved, zero-filled to its eleven declared positions. */
+  readonly accountId: string;
+  /** The card number the cross-reference resolved, sixteen digits and unmasked. */
+  readonly cardNumber: string;
 }
 
 /**
@@ -827,6 +852,126 @@ export function buildCreateRequest(
 }
 
 /**
+ * Builds the copy-last submission, which carries a key and a confirmation and no data member.
+ *
+ * ⚠️ Refactoring Rationale: this builder exists because the copy turn used to send a full capture body,
+ * whose eleven data members are each required -- so the action could only be submitted from a screen that
+ * was ALREADY filled in, and pressing the key on a blank one was refused locally with the first blank
+ * field's sentence before any request left the browser. That is the opposite of what the key is for.
+ * `app/cbl/COTRN02C.cbl` L473 performs `VALIDATE-INPUT-KEY-FIELDS` and nothing else before the read, and
+ * L481 to L492 then fill the eleven fields, so they are the action's OUTPUT.
+ *
+ * Assumptions: the key is chosen and zero-filled exactly as {@link buildCreateRequest} chooses and fills
+ * it, and for the same two reasons -- one key is sent because the other is a lookup result rather than an
+ * input, and the width is filled because the contract requires the declared width.
+ *
+ * Assumptions: the confirmation is carried under the same rule the capture body applies: sent when it is
+ * one of the four letters the contract admits and omitted otherwise, so an unconfirmed turn is spelled by
+ * absence. Carrying it preserves the reference's fall-through at L495 -- a copy pressed with an
+ * affirmative answer already keyed copies and writes in one turn.
+ * @param {TransactionAddValues} values - Current field values, already past {@link keyFieldFailure}.
+ * @param {'accountId' | 'cardNumber'} key - Which key field addresses the submission.
+ * @param {string} confirmation - The confirmation character as keyed.
+ * @returns {CopyLastTransactionRequest} The body to submit.
+ */
+export function buildCopyRequest(
+  values: TransactionAddValues,
+  key: 'accountId' | 'cardNumber',
+  confirmation: string,
+): CopyLastTransactionRequest {
+  const addressed: CopyLastTransactionRequest =
+    key === 'accountId'
+      ? { accountId: toZeroFilledKey(values.accountId, TRANSACTION_ADD_FIELD_WIDTHS.accountId) }
+      : { cardNumber: toZeroFilledKey(values.cardNumber, TRANSACTION_ADD_FIELD_WIDTHS.cardNumber) };
+
+  const keyed = confirmation.trim();
+  return WIRE_CONFIRMATION.test(keyed) ? { ...addressed, confirmation: keyed } : addressed;
+}
+
+/**
+ * Adopts the copied record over the form, exactly as the reference's copy block does.
+ *
+ * Assumptions: ELEVEN values come from the copy block, whose reach is exactly that. `app/cbl/COTRN02C.cbl`
+ * L481 to L492 moves the type code, category code, source, amount, description, the two dates and the four
+ * merchant columns, and moves nothing into either key field or into the confirmation.
+ *
+ * ⚠️ Refactoring Rationale: the two KEY fields are nevertheless repainted from the RESOLVED pair, and
+ * leaving them untouched -- which two authored shapes of this function did, on the reading that the copy
+ * block moves nothing into them -- loses a step the reference performs on the same turn. The copy paragraph
+ * begins at L473 by performing `VALIDATE-INPUT-KEY-FIELDS`, and that paragraph writes BOTH key fields: the
+ * account arm reads the cross-reference at L208 and moves the card number it found into `CARDNINI` at L209,
+ * the card arm reads at L219 and moves the account identifier it found into `ACTIDINI` at L221, and each
+ * arm moves its own numeric value back into its own field first (L206, L220) so the field ends zero-filled
+ * to its declared width. The screen is then re-sent, so after a copy the operator is looking at the
+ * resolved pair. A browser that left a keyed card standing while the service resolved a different one from
+ * the account would show the operator one card and write another -- the disagreement the reference cannot
+ * reach, because L209 and the `SEND MAP` share one piece of state.
+ *
+ * Assumptions: repainting the keys does NOT change which account the capture lands against, which is the
+ * property the untouched-keys reading was protecting. The service resolves account-first and answers with
+ * the pair it resolved, so the account written is the account the operator keyed; what changes is that the
+ * card field stops disagreeing with it.
+ *
+ * Assumptions: this is a REPLACEMENT and not a merge, so a field the operator had already filled in
+ * loses its value. That is the reference behaviour -- the eleven moves are unconditional once the row is
+ * read -- and it is why the key press is worth pressing at all.
+ *
+ * ⚠️ Refactoring Rationale: the AMOUNT arrives separately, in `normalisedAmount`, rather than as a member
+ * of `copied`. Two shapes were authored for the copied record, one carrying the amount and one not, and
+ * the one without it is what transaction-service publishes: line 481 renders the stored figure through
+ * `WS-TRAN-AMT-E PIC +99999999.99` and line 485 moves THAT edited rendering, which is the same value the
+ * preview's own amount member already carries, so a member here would publish one figure twice in one
+ * body and invite the two copies to be read as different things. Taking it as a parameter keeps this one
+ * function the single place the eleven moves are expressed while leaving the amount's single source of
+ * truth where the contract puts it.
+ *
+ * ⚠️ Assumptions: the resolved PAIR is a parameter of its own and NOT a member of `copied`, because the
+ * service reports it on every withheld answer while `copied` arrives on a copy turn alone. That is what
+ * lets an ordinary capture repaint its keys too, which is what the reference does -- L166 performs
+ * `VALIDATE-INPUT-KEY-FIELDS` for the Enter arm exactly as L473 does for the copy arm.
+ *
+ * Assumptions: each input is applied independently and an absent one suppresses nothing else. A preview
+ * whose amount the screen's mask cannot express leaves the amount as it stands rather than blanking it, and
+ * an ordinary capture's preview carries no copied record at all.
+ * @param {TransactionAddValues} previous - Values as they stand, whose untouched fields survive.
+ * @param {CopiedTransactionData | null} copied - The ten values the service read from the stored row,
+ *   or `null` on a turn that copied nothing.
+ * @param {ResolvedKeys | null} resolved - The account and card the service resolved, or `null` when this
+ *   turn reported none.
+ * @param {string | null} normalisedAmount - The preview's amount rendered through this screen's edit
+ *   mask, or `null` when the mask cannot express it.
+ * @returns {TransactionAddValues} The values the form now holds, ready for the confirmation turn.
+ */
+export function paintCopiedValues(
+  previous: TransactionAddValues,
+  copied: CopiedTransactionData | null,
+  resolved: ResolvedKeys | null,
+  normalisedAmount: string | null,
+): TransactionAddValues {
+  return {
+    ...previous,
+    ...(resolved === null
+      ? {}
+      : { accountId: resolved.accountId, cardNumber: resolved.cardNumber }),
+    ...(copied === null
+      ? {}
+      : {
+          typeCode: copied.typeCode,
+          categoryCode: copied.categoryCode,
+          source: copied.source,
+          description: copied.description,
+          originDate: copied.originDate,
+          processDate: copied.processDate,
+          merchantId: copied.merchantId,
+          merchantName: copied.merchantName,
+          merchantCity: copied.merchantCity,
+          merchantZip: copied.merchantZip,
+        }),
+    ...(normalisedAmount === null ? {} : { amount: normalisedAmount }),
+  };
+}
+
+/**
  * Reports whether a name the service attributed a refusal to is one of this screen's fields.
  *
  * Assumptions: the lookup is restricted to the table's OWN properties, and the restriction is
@@ -1070,8 +1215,8 @@ const CONFIRM_MODAL_CANCEL = 'N';
 interface FieldHint {
   /** The literal, verbatim from the mapset. */
   readonly text: string;
-  /** Measured BMS colour role, resolved to a token through `BMS_COLOR_TOKENS`. */
-  readonly tone: keyof typeof BMS_COLOR_TOKENS;
+  /** Measured BMS colour role, resolved to a text-grade token through `BMS_TEXT_COLOR_TOKENS`. */
+  readonly tone: keyof typeof BMS_TEXT_COLOR_TOKENS;
 }
 
 /** Presentation options a field needs beyond its label, width and value. */
@@ -1136,18 +1281,59 @@ export function TransactionAddScreen(): ReactElement {
   const [message, setMessage] = useState<string | null>(null);
   const [severity, setSeverity] = useState<MessageBandSeverity>('error');
   const [fieldErrors, setFieldErrors] = useState<readonly TransactionAddFieldError[]>([]);
+  /*
+   * WHY : Purpose: the account identifier and card number the SERVICE resolved on the last turn, held so
+   *       the confirmation surface can describe the record being committed rather than merely ask about
+   *       it. The reference's confirming turn redisplays the whole populated map -- L176 to L181 moves
+   *       `Confirm to add this transaction...` and performs `SEND-TRNADD-SCREEN` after
+   *       `VALIDATE-INPUT-KEY-FIELDS` has already overwritten both key fields -- so an operator
+   *       confirming can see the resolved pair. A modal that showed only a question would take that away.
+   * WHY : ⚠️ Assumptions: this is held SEPARATELY from `values` even though the two key fields now carry
+   *       the same pair, and the separation is what makes the surface honest. The fields are editable, so
+   *       their contents state what WOULD be sent; this states what the service actually resolved, and it
+   *       is cleared the moment either key is edited. Reading the summary off the fields instead would
+   *       describe an edited, unresolved pair with the authority of a service answer.
+   * WHY : Alternatives Considered: holding the whole resolved capture -- the ten data values as well as
+   *       the pair -- which an earlier shape did. Withdrawn as duplication: the ten values are painted
+   *       into the fourteen controls, so the screen already holds them, and a second copy could disagree
+   *       with what the operator is looking at.
+   */
+  const [resolvedKeys, setResolvedKeys] = useState<ResolvedKeys | null>(null);
   const [busy, setBusy] = useState(false);
   /*
-   * WHY : Assumptions: this records that the LAST submission was a copy, and it exists because the
-   *       migrated copy action replaces the eleven data members server-side. `app/cbl/COTRN02C.cbl` L495
-   *       ends `COPY-LAST-TRAN-DATA` by performing `PROCESS-ENTER-KEY`, so a copy and the confirmation
-   *       that follows it are two turns of one action, and the record written on the second turn is the
-   *       COPIED one rather than whatever the screen fields held before. Routing the confirming turn back
-   *       through the copy operation is what preserves that, and it is the property parity depends on.
-   *       Trade-offs: the flag is cleared by any field edit, which is equally faithful -- once an operator
-   *       changes a field, the reference's next Enter writes the screen's values rather than re-copying.
+   * WHY : ⚠️ Refactoring Rationale: there is NO "a copy is pending" flag here any more, and the flag this
+   *       block replaces was the mechanism of a reported write hazard rather than a piece of book-keeping.
+   *       It recorded that the last submission had been a copy so that the CONFIRMING turn could be routed
+   *       back through the copy operation -- which re-resolves "the most recently stored transaction", so a
+   *       row appended between the operator's preview and their confirmation silently replaced what they
+   *       had been shown and was written instead. The reasoning that stood here was that the copy and the
+   *       confirmation are "two turns of one action", which is true of the reference and does not imply a
+   *       second read: `COPY-LAST-TRAN-DATA` at `app/cbl/COTRN02C.cbl` L480 to L493 moves the eleven values
+   *       into the operator's own unprotected MAP FIELDS and L495 then performs `PROCESS-ENTER-KEY`, so the
+   *       row is read exactly once and every later turn writes what is on the glass. The copy operation now
+   *       publishes those eleven values, this screen adopts them into its own fields, and the confirming
+   *       turn goes through the ordinary capture operation -- which is the same one read, in the same
+   *       place, as the reference performs.
+   *       Trade-offs: the earlier arrangement's one genuine merit is preserved without the flag. It cleared
+   *       itself on any field edit so that an edited screen was written rather than re-copied; here every
+   *       turn after a copy writes the screen, edited or not, so there is nothing to clear and no state
+   *
+   *       is what the guard reads. State alone cannot serialise turns: every handler closes over the
+   *       `busy` value of the render it was created in, so two key presses arriving before React commits
+   *       the next render both read `false` and both submit -- writing two transactions where the operator
+   *       asked for one, which is precisely what the guard exists to prevent. A ref is mutated
+   *       synchronously and read through the same object by every closure, so the second press sees the
+   *       first. The state member is retained because it is what the controls and the key bindings render
+   *       from, and a ref does not re-render.
+   *       Alternatives Considered: a `copyPending` flag recording that the last submission was a copy, so
+   *       the confirming turn could be routed back through the copy-and-write operation. Removed rather
+   *       than kept: the copy key press now READS the eleven values and paints them
+   *       (`app/cbl/COTRN02C.cbl` L473 to L493), so the confirming turn writes what the form holds --
+   *       which is what the reference writes, its L495 re-entry running against the fields the copy has
+   *       already replaced. The flag also had a defect no test caught: typing the confirmation cleared it,
+   *       so the confirming turn submitted the PRE-COPY values.
    */
-  const [copyPending, setCopyPending] = useState(false);
+  const inFlight = useRef(false);
 
   /*
    * WHY : Assumptions: one ref object holding a control per field, rather than fourteen separate refs.
@@ -1241,10 +1427,10 @@ export function TransactionAddScreen(): ReactElement {
    */
   function clearScreen(): void {
     setValues(BLANK_VALUES);
+    setResolvedKeys(null);
     setMessage(null);
     setSeverity('error');
     setFieldErrors([]);
-    setCopyPending(false);
     focusField('accountId');
   }
 
@@ -1267,6 +1453,82 @@ export function TransactionAddScreen(): ReactElement {
       : SHARED_MESSAGES.INVALID_VALUE_VALID_VALUES_ARE_Y_N;
   }
 
+  /**
+   * Prepares the CAPTURE submission, or reports the refusal that stops it.
+   *
+   * Assumptions: the data-field chain runs here and nowhere else, so it applies to a capture and not to a
+   * copy. The reference validates the data fields at `app/cbl/COTRN02C.cbl` L167, which the copy path
+   * reaches only through its re-entry at L495 -- that is, after L481 to L492 have filled them.
+   *
+   * Assumptions: the chain reads the SUBMITTED values rather than the component's `values`, for the reason
+   * {@link runTurn} records for the same choice -- {@link submitTurn} composes the answer into the values
+   * and submits in one task, where state set in that task is not yet readable.
+   * @param {'accountId' | 'cardNumber'} key - Which key field addresses the submission.
+   * @param {string} answer - The confirmation character as keyed.
+   * @param {TransactionAddValues} submitted - The values this turn validates and sends.
+   * @returns {(() => Promise<TransactionAddOutcome>) | null} A thunk that dispatches the capture, or
+   *   `null` when a field was refused and this turn is over.
+   */
+  function captureDispatch(
+    key: 'accountId' | 'cardNumber',
+    answer: string,
+    submitted: TransactionAddValues,
+  ): (() => Promise<TransactionAddOutcome>) | null {
+    const refusal = dataFieldFailure(submitted);
+    if (refusal !== null) {
+      reportFieldFailure(refusal);
+      return null;
+    }
+
+    const request = buildCreateRequest(submitted, key, answer);
+    if (request === null) {
+      /*
+       * WHY : Assumptions: unreachable in practice and handled anyway. `dataFieldFailure` has already
+       *       accepted the amount's shape, so the wire conversion cannot fail -- but the two checks live
+       *       in different functions, and a total handler here means a future change to either one
+       *       surfaces the reference's own format sentence instead of dispatching a request with no body.
+       */
+      reportFieldFailure({
+        field: 'amount',
+        message: ADD_MESSAGES.AMOUNT_SHOULD_BE_IN_FORMAT_99999999_99,
+        state: 'NOT_OK',
+      });
+      return null;
+    }
+
+    /**
+     * Dispatches the capture with the body built above.
+     * @returns {Promise<TransactionAddOutcome>} The service's outcome for this turn.
+     */
+    return (): Promise<TransactionAddOutcome> => addTransaction(request);
+  }
+
+  /**
+   * Prepares the COPY submission, which needs only the key this turn already validated.
+   *
+   * Assumptions: nothing can refuse this turn locally beyond the key chain the caller has already run, so
+   * the return type carries no null arm of its own -- the shape it shares with {@link captureDispatch} is
+   * what lets one caller treat the two alike.
+   * @param {'accountId' | 'cardNumber'} key - Which key field addresses the submission.
+   * @param {string} answer - The confirmation character as keyed, which decides copy-only against
+   *   copy-and-write in this same turn.
+   * @param {TransactionAddValues} submitted - The values whose key field addresses the copy.
+   * @returns {() => Promise<TransactionAddOutcome>} A thunk that dispatches the copy.
+   */
+  function copyDispatch(
+    key: 'accountId' | 'cardNumber',
+    answer: string,
+    submitted: TransactionAddValues,
+  ): () => Promise<TransactionAddOutcome> {
+    const request = buildCopyRequest(submitted, key, answer);
+
+    /**
+     * Dispatches the copy with the body built above.
+     * @returns {Promise<TransactionAddOutcome>} The service's outcome for this turn.
+     */
+    return (): Promise<TransactionAddOutcome> => copyLastTransaction(request);
+  }
+
   /*
    * WHY : Assumptions: the whole chain runs BEFORE the confirmation character is read, on every turn,
    *       including the turn that only declines. `PROCESS-ENTER-KEY` performs
@@ -1284,72 +1546,117 @@ export function TransactionAddScreen(): ReactElement {
    */
 
   /**
+   * Marks a turn as begun, reporting whether it may proceed.
+   *
+   * Assumptions: the REF is the gate and the state member only follows it, for the reason the ref's own
+   * declaration records: a handler closes over the `busy` of its own render, so two presses arriving in
+   * one render both see `false`. Reading and setting the ref in one function is what makes the check and
+   * the claim inseparable.
+   * @returns {boolean} `true` when this turn owns the screen, `false` when one is already in flight.
+   */
+  function beginTurn(): boolean {
+    if (inFlight.current) {
+      return false;
+    }
+    inFlight.current = true;
+    setBusy(true);
+    return true;
+  }
+
+  /**
+   * Marks the in-flight turn as settled, releasing the screen.
+   *
+   * Assumptions: the ref is cleared SYNCHRONOUSLY, which is what lets the copy key press continue into
+   * its confirmation turn within the same task. Nothing can interleave between the two, because a single
+   * task runs to completion, so releasing and re-taking the gate cannot admit a second operator press.
+   * @returns {void} Completion is represented by the screen's own state.
+   */
+  function endTurn(): void {
+    inFlight.current = false;
+    setBusy(false);
+  }
+
+  /**
    * Runs one turn: the validation chain, then the submission, then the confirmation evaluation.
    *
-   * Assumptions: `copying` selects the copy-last operation, whose eleven data members the service
-   * replaces from the stored record. The full chain still runs for it, and that is a documented
-   * divergence rather than an oversight: the reference validates only the key fields before copying
-   * (L473) because the copy then fills the eleven fields itself, whereas the migrated operation is
-   * declared over the same request schema with all eleven members required, so a body that omitted them
-   * would be refused by the contract before the service could replace them. The alternative -- sending
-   * placeholder values to satisfy the shape -- would put invented data on the wire.
+   * ⚠️ Refactoring Rationale: `copying` selects the copy-last operation, and the chain that runs before it
+   * is now the KEY chain alone. The note this replaces recorded the full chain running for a copy too, as
+   * "a documented divergence rather than an oversight", on the ground that the copy operation was declared
+   * over the capture's request schema with all eleven data members required. That was a description of a
+   * defect: the reference validates the key fields at L473 and then FILLS the eleven fields at L481 to
+   * L492, so requiring them on the way in made the copy key unusable -- pressing it on a blank screen was
+   * refused with the first blank field's own sentence and sent no request at all. The operation now has a
+   * request shape of its own carrying the key and the confirmation, which is what the reference reads.
+   *
+   * Assumptions: `copying` is true for the PF5 arm ALONE and for no turn that follows it. A copy turn's
+   * withheld answer carries the eleven values it copied, this screen adopts them into its own fields, and
+   * every turn afterwards is an ordinary capture of what is on the screen -- so "the most recently stored
+   * transaction" is resolved exactly once per action, as it is at L475 to L478. See the state declaration
+   * above for the hazard that a second resolution produced.
+   *
+   * ⚠️ Assumptions: the values to submit are a PARAMETER and not read from state, and that is what keeps
+   * every confirmation surface submitting the same turn. {@link submitTurn} records the answer in the
+   * confirmation field and submits in one task, and React state set in a task is not readable in it, so a
+   * turn reading `values` would submit the PREVIOUS answer -- which is the divergence between the modal's
+   * path and the Enter path that one dispatcher exists to remove.
    * @param {string} answer - The confirmation character to submit, which decides preview against write.
+   * @param {TransactionAddValues} submitted - The values this turn validates and submits, which carry the
+   *   answer this turn is giving rather than the one the previous turn gave.
    * @param {boolean} copying - Whether to submit the copy-last operation instead of the capture.
    * @returns {void} Completion is represented by the screen's own state.
    */
-  function runTurn(answer: string, copying: boolean): void {
+  function runTurn(answer: string, submitted: TransactionAddValues, copying: boolean): void {
     /*
      * WHY : Assumptions: a turn arriving while one is in flight is dropped. A terminal turn is serialised
      *       by the hardware -- a 3270 keyboard locks until the region replies -- so the reference needs no
      *       such guard, and without one here a doubled Enter could submit the same confirmed capture
      *       twice and write two transactions where the operator asked for one.
      */
-    if (busy) {
+    if (inFlight.current) {
       return;
     }
 
-    const keyed = keyFieldFailure(values);
+    const keyed = keyFieldFailure(submitted);
     if ('failure' in keyed) {
       reportFieldFailure(keyed.failure);
       return;
     }
 
-    const refusal = dataFieldFailure(values);
-    if (refusal !== null) {
-      reportFieldFailure(refusal);
-      return;
-    }
-
-    const request = buildCreateRequest(values, keyed.key, answer);
-    if (request === null) {
-      /*
-       * WHY : Assumptions: unreachable in practice and handled anyway. `dataFieldFailure` has already
-       *       accepted the amount's shape, so the wire conversion cannot fail -- but the two checks live
-       *       in different functions, and a total handler here means a future change to either one
-       *       surfaces the reference's own format sentence instead of dispatching a request with no body.
-       */
-      reportFieldFailure({
-        field: 'amount',
-        message: ADD_MESSAGES.AMOUNT_SHOULD_BE_IN_FORMAT_99999999_99,
-        state: 'NOT_OK',
-      });
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the data-field chain runs for a CAPTURE and is skipped for a COPY,
+     *       and running it for both was what made the copy key unusable. The reference validates the data
+     *       fields at `app/cbl/COTRN02C.cbl` L167, which the copy path reaches only through the re-entry at
+     *       L495 -- that is, AFTER L481 to L492 have filled them. Running the chain before the copy
+     *       therefore validated fields the action was about to supply, so pressing the key on a blank
+     *       screen was refused with `Type CD can NOT be empty...` and no request was ever sent.
+     * WHY : Assumptions: the KEY chain still runs for both, because the reference runs it for both -- L473
+     *       performs `VALIDATE-INPUT-KEY-FIELDS` for the copy arm and L166 for the Enter arm -- so a copy
+     *       with neither key filled in is refused here rather than at the service.
+     * WHY : Assumptions: the copied values are validated on the turn that follows, not on this one, which
+     *       is the reference's own sequence: the copy fills the fields and the re-entry at L495 then puts
+     *       them through the whole chain, so a copied row carrying a value this screen would refuse is
+     *       reported on the confirming turn exactly as the reference reports it.
+     */
+    const dispatch = copying
+      ? copyDispatch(keyed.key, answer, submitted)
+      : captureDispatch(keyed.key, answer, submitted);
+    if (dispatch === null) {
       return;
     }
 
     const writing = CONFIRMING_ANSWER.test(answer.trim());
-    setBusy(true);
+    beginTurn();
     setMessage(null);
     setFieldErrors([]);
 
-    const submission = copying ? copyLastTransaction(request) : addTransaction(request);
-    submission.then(
+    dispatch().then(
       /**
        * Renders the outcome: the written capture's acknowledgement, or the normalised preview.
        * @param {TransactionAddOutcome} outcome - Which of the two outcomes the service reported.
        * @returns {void} Completion is represented by the screen's own state.
        */
       (outcome: TransactionAddOutcome): void => {
-        setBusy(false);
+        endTurn();
 
         if (outcome.outcome === 'CREATED') {
           /*
@@ -1370,7 +1677,7 @@ export function TransactionAddScreen(): ReactElement {
            *       normalised away.
            */
           setValues(BLANK_VALUES);
-          setCopyPending(false);
+          setResolvedKeys(null);
           setFieldErrors([]);
           setMessage(
             formatMessageTemplate(MESSAGE_TEMPLATES.TRANSACTION_ADDED_SUCCESSFULLY, {
@@ -1388,21 +1695,55 @@ export function TransactionAddScreen(): ReactElement {
          *       form -- unsigned when positive and never zero-filled -- while the field displays
          *       `+99999999.99`, so adopting the response verbatim would replace a twelve-character
          *       display value with a shorter one the field's own predicate would then refuse.
+         * WHY : ⚠️ Refactoring Rationale: on a COPY turn the other TEN copied values are adopted too, and
+         *       adopting the amount alone is the defect this closes. `COPY-LAST-TRAN-DATA` moves eleven
+         *       values into the operator's own map fields at `app/cbl/COTRN02C.cbl` L481 to L492, so after
+         *       a copy the reference's screen holds the copied record in full; a screen holding one of the
+         *       eleven showed the operator ten stale fields beside one copied figure, and then had to
+         *       re-copy on the confirming turn to write anything faithful -- which re-resolved which row
+         *       is last. The values are adopted here, in the one place that receives them, and the
+         *       confirming turn writes them.
+         * WHY : Assumptions: the CONFIRMATION is left exactly as the operator left it, because the
+         *       published shape carries no such member and the copy block moves nothing into it. The two
+         *       KEY fields are repainted from the resolved pair, for the reason
+         *       {@link paintCopiedValues} records: the copy paragraph performs
+         *       `VALIDATE-INPUT-KEY-FIELDS` at L473 before it reads, and that paragraph writes both key
+         *       fields from the cross-reference. A copy therefore still lands against the account the
+         *       operator was already working on -- the resolved account IS that account -- and the card
+         *       field stops disagreeing with it.
+         * WHY : Assumptions: the copied row's own identifier is validated on arrival by
+         *       `ui/src/api/transactions.ts` and deliberately NOT retained here. No field of this mapset
+         *       renders it -- the reference paints no such field, and inventing one would put text on this
+         *       screen the reference never publishes -- and the property it establishes, that one stored
+         *       row was copied and that the same row is the one being written, is established by these
+         *       values having been adopted from it.
          */
         const normalised = toEditMaskAmount(outcome.preview.amount);
-        if (normalised !== null) {
-          setValues(
-            /**
-             * Replaces the amount with its canonical rendering, leaving every other field as keyed.
-             * @param {TransactionAddValues} previous - Values as they stand.
-             * @returns {TransactionAddValues} The same values with the amount re-rendered.
-             */
-            (previous: TransactionAddValues): TransactionAddValues => ({
-              ...previous,
-              amount: normalised,
-            }),
-          );
-        }
+        const copied = outcome.preview.copied;
+        /*
+         * WHY : ⚠️ Assumptions: the pair is recorded on EVERY withheld answer and not on a copy turn
+         *       alone, because the service resolves it on every turn -- `app/cbl/COTRN02C.cbl` L166
+         *       performs `VALIDATE-INPUT-KEY-FIELDS` for the Enter arm as L473 does for the copy arm --
+         *       and the reference repaints both key fields each time before re-sending the screen.
+         */
+        const resolved: ResolvedKeys = {
+          accountId: outcome.preview.resolvedAccountId,
+          cardNumber: outcome.preview.resolvedCardNumber,
+        };
+        setResolvedKeys(resolved);
+        setValues(
+          /**
+           * Adopts the copied record, and the canonical amount, leaving the keys and answer as keyed.
+           *
+           * Assumptions: the eleven moves are expressed by {@link paintCopiedValues} rather than inline
+           * here, so the one function that states which fields the copy block reaches is also the one a
+           * test can exercise without rendering the screen.
+           * @param {TransactionAddValues} previous - Values as they stand.
+           * @returns {TransactionAddValues} The same values carrying whatever this turn supplied.
+           */
+          (previous: TransactionAddValues): TransactionAddValues =>
+            paintCopiedValues(previous, copied, resolved, normalised),
+        );
 
         if (writing) {
           /*
@@ -1419,7 +1760,6 @@ export function TransactionAddScreen(): ReactElement {
           return;
         }
 
-        setCopyPending(copying);
         setSeverity('error');
         setMessage(unconfirmedSentence(answer));
         focusField('confirmation');
@@ -1430,8 +1770,21 @@ export function TransactionAddScreen(): ReactElement {
        * @returns {void} Completion is represented by the screen's own state.
        */
       (failure: unknown): void => {
-        setBusy(false);
-        const report = screenMessageForFailure(failure, { key: keyed.key, copying, writing });
+        endTurn();
+        /*
+         * WHY : ⚠️ Assumptions: `copying` is passed THROUGH rather than fixed false, and which of the two
+         *       it is decides which sentences the context may select. A copy turn's work includes the
+         *       browse of the row to copy, so `Unable to lookup Transaction...` from L664 and L693 and
+         *       `Transaction ID NOT found...` from L655 to L660 are the reference's own words for a
+         *       failure on that turn; a capture turn makes no such read, so naming them there would
+         *       attribute a failed capture to a read the turn never made. Fixing the flag false was
+         *       correct only while the copy ran through a function of its own.
+         */
+        const report = screenMessageForFailure(failure, {
+          key: keyed.key,
+          copying,
+          writing,
+        });
         setSeverity('error');
         setMessage(report.message);
         setFieldErrors(report.fieldErrors);
@@ -1441,23 +1794,66 @@ export function TransactionAddScreen(): ReactElement {
   }
 
   /**
-   * Submits with a confirmation the modal supplied, which is the mouse form of keying it.
-   * @param {string} answer - The answer the modal stands for, one of the two the domain hint names.
+   * The ONE dispatcher every confirmation surface goes through.
+   *
+   * ⚠️ Purpose: physical Enter, the legend's ENTER control and the modal's two controls all call this and
+   * nothing else, so no surface can submit a different turn from another. They previously did not: the
+   * modal recorded its answer and then submitted, while Enter submitted the confirmation field as it
+   * stood, and the two consequently disagreed about which values were in play -- typing `Y` into the
+   * field cleared the copy state that the modal's path preserved, so the same answer given two ways
+   * produced two different submissions. One function is what makes that class of divergence impossible
+   * rather than merely absent.
+   *
+   * Assumptions: the answer is recorded in the confirmation FIELD as well as submitted, so the screen
+   * shows what was sent. For physical Enter the recorded value is the one already there, which makes the
+   * write a no-op rather than a special case -- and a special case is what the two paths used to be.
+   *
+   * Assumptions: the submitted values are composed here rather than read back from state, because state
+   * set in this task is not readable in it. Composing them is also what keeps the recorded answer and the
+   * submitted answer the same character; reading state would submit the previous one.
+   * @param {string} answer - The confirmation character to submit: the field's own value for Enter, or
+   *   the character the modal's control stands for.
    * @returns {void} Completion is represented by the screen's own state.
    */
-  function answerConfirmation(answer: string): void {
-    setValues(
-      /**
-       * Records the answer in the confirmation field so the screen shows what was submitted.
-       * @param {TransactionAddValues} previous - Values as they stand.
-       * @returns {TransactionAddValues} The same values carrying the supplied answer.
-       */
-      (previous: TransactionAddValues): TransactionAddValues => ({
-        ...previous,
-        confirmation: answer,
-      }),
-    );
-    runTurn(answer, copyPending);
+  function submitTurn(answer: string): void {
+    const submitted: TransactionAddValues = { ...values, confirmation: answer };
+    setValues(submitted);
+    /*
+     * WHY : Assumptions: the operation is the CAPTURE and never the copy, whichever turn preceded this
+     *       one. A copy has already put its ten values and its amount on this screen, so confirming
+     *       writes what the operator is looking at; reaching the copy operation again would re-resolve
+     *       which row is last and could write a row the operator never saw.
+     */
+    runTurn(answer, submitted, false);
+  }
+
+  /**
+   * Runs the copy key press: the reference's `COPY-LAST-TRAN-DATA`, as one turn.
+   *
+   * ⚠️ Purpose: this is `COPY-LAST-TRAN-DATA` at `app/cbl/COTRN02C.cbl` L471 to L495, in the order the
+   * paragraph performs it. L473 validates the KEY FIELDS ONLY, L475 to L478 read the most recent row,
+   * L480 to L493 move eleven of its columns into the map's input fields, and L495 then performs
+   * `PROCESS-ENTER-KEY` -- so the operator ends on a populated screen being asked to confirm.
+   *
+   * ⚠️ Refactoring Rationale: this is ONE call and not two. A read-then-submit pair was authored for it,
+   * which fetched the eleven values, painted them and then submitted the painted form in the same task;
+   * transaction-service publishes a single operation that copies, validates and answers with the preview
+   * carrying what it copied, so the pair described a call that does not exist and made a second round trip
+   * out of the reference's own fall-through at L495.
+   *
+   * Assumptions: the confirmation is passed through as keyed rather than forced, so pressing this key with
+   * the field blank lands on `Confirm to add this transaction...` and pressing it with a `Y` already keyed
+   * copies and writes in the one turn -- which is exactly what the reference's L495 re-entry does with
+   * `CONFIRMI` as it stands.
+   *
+   * Assumptions: the values are passed as they are, without composing the answer into them, because this
+   * key press does not change the confirmation field. {@link submitTurn} composes because the modal's
+   * controls stand for an answer the field does not yet hold; this key press submits the field as keyed.
+   * @param {string} answer - The confirmation character as keyed, which the service reads at L495.
+   * @returns {void} Completion is represented by the screen's own state.
+   */
+  function copyLastTurn(answer: string): void {
+    runTurn(answer, values, true);
   }
 
   /*
@@ -1470,17 +1866,37 @@ export function TransactionAddScreen(): ReactElement {
    * WHY : Assumptions: PF13 through PF24 need no handling here. `app/cpy/CSSTRPFY.cpy` L54-L77 aliases them
    *       onto PF01 through PF12, and `usePfKeys` already applies that table through `PF_KEY_ALIASES`, so
    *       re-implementing the aliasing in this screen would create a second copy of one mapping.
+   * WHY : ⚠️ Refactoring Rationale: every binding declares `disabled` while a turn is in flight, where none
+   *       did. The controls and the modal already reflected the busy state, so the SCREEN said a turn was
+   *       running while the legend's four controls stayed lit and a key press was accepted and then
+   *       silently dropped by the guard inside the turn -- an operator pressing Enter twice saw nothing
+   *       happen and no reason why. One declaration covers all three surfaces: `usePfKeys` refuses the
+   *       dispatch before calling `onInvoke`, and `PfKeyBar` renders the control disabled and routes its
+   *       clicks through that same dispatch, so the visible state, the pointer and the keyboard agree.
+   *       Trade-offs: PF3 and PF4 are disabled too, though neither writes. Leaving them live would let an
+   *       operator navigate away or clear the form while a capture is in flight, and the settlement would
+   *       then paint a message about a submission whose screen no longer exists -- the terminal has no such
+   *       state, because its keyboard is locked until the region replies.
    */
   const keyHandlers: PfKeyHandlerMap = {
     ENTER: {
       /**
        * Runs one turn with the confirmation as keyed, which is the reference's Enter arm.
+       *
+       * Assumptions: it goes through {@link submitTurn}, the same function the modal's two controls go
+       * through, so a keyed answer and a clicked one cannot submit different turns.
+       * Assumptions: this arm always submits the CAPTURE and never the copy, including the Enter that
+       * confirms a copy. `PROCESS-ENTER-KEY` writes the map fields, and after a copy those fields hold the
+       * copied record because the copy block put them there at `app/cbl/COTRN02C.cbl` L481 to L492 -- so
+       * the faithful confirming turn is a capture of the screen, and reaching the copy operation again
+       * would resolve "the most recently stored transaction" a second time.
        * @returns {void} Completion is represented by the screen's own state.
        */
       onInvoke: (): void => {
-        runTurn(values.confirmation, copyPending);
+        submitTurn(values.confirmation);
       },
       label: TRANSACTION_ADD_KEY_LABELS.ENTER,
+      disabled: busy,
     },
     PFK03: {
       /**
@@ -1496,6 +1912,7 @@ export function TransactionAddScreen(): ReactElement {
         navigateSafely(navigate, MAIN_MENU_ROUTE);
       },
       label: TRANSACTION_ADD_KEY_LABELS.PFK03,
+      disabled: busy,
     },
     PFK04: {
       /**
@@ -1504,6 +1921,7 @@ export function TransactionAddScreen(): ReactElement {
        */
       onInvoke: clearScreen,
       label: TRANSACTION_ADD_KEY_LABELS.PFK04,
+      disabled: busy,
     },
     PFK05: {
       /**
@@ -1516,9 +1934,10 @@ export function TransactionAddScreen(): ReactElement {
        * @returns {void} Completion is represented by the screen's own state.
        */
       onInvoke: (): void => {
-        runTurn(values.confirmation, true);
+        copyLastTurn(values.confirmation);
       },
       label: TRANSACTION_ADD_KEY_LABELS.PFK05,
+      disabled: busy,
     },
   };
 
@@ -1544,12 +1963,45 @@ export function TransactionAddScreen(): ReactElement {
     },
   });
 
+  /*
+   * WHY : Refactoring Rationale: the title band, the row-23 message line and the row-24 legend are
+   *       DELEGATED to the one `AppShell` that `ui/src/App.tsx` mounts, where this screen composed all
+   *       three itself. Per-screen composition is what this tree did before the shell was wired in;
+   *       keeping it afterwards would render a second title band, a second message line and a second
+   *       named legend region on the screen. What stays here is everything the mapset paints between rows
+   *       4 and 21 -- the title, the fourteen fields and the confirmation control.
+   * WHY : Assumptions: delegating `pfKeys` is also what keeps the keyboard singly owned. `usePfKeys`
+   *       installs one document listener per call site, and the shell binds its own sign-off key only
+   *       while NO screen has published one, so publishing here makes the shell stand down and leaves this
+   *       screen's listener the only one installed. No legend colour is delegated because
+   *       `app/bms/COTRN02.bms` L297-L302 paints the row-24 field `COLOR=YELLOW`, the slot's own default.
+   */
+  useShellSlot({
+    screen: {
+      transactionId: TRANSACTION_ADD_TRANSACTION_ID,
+      programName: TRANSACTION_ADD_PROGRAM_NAME,
+    },
+    now: paintedAt,
+    message: { text: message, severity, mapset: TRANSACTION_ADD_MAPSET },
+    pfKeys: { keys: bindings, onInvoke: invoke },
+  });
+
+  /*
+   * WHY : Refactoring Rationale: the text colours below resolve through
+   *       `BMS_TEXT_COLOR_TOKENS` rather than through the hue map `BMS_COLOR_TOKENS`. The
+   *       measured source roles are unchanged -- `COLOR=NEUTRAL` on the screen title and the
+   *       domain hints, `COLOR=TURQUOISE` on the fourteen field labels -- but the hue map's
+   *       entries are fill-grade anchors, and read as text the turquoise one measures 2.205:1
+   *       and the blue one 4.104:1 against the surface the shell paints, where WCAG AA asks
+   *       4.5:1 for normal text. `ui/src/theme/tokens.ts` records the per-role measurement and
+   *       which roles kept their hue family.
+   */
   const titleStyle: CSSProperties = {
-    color: cssVar[BMS_COLOR_TOKENS.NEUTRAL],
+    color: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL],
     fontWeight: cssVar[TYPOGRAPHY_TOKENS.brightEmphasis],
   };
-  const labelStyle: CSSProperties = { color: cssVar[BMS_COLOR_TOKENS.TURQUOISE] };
-  const neutralStyle: CSSProperties = { color: cssVar[BMS_COLOR_TOKENS.NEUTRAL] };
+  const labelStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.TURQUOISE] };
+  const neutralStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL] };
   const fixedPitchStyle: CSSProperties = {
     fontFamily: cssVar[TYPOGRAPHY_TOKENS.fixedPitchData],
   };
@@ -1557,12 +2009,14 @@ export function TransactionAddScreen(): ReactElement {
   const blankMarkerStyle: CSSProperties = { color: cssVar[FIELD_ERROR_TOKENS.errorColor] };
 
   /**
-   * Records one field's value, discarding any pending copy because the operator has taken over.
+   * Records one field's value.
    *
-   * Assumptions: an edit clears the copy state for the reason the state itself records -- after the
-   * reference copies, the fields hold the copied values and the next Enter writes whatever the fields
-   * hold, so an operator who changes one has changed what gets written. Keeping the flag would send the
-   * confirming turn back through the copy operation and silently discard the edit.
+   * ⚠️ Assumptions: nothing about a previous copy is remembered or discarded here, and nothing needs to be.
+   * The copy key press paints its eleven values INTO these same fields, so after it runs the form holds
+   * the copied record and an edit to any field simply changes what the next turn submits -- which is
+   * exactly the reference's behaviour, its L495 re-entry reading the fields as they then stand. The flag
+   * this handler used to clear existed only because the confirming turn re-invoked a copy operation, and
+   * clearing it here is what made a typed `Y` submit the pre-copy values.
    *
    * Assumptions: the refusal marker and the message are NOT cleared here. AAP section 0.7.1 removes the
    * re-entry discriminator the reference gated its highlighting on, and the replacement is that the error
@@ -1581,6 +2035,17 @@ export function TransactionAddScreen(): ReactElement {
      */
     return (event: ChangeEvent<HTMLInputElement>): void => {
       const edited = event.target.value;
+      /*
+       * WHY : Assumptions: editing either KEY field discards the resolved pair, and only a key field does.
+       *       The pair states what the service resolved FROM those two values, so once one of them changes
+       *       the pair describes a resolution that no longer follows from what is on the screen -- and the
+       *       confirmation surface would then describe a record with the authority of a service answer
+       *       while naming an account the next turn will not use. Editing a DATA field leaves it standing,
+       *       because the resolution does not depend on the data fields: L193-L229 reads only the keys.
+       */
+      if (field === 'accountId' || field === 'cardNumber') {
+        setResolvedKeys(null);
+      }
       setValues(
         /**
          * Replaces one field's value, leaving the rest as they stand.
@@ -1592,7 +2057,6 @@ export function TransactionAddScreen(): ReactElement {
           [field]: edited,
         }),
       );
-      setCopyPending(false);
     };
   }
 
@@ -1624,6 +2088,15 @@ export function TransactionAddScreen(): ReactElement {
    * form to infer, because these controls are managed by this screen rather than by the form store. The
    * association is what lets an operator using a screen reader hear the mapset's own label, and what lets
    * the screen tests find a control by the label literal.
+   *
+   * ⚠️ Refactoring Rationale: the refusal text and the format hint are now bound to the control
+   * PROGRAMMATICALLY, through the shared `fieldHelp` renderer, where they were rendered beside it and
+   * linked to nothing. `Form.Item` positions its `help` and `extra` containers visually and gives them
+   * no identifier, so an operator using a screen reader heard the field's label and its value and never
+   * the sentence explaining why the value was refused -- on all fourteen controls, which is every
+   * control this screen has. `aria-invalid` states the refusal itself and `aria-describedby` names the
+   * sentence and the hint in the order antd paints them, so what a sighted operator reads under the
+   * control is what an operator using assistive technology hears with it.
    * @param {TransactionAddField} field - Field to render.
    * @param {FieldPresentation} presentation - Hint, initial-cursor, numeric and fixed-pitch options.
    * @returns {ReactElement} The labelled control, sized to share its row with its siblings.
@@ -1653,13 +2126,17 @@ export function TransactionAddScreen(): ReactElement {
           htmlFor={controlId}
           {...(refusal === undefined
             ? {}
-            : { validateStatus: 'error' as const, help: refusal.message })}
+            : {
+                validateStatus: 'error' as const,
+                help: fieldErrorHelp(controlId, refusal.message),
+              })}
           {...(presentation.hint === undefined
             ? {}
             : {
                 extra: (
                   <Typography.Text
-                    style={{ color: cssVar[BMS_COLOR_TOKENS[presentation.hint.tone]] }}
+                    id={fieldHintId(controlId)}
+                    style={{ color: cssVar[BMS_TEXT_COLOR_TOKENS[presentation.hint.tone]] }}
                   >
                     {presentation.hint.text}
                   </Typography.Text>
@@ -1674,6 +2151,11 @@ export function TransactionAddScreen(): ReactElement {
             onChange={changeHandler(field)}
             disabled={busy}
             autoFocus={presentation.initialCursor === true}
+            {...fieldAriaProps(controlId, {
+              invalid: refusal !== undefined,
+              hasError: refusal !== undefined,
+              hasHint: presentation.hint !== undefined,
+            })}
             {...(presentation.numeric === true ? { inputMode: 'numeric' as const } : {})}
             {...(presentation.fixedPitch === true ? { style: fixedPitchStyle } : {})}
             {...(refusal?.state === 'BLANK'
@@ -1711,11 +2193,6 @@ export function TransactionAddScreen(): ReactElement {
    */
   return (
     <Flex vertical gap="large">
-      <ScreenHeader
-        transactionId={TRANSACTION_ADD_TRANSACTION_ID}
-        programName={TRANSACTION_ADD_PROGRAM_NAME}
-        now={paintedAt}
-      />
       {/*
        * Assumptions: heading level four rather than any other, because the token bridge maps a screen
        * title to `fontSizeHeading4` and `lineHeightHeading4`, and `Typography.Title level={4}` is the
@@ -1727,12 +2204,12 @@ export function TransactionAddScreen(): ReactElement {
         {TRANSACTION_ADD_TITLE}
       </Typography.Title>
       {/*
-       * Assumptions: the band is placed here, above the form, which is where every authored screen in
-       * this tree puts it, and it is sized from the mapset rather than from the route. The reference paints
-       * its message on row 23 below the fields; the band reserves its space at all times either way, so
-       * the reading order changes and the layout stability the reserved space exists for does not.
+       * Refactoring Rationale: the message line that used to sit here is delegated to the shell, which
+       * paints it at row 23 -- below the fields, which is where the reference paints it. Composing it
+       * above the form was this tree's earlier convention and it inverted the source's order; the band
+       * reserves its space at all times either way, so the layout stability that reservation exists for is
+       * unaffected by the move.
        */}
-      <MessageBand message={message} severity={severity} mapset={TRANSACTION_ADD_MAPSET} />
       <Form layout="vertical">
         <Flex gap="middle" wrap align="flex-start">
           {renderField('accountId', { initialCursor: true, numeric: true, fixedPitch: true })}
@@ -1815,9 +2292,13 @@ export function TransactionAddScreen(): ReactElement {
            *       the modal introduces no text the baseline does not hold, and its question is the
            *       reference's own row-21 prompt for the same reason: this screen has exactly one
            *       confirmation sentence and inventing a second would breach the verbatim-text rule.
-           * WHY : Assumptions: both this control and the legend's ENTER control dispatch the SAME
-           *       function, so the two cannot diverge. The legend control exists because the reference
-           *       paints the key; this one exists because a browser operator has a mouse and the re-key
+           * WHY : ⚠️ Assumptions: both this control and the legend's ENTER control call `submitTurn`, one
+           *       function, so the two cannot diverge. That is now literally true and was not: this
+           *       control called `answerConfirmation`, which recorded the answer and then submitted, while
+           *       the legend called the turn directly with the confirmation field as it stood -- and the
+           *       two disagreed about which values were in play, because typing the answer cleared the
+           *       copy state the modal's path kept. The legend control exists because the reference paints
+           *       the key; this one exists because a browser operator has a mouse and the re-key
            *       convention has no mouse analogue.
            * WHY : Trade-offs: the primary emphasis is deliberate and `okType="danger"` is NOT used, though
            *       the design-system mapping pairs it with `Popconfirm` for a destructive confirmation.
@@ -1827,7 +2308,7 @@ export function TransactionAddScreen(): ReactElement {
            */}
           <Popconfirm
             title={TRANSACTION_ADD_FIELD_LABELS.confirmation}
-            {...(isBlankField(values.cardNumber)
+            {...(resolvedKeys === null
               ? {}
               : {
                   /*
@@ -1844,11 +2325,25 @@ export function TransactionAddScreen(): ReactElement {
                    *       confirmation turn redisplays the whole populated map, so the operator confirming
                    *       could see what they were committing, and a modal that showed only a question would
                    *       take that away.
+                   * WHY : ⚠️ Assumptions: the pair is read from `resolvedKeys` and NOT from the two key
+                   *       controls, and the gate is that a service answer exists rather than that the card
+                   *       control is non-blank. Reading the controls would describe whatever is keyed --
+                   *       including a card the operator typed that the service will discard in favour of the
+                   *       account's own, which is exactly what L209 overwrites -- and would do so with the
+                   *       authority of a service answer. The state is discarded when either key is edited,
+                   *       so no summary outlives the values it was resolved from.
+                   * WHY : Assumptions: the ACCOUNT is named as well as the card, because the reference
+                   *       resolves in both directions and a summary reading only one of them is silent on
+                   *       the arm that matters: a turn keyed by card alone resolves the account at L221,
+                   *       and that account is the one the capture lands against.
                    */
                   description: (
                     <Flex vertical>
                       <Typography.Text style={fixedPitchStyle}>
-                        {`${TRANSACTION_ADD_FIELD_LABELS.cardNumber} ${maskCardNumber(values.cardNumber)}`}
+                        {`${TRANSACTION_ADD_FIELD_LABELS.accountId} ${resolvedKeys.accountId}`}
+                      </Typography.Text>
+                      <Typography.Text style={fixedPitchStyle}>
+                        {`${TRANSACTION_ADD_FIELD_LABELS.cardNumber} ${maskCardNumber(resolvedKeys.cardNumber)}`}
                       </Typography.Text>
                       <Typography.Text style={fixedPitchStyle}>
                         {`${TRANSACTION_ADD_FIELD_LABELS.amount} ${values.amount}`}
@@ -1865,7 +2360,7 @@ export function TransactionAddScreen(): ReactElement {
                * @returns {void} Completion is represented by the screen's own state.
                */
               (): void => {
-                answerConfirmation(CONFIRM_MODAL_OK);
+                submitTurn(CONFIRM_MODAL_OK);
               }
             }
             onCancel={
@@ -1874,7 +2369,7 @@ export function TransactionAddScreen(): ReactElement {
                * @returns {void} Completion is represented by the screen's own state.
                */
               (): void => {
-                answerConfirmation(CONFIRM_MODAL_CANCEL);
+                submitTurn(CONFIRM_MODAL_CANCEL);
               }
             }
           >
@@ -1885,11 +2380,9 @@ export function TransactionAddScreen(): ReactElement {
         </Flex>
       </Form>
       {/*
-       * Assumptions: the legend colour is left at the bar's default, which `app/bms/COTRN02.bms`
-       * L297-L302 confirms -- the row-24 field is `COLOR=YELLOW`, the majority the bar already defaults
-       * to -- so passing it would restate a default rather than record a decision.
+       * Assumptions: the legend the shell paints from this screen's delegated bindings dispatches through
+       * the same `invoke` a real key press does, so a clicked legend control and its key cannot diverge.
        */}
-      <PfKeyBar keys={bindings} onInvoke={invoke} />
     </Flex>
   );
 }

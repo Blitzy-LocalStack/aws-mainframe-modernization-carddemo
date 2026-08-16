@@ -17,190 +17,86 @@ import java.util.function.Function;
  *
  * <p>One marker serves every validated input field in the migrated services, and it carries exactly
  * three states. The reference baseline declares that marker as a single character with three
- * condition names attached, and it declares it that way three times over -- once each for the year,
- * the month and the day of a date -- at {@code app/cpy/CSUTLDWY.cpy} lines 46 to 57. The three
- * states and the byte each one holds are not open to interpretation there: acceptable is the
+ * condition names attached, at {@code app/cpy/CSUTLDWY.cpy} lines 46 to 57: acceptable is the
  * low-value byte, unacceptable is the digit zero, and never-supplied is the letter B. This type is
  * those three states, named, with the predicates that read them.</p>
  *
- * <p>Assumptions: the marker is a general per-field contract rather than a date-specific one, and
- * the count settles it. The same three condition names, with the same suffixes, are declared 71
- * times across the baseline for 71 separate field identities -- among them an account status, an
- * account filter, a transaction-type filter and a description -- of which only three belong to the
- * date components. This type is therefore usable on its own, with no date validator anywhere in the
- * call path, and one baseline program relies on exactly that: at
- * {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl} line 76 it copies the marker declarations
- * while never copying the date algorithm, and it runs no date edit at all.</p>
+ * <p>Assumptions: the marker is a general per-field contract rather than a date-specific one. The
+ * same three condition names are declared 71 times across the baseline for 71 separate field
+ * identities -- among them an account status, an account filter, a transaction-type filter and a
+ * description -- of which only three belong to the components of a date. This type is therefore
+ * usable with no date validator anywhere in the call path, exactly as
+ * {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl} line 76 uses it: that program copies the
+ * marker declarations, never the date algorithm, and runs no date edit at all.</p>
  *
- * <h2>Never-supplied is a kind of error, not a third alternative to it</h2>
+ * <h2>Never-supplied is a kind of error, not a peer of it</h2>
  *
- * <p>Trade-offs: the three states are modelled so that never-supplied is a REASON WITHIN error
- * rather than a peer of it, and a flat set of three equal alternatives was the other option. The
- * flat shape is easier to write and was rejected, because four separate properties of the baseline
- * say the containment is real:</p>
+ * <p>Trade-offs: never-supplied is modelled as a REASON WITHIN error rather than as a third
+ * alternative to it, which costs a caller the ability to ask "is this field in error" by comparing
+ * against a single constant. A flat set of three equal states is easier to write and is rejected,
+ * because the presentation template asks one question and not two: at
+ * {@code app/cpy/CSSETATY.cpy} lines 18 and 19 the test is a single disjunction over the
+ * unacceptable and never-supplied conditions, so nothing downstream of it distinguishes them when
+ * deciding whether a field is in error. That one question is exposed as one predicate,
+ * {@link #isError()}. Reading the states as peers lets a caller compare against never-supplied
+ * where the correct question is whether the field is in error at all, and that caller then passes an
+ * unacceptable value as though it were acceptable.</p>
  *
- * <ul>
- *   <li>the presentation template asks ONE question, not two. At {@code app/cpy/CSSETATY.cpy} lines
- *       18 and 19 the test is a single disjunction over the unacceptable and never-supplied
- *       conditions, so nothing downstream of it distinguishes them when deciding whether a field is
- *       in error;</li>
- *   <li>the never-supplied path sets TWO markers. It sets this per-field marker and, separately, a
- *       caller-owned error switch declared at
- *       {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl} lines 81 to 84, so a field that was
- *       never supplied is unconditionally in error and additionally records why;</li>
- *   <li>the never-supplied test is itself a two-way disjunction over two distinct byte patterns,
- *       both resolving to the one outcome, which is the tolerance {@link #fromCode(char)}
- *       reproduces;</li>
- *   <li>the template's second action is conditioned on never-supplied ALONE, at
- *       {@code app/cpy/CSSETATY.cpy} lines 23 to 25, which is why the state has to remain
- *       distinguishable at all rather than collapsing into a single error state.</li>
- * </ul>
- *
- * <p>The compromise accepted is that a caller cannot ask "is this field in error" by comparing
- * against a constant, since two of the three states answer yes. That is the point: the question the
- * baseline asks has one answer, so this type exposes it as one predicate, {@link #isError()}.
- * Reading it as three peers would let a caller write a comparison against never-supplied where the
- * correct question is whether the field is in error at all, and that caller would then silently
- * pass an unacceptable value as though it were acceptable.</p>
- *
- * <p>Trade-offs: {@link #isError()} is exposed as a derived predicate rather than leaving callers to
- * compare against the constants themselves. The cost is one more member on an otherwise minimal
- * type. It is accepted because the disjunction at {@code app/cpy/CSSETATY.cpy} lines 18 and 19 is
- * expanded 40 times in the baseline, so a caller-side comparison would be the one piece of logic
- * most likely to be written 40 different ways, and a two-term disjunction is exactly the shape in
- * which omitting a term produces no compiler complaint.</p>
+ * <p>Assumptions: the never-supplied state still has to remain distinguishable, because the
+ * template's second action is conditioned on it ALONE, at {@code app/cpy/CSSETATY.cpy} lines 23 to
+ * 25. That is the question {@link #requiresBlankMarker()} answers.</p>
  *
  * <h2>The screen marker is not a state value</h2>
  *
  * <p>Assumptions: two single characters belong to this contract and they live at different layers,
  * so this type keeps them apart. The letter B is a STATE VALUE, stored in the marker field itself,
  * declared at {@code app/cpy/CSUTLDWY.cpy} lines 46 to 57. The asterisk is a PRESENTATION ARTEFACT,
- * written into the screen field so that an empty box visibly shows something, and it appears at
+ * written into the screen field so that an empty box visibly shows something, at
  * {@code app/cpy/CSSETATY.cpy} line 24. The template makes the separation structural rather than
- * incidental: at lines 21 and 22 it moves the error colour into the field's ATTRIBUTE position,
- * while at lines 24 and 25 it moves the asterisk into the field's DATA position. Two destinations,
- * one condition. Merging the two characters would put a literal asterisk into the state domain,
- * after which a marker field could hold a value the baseline never stores in one, so the asterisk is
- * published here as {@link #BLANK_SCREEN_MARKER} and is never a value {@link #code()} returns.</p>
+ * incidental: lines 21 and 22 move the error colour into the field's ATTRIBUTE position, while lines
+ * 24 and 25 move the asterisk into the field's DATA position -- two destinations, one condition.
+ * Merging the two characters would let a marker field hold a value the baseline never stores in one,
+ * so the asterisk is published as {@link #BLANK_SCREEN_MARKER} and is never a value
+ * {@link #code()} returns.</p>
  *
- * <h2>One parameterised type replaces forty textual expansions</h2>
+ * <h2>Rendering carries no re-entry gate</h2>
  *
- * <p>Refactoring Rationale: the baseline expands {@code app/cpy/CSSETATY.cpy} forty times across two
- * programs -- thirty-nine in {@code app/cbl/COACTUPC.cbl} at lines 3208 through 3432 and one in
- * {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl} at line 1358 -- one textual expansion per
- * validated screen field, because a COBOL copybook substitution macro has no runtime
- * parameterisation. A single Java type parameterised by field identity replaces all forty
- * expansions. Field identity is a value here, carried as the first component of
- * {@link FieldError}, which is what turns forty compile-time substitutions into one runtime
- * argument.</p>
- *
- * <p>Assumptions: the substitution is the whole of what varies between those forty sites. Each
- * expansion supplies three tokens and nothing else -- the marker to test, the screen field to alter
- * and the map that field belongs to -- so the forty sites differ in identity alone and share their
- * logic entirely. Two properties of that block record what maintaining forty copies by hand costs,
- * and both were read from the file rather than inferred. The expansions sit six lines apart from
- * line 3208 to line 3400 and then the spacing breaks, falling to five lines at 3405, at 3422, at
- * 3427 and at 3432. At lines 3426 through 3435 two adjacent descriptive comments are transposed
- * relative to the expansions they introduce, so the comment naming an account identifier stands
- * above the expansion for a cardholder marker and vice versa. The block also retains, at lines 3198
- * to 3205, a commented-out hand-written form of the same logic that the macro superseded, directly
- * beneath the program's own note at lines 3195 and 3196 that a substitution copy is being used to
- * set attributes for the remaining fields. The baseline carries all three of these; this type
- * carries one implementation reached by forty callers; the divergence is documented.</p>
- *
- * <h2>The re-entry gate is not carried forward</h2>
- *
- * <p>Refactoring Rationale: the baseline's highlight does not fire whenever a field is in error. At
- * {@code app/cpy/CSSETATY.cpy} line 20 the disjunction above is conjoined with a further condition,
- * a one-digit discriminator declared at {@code app/cpy/COCOM01Y.cpy} lines 29 to 31 with two
- * condition names, zero meaning a first pass through the program and one meaning a subsequent one.
- * The highlight therefore fires only on a subsequent pass. That discriminator lives in the session
- * structure the terminal hands back between screen turns, so in the baseline the marker state and
- * its presentation are coupled through a remembered turn count, and a field can be in error without
- * being shown as being in error.</p>
- *
- * <p>The migrated services are stateless and hold no such count, so the coupling is severed at its
- * source: a marker in either error state is reported in the response body unconditionally, and the
- * client renders whatever the body contains. The consequence is deliberate and is stated rather than
- * left to be discovered -- a validation failure on a first submission highlights fields where the
- * baseline would not have. The baseline gates on the discriminator; this type has no gate; the
- * divergence is documented. The constraint that follows binds this whole type: no member here
+ * <p>Assumptions: the baseline conjoins the disjunction above with a one-digit pass discriminator at
+ * {@code app/cpy/CSSETATY.cpy} line 20, declared at {@code app/cpy/COCOM01Y.cpy} lines 29 to 31, so
+ * its highlight fires only on a pass after the first and a field can be in error there without being
+ * shown as being in error. That discriminator lives in the session structure a terminal hands back
+ * between screen turns. The migrated services are stateless and hold no such count, so a marker in
+ * either error state is reported in the response body unconditionally and the client renders what
+ * the body carries. The divergence is deliberate -- a validation failure on a first submission
+ * highlights fields where the baseline would not have -- and it binds this whole type: no member
  * accepts, stores or exposes a pass count, a submission count or any other per-conversation state,
- * and none may acquire one, because {@link #isError()} answering differently on two identical
- * inputs is precisely the behaviour that was removed.</p>
- *
- * <h2>Shape decisions</h2>
- *
- * <p>Alternatives Considered: an annotation processor generating the accessors was evaluated and
- * rejected, and the parent build omits one deliberately. Generated members carry no documentation,
- * and this project's single rule requires a docstring on every method stating its purpose, its
- * parameters and its return value; a generated accessor cannot hold one, so the gate that enforces
- * the rule would have nothing to read. A Java 21 record with an explicit compact constructor gives
- * the same brevity while leaving every member a place to be documented, which is why
- * {@link FieldError} is written that way.</p>
- *
- * <p>Alternatives Considered: this type sits in the same package as the date edit rules, and
- * splitting marker state from date logic into two packages was the alternative. The baseline settles
- * it two out of two: both programs that copy the marker declarations also expand the highlight
- * template. {@code app/cbl/COACTUPC.cbl} copies the declarations at line 166 and expands the
- * template thirty-nine times; {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl} copies them at
- * line 76 and expands the template once. There is no program that takes one without the other, so a
- * package boundary between them would separate two contracts that the baseline has never once
- * separated.</p>
- *
- * <p>Assumptions: the two copy statements naming those declarations are spelled differently and both
- * are left exactly as they stand. Line 166 names the file in quotation marks with a terminating
- * period; line 76 names it in quotation marks within a sequence-numbered layout. The difference is
- * recorded so that a reader comparing the two lines does not take either for a defect.</p>
- *
- * <p>Assumptions: the symmetry of the three Java state names is this type's own, and the baseline it
- * derives from is not symmetric. Of the three marker fields at {@code app/cpy/CSUTLDWY.cpy} lines 46
- * to 57 only the year field carries a trailing abbreviation for flag; the month field at line 50 and
- * the day field at line 54 do not. The same inconsistency recurs in the other program that copies
- * them, where {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl} lines 110 to 114 give the year
- * subfield an extra infix that the month and day subfields at lines 112 and 114 lack, inside a group
- * of seven lines. Neither asymmetry is reproduced in the Java names, and neither is a defect to be
- * read back into the baseline from the tidier names here.</p>
- *
- * <p>Assumptions: field identity is modelled as a value rather than as a name, and one baseline
- * declaration is the reason it has to be. At {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl}
- * lines 115 and 116 a field is declared as a redefinition of itself, which strict COBOL does not
- * admit; the baseline retains that declaration and this migration does not alter it. Identifying a
- * field by name alone is what makes such a collision expressible at all, so identity is passed to
- * {@link #toFieldError(String, String)} as an argument and validated on arrival.</p>
+ * because {@link #isError()} answering differently on two identical inputs is precisely the
+ * behaviour that was removed.</p>
  *
  * <h2>Encoding tolerance, and why it is not laxity</h2>
  *
- * <p>Assumptions: the three bytes are the contract, but two of them demonstrably vary across the
- * baseline while their meanings do not, so {@link #fromCode(char)} accepts both spellings of each.
- * The measurement over all 71 declarations is precise. The unacceptable byte is the digit zero at 71
- * sites out of 71, with no variation at all. The acceptable byte is the low-value byte at 52 sites
- * and the digit one at 16. The never-supplied byte is the letter B at 55 sites and the SPACE
- * character at 16. Decisively, {@code app/cbl/COACTUPC.cbl} -- the program holding thirty-nine of
- * the forty expansions -- carries BOTH spellings, 47 fields using the letter B and two using SPACE,
- * and every one of its expansions works regardless, because the template at
- * {@code app/cpy/CSSETATY.cpy} lines 18 and 19 tests the named condition and never the raw byte. The
- * semantic state is therefore the stable contract and the byte is an encoding detail. Accepting both
- * spellings of a state is not tolerance of arbitrary input: an unrecognised byte is rejected, and
- * the canonical spelling that {@link #code()} emits is the one at
- * {@code app/cpy/CSUTLDWY.cpy} lines 46 to 57.</p>
+ * <p>Assumptions: the semantic state is the stable contract and the byte is an encoding detail, so
+ * {@link #fromCode(char)} accepts both spellings the baseline uses for two of the three states --
+ * the digit one alongside the low-value byte for acceptable, and the SPACE character alongside the
+ * letter B for never-supplied -- while the unacceptable byte is the digit zero at all 71 declaration
+ * sites. The template tests the named condition and never the raw byte, which is why the program
+ * holding thirty-nine of the forty highlight expansions carries both spellings and every expansion
+ * in it works regardless. Tolerance stops there: an unrecognised byte is rejected, and
+ * {@link #code()} emits the canonical spelling at {@code app/cpy/CSUTLDWY.cpy} lines 46 to 57.</p>
  *
- * <p>Assumptions: a raw byte is never this type's primary abstraction, and one baseline pairing shows
- * why it must not be. In {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl} the digit zero means
- * acceptable on the caller-owned error switch at line 82 and means UNACCEPTABLE on a per-field
- * marker at line 96, fourteen lines apart in one program. The same byte carries opposite senses
- * depending on which field holds it, so this type is an enumeration whose states are named, and the
- * byte is reachable only through {@link #code()} and {@link #fromCode(char)}.</p>
+ * <p>Assumptions: a raw byte is never this type's primary abstraction, because the same byte carries
+ * opposite senses depending on which field holds it -- in
+ * {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl} the digit zero means acceptable on the
+ * caller-owned error switch at line 82 and means UNACCEPTABLE on a per-field marker at line 96,
+ * fourteen lines apart in one program. The states are therefore named, and the byte is reachable
+ * only through {@link #code()} and {@link #fromCode(char)}.</p>
  *
- * <h2>Verification</h2>
- *
- * <p>Assumptions: no golden-master comparison covers this type, and the limit is recorded rather than
- * glossed. The repository's parity oracle suite exercises batch flows, and its own guide records at
- * {@code tests/README.md} lines 83 to 85 that the online programs cannot run end to end without a
- * terminal-monitor runtime, so only their extractable field-validation logic is unit-tested. This
- * type is an online-path concept with no batch caller, so its correctness rests on the unit tests in
- * this module's own test tree together with the baseline citations above. Claiming golden-master
- * backing for it would overstate the evidence behind every assertion made here.</p>
+ * <p>Field identity is a value here rather than a token bound at compile time. The baseline expands
+ * {@code app/cpy/CSSETATY.cpy} once per validated screen field -- forty times across two programs --
+ * because a copybook substitution macro has no runtime parameterisation, and each expansion supplies
+ * only the marker to test, the screen field to alter and the map that field belongs to. One type
+ * parameterised by the field identity carried in {@link FieldError} therefore serves all forty
+ * callers, and identity is validated on arrival at {@link #toFieldError(String, String)}.</p>
  *
  * <p>This type holds no state beyond its three constants, is safe for concurrent use, and adds no
  * dependency to the module: its whole import list is drawn from the platform library, so a batch
@@ -358,17 +254,17 @@ public enum FieldValidationFlag {
      *     {@link #ALTERNATE_BLANK_CODE} or the asterisk of {@link #BLANK_SCREEN_MARKER}
      */
     public char code() {
-        // WHY : Alternatives Considered: holding the byte in an instance field populated from each
-        //       constant's argument list was the obvious shape and is unavailable, which was
-        //       confirmed by compiling it rather than reasoned about. Java requires enum constants to
-        //       be the first members of the body, so the named constants cannot be declared above
-        //       them, and an argument list referring to a constant declared below is rejected as an
-        //       illegal forward reference by javac 21.0.11. Spelling the three bytes as literals in
-        //       the argument lists would compile, at the cost of declaring each contract byte twice:
-        //       once as an unnamed literal and once as the named constant callers read. This switch
-        //       leaves each byte declared exactly once, and its exhaustiveness over the three states
-        //       is checked by the compiler, so a fourth state could not be added without this method
-        //       failing to compile.
+        // Alternatives Considered: holding the byte in an instance field populated from each
+        // constant's argument list was the obvious shape and is unavailable, which was
+        // confirmed by compiling it rather than reasoned about. Java requires enum constants to
+        // be the first members of the body, so the named constants cannot be declared above
+        // them, and an argument list referring to a constant declared below is rejected as an
+        // illegal forward reference by javac 21.0.11. Spelling the three bytes as literals in
+        // the argument lists would compile, at the cost of declaring each contract byte twice:
+        // once as an unnamed literal and once as the named constant callers read. This switch
+        // leaves each byte declared exactly once, and its exhaustiveness over the three states
+        // is checked by the compiler, so a fourth state could not be added without this method
+        // failing to compile.
         return switch (this) {
             case VALID -> VALID_CODE;
             case NOT_OK -> NOT_OK_CODE;
@@ -402,13 +298,13 @@ public enum FieldValidationFlag {
      *     {@link #VALID}
      */
     public boolean isError() {
-        // WHY : Trade-offs: this is written as the negation of the single acceptable state rather
-        //       than as a disjunction of the two error states. Both read identically today. The
-        //       negation is chosen because a state added to this type would default to being
-        //       reported as an error, which fails safe towards surfacing a field the client can
-        //       correct, whereas a two-term disjunction would silently omit the new state and let an
-        //       unvalidated field pass as acceptable. That omission is the failure mode the
-        //       forty expanded copies of the disjunction in the baseline are most exposed to.
+        // Trade-offs: this is written as the negation of the single acceptable state rather
+        // than as a disjunction of the two error states. Both read identically today. The
+        // negation is chosen because a state added to this type would default to being
+        // reported as an error, which fails safe towards surfacing a field the client can
+        // correct, whereas a two-term disjunction would silently omit the new state and let an
+        // unvalidated field pass as acceptable. That omission is the failure mode the
+        // forty expanded copies of the disjunction in the baseline are most exposed to.
         return this != VALID;
     }
 
@@ -454,11 +350,11 @@ public enum FieldValidationFlag {
      *     as acceptable would pass an unvalidated field through as though it had been checked
      */
     public static FieldValidationFlag fromCode(char code) {
-        // WHY : Assumptions: the asterisk is deliberately absent from the accepted set even though it
-        //       is one of the four characters this contract names. It is written into a SCREEN field
-        //       at app/cpy/CSSETATY.cpy lines 24 and 25, never into the marker field, so a marker
-        //       field holding it means the two layers have been conflated somewhere upstream. Falling
-        //       through to the rejection below reports that rather than absorbing it.
+        // Assumptions: the asterisk is deliberately absent from the accepted set even though it
+        // is one of the four characters this contract names. It is written into a SCREEN field
+        // at app/cpy/CSSETATY.cpy lines 24 and 25, never into the marker field, so a marker
+        // field holding it means the two layers have been conflated somewhere upstream. Falling
+        // through to the rejection below reports that rather than absorbing it.
         return switch (code) {
             case VALID_CODE, ALTERNATE_VALID_CODE -> VALID;
             case NOT_OK_CODE -> NOT_OK;
@@ -475,12 +371,12 @@ public enum FieldValidationFlag {
      * @return the exception detail message naming the offending byte
      */
     private static String describeUnknownCode(char code) {
-        // WHY : Assumptions: the byte is reported as a numeric code point rather than as itself,
-        //       because three of the five bytes this contract uses are invisible or
-        //       indistinguishable when printed -- the low-value byte renders as nothing at all, and
-        //       a space is indistinguishable from the surrounding message text. A message reading
-        //       "unrecognised code ' '" would leave a reader unable to tell which of those two
-        //       arrived, which is exactly the diagnosis this message exists to supply.
+        // Assumptions: the byte is reported as a numeric code point rather than as itself,
+        // because three of the five bytes this contract uses are invisible or
+        // indistinguishable when printed -- the low-value byte renders as nothing at all, and
+        // a space is indistinguishable from the surrounding message text. A message reading
+        // "unrecognised code ' '" would leave a reader unable to tell which of those two
+        // arrived, which is exactly the diagnosis this message exists to supply.
         return "unrecognised field validation code: U+"
                 + String.format(Locale.ROOT, "%04X", (int) code)
                 + "; expected one of U+0000, '1', '0', 'B' or ' '";
@@ -525,19 +421,19 @@ public enum FieldValidationFlag {
      *     {@code false} otherwise
      */
     public static boolean isNeverSupplied(String value) {
-        // WHY : Assumptions: a null and an empty value are folded into the same answer as a run of
-        //       pad characters, because the baseline cannot tell those cases apart and this method
-        //       must not invent a distinction it never made. A screen field always arrives at a COBOL
-        //       program as a character field of declared width, so "nothing arrived" reaches it as
-        //       pad characters rather than as an absence; over HTTP the same field arrives absent or
-        //       empty. All three describe a field the user never filled in.
+        // Assumptions: a null and an empty value are folded into the same answer as a run of
+        // pad characters, because the baseline cannot tell those cases apart and this method
+        // must not invent a distinction it never made. A screen field always arrives at a COBOL
+        // program as a character field of declared width, so "nothing arrived" reaches it as
+        // pad characters rather than as an absence; over HTTP the same field arrives absent or
+        // empty. All three describe a field the user never filled in.
         if (value == null || value.isEmpty()) {
             return true;
         }
 
-        // WHY : Assumptions: the arms are evaluated over ALL characters separately rather than
-        //       character by character against either pad, so a mixed value satisfies neither. The
-        //       reasoning, and why the outcome stays safe, is on this method.
+        // Assumptions: the arms are evaluated over ALL characters separately rather than
+        // character by character against either pad, so a mixed value satisfies neither. The
+        // reasoning, and why the outcome stays safe, is on this method.
         return isEntirely(value, ABSENT_INPUT_LOW_VALUE) || isEntirely(value, ABSENT_INPUT_SPACE);
     }
 
@@ -581,15 +477,15 @@ public enum FieldValidationFlag {
      *     whitespace, under the same condition
      */
     public Optional<FieldError> toFieldError(String field, String message) {
-        // WHY : Trade-offs: this makes the arguments unvalidated on the acceptable path, so a caller
-        //       passing a null identity for a field that turns out to be acceptable is not told. The
-        //       compromise is accepted deliberately, because the alternative reverses the baseline's
-        //       own control flow: at app/cpy/CSSETATY.cpy lines 18 and 19 the template evaluates
-        //       nothing whatsoever for a field that is not in error. Validating first would also
-        //       oblige every caller to supply help text for fields it has no complaint about, which
-        //       for a screen such as the account update -- 39 validated fields, most of them
-        //       acceptable on any given submission -- means resolving message text that is then
-        //       discarded.
+        // Trade-offs: this makes the arguments unvalidated on the acceptable path, so a caller
+        // passing a null identity for a field that turns out to be acceptable is not told. The
+        // compromise is accepted deliberately, because the alternative reverses the baseline's
+        // own control flow: at app/cpy/CSSETATY.cpy lines 18 and 19 the template evaluates
+        // nothing whatsoever for a field that is not in error. Validating first would also
+        // oblige every caller to supply help text for fields it has no complaint about, which
+        // for a screen such as the account update -- 39 validated fields, most of them
+        // acceptable on any given submission -- means resolving message text that is then
+        // discarded.
         if (isValid()) {
             return Optional.empty();
         }
@@ -627,40 +523,40 @@ public enum FieldValidationFlag {
         Objects.requireNonNull(flagsByField, "flagsByField must not be null");
         Objects.requireNonNull(messageForField, "messageForField must not be null");
 
-        // WHY : Assumptions: the order fields are reported in is part of the migrated behaviour, not
-        //       an implementation detail, so it is preserved rather than sorted or grouped. The
-        //       baseline highlights fields by running its forty expansions in the order they are
-        //       written, from app/cbl/COACTUPC.cbl line 3208 to line 3432, which is the order the
-        //       fields appear on the screen. A caller passing an insertion-ordered map therefore gets
-        //       the baseline's reporting order back; a caller passing an unordered map gets that
-        //       map's order, which is its own choice to make and is documented on the parameter
-        //       rather than silently overridden here.
+        // Assumptions: the order fields are reported in is part of the migrated behaviour, not
+        // an implementation detail, so it is preserved rather than sorted or grouped. The
+        // baseline highlights fields by running its forty expansions in the order they are
+        // written, from app/cbl/COACTUPC.cbl line 3208 to line 3432, which is the order the
+        // fields appear on the screen. A caller passing an insertion-ordered map therefore gets
+        // the baseline's reporting order back; a caller passing an unordered map gets that
+        // map's order, which is its own choice to make and is documented on the parameter
+        // rather than silently overridden here.
         List<FieldError> errors = new ArrayList<>();
 
         for (Map.Entry<String, FieldValidationFlag> entry : flagsByField.entrySet()) {
             String field = entry.getKey();
             FieldValidationFlag state = entry.getValue();
 
-            // WHY : Assumptions: a null key or value is rejected here rather than being skipped. A
-            //       missing state for a field the caller has listed means the field was never
-            //       validated, and skipping it would report that field as acceptable -- the one
-            //       outcome this type exists to prevent, since an unvalidated field would then reach
-            //       persistence indistinguishable from a checked one.
+            // Assumptions: a null key or value is rejected here rather than being skipped. A
+            // missing state for a field the caller has listed means the field was never
+            // validated, and skipping it would report that field as acceptable -- the one
+            // outcome this type exists to prevent, since an unvalidated field would then reach
+            // persistence indistinguishable from a checked one.
             Objects.requireNonNull(field, "flagsByField must not contain a null field identity");
             Objects.requireNonNull(
                     state, () -> "flagsByField must not contain a null state, found one for " + field);
 
-            // WHY : Trade-offs: this guard duplicates the acceptable-state test that
-            //       toFieldError already performs, and the duplication is accepted because it is
-            //       what makes the resolver lazy. Java evaluates an argument before the call it
-            //       belongs to, so resolving the message inside the toFieldError argument list
-            //       would invoke the resolver for EVERY field including the acceptable ones,
-            //       defeating the early return that method documents and contradicting the
-            //       contract stated on the parameter above. On the account update screen, whose
-            //       39 validated fields are mostly acceptable on any one submission, that is
-            //       roughly 36 message lookups whose results are discarded; worse, a resolver
-            //       that raises for a field it has no message for would then raise on a
-            //       submission that had nothing wrong with it.
+            // Trade-offs: this guard duplicates the acceptable-state test that
+            // toFieldError already performs, and the duplication is accepted because it is
+            // what makes the resolver lazy. Java evaluates an argument before the call it
+            // belongs to, so resolving the message inside the toFieldError argument list
+            // would invoke the resolver for EVERY field including the acceptable ones,
+            // defeating the early return that method documents and contradicting the
+            // contract stated on the parameter above. On the account update screen, whose
+            // 39 validated fields are mostly acceptable on any one submission, that is
+            // roughly 36 message lookups whose results are discarded; worse, a resolver
+            // that raises for a field it has no message for would then raise on a
+            // submission that had nothing wrong with it.
             if (state.isError()) {
                 state.toFieldError(field, messageForField.apply(field)).ifPresent(errors::add);
             }
@@ -682,12 +578,12 @@ public enum FieldValidationFlag {
     private static String requireText(String value, String name) {
         Objects.requireNonNull(value, () -> name + " must not be null");
 
-        // WHY : Assumptions: a wholly whitespace value is rejected as well as an empty one, because
-        //       the two error states of this contract exist precisely to distinguish a field that was
-        //       never supplied from one holding a bad value. A blank field identity or a blank help
-        //       text would render as an entry the client cannot attach to any field and cannot
-        //       display, which reports the presence of an error while withholding both of the things
-        //       needed to act on it.
+        // Assumptions: a wholly whitespace value is rejected as well as an empty one, because
+        // the two error states of this contract exist precisely to distinguish a field that was
+        // never supplied from one holding a bad value. A blank field identity or a blank help
+        // text would render as an entry the client cannot attach to any field and cannot
+        // display, which reports the presence of an error while withholding both of the things
+        // needed to act on it.
         if (value.isBlank()) {
             throw new IllegalArgumentException(name + " must not be blank");
         }
@@ -747,13 +643,13 @@ public enum FieldValidationFlag {
             message = requireText(message, "message");
             Objects.requireNonNull(state, "state must not be null");
 
-            // WHY : Assumptions: an acceptable state is rejected rather than stored, which is what
-            //       makes the presence of an entry sufficient evidence of an error. The baseline
-            //       reaches its highlight only through the disjunction at app/cpy/CSSETATY.cpy lines
-            //       18 and 19, so it has no representation for "this field is fine" on the screen
-            //       either; an entry carrying an acceptable state would be a shape with no baseline
-            //       counterpart, and a consumer counting entries to decide whether a submission
-            //       failed would count it and reject a valid submission.
+            // Assumptions: an acceptable state is rejected rather than stored, which is what
+            // makes the presence of an entry sufficient evidence of an error. The baseline
+            // reaches its highlight only through the disjunction at app/cpy/CSSETATY.cpy lines
+            // 18 and 19, so it has no representation for "this field is fine" on the screen
+            // either; an entry carrying an acceptable state would be a shape with no baseline
+            // counterpart, and a consumer counting entries to decide whether a submission
+            // failed would count it and reject a valid submission.
             if (state.isValid()) {
                 throw new IllegalArgumentException(
                         "state must be an error state, but was " + state + " for field " + field);

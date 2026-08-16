@@ -196,27 +196,39 @@ class AccountViewRevisionTest {
     }
 
     /**
-     * An incomplete composition is refused rather than answered with a token for rows that were not read.
+     * An incomplete composition is answered with NO token rather than with one for rows that were not read.
      *
-     * <p>Assumptions: the customer-master miss is the arm to assert, because it is the one arm the
-     * composition still populates the account half on -- the reference fills its account region under the
-     * disjunction at L471 with L472 of {@code app/cbl/COACTVWC.cbl} while leaving the customer region at
-     * L493 unpopulated -- so it is the only arm where a half-populated view could plausibly be published
-     * with half a token. The entry point raises instead, which is what keeps a caller from ever holding a
-     * precondition for a pair it was not shown.</p>
+     * <p>⚠️ Refactoring Rationale: this case asserted a raised failure and now asserts a returned
+     * composition carrying a null revision, because the entry point stopped raising on this arm. The
+     * property it exists for is unchanged and is the one that matters: a caller must never hold a
+     * precondition for a pair it was not shown. Raising was one way to guarantee that and it cost the
+     * reference's own partial screen -- the account region is filled under the disjunction at L471 with
+     * L472 of {@code app/cbl/COACTVWC.cbl} while the customer region at L493 is suppressed -- so the
+     * guarantee is now carried by the absent token instead, and the adapter omits the {@code ETag} header
+     * altogether rather than publishing a tag naming nothing.</p>
+     *
+     * <p>Assumptions: the customer-master miss is still the arm to assert, because it is the one arm the
+     * composition populates the account half on, so it is the only arm where a half-populated view could
+     * plausibly be published with half a token.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("a composition missing the customer row is refused, not answered with a partial token")
-    void anIncompleteCompositionIsRefused() {
+    @DisplayName("a composition missing the customer row is answered with no token, never a partial one")
+    void anIncompleteCompositionCarriesNoToken() {
         when(this.crossReferences.findAccountScreenRows(any(), any(Limit.class)))
                 .thenReturn(List.of(new AccountScreenRow(
                         new CardXref(CARD_NUMBER, CUSTOMER_ID, ACCOUNT_ID), this.account, null)));
 
-        assertThatThrownBy(() -> this.reads.readAccountView(ACCOUNT_ID))
+        AccountViewService.RevisionedAccountView composed = this.reads.readAccountView(ACCOUNT_ID);
+
+        assertThat(composed.view().account())
+                .as("the reference paints the account half on this arm, so it must be published")
+                .isNotNull();
+        assertThat(composed.view().customer()).isNull();
+        assertThat(composed.revision())
                 .as("a caller must not be handed a precondition for rows that were not both located")
-                .isInstanceOf(NoSuchElementException.class);
+                .isNull();
     }
 
     /**

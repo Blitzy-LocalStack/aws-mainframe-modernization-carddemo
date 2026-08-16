@@ -175,7 +175,7 @@ same resources mechanically.
 |---|---|---|
 | `aws_cognito_user_pool.this` | Singleton | The baseline had exactly one identity store — one `DEFINE FILE(USRSEC)` at `app/csd/CARDDEMO.CSD` L88 — and one sign-on transaction reading it. A second pool would split the meaning of the group claim across two issuers |
 | — password policy | Derived from five inputs | Stronger than the baseline by intent, and floored so the baseline's own length cannot be restored |
-| — MFA, threat protection | Coupled pairs | A software-token mechanism is emitted exactly when the mode is not `OFF`, and the pool tier is derived from the threat-protection mode rather than accepted as a second input, because an inconsistent pair fails at apply rather than at plan |
+| — MFA, threat protection | Coupled pairs | A software-token mechanism is emitted exactly when the mode is not `OFF`, and the pool tier is derived from the threat-protection mode rather than accepted as a second input, because an inconsistent pair fails at apply rather than at plan. The MFA input is additionally validated to `OFF` in every environment: `services/auth-service` translates only the `NEW_PASSWORD_REQUIRED` challenge, so advertising a software-token factor turned a working sign-on into HTTP 500 for any user who enrolled one. The mechanism and the pass-through are retained so that raising the value is one deleted validation once the challenge union exists |
 | — sign-up, recovery | Admin-only | The baseline had no self-registration path and no self-service reset; these identities carry no email address or telephone number at all, so a mail-based recovery route could never complete |
 | — `schema` | One custom attribute | `custom:user_type`, one character wide, carrying `SEC-USR-TYPE`. Authorization does not depend on it — group membership grants authority and this records lineage |
 | `aws_cloudformation_stack.app_client` | Confidential client | See the credential path below; this is the most surprising choice in the module |
@@ -245,6 +245,22 @@ Terraform. Rotation adds a new secret against the same client id and retains the
 previous one for a consumer rollout, because replacing the client instead would
 change the id that the JWT authorizer and every token validator use as the audience,
 turning a credential rotation into a coordinated identity-contract release.
+
+Refactoring Rationale: the bridge **fails closed** when it finds two active secrets and
+the stored payload identifies neither. It used to prune the older of the two by
+creation date, which could delete the credential running tasks were authenticating
+with — the one outcome rotation exists to avoid — and the justification for doing so
+conflated two different unknowns: a payload naming an identifier Cognito no longer
+lists describes a dead value, but a payload written before identifiers were recorded
+describes a very much live one, and by age that is the likelier of the two to be
+pruned. The refusal names the client, the secret and the remedy;
+[`docs/runbooks/deploy.md`](../../../docs/runbooks/deploy.md) carries the two
+resolutions. Trade-offs: an apply in that state now fails rather than completing, which
+leaves every existing credential working instead of possibly breaking the one in use.
+Assumptions: the state is not reachable through this module's own lifecycle — a first
+apply finds one secret and mints the second, and every rotation after that finds two of
+which one is recorded — so it arises only from an out-of-band change or from a payload
+predating the identifier field, both of which need an operator to look.
 
 **A seed user's initial password.** Refactoring Rationale: the baseline commits one
 shared credential literal with the seed rows, whereas this path generates an
@@ -332,10 +348,17 @@ module "cognito" {
   environment         = var.environment
   secrets_kms_key_arn = module.kms.secrets_key_arn
 
-  callback_urls = ["${local.spa_origin}/callback"]
-  logout_urls   = [local.spa_origin]
+  # Both lists stay EMPTY. Supplying either switches the derived `oauth_enabled`
+  # local true and adds the authorization-code flow to the app client, which needs a
+  # hosted sign-in domain no root provisions and which nothing in this system uses:
+  # the SPA posts the credential to auth-service, which authenticates server-side.
+  callback_urls = []
+  logout_urls   = []
 
-  mfa_configuration      = var.environment == "prod" ? "ON" : "OPTIONAL"
+  # OFF, and the input is validated to OFF. auth-service answers exactly one Cognito
+  # challenge (NEW_PASSWORD_REQUIRED) and reports every other as HTTP 500, so OPTIONAL
+  # broke every enrolled user's sign-in and ON would break every user's first one.
+  mfa_configuration      = "OFF"
   advanced_security_mode = var.environment == "prod" ? "ENFORCED" : "AUDIT"
   deletion_protection    = var.deletion_protection ? "ACTIVE" : "INACTIVE"
 
@@ -362,8 +385,11 @@ module "cognito" {
 Assumptions: the calling root does every piece of cross-module wiring, because this
 module resolves no data source and reads no sibling's state. `secrets_kms_key_arn`
 arrives from the `kms` module's `secrets_key_arn` output rather than as a literal
-ARN, and `callback_urls` and `logout_urls` arrive from the distribution that
-[`infra/modules/cloudfront-spa`](../cloudfront-spa/README.md) creates. Keeping key
+ARN. `callback_urls` and `logout_urls` would arrive from the distribution that
+[`infra/modules/cloudfront-spa`](../cloudfront-spa/README.md) creates, and both roots
+deliberately pass none — the app client is confidential and server-side, so no
+browser redirect occurs and an approved redirect target would be a second, unused way
+to obtain a token from this pool. Keeping key
 ownership in the module responsible for it is also what prevents a dependency cycle,
 and it keeps region, credentials and default tags from disagreeing with the root's
 own provider configuration.
@@ -435,8 +461,10 @@ this directory is **gating** — none is advisory and none tolerates a non-zero 
   select zero checks and report a false green; the gate instead runs one visible
   full scan and then hard-fails against an explicit, reviewable material-security
   check list, with a summary assertion so an empty selection can never pass again.
-  The strong password policy, the MFA configuration and the threat-protection
-  setting satisfy it by construction. Two suppressions exist in `main.tf`, each
+  The strong password policy and the threat-protection setting satisfy it by
+  construction; the MFA configuration does not, and the divergence is deliberate and
+  argued on the input — a factor the authenticating service cannot answer converts a
+  working sign-on into a server fault, so it is not advertised. Two suppressions exist in `main.tf`, each
   carrying the scanner's **real** check id and a distinct, specific reason — one
   records that app-client rotation is implemented through service APIs the graph
   check cannot recognise, the other that a one-time handover value would only be
@@ -539,7 +567,7 @@ it by hand; regenerate it instead, and keep hand-written prose outside the marke
 | <a name="input_explicit_auth_flows"></a> [explicit\_auth\_flows](#input\_explicit\_auth\_flows) | Authentication flows the confidential app client may initiate, as ALLOW\_-prefixed names. Defaults to USER\_PASSWORD\_AUTH for server-side sign-on. REFRESH\_TOKEN\_AUTH is forbidden because refresh-token rotation requires the auth service to use GetTokensFromRefreshToken instead. | `list(string)` | <pre>[<br/>  "ALLOW_USER_PASSWORD_AUTH"<br/>]</pre> | no |
 | <a name="input_id_token_validity_minutes"></a> [id\_token\_validity\_minutes](#input\_id\_token\_validity\_minutes) | Identity token lifetime in minutes, carrying the cognito:groups claim that common-lib's JwtRoleConverter turns into authorities. Paired by main.tf with a token\_validity\_units block set to minutes. | `number` | `60` | no |
 | <a name="input_logout_urls"></a> [logout\_urls](#input\_logout\_urls) | Absolute URLs Cognito may redirect to after a sign-out. Supplied by the calling root from the CloudFront distribution that serves the SPA, on the same reasoning as callback\_urls. | `list(string)` | `[]` | no |
-| <a name="input_mfa_configuration"></a> [mfa\_configuration](#input\_mfa\_configuration) | Multi-factor posture for the user pool: OFF, ON (compulsory) or OPTIONAL (available but not required). Paired by main.tf with a software-token MFA mechanism, without which ON and OPTIONAL are rejected at apply. Production is structurally required to be ON; the default suits dev only. | `string` | `"OPTIONAL"` | no |
+| <a name="input_mfa_configuration"></a> [mfa\_configuration](#input\_mfa\_configuration) | Multi-factor posture for the user pool: OFF, ON (compulsory) or OPTIONAL (available but not required). Paired by main.tf with a software-token MFA mechanism, without which ON and OPTIONAL are rejected at apply. Currently required to be OFF in every environment, because services/auth-service answers exactly one Cognito challenge (NEW\_PASSWORD\_REQUIRED) and no MFA challenge at all; the validation below states the precondition for raising it. | `string` | `"OFF"` | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Lowercase token prefixed to environment-specific resource names such as the user pool, app client and Secrets Manager entries. The authorization groups are invariant carddemo-admin and carddemo-user values and deliberately do not inherit this prefix. | `string` | `"carddemo"` | no |
 | <a name="input_password_minimum_length"></a> [password\_minimum\_length](#input\_password\_minimum\_length) | Minimum length Cognito enforces on a user password. Defaults well above the baseline's eight-character SEC-USR-PWD field, and cannot be lowered to it. | `number` | `14` | no |
 | <a name="input_password_require_lowercase"></a> [password\_require\_lowercase](#input\_password\_require\_lowercase) | Whether a password must contain a lowercase letter. Part of the complexity policy the baseline had no equivalent for. | `bool` | `true` | no |

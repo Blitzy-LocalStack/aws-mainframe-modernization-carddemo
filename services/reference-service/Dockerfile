@@ -4,10 +4,10 @@
 # Purpose:
 #   Builds the non-root container image for the CardDemo reference-data context: the
 #   migrated form of app/app-transaction-type-db2/cbl/COTRTLIC.cbl and COTRTUPC.cbl,
-#   their batch updater COBTUPDT.cbl, and the queue-driven date conversion
+#   their batch updater COBTUPDT.cbl, and the SYNCHRONOUS half of the date conversion
 #   app/app-vsam-mq/cbl/CODATE01.cbl. The date-edit rules of app/cbl/CSUTLDTC.cbl are
 #   reached THROUGH this context but do not live in it -- DateEditValidator sits in
-#   common-lib and this module is its HTTP and queue front door -- so a reader looking
+#   common-lib and this module is its HTTP front door -- so a reader looking
 #   for those rules in this image's own sources finds only the endpoint that calls
 #   them.
 #   Two start-up behaviours of the packaged jar are what the health probe below is
@@ -21,8 +21,17 @@
 #   applies: this note previously called V2 unique to this module and to the tree,
 #   which is false in both readings -- six of the eight contexts carry a V2 and the
 #   auth context reaches V4 -- and neither reading was load-bearing for the probe
-#   anyway. DateInquiryMessageListener then begins polling SQS, which is what replaces
-#   CODATE01's IBM MQ front door.
+#   anyway.
+#   Refactoring Rationale: this paragraph ended by saying DateInquiryMessageListener
+#   then begins polling SQS, replacing CODATE01's IBM MQ front door. That listener is
+#   not in this image: the baseline drives BOTH inquiry programs from ONE request
+#   destination -- DEFINE QLOCAL('CARDDEMO.REQUEST.QUEUE') at
+#   app/app-vsam-mq/README.md L53, aliased to CICS as MQQUEUE(CARDREQ) at L71 -- and a
+#   queue admits exactly one OWNING consumer, because a receive hides the message from
+#   every other consumer. The owner is account-service's InquiryMessageListener, which
+#   dispatches on the request's four-character function code. This container therefore
+#   opens no queue connection at all, which is also why the runtime inventory below no
+#   longer lists a region or three queue names.
 #
 # Stages:
 #   build   - installs the pinned database trust anchor, resolves the reactor's
@@ -63,10 +72,12 @@
 #     - SPRING_FLYWAY_USER, SPRING_FLYWAY_PASSWORD
 #     - SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI
 #     - CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID
-#     - AWS_REGION
-#     - CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE,
-#       CARDDEMO_REFERENCE_INQUIRY_REPLY_QUEUE and
-#       CARDDEMO_REFERENCE_INQUIRY_ERROR_QUEUE
+#   Refactoring Rationale: AWS_REGION and the three CARDDEMO_REFERENCE_INQUIRY_*
+#   queue names were listed here and are withdrawn with this module's queue consumer.
+#   The region was required only because a messaging starter builds its client as the
+#   context is constructed; with the starter gone, a task with no region starts
+#   normally, and a task definition still supplying the four variables would be
+#   supplying settings nothing reads.
 #   That is the complete set of no-fallback placeholders across application.yml and
 #   application-prod.yml with ONE deliberate exclusion, and the completeness is
 #   mechanically held rather than asserted: common-lib's
@@ -157,7 +168,7 @@
 #     belongs to the public base image, and the tag in the command above names no
 #     account and no region, so no line of this file can be mistaken for a
 #     publishable reference or carry an account-scoped registry host. The datasource
-#     URL, the queue names, the issuer URI and every key ARN arrive at run time from
+#     URL, the issuer URI and every key ARN arrive at run time from
 #     Parameter Store and Secrets Manager through the ECS task definition, which is
 #     why this file declares no ENV and no ARG at all.
 # =============================================================================
@@ -297,7 +308,7 @@ RUN mvn -B -ntp --offline -f pom.xml -pl common-lib,reference-service -am \
 #       it for image-size reasons fails the build outright rather than producing a
 #       leaner image. 21.0.12 is the highest published 21.x tag.
 # WHY : Trade-offs: headless rather than headful or generic. A headless JRE omits
-#       AWT and Swing, and this process serves HTTP and consumes SQS, so it loads
+#       AWT and Swing, and this process serves HTTP only, so it loads
 #       no class from either - the capability given up is one this context cannot
 #       reach. What is accepted in exchange is that a future need for server-side
 #       image rendering would require changing this tag rather than adding a

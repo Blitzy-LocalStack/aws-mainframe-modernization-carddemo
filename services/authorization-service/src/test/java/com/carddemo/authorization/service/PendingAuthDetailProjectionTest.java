@@ -12,6 +12,7 @@ import static org.mockito.Mockito.when;
 
 import com.carddemo.authorization.domain.PendingAuthDetail;
 import com.carddemo.authorization.domain.PendingAuthDetailKey;
+import com.carddemo.authorization.dto.PendingAuthDetailView;
 import com.carddemo.authorization.mapper.PendingAuthViewMapper;
 import com.carddemo.authorization.repository.PendingAuthDetailRepository;
 import com.carddemo.common.money.Money;
@@ -419,6 +420,50 @@ class PendingAuthDetailProjectionTest {
         assertThat(next.message()).isEqualTo("Already at the last Authorization...");
         assertThat(PendingAuthDetailService.LAST_AUTHORIZATION_REACHED)
                 .isEqualTo("Already at the last Authorization...");
+    }
+
+    /**
+     * Every combination of the forward-step outcome that the reference cannot produce is refused at
+     * construction.
+     *
+     * <p>Purpose: the record documents that exactly one of its two states is populated and the published
+     * schema declares the message present only on exhaustion, and this case is what makes both statements
+     * true of every instance rather than of the two the service happens to build. Each of the four
+     * combinations below reaches a client as a well-formed 200 whose {@code message} disagrees with its
+     * {@code endOfData} if it is constructible, so the screen shows boundary text mid-chain or no
+     * boundary text at the boundary.</p>
+     *
+     * <p>Assumptions: the message is asserted to be refused by VALUE and not merely by presence. An
+     * exhaustion carrying arbitrary wording is the combination least likely to be noticed in review --
+     * it has a message where one belongs -- and it is the one the verbatim-text rule forbids.</p>
+     *
+     * <p>Trade-offs: this case constructs the record directly rather than driving the service, which is
+     * the only way to reach a combination the service does not build. That is the point: the invariant
+     * belongs to the type, so a future caller assembling one by hand is bound by it too.</p>
+     */
+    @Test
+    @DisplayName("the forward-step outcome refuses every combination the reference cannot produce")
+    void theForwardStepOutcomeRefusesEveryImpossibleCombination() {
+        PendingAuthDetailView found = this.mapper.toDetailView(row(), SUBJECT);
+
+        assertThatExceptionOfType(IllegalArgumentException.class).isThrownBy(() ->
+                new PendingAuthDetailService.NextAuthorization(found, true,
+                        PendingAuthDetailService.LAST_AUTHORIZATION_REACHED));
+        assertThatExceptionOfType(IllegalArgumentException.class).isThrownBy(() ->
+                new PendingAuthDetailService.NextAuthorization(null, false, null));
+        assertThatExceptionOfType(IllegalArgumentException.class).isThrownBy(() ->
+                new PendingAuthDetailService.NextAuthorization(null, true, null));
+        assertThatExceptionOfType(IllegalArgumentException.class).isThrownBy(() ->
+                new PendingAuthDetailService.NextAuthorization(null, true, "Some other wording"));
+        assertThatExceptionOfType(IllegalArgumentException.class).isThrownBy(() ->
+                new PendingAuthDetailService.NextAuthorization(found, false,
+                        PendingAuthDetailService.LAST_AUTHORIZATION_REACHED));
+
+        assertThat(new PendingAuthDetailService.NextAuthorization(null, true,
+                PendingAuthDetailService.LAST_AUTHORIZATION_REACHED).message())
+                .isEqualTo(PendingAuthDetailService.LAST_AUTHORIZATION_REACHED);
+        assertThat(new PendingAuthDetailService.NextAuthorization(found, false, null).authorization())
+                .isSameAs(found);
     }
 
     /**

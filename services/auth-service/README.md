@@ -321,7 +321,7 @@ The principal test classes, and what each one holds:
 | `UserControllerTest` | web layer, MockMvc | The five user-administration operations, including the delete confirmation contract |
 | `UserServiceTest` | plain unit test | Validation branches transcribed from the COBOL paragraphs, and keyset page assembly |
 | `UserRepositoryIT` | Testcontainers, real PostgreSQL | The keyset queries and the schema constraints, against the engine that actually runs them |
-| `OperationCensusTest` | contract census | That the published surface is exactly the operations [§8](#8-api-surface) lists — three open and five administrator-only |
+| `OperationCensusTest` | contract census | That the published surface is exactly the operations [§8](#8-api-surface) lists — four open and five administrator-only |
 
 Alongside these the module carries further focused tests covering the security
 configuration, request validation, authority derivation, response-rendering
@@ -492,9 +492,9 @@ the claim can be diffed against them.
 
 ## 8. API surface
 
-The published contract is **eight operations**, and that count is asserted by
+The published contract is **nine operations**, and that count is asserted by
 `OperationCensusTest` rather than merely documented, so the table below cannot
-drift from the code without a test failing. A ninth endpoint, the health probe, is
+drift from the code without a test failing. A tenth endpoint, the health probe, is
 an operational contract rather than part of the business API.
 
 | Method | Path | Authority | Source |
@@ -502,6 +502,7 @@ an operational contract rather than part of the business API.
 | `POST` | `/api/v1/auth/signon` | none — it issues the token | `COSGN00C` |
 | `POST` | `/api/v1/auth/challenge` | none — continues an in-flight sign-on | `COSGN00C` |
 | `POST` | `/api/v1/auth/refresh` | none — presents a refresh grant | `COSGN00C` |
+| `POST` | `/api/v1/auth/signout` | none — it presents the grant it revokes | no reference counterpart |
 | `GET` | `/api/v1/auth/users` | `carddemo-admin` | `COUSR00C` |
 | `POST` | `/api/v1/auth/users` | `carddemo-admin` | `COUSR01C` |
 | `GET` | `/api/v1/auth/users/{userId}` | `carddemo-admin` | `COUSR02C` (fetch) |
@@ -510,10 +511,29 @@ an operational contract rather than part of the business API.
 | `GET` | `/actuator/health` | none | operational |
 
 The five user-administration operations require the **`carddemo-admin`**
-authority. The three sign-on operations are open because each one is the operation
-that *obtains* a token; requiring a token to get a token cannot terminate. Any
-path matching neither set is denied rather than merely challenged, so a validly
-signed token still reaches nothing that was not deliberately published.
+authority. The four session operations are open because on each one the caller has
+no usable access token to present: three of them are the operations that *obtain*
+a token, and requiring a token to get a token cannot terminate.
+
+**The fourth is `POST /api/v1/auth/signout`, and it is open for a different
+reason worth stating.** `Trade-offs:` gating revocation behind a live access token
+would refuse it in precisely the case that most needs it — a session abandoned
+rather than closed, whose one-hour access token has expired while its thirty-day
+refresh token has weeks of life left. Its authority is possession of the refresh
+token, which is the only credential the pool's own revocation operation accepts,
+so requiring a second one would add a failure mode without adding a check. It
+answers `204` both for a token it revoked and for one the pool declines to accept,
+because every state the pool reports for the latter — already revoked, expired,
+not a revocable type — describes a token that can no longer mint anything;
+distinguishing them would tell an unauthenticated caller whether a token was live.
+It answers `500` only when the pool could not be reached, because then nothing was
+revoked and the caller must retry. `Alternatives Considered:` requiring the bearer
+token as well and revoking only on a match. Rejected on the reasoning above — it
+narrows nothing an attacker holding the refresh token could not already do, and it
+withdraws the operation from the users who need it.
+
+Any path matching neither set is denied rather than merely challenged, so a
+validly signed token still reaches nothing that was not deliberately published.
 
 **The health endpoint is unauthenticated.** Two independent consumers poll it —
 the load-balancer target group and the container's own `HEALTHCHECK` — and neither

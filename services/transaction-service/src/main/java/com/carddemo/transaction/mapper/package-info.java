@@ -76,13 +76,16 @@
  * is one mapper per persistence entity, which would make six files rather than
  * three, because {@code domain} holds four entities. It is not available, and
  * the reason is a fact about the sibling package rather than a preference here.
- * The {@code dto} package is a closed inventory of twelve files, nine of them
- * records -- all nine authored -- and those nine serve
- * the four migrated online screens only. Two of the nine are the preview shapes
- * the two write screens answer their non-writing turns with, and they need no
- * mapper of their own: neither converts a stored row, because on those turns no
- * row exists, so each is composed directly by the service from the value its own
- * validation derived. No
+ * The {@code dto} package is a closed inventory of fourteen files, eleven of them
+ * records -- all eleven authored -- and those eleven serve
+ * the four migrated online screens only. Four of the eleven need no mapper of their own.
+ * Two are the preview shapes the two write screens answer their non-writing turns with:
+ * neither converts a stored row, because on those turns no row exists, so each is composed
+ * directly by the service from the value its own validation derived. The other two are the
+ * copy-last request and its copied draft, and their exclusion is for a different reason --
+ * the draft is composed from the COPIED SUBMISSION the service has already built and
+ * validated, not from the stored row a second time, because reading the row again is
+ * precisely the divergence the draft exists to remove. No
  * transfer object exists for {@code DailyTransaction}, for
  * {@code TransactionCategoryBalance} or for {@code TransactionReject}, so a
  * mapper for any of the three would have nothing on the far side to map to and
@@ -103,10 +106,11 @@
  *
  * <p>Assumptions: three counts of a small number meet in this module and are
  * kept textually distinct throughout. The module holds eight Java packages and
- * therefore eight package charters. The {@code dto} package holds twelve files,
+ * therefore eight package charters. The {@code dto} package holds fourteen files,
  * which is a different quantity that once happened to share a digit and no longer
  * does -- that quantity moved to twelve when each write screen's non-writing turn
- * gained its own shape, while the package count did not move at all. This package
+ * gained its own shape and then to fourteen when the copy-last operation gained its own
+ * request shape and its own draft, while the package count did not move at all. This package
  * holds three files. None of the three figures is derivable from either of the
  * others, so each is stated where it is owned rather than restated here, and each is
  * verified against its own directory rather than inherited.

@@ -66,11 +66,20 @@ import org.springframework.context.annotation.Configuration;
  * {@code com.carddemo.reporting.api} held no request-handler type under {@code src/main/java} -- still
  * true, that directory holding its package charter and nothing else -- so there was no operation list
  * to count and a number written here would have been a guess. The committed contract now declares
- * five operations, so a count is available; it is still not written here, because this bean
+ * eight operations, so a count is available; it is still not written here, because this bean
  * contributes no path and a figure in its metadata would describe the contract's content rather than
  * this bean's, giving a reader two places to look for one number. {@code ReportingApiContractTest}
- * pins that figure as an exact set of five paths and five identifiers where they are declared, so the
- * count is asserted once rather than restated here.</p>
+ * pins those operations as an exact set of eight paths and eight identifiers where they are declared,
+ * so the set is asserted once rather than restated here.</p>
+ *
+ * <p>Refactoring Rationale: the two sentences above said five paths and five identifiers. The
+ * contract has since grown to eight of each, and the test named in them was moved forward with the
+ * contract while this file was not -- so a paragraph whose whole point is that the count is asserted
+ * in exactly one place named the wrong figure for that place twice. The figures are re-read from that
+ * test's two {@code containsExactlyInAnyOrder} sets and from a parse of the document. The paragraph's
+ * conclusion is unchanged and is now safer to hold: because this bean states no count of its own, the
+ * only figures a maintainer has to keep true are the ones the test pins, and this rationale is the
+ * record of what it cost to restate them here even once.</p>
  *
  * <p>Alternatives Considered: the singular and the parenthesised registers for the four rationale
  * labels used throughout this file. Rejected on a census measured across this repository while this
@@ -135,6 +144,15 @@ public class OpenApiConfig {
     //       ownership authority for all eight schemas, and is cited here rather than restated in
     //       full, because a published contract description is not the place a reader should have to
     //       learn a privilege model.
+    // WHY : ⚠️ Refactoring Rationale: the first paragraph's privilege sentence read "a database role
+    //       holding select and nothing else", which omitted this login's only executable privilege --
+    //       EXECUTE on reporting.resolve_card(character varying), granted by
+    //       data-migration/sql/V1__reporting_views.sql after being revoked from PUBLIC -- and left
+    //       the readable surface uncounted. It is ten relations for the login and eight for this
+    //       context's queries, the difference being the two aggregate-only verification relations of
+    //       data-migration/sql/V3__verification_surfaces.sql. Both figures are stated because a
+    //       caller reads the second and a privilege review reads the first, and one number cannot
+    //       serve both.
     // WHY : Assumptions: the description states what this context reads and what shape its output
     //       takes, both of which a caller needs and neither of which is derivable from an operation
     //       list. The two report edit masks are named separately on purpose: app/cpy/CVTRA07Y.cpy
@@ -158,11 +176,11 @@ public class OpenApiConfig {
     //       the intended sensitivity rather than a fragility to work around.
     private static final String CONTRACT_DESCRIPTION = """
             Reports and statements for the migrated CardDemo credit-card system. This context reads \
-            and never writes: its queries resolve against the read-only cross-schema views created \
-            by data-migration/sql/V1__reporting_views.sql under a database role holding select and \
-            nothing else, and it owns no table, index or constraint. It therefore ships no \
-            schema-migration directory, and one appearing beneath this module would itself be a \
-            defect.
+            and never writes: its queries resolve against the eight read-only cross-schema views \
+            created by data-migration/sql/V1__reporting_views.sql, under a database login holding \
+            SELECT on the reporting schema's ten views, EXECUTE on its one function and nothing \
+            else, and it owns no table, index or constraint. It therefore ships no schema-migration \
+            directory, and one appearing beneath this module would itself be a defect.
 
             Three surfaces are published. The transaction detail report preserves the 133-column \
             width that the X(133) separator at app/cpy/CVTRA07Y.cpy L48 fixes, and it preserves its \

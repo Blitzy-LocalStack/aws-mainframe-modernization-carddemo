@@ -4,6 +4,7 @@ import com.carddemo.account.dto.AccountContextView;
 import com.carddemo.account.dto.AccountLookupRequest;
 import com.carddemo.account.dto.AccountUpdateRequest;
 import com.carddemo.account.dto.AccountUpdateResponse;
+import com.carddemo.account.dto.AccountUpdateValidationResponse;
 import com.carddemo.account.dto.AccountViewResponse;
 import com.carddemo.account.dto.CardXrefResponse;
 import com.carddemo.account.service.AccountUpdateService;
@@ -73,7 +74,11 @@ import org.springframework.web.bind.annotation.RestController;
  * {@code docs/architecture/observability.md} names account identifiers among the values a durable
  * diagnostic may not hold. Every operation on this controller therefore addresses a fixed segment, and
  * the module's contract test fails the build if any published path template or declared parameter
- * regains a place to put one.</p>
+ * regains a place to put one. Assumptions: this departs from §0.7.1 of the technical specification,
+ * which words the same decomposition as "REST path and query parameters", and the departure is
+ * registered centrally as {@code D-ACCOUNT-SELECTION-IN-BODY} in
+ * {@code docs/architecture/cobol-to-service-traceability.md} §7.4 rather than argued here — that entry
+ * holds the cost, the three rejected alternatives and the §0.7.8 reasoning that decides it.</p>
  *
  * <p>Refactoring Rationale: NAVIGATION leaves the server entirely. The reference transfers control with
  * {@code EXEC CICS XCTL} at {@code app/cbl/COACTVWC.cbl} L349 and {@code app/cbl/COACTUPC.cbl} L956 to
@@ -262,6 +267,16 @@ public class AccountController {
     public static final String UPDATE_PATH = "/update";
 
     /**
+     * The sub-path of the no-write validation turn, beneath {@link #BASE_PATH}.
+     *
+     * <p>Assumptions: it sits BENEATH the update path rather than beside it, spelled
+     * {@code /update/validate}, because it judges exactly the submission {@link #UPDATE_PATH} applies
+     * and shares its request body. A sibling spelling such as {@code /validate-update} would have
+     * separated two operations that a reader has to read together.</p>
+     */
+    public static final String UPDATE_VALIDATE_PATH = "/update/validate";
+
+    /**
      * The sub-path of the by-account cross-reference walk, beneath {@link #BASE_PATH}.
      *
      * <p>Refactoring Rationale: this operation was
@@ -294,10 +309,16 @@ public class AccountController {
     /**
      * The request property name a refused account identifier is reported under.
      *
-     * <p>Assumptions: the name is the path variable this class binds, and the committed contract states
-     * the same name in the refusal description of both operations that carry the key. Naming it once
-     * here is what keeps the binding and the reported property from drifting apart, since a rename of
-     * the path variable alone would otherwise leave the array pointing at a property no request has.</p>
+     * <p>Assumptions: the name is the BODY MEMBER this class binds — {@code accountId} on
+     * {@code AccountLookupRequest} and on {@code AccountUpdateRequest} — and the committed contract states
+     * the same name in the refusal description of both operations that carry the key. Naming it once here
+     * is what keeps the binding and the reported property from drifting apart, since a rename of the
+     * member alone would otherwise leave the array pointing at a property no request has. Refactoring
+     * Rationale: this said "the path variable this class binds", which no operation here binds — every one
+     * of the four is a {@code POST} taking its key from a body, for the reason recorded on the class and
+     * registered as {@code D-ACCOUNT-SELECTION-IN-BODY}. The property name is unchanged by the
+     * correction, which is exactly why the stale wording survived: it described the wrong mechanism for
+     * the right name.</p>
      */
     private static final String ACCOUNT_ID_FIELD = "accountId";
 
@@ -435,6 +456,14 @@ public class AccountController {
      * optimistic-lock version is transport metadata, and a value with two homes is a value whose two
      * homes can disagree.</p>
      *
+     * <p>⚠️ Refactoring Rationale: the header is OMITTED when the composition carries no revision, and it
+     * was previously written unconditionally. The read now answers HTTP 200 for an account located with no
+     * customer row -- the reference's own partial screen -- and that arm has no revision, because a
+     * precondition cannot be formed from rows that were not both read. Formatting a null through the weak
+     * tag would have published the literal {@code W/"null"}, which a caller would echo on
+     * {@code If-Match} and be told was stale by a comparison against a real token, when what it should be
+     * told is that this representation carries no precondition at all.</p>
+     *
      * <p>Trade-offs: the entity tag is WEAK, prefixed {@code W/}. A strong tag asserts octet equality of
      * the representation, which this value cannot promise -- two responses at the same revision are
      * semantically identical but need not be byte-identical, since the masked identifiers and the message
@@ -443,7 +472,8 @@ public class AccountController {
      *
      * @param request the read request carrying the account identifier; must satisfy its declared
      *     constraints
-     * @return the account view with its revision in the {@code ETag} header, never {@code null}
+     * @return the account view, carrying its revision in the {@code ETag} header when both master rows
+     *     were located and carrying no such header when only the account was, never {@code null}
      * @throws ClientInputException if the identifier is not one the reference's own filter edit would
      *     accept, which the shared advice renders as HTTP 400 naming the offending property
      * @throws IllegalArgumentException as the parent of the above, since {@link ClientInputException}
@@ -467,9 +497,11 @@ public class AccountController {
         refuseUnacceptableViewFilter(accountId);
 
         AccountViewService.RevisionedAccountView composed = this.reads.readAccountView(accountId);
-        return ResponseEntity.ok()
-                .header(HttpHeaders.ETAG, weakTag(composed.revision()))
-                .body(composed.view());
+        ResponseEntity.BodyBuilder response = ResponseEntity.ok();
+        if (composed.revision() != null) {
+            response.header(HttpHeaders.ETAG, weakTag(composed.revision()));
+        }
+        return response.body(composed.view());
     }
 
     /**
@@ -546,6 +578,62 @@ public class AccountController {
         return ResponseEntity.ok()
                 .header(HttpHeaders.ETAG, weakTag(applied.revision()))
                 .body(applied.response());
+    }
+
+    /**
+     * Judges a submitted edit against the stored rows and reports the verdict, writing nothing.
+     *
+     * <p>Purpose: this is the baseline's FIRST turn. {@code 2000-DECIDE-ACTION}'s show-details arm
+     * advances to the confirmation state only when the edits found no error and something changed --
+     * {@code IF INPUT-ERROR OR NO-CHANGES-DETECTED ... CONTINUE ELSE SET ACUP-CHANGES-OK-NOT-CONFIRMED}
+     * at {@code app/cbl/COACTUPC.cbl} L2584 to L2591 -- so the twenty-four edits have run before the
+     * operator is ever shown {@code Changes validated.Press F5 to save}. Only the confirmation turn
+     * performs {@code 9600-WRITE-PROCESSING}.</p>
+     *
+     * <p>Refactoring Rationale: this route did not exist, and its absence was a correctness problem in
+     * the browser rather than a missing convenience. A client wanting the reference's two turns could
+     * only advance without validating -- asserting the edits had passed on the strength of nothing --
+     * or submit the write to find out, which is the one thing the first turn must not do. The screen
+     * took the first option and told operators their changes were validated when no rule had run.</p>
+     *
+     * <p>Assumptions: no {@code If-Match} header is required, unlike {@link #update}. A verdict changes
+     * nothing, so there is no state a precondition would protect, and requiring one would only prevent
+     * a caller asking a question it is entitled to ask. The key edit is still applied to the body's own
+     * identifier first, by the same helper the write uses, so an unusable identifier is refused here
+     * exactly as it is there.</p>
+     *
+     * <p>Trade-offs: a refusal is reported as HTTP 200 carrying the verdict, not as a 400. Here a
+     * refused value is the successful answer to the question asked; on the write it means the request
+     * could not be carried out. The reasoning is recorded on
+     * {@link AccountUpdateValidationResponse}.</p>
+     *
+     * @param request the submitted edit to judge, whose own first member names the account; must not be
+     *     {@code null}
+     * @return the verdict, never {@code null}
+     * @throws ClientInputException if the submitted identifier is not one the reference's own key edit
+     *     would accept, which the shared advice renders as HTTP 400
+     * @throws IllegalArgumentException as the parent of the above, since {@link ClientInputException}
+     *     extends it
+     * @throws java.util.NoSuchElementException if the account or its customer is absent, which the
+     *     shared advice renders as HTTP 404
+     */
+    @OnlineWriteGateExempt(reason =
+            "A READ that judges a submitted edit and writes nothing, a POST only because it shares the"
+            + " update's request body and so carries the eleven-digit account identifier where the"
+            + " update carries it. The gate classifies by HTTP method, so a read expressed as a POST has"
+            + " to declare itself one; and the quiesce this gate migrates closed the files to WRITERS"
+            + " rather than to readers, so refusing a verdict during the batch window would withhold the"
+            + " one turn that tells an operator whether their edit would be accepted once it reopens.")
+    @PostMapping(path = UPDATE_VALIDATE_PATH,
+            consumes = MediaType.APPLICATION_JSON_VALUE,
+            produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<AccountUpdateValidationResponse> validateUpdate(
+            @Valid @RequestBody AccountUpdateRequest request) {
+        long accountId = refuseUnacceptableUpdateKey(request.accountId());
+
+        AccountUpdateService.EditVerdict verdict = this.writes.validateOnly(accountId, request);
+        return ResponseEntity.ok(new AccountUpdateValidationResponse(verdict.fieldErrors(),
+                verdict.message(), verdict.inputError(), verdict.noChangesFound()));
     }
 
     /**

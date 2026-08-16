@@ -196,7 +196,28 @@ data "aws_iam_policy_document" "assume_role" {
 resource "aws_iam_role" "this" {
   name               = local.role_name
   assume_role_policy = data.aws_iam_policy_document.assume_role.json
-  tags               = var.tags
+
+  # WHY : ⚠️ Refactoring Rationale: this role carried no boundary while both
+  #       environment roots described their `permissions_boundary_arn` as applying to
+  #       "every role this deployment creates". It is attached here because a caller
+  #       cannot bound a role it does not declare.
+  # WHY : Assumptions: this role holds `states:StartExecution` on the nightly chain and
+  #       `sqs:SendMessage` on the dead-letter target, so it is the identity that can
+  #       start batch work unattended. The boundary is what caps it if a later edit
+  #       widens either grant beyond the one machine and the one queue.
+  permissions_boundary = var.permissions_boundary_arn
+
+  tags = var.tags
+
+  lifecycle {
+    precondition {
+      # WHY : Assumptions: a cross-account boundary ARN is accepted by IAM and then
+      #       bounds nothing, because the policy it names does not resolve in this
+      #       account. This comparison turns that silent no-op into a plan failure.
+      condition     = split(":", var.permissions_boundary_arn)[4] == data.aws_caller_identity.current.account_id
+      error_message = "permissions_boundary_arn must belong to the same AWS account as the scheduler role."
+    }
+  }
 }
 
 data "aws_iam_policy_document" "permissions" {

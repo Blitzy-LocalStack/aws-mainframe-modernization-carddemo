@@ -502,14 +502,14 @@ services, repositories and adapters as non-`package-info.java` main-source Java:
 
 | Maven module | main-source classes | owned Flyway migrations |
 |---|---:|---|
-| `common-lib` | 44 | none — it owns no schema |
-| `auth-service` | 29 | `V1__auth.sql`, `V2__auth_identity_sync.sql`, `V3__auth_identity_sync_operations.sql`, `V4__auth_folded_user_id.sql`, `V5__auth_folded_user_id_trim.sql`, `V6__auth_canonical_user_id.sql`, `V7__auth_identity_sync_provisioning_guard.sql` |
-| `account-service` | 43 | `V1__account.sql`, `V2__account_inquiry_reply_ledger.sql` |
+| `common-lib` | 46 | none — it owns no schema |
+| `auth-service` | 30 | `V1__auth.sql`, `V2__auth_identity_sync.sql`, `V3__auth_identity_sync_operations.sql`, `V4__auth_folded_user_id.sql`, `V5__auth_folded_user_id_trim.sql`, `V6__auth_canonical_user_id.sql`, `V7__auth_identity_sync_provisioning_guard.sql` |
+| `account-service` | 44 | `V1__account.sql`, `V2__account_inquiry_reply_ledger.sql` |
 | `card-service` | 25 | `V1__card.sql`, `V2__card_num_digit_domain.sql` |
-| `transaction-service` | 37 | `V1__ledger.sql`, `V2__ledger_transaction_id_allocator.sql`, `V3__ledger_bytewise_collation.sql` |
-| `reference-service` | 59 | `V1__reference.sql`, `V2__seed_reference.sql` |
+| `transaction-service` | 40 | `V1__ledger.sql`, `V2__ledger_transaction_id_allocator.sql`, `V3__ledger_bytewise_collation.sql` |
+| `reference-service` | 57 | `V1__reference.sql`, `V2__seed_reference.sql`, `V3__reference_inquiry_reply_ledger.sql` |
 | `batch-service` | 63 | `V1__batch.sql`, `V2__batch_feed_watermark.sql` |
-| `authorization-service` | 58 | `V1__authorization.sql`, `V2__authorization_outbox_claim_version.sql`, `V3__authorization_outbox_fifo_identities.sql`, `V4__authorization_outbox_send_acceptance.sql` |
+| `authorization-service` | 57 | `V1__authorization.sql`, `V2__authorization_outbox_claim_version.sql`, `V3__authorization_outbox_fifo_identities.sql`, `V4__authorization_outbox_send_acceptance.sql` |
 | `reporting-service` | 64 | none by design — it owns no table, only read-only views |
 
 Refactoring Rationale: this paragraph reported that "only `batch-service` and
@@ -519,6 +519,14 @@ adapters". That was true of the tree it was written against and is now false of
 every one of the six. It is replaced by a measured table rather than by a corrected
 sentence, because a sentence of that shape has no way to be checked and this one
 survived six modules landing.
+
+Refactoring Rationale: `auth-service` reads 30 where it read 29, and the added class is
+`com.carddemo.auth.dto.SignOutRequest`. It landed with the session-revocation operation,
+which is what turned signing out from a change of browser state into an event at the
+identity pool: nothing in this migration previously revoked a refresh token, so a
+discarded copy of a thirty-day credential stayed able to mint access tokens for the
+rest of its life. One class in, none out, and no migration with it -- the operation
+writes nothing and the `auth.users` table has no column for a token.
 
 Refactoring Rationale: this paragraph also claimed that "the `auth-service` figure moved
 from 29 to 31 when the create path was made usable ... two value types in, none out", and
@@ -545,7 +553,15 @@ asserts every count in this table against the module it names, so a figure here 
 drifts from the tree fails the build — which is what a countable claim in a document
 has to be to be worth stating.
 
-Refactoring Rationale: `common-lib` reads 44 where it read 43. One class was added,
+Refactoring Rationale: `common-lib` reads 45 where it read 44. The class added is
+`com.carddemo.common.codec.DateInquiryReplyCodec`, the positional reply body of the
+date-and-time inquiry. It is in the shared kernel rather than in a bounded context
+because both inquiry flows now arrive on the ONE shared request queue the baseline
+defines, one queue admits exactly one owning consumer, and the answer is a function of
+the clock alone — so the layout sits beside the request half of the same wire instead of
+being reached across a context boundary.
+
+Refactoring Rationale: `common-lib` read 44 where it read 43. One class was added,
 `com.carddemo.common.observability.FailureSummary`, and it exists because the two
 things a failure log has to carry — what failed and why — could not both be carried by
 the one type that existed. `ThrowableDigest` renders a cause chain of types and frames
@@ -612,6 +628,22 @@ carries no protected value at all: the two encrypted identifiers and the credit 
 rather than masked, because a masked member is still a member a future consumer would begin
 reading.
 
+Refactoring Rationale: `transaction-service` reads 39 where it read 37. Two classes were added to
+`com.carddemo.transaction.dto`, and both exist to close one defect in the copy-last-transaction
+operation rather than to add a capability. `TransactionCopyRequest` is the operation's real parameter
+list — a key and a confirmation — and it replaces `TransactionAddRequest`, whose eleven data components
+are each `@NotBlank`, so a copy could previously only be requested from a screen the operator had already
+filled in completely; `COPY-LAST-TRAN-DATA` at line 471 of `app/cbl/COTRN02C.cbl` performs
+`VALIDATE-INPUT-KEY-FIELDS` at line 473 and nothing else, precisely because it is about to overwrite
+those eleven fields. `TransactionCopiedDraft` is the ten non-monetary columns the reference moves over
+the terminal at lines 480 to 493, published on the 200 body so the client can render and then resubmit
+exactly the row it was shown; without it the preview disclosed only the amount, so a client had no way to
+confirm the row it saw and its only means of confirming was to ask for "the latest row" a second time —
+which a concurrent insert changes. Alternatives Considered: a server-held draft keyed by a token, which
+would have needed no new response member. Rejected because it puts a mutable per-operator state back into
+a context whose whole session design was removed with `DFHCOMMAREA`, and because the value the client
+must be able to see and re-send is the draft itself, not a handle to it.
+
 Refactoring Rationale: `transaction-service` reads 37 where it read 33. Four classes were added
 to `com.carddemo.transaction.dto`, and all four exist to correct one defect rather than to add a
 capability: both of that context's write operations answer a 200 and a 201 with two different bodies,
@@ -627,6 +659,21 @@ service return either shape and a controller select the status from the shape it
 from a nullable member. The alternatives live beside the records because a `sealed` type's permitted
 subtypes must sit in its own package on the class path, and an unsealed interface in the adapter or
 service layer would invert the dependency the module's ArchUnit rules assert.
+
+Refactoring Rationale: `transaction-service` reads 40 where it read 37. Three classes were added to
+`com.carddemo.transaction.dto`, and all three exist so that the copy-last operation answers with what it
+copied and takes a body of its own. `CopiedTransactionData` is the ten values
+`COPY-LAST-TRAN-DATA` moves into the operator's map fields at
+[`COTRN02C.cbl`](../../app/cbl/COTRN02C.cbl) **L481-L492** plus the identifier of the row they came
+from, so a screen can populate its whole form from one answer and confirm that exact preview instead of
+re-resolving which row is last. `CopyLastRequest` is that operation's own request body -- the two key
+fields and the confirmation, and nothing else -- because the capture body was being reused for it, so a
+copy turn was refused locally for the blank capture fields it does not carry and the key could not be
+pressed at all. `TransactionKeySelection` is the two-accessor interface both records implement, which is
+what lets the existing at-least-one-key validator serve both without being duplicated: Bean Validation
+resolves a constraint validator by assignability, so widening the validator's target to the interface
+covers both records with one implementation. The alternative was a second validator class with the same
+body, which would have been a fourth class and two places for one rule.
 
 Refactoring Rationale: five of the nine figures above are restated together — `common-lib` 40 to 43,
 `auth-service` 31 to 29, `account-service` 41 to 43, `reference-service` 58 to 59 and `batch-service`
@@ -799,6 +846,26 @@ moves; the queues, their dead-letter queues and their encryption keys belong to
 `infra/modules/sqs`, and the class is property-gated so a task whose selected job has
 nothing to report starts and exits without it.
 
+Refactoring Rationale: `reference-service` reads 60 where it read 59, and its migration
+list gains a third entry. One class was added,
+`com.carddemo.reference.repository.InquiryReplyLedger`, together with
+`V3__reference_inquiry_reply_ledger.sql`, the table it issues its three native statements
+over. It is recorded as an addition and not as a correction: 59 was accurate for the tree
+it was measured against. Assumptions: the pair closes a delivery-boundary defect rather
+than adding a capability — the asynchronous date-conversion consumer sent its reply and
+then returned, and because that reply body is the system date and time read at the moment
+of composition, a redelivery between the send and the acknowledgement answered with a
+LATER timestamp; the ledger records the composed reply, commits, sends, and marks, so a
+redelivery re-sends the recorded bytes instead of asking the clock again. Assumptions: it
+adds no queue resource and no schema, only the one table inside the schema this context
+already owns, and it is the only table in that schema holding no reference DATA — the
+migration header records why it lives beside the context that owns the exchange rather
+than in a schema of its own. Trade-offs: the module's data-access package now holds one
+CLASS among seven derived interfaces, which its own descriptor records as the single
+documented exception, admitted because `INSERT ... ON CONFLICT DO NOTHING` has no JPQL
+form and a read-then-conditional-insert would leave the first-delivery decision to the
+gap between two statements.
+
 Refactoring Rationale: `reference-service` reads 59 where it read 58. One class was
 added, `com.carddemo.reference.config.DataSourceConfig`, and this is the one module of
 the eight that had been missing it. §0.4.1.2 of the technical specification states that
@@ -814,6 +881,37 @@ over the declaration in `application.yml` is a startup comparison of the schema 
 server reports through `current_schema()` against `spring.flyway.default-schema` — two
 independent keys, which is what makes the comparison able to fail — so the module now
 proves its schema pin took effect rather than only that it was requested.
+Refactoring Rationale: `reference-service` reads 56 where it read 59, and this is the
+first time a figure in this table has moved DOWN by three at once. Three classes left
+the module together and none of them was deleted as surplus: `config/SqsConfig`,
+`service/DateInquiryMessageListener` and `mapper/DateInquiryReplyMapper` were the
+consumer of the migrated date-and-time inquiry, the queue client it published with, and
+the renderer of its reply. The cause is a property of the transport rather than a
+preference. The baseline drives BOTH inquiry programs from ONE request destination —
+`DEFINE QLOCAL('CARDDEMO.REQUEST.QUEUE')` at `app/app-vsam-mq/README.md` L53, aliased
+to CICS as `MQQUEUE(CARDREQ)` at L71 — and the migrated topology provisions that one
+queue rather than one per consumer. A queue admits exactly one OWNING consumer, because
+a receive hides the message from every other consumer rather than delivering a copy to
+each, so two consumers on one queue do not share the work: each takes work only the
+other can answer, and the contract a message meets is decided by which container polled
+first. The queue is therefore owned by `account-service`'s `InquiryMessageListener`,
+which dispatches on the request's four-character function code, and the reply renderer
+moved to `common-lib` as `codec/DateInquiryReplyCodec` so that one transcription of the
+positional layout serves both halves of the wire — which is why `common-lib` reads 45
+where it read 44 in the same change. Alternatives Considered: making the reference
+context the single dispatcher instead, and having it call the account context for an
+account inquiry. Rejected on cost and blast radius: it would add a third pairwise
+machine-identity signing key with its own rotation obligation, its IAM grants and a
+cross-context network hop on the message path, where the chosen direction adds a clock
+reading. Assumptions: `reference-service` keeps the date EVALUATION of
+`app/cbl/CSUTLDTC.cbl` on its synchronous route, which is a different question from the
+one the queue asks; the baseline keeps them apart too, since a search for `CSUTLDTC`
+across all 524 lines of `CODATE01.cbl` returns zero occurrences. Trade-offs: one
+behavioural divergence follows and is registered in
+[`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) — an unrecognised
+function code now receives `COACCT01`'s invalid-parameters reply rather than a date
+reply, because `CODATE01` answered ANY message with the date.
+
 Refactoring Rationale: `batch-service` reads 53 where it read 52, and before that 52
 where it read 51. The first addition was `com.carddemo.batch.config.SqsConfig`, which
 completes the three-class roster its configuration package charter has always declared
@@ -893,7 +991,7 @@ that topology.
 
 | Aspect | Detail |
 |---|---|
-| Responsibilities | Sign-on and the four user-administration functions: list, add, update and delete |
+| Responsibilities | Sign-on, session renewal and sign-out, plus the four user-administration functions: list, add, update and delete |
 | Source programs | `COSGN00C` (sign-on), `COUSR00C` (list), `COUSR01C` (add), `COUSR02C` (update), `COUSR03C` (delete) |
 | Owned schema | `auth` |
 | Owned tables | `users` |
@@ -1028,7 +1126,7 @@ timestamp, and a second index carries the by-card access path.
 | Owned tables | `transaction_types`, `transaction_categories`, `disclosure_groups`, `us_phone_area_codes`, `us_states`, `us_state_zip_prefixes` |
 | Baseline data | The transaction-type, transaction-category and disclosure-group datasets, and the lookup copybook's code lists |
 | Synchronous dependencies | None |
-| Target asynchronous dependencies | Consume the dedicated date-inquiry request queue and publish to the shared inquiry reply queue — see [`messaging-contracts.md`](messaging-contracts.md) |
+| Target asynchronous dependencies | **None.** Refactoring Rationale: this row read "consume the dedicated date-inquiry request queue and publish to the shared inquiry reply queue". There is no dedicated date-inquiry request queue: the baseline defines ONE request destination for both inquiry programs (`app/app-vsam-mq/README.md` L53, aliased at L71) and a queue admits exactly one owning consumer, so `account-service` owns it and dispatches on the request's four-character function code. This context answers the date **evaluation** of `CSUTLDTC` synchronously and consumes no queue — see [`messaging-contracts.md`](messaging-contracts.md) |
 
 Two constraints on this context's data are load-bearing for parity elsewhere and
 so are recorded here. `transaction_categories` carries a foreign key to
@@ -1098,7 +1196,7 @@ fact implicitly, in the lifecycle of a dataset — and it is registered in
 | Target tables | `pending_auth_summary`, `pending_auth_detail`, `auth_fraud`, `auth_reply_outbox` — four, of which the first three derive from baseline stores and the fourth has no baseline counterpart |
 | Baseline data | The two IMS segment layouts plus the Db2 fraud table |
 | Synchronous dependencies | `account-service`, through `com.carddemo.authorization.service.RestAccountContextClient` — the three reads `COPAUA0C` performs against the cross-reference, account and customer files (`5100-READ-XREF-RECORD`, `5200-READ-ACCT-RECORD`, `5300-READ-CUST-RECORD`) become calls on the context that owns those records |
-| Asynchronous dependencies | Consumes the authorization request queue in order per opaque card group until the explicit dead-letter quarantine boundary; publishes replies through a transactional outbox — see `docs/architecture/messaging-contracts.md` |
+| Asynchronous dependencies | Consumes the authorization request queue in order per card group — the group being the literal card number, per §0.4.1.8, not a derived token — until the explicit dead-letter quarantine boundary; publishes replies through a transactional outbox, whose `order_group_id` column carries that same literal value — see `docs/architecture/messaging-contracts.md` and divergence `D-AUTHORIZATION-FIFO-IDENTITY-METADATA` |
 
 Assumptions: this context's synchronous edge is **on the authorization decision
 path**, which is why it is recorded rather than treated as incidental.
@@ -1128,7 +1226,7 @@ first-in-first-out identity columns to `order_group_id` and `deduplication_id`, 
 a send the broker accepted — the send instant, the deadline the sent message carried,
 and the broker's own message identity and sequence number — so that a publication write
 failing after an accepted send is reconciled rather than sent a second time,
-together with 58 non-`package-info.java` main-source classes — the count tabulated
+together with 57 non-`package-info.java` main-source classes — the count tabulated
 for it earlier in this document.
 
 Refactoring Rationale: this sentence read "49" while claiming to restate the count
@@ -1143,7 +1241,21 @@ the prose had been six behind before this checkpoint touched it. It is stated as
 number in one place now, and the mechanical check that guards the table is the reason
 the table itself was right.
 
-Refactoring Rationale: `authorization-service` reads 58 where it read 57. One class was
+⚠️ Refactoring Rationale: `authorization-service` reads 57 where it read 58, and the two
+movements behind that are recorded separately because they point in opposite directions and
+the figure has now visited 57 twice. The later movement is a DELETION:
+`com.carddemo.authorization.config.MessagingIdentityConfig` is withdrawn, together with the
+`carddemo.messaging.hmac-key` property it read, the `CARDDEMO_MESSAGING_HMAC_KEY` container
+secret, the Secrets Manager entry both environment roots generated for it, the task-role read
+grant and the `infra/modules/ecs-service` condition that required this task to receive it. It
+declared one keyed-tokeniser bean and nothing injected that bean, because specification
+§0.4.1.8 fixes the reply queue's `MessageGroupId` as `card_num` and its
+`MessageDeduplicationId` as `transaction_id`, so both are emitted literally and there was
+nothing left to derive. Assumptions: the two derived-identity surfaces of the module's
+`.mapper` package are unaffected — each takes a tokeniser as a parameter rather than injecting
+one — so the deletion removes a provisioned credential with no reader and no capability.
+
+Refactoring Rationale: the earlier movement took the figure from 57 to 58. One class was
 added, `com.carddemo.authorization.config.JsonReadConfig`, which holds the module's
 request reader to the character domains its published contract declares — a JSON number
 reaching a member the document declares `type: string` is refused rather than converted.
@@ -1228,9 +1340,20 @@ by this module's `V1__authorization.sql` alongside them. Its shape follows from 
 two jobs it has to do. It carries the reply exactly as the wire
 format states it, the
 six-field CSV, so that draining a row is a send and never a re-derivation. It
-carries the two identities the FIFO reply queue needs as purpose-scoped opaque
-tokens derived from the card and transaction tuple, so per-card ordering and
-duplicate suppression survive a retry without PAN or raw transaction metadata. And it
+carries the two identities the FIFO reply queue needs — `order_group_id` and
+`deduplication_id` — as the **literal** card number and transaction identifier, which
+is what §0.4.1.8 states and what makes per-card ordering and duplicate suppression
+survive a retry: the row carries the exact values the send will use, so a redelivery
+re-sends rather than re-derives. Refactoring Rationale: this sentence described the two
+columns as "purpose-scoped opaque tokens derived from the card and transaction tuple
+… without PAN or raw transaction metadata", which is the derivation the migration
+withdrew — a keyed value orders one card only while every producer computes it
+identically, and suppresses a resend only while the requester can predict it, and a
+value keyed from one consumer's secret is neither. The exposure the literal values
+accept, a primary account number in queue metadata, is registered as
+`D-AUTHORIZATION-FIFO-IDENTITY-METADATA` in
+[`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) together with
+the three controls that bound it. And it
 carries its publication state as a nullable `published_at`, so that the drain query
 is a partial index scan over unpublished rows rather than a full scan with a status
 filter. Retention is bounded: a published row is removed by the same purge job that
@@ -1518,8 +1641,17 @@ against a sentence, so the rule and the evidence cannot drift apart.
 | Context | Consumes | Publishes |
 |---|---|---|
 | `authorization-service` | target: authorization request queue, in order per card | target: authorization reply queue via a transactional outbox |
-| `account-service` | target: dedicated account-inquiry request queue | target: inquiry reply queue |
-| `reference-service` | target: dedicated date-inquiry request queue | target: inquiry reply queue |
+| `account-service` | target: the one shared inquiry request queue, dispatching on the request's function code | target: inquiry reply queue, error queue |
+| `batch-service` | — | target: error queue, on a failed nightly run |
+
+Refactoring Rationale: `reference-service` had a row here naming a dedicated
+date-inquiry request queue, and it is withdrawn along with that queue. One request
+destination feeds both inquiry programs in the baseline, and a queue admits exactly one
+owning consumer, so the queue half of the date flow is answered by the queue's owner
+while `reference-service` keeps the date evaluation on its synchronous route. The
+`batch-service` row is added in the same pass: it was omitted while that module carried
+an authored error-sink producer, so this table understated the set of contexts that
+touch a queue.
 
 The wire contracts — field order, delimiter, correlation identity, reply routing,
 ordering and deduplication guarantees, and the resolution of the message-expiry
@@ -1589,8 +1721,8 @@ graph TB
 
     RQ[["authorization request queue<br/>ordered per card"]] -.->|consumes| AUTZ
     AUTZ -.->|"target: publishes via outbox"| RP[["authorization reply queue"]]
-    AIQ[["account-inquiry request queue"]] -.->|consumes| ACCT
-    DIQ[["date-inquiry request queue"]] -.->|consumes| REF
+    IQ[["inquiry request queue<br/>one queue, both function codes"]] -.->|consumes| ACCT
+    ACCT -.->|"publishes"| IRP[["inquiry reply queue"]]
 
     ORCH["batch orchestration"] --> BATCH
     BATCH -->|"scoped write grants"| TRAN

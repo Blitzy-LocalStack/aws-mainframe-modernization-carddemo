@@ -194,6 +194,16 @@ jobs:
       #   count is asserted, so a newly added block that does not match the opener pattern
       #   fails this gate instead of being skipped in silence -- a silent skip being the
       #   failure mode that let the two undocumented blocks through in the first place.
+      #   Assumptions: the subjects are the module, every class and every function, at any
+      #   nesting depth and any visibility. Classes were previously absent from the walk, so
+      #   a class in one of these blocks carried no requirement here and none in ruff either
+      #   -- D101 is a public-declaration check, so a privately named or function-nested
+      #   class evades it. A class is held to docstring PRESENCE, and to Raises: when its own
+      #   body raises; Parameters: and Returns: are function elements and are not demanded of
+      #   a declaration that takes no parameters and returns nothing. The walk is proved
+      #   negatively inside the block, against a probe carrying exactly those evading shapes,
+      #   because every class in these blocks is documented and a narrowed walk would
+      #   otherwise report nothing and pass.
       #   Trade-offs: the Rule 1 element check is a section-NAME check, not a semantic one.
       #   It decides that a docstring states its parameters and its return value, and
       #   cannot decide whether the prose is accurate; that half stays with review, exactly
@@ -233,7 +243,12 @@ jobs:
 
           # Assumptions: the count includes THIS block, so the gate covers itself. A gate
           #   exempt from its own rule is the first place a convention decays.
-          EXPECTED_BLOCKS = 5
+          # Assumptions: advanced from 5 to 7 when the permissions-boundary and the
+          #   database-role coverage gates were added. The literal is what stops a
+          #   newly added block from escaping the gate, so it moves with the block
+          #   count rather than being derived from it -- a derived count would agree
+          #   with any number of blocks, including zero.
+          EXPECTED_BLOCKS = 8
 
           OPENER = re.compile(r"^(?P<indent> *)python3? - <<'(?P<delimiter>[A-Z]+)'$")
 
@@ -346,7 +361,7 @@ jobs:
 
 
           def missing_elements(source, label):
-              """List the Rule 1 docstring elements the module and its functions omit.
+              """List the Rule 1 docstring elements the module, classes and functions omit.
 
               Parameters:
                   source (str): One extracted block's Python source.
@@ -358,25 +373,92 @@ jobs:
                   SyntaxError: If the extracted block is not valid Python, which means the
                       extraction margin was wrong rather than the source being bad.
               """
+              # Assumptions: CLASSES are subjects too, and their element set is narrower
+              #   than a function's. A class declaration takes no parameters and returns
+              #   nothing, so only presence -- and Raises: when its own body raises -- can
+              #   be required of it; demanding Parameters: and Returns: would report every
+              #   compliant class in the tree and teach a reader to ignore this gate.
+              # WHY : Refactoring Rationale: ClassDef was absent from this walk, so a class
+              #   declared in one of these blocks carried no docstring requirement here at
+              #   all. Ruff cannot cover the gap either: its D101 is a public-declaration
+              #   check, so a privately named or function-nested class evades both, and the
+              #   step above claims to apply the Rule 1 elements to every subject in these
+              #   blocks. The negative probe below is what keeps the claim honest.
               tree = ast.parse(source)
               problems = []
-              subjects = [(label + " module", tree)]
+              subjects = [(label + " module", tree, "module")]
               for node in ast.walk(tree):
                   if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                      subjects.append((f"{label} function {node.name}", node))
+                      subjects.append((f"{label} function {node.name}", node, "function"))
+                  elif isinstance(node, ast.ClassDef):
+                      subjects.append((f"{label} class {node.name}", node, "class"))
 
-              for name, node in subjects:
+              for name, node, kind in subjects:
                   text = ast.get_docstring(node)
                   if not text:
                       problems.append(f"{name}: no docstring")
                       continue
-                  required = ["Parameters:", "Returns:"]
+                  required = [] if kind == "class" else ["Parameters:", "Returns:"]
                   if raises_something(node):
                       required.append("Raises:")
                   for section in required:
                       if section not in text:
                           problems.append(f"{name}: docstring omits {section}")
               return problems
+
+
+          # WHY : Assumptions: this probe is NEGATIVE and it is the only thing that can show
+          #       the walk above still reports. Every class and function in the five blocks
+          #       is documented, so a walk narrowed back to functions -- or narrowed to
+          #       nothing at all -- produces the same silent green run as a correct one. The
+          #       three shapes are the ones no ruff presence check reports: a privately
+          #       named class, a class nested inside a function body, and a documented
+          #       public class whose docstring omits a Raises: its own body needs.
+          # WHY : Trade-offs: the probe is parsed in memory and asserted here rather than
+          #       written as a separate step, because adding a step would add a heredoc block
+          #       and the extraction count above is asserted exactly. Running it in this
+          #       block keeps EXPECTED_BLOCKS true and keeps the probe beside the walk it
+          #       guards.
+          _CLASS_PROBE = (
+              '"""Module probe.\n'
+              "\n"
+              "Parameters:\n"
+              "    None.\n"
+              "Returns:\n"
+              "    None.\n"
+              '"""\n'
+              "\n"
+              "class _BarePrivateClass:\n"
+              "    pass\n"
+              "\n"
+              "class RaisingClass:\n"
+              '    """Documented class whose own body raises."""\n'
+              "    raise ValueError('class body')\n"
+              "\n"
+              "def outer():\n"
+              '    """Do a thing.\n'
+              "\n"
+              "    Parameters:\n"
+              "        None.\n"
+              "    Returns:\n"
+              "        None.\n"
+              '    """\n'
+              "\n"
+              "    class BareNestedClass:\n"
+              "        pass\n"
+              "\n"
+              "    return BareNestedClass\n"
+          )
+          _CLASS_PROBE_FINDINGS = set(missing_elements(_CLASS_PROBE, "probe"))
+          assert _CLASS_PROBE_FINDINGS == {
+              "probe class _BarePrivateClass: no docstring",
+              "probe class BareNestedClass: no docstring",
+              "probe class RaisingClass: docstring omits Raises:",
+          }, (
+              "the element walk must report an undocumented private class, an undocumented "
+              "class nested in a function body, and a documented class whose own body "
+              f"raises without a Raises: section; it reported {sorted(_CLASS_PROBE_FINDINGS)}"
+          )
 
 
           extracted = blocks(WORKFLOW.read_text(encoding="utf-8"))
@@ -439,6 +521,26 @@ jobs:
       # Trade-offs: the glob needs the same floor the drift step needs, because an
       # unmatched pattern survives `set -u` as a literal and a loop over nothing exits
       # zero. Three is a lower bound, so adding an environment is not a failure.
+      # WHY : ⚠️ Refactoring Rationale: this step exists because the operational Lambda
+      #       packages are no longer built by Terraform. They were assembled by
+      #       `hashicorp/archive` data sources, a provider the frozen AAP inventory does
+      #       not name, so packaging moved to infra/lambda/build_packages.py -- standard
+      #       library only. Both `validate` and `plan` evaluate `filebase64sha256` over
+      #       the built archive, so the packages have to exist before either runs.
+      # WHY : Assumptions: the builder is deterministic -- it pins member timestamps and
+      #       modes -- so running it here produces byte-identical archives to the ones a
+      #       developer builds locally, and therefore an identical `source_code_hash`. A
+      #       non-deterministic packager would make every plan report all four functions
+      #       updating on a commit that changed no handler.
+      # GATING and FAIL-CLOSED: `--check` is deliberately NOT used here. This job's
+      #       purpose is to produce the packages; verifying them against sources they
+      #       were just built from would assert nothing.
+      - name: Build the operational Lambda packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 infra/lambda/build_packages.py
+
       - name: Initialize and validate every Terraform root without a backend
         shell: bash
         run: |
@@ -555,6 +657,212 @@ jobs:
       #       Assumptions: only the claims that are countable from HCL are asserted. Prose about
       #       intent is not, and narrowing what a reviewer must verify by hand to exactly that
       #       set is the purpose.
+      # Assumptions: this gate closes a list against its AUTHORITY rather than against
+      # a count. local.service_role_names becomes the ETL's alternate-login allowlist,
+      # so a name the database does not declare is refused at connection time and an
+      # invented name raises nothing during an apply -- the drift is invisible until a
+      # rotated credential is rejected in production. The authority is the CREATE ROLE
+      # inventory in the migration DDL, which is also what the ETL's own schema-to-role
+      # mapping is written from.
+      # GATING and FAIL-CLOSED: order is asserted as well as membership, because the
+      # surrounding rationale claims "the same inventory in the same order" and a gate
+      # that ignored order would let that claim become false. A run that parsed no
+      # roles fails rather than passing.
+      - name: Verify the database role inventory closes against the V0 declarations
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'ROLES'
+          """Assert each root's service-role list is exactly the DDL's LOGIN role inventory.
+
+          Parameters:
+              None. The DDL path, the two root paths and the local's name are literals,
+              because there is one authority and the roots that must agree with it are
+              enumerated rather than discovered -- a root added without being listed here
+              would otherwise be unchecked.
+          Returns:
+              None. Successful completion lets the workflow step exit zero.
+          Raises:
+              AssertionError: If the DDL array cannot be located, if it is empty, if a
+                  root's list is missing, or if a root's list differs from the DDL's in
+                  membership or order.
+          """
+
+          import re
+          from pathlib import Path
+
+          DDL = Path("data-migration/sql/V0__schemas_and_roles.sql")
+          ROOTS = ("infra/envs/dev/main.tf", "infra/envs/prod/main.tf")
+
+          # Assumptions: the DDL declares TWO arrays named service_roles, and the
+          #   difference matters. The FIRST, in the role-creation section, is the nine
+          #   login identities the ETL may connect as. The second, in the
+          #   credential-application section, is the sixteen identities that need a
+          #   password -- including the seven migrator logins, which Flyway uses and the
+          #   ETL never does. re.search takes the first, which is the intended one, and
+          #   this note is why that is not an accident of ordering.
+          declaration = re.search(
+              r"service_roles\s+text\[\]\s*:=\s*ARRAY\[(.*?)\]", DDL.read_text(), re.S
+          )
+          assert declaration is not None, f"no service_roles array found in {DDL}"
+          authority = re.findall(r"'([a-z0-9_]+)'", declaration.group(1))
+          assert authority, "the service_roles array declares no roles"
+
+          for root in ROOTS:
+              text = Path(root).read_text()
+              listed = re.search(r"service_role_names\s*=\s*\[(.*?)\]", text, re.S)
+              assert listed is not None, f"no service_role_names list found in {root}"
+              names = re.findall(r'"([a-z0-9_]+)"', listed.group(1))
+              assert names == authority, (
+                  f"{root} service_role_names {names} does not match the DDL inventory {authority}"
+              )
+
+          print(f"service-role inventory closes in both roots: {len(authority)} roles")
+          ROLES
+
+      # Assumptions: this gate exists because Terraform can assert nothing ACROSS
+      # resources. A `validation` block sees one variable, a `precondition` sees one
+      # resource, and neither can answer "does every role in this repository carry a
+      # boundary" -- which is the only form of the question that is worth asking,
+      # because the control fails by OMISSION rather than by a wrong value. A role
+      # added without the argument applies cleanly and is unbounded.
+      # GATING and FAIL-CLOSED: the script takes no allow-list and no exception flag.
+      # It additionally refuses a run that found NO roles, because a moved directory
+      # would otherwise report a repository with nothing to bound as compliant.
+      - name: Verify every IAM role carries the deployment permissions boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'BOUNDARY'
+          """Assert every aws_iam_role in the infrastructure sets permissions_boundary.
+
+          Parameters:
+              None. The tree walked is the repository's infra/ directory, because the
+              boundary applies to every role this deployment creates wherever it is
+              declared -- a root, a module, or the state bootstrap.
+          Returns:
+              None. Successful completion lets the workflow step exit zero.
+          Raises:
+              AssertionError: If any role omits the argument, or if the walk found no
+                  roles at all. The second case is the reason the count is asserted
+                  rather than merely reported: a renamed directory makes an omission
+                  gate pass by matching nothing.
+          """
+
+          import re
+          from pathlib import Path
+
+          ROLE = re.compile(r'resource\s+"aws_iam_role"\s+"([A-Za-z0-9_]+)"\s*\{')
+
+
+          def body_of(text, opening):
+              """Return one resource block's body by matching braces from its opening.
+
+              Parameters:
+                  text (str): Full contents of the Terraform file.
+                  opening (int): Index of the block's opening brace.
+              Returns:
+                  str: The characters between the opening brace and its match.
+              Raises:
+                  AssertionError: If the braces never balance, which is a malformed file
+                      rather than a policy defect and must not read as compliant.
+              """
+              depth = 0
+              for cursor in range(opening, len(text)):
+                  if text[cursor] == "{":
+                      depth += 1
+                  elif text[cursor] == "}":
+                      depth -= 1
+                      if depth == 0:
+                          return text[opening:cursor]
+              raise AssertionError("unbalanced braces while reading an aws_iam_role block")
+
+
+          unbounded = []
+          examined = 0
+          for path in sorted(Path("infra").rglob("*.tf")):
+              if ".terraform" in path.parts:
+                  continue
+              text = path.read_text()
+              for match in ROLE.finditer(text):
+                  examined += 1
+                  opening = text.index("{", match.start())
+                  if "permissions_boundary" not in body_of(text, opening):
+                      line = text[: match.start()].count("\n") + 1
+                      unbounded.append(f"{path}:{line} aws_iam_role.{match.group(1)}")
+
+          assert examined > 0, "found no aws_iam_role declarations under infra/"
+          assert not unbounded, "roles without permissions_boundary: " + "; ".join(unbounded)
+          print(f"permissions boundary present on all {examined} aws_iam_role declarations")
+          BOUNDARY
+
+      # Assumptions: an engine version pin is the one input in this repository that
+      # goes stale WITHOUT anyone editing it -- every other value stays correct until
+      # changed, while a pinned Aurora minor silently crosses out of standard support
+      # on a calendar date. That is how this root came to deploy 16.6 nearly three
+      # months after its support ended. Alternatives Considered: querying the live
+      # support calendar was rejected because the static job holds no AWS credentials
+      # and must run offline, so the check would be skipped in exactly the situation
+      # it exists for; a comment reminding a human to look was rejected because that
+      # is what the stale pin already was.
+      - name: Verify the Aurora engine pin against its support review horizon
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'ENGINE'
+          """Assert every root's Aurora engine pin carries an unexpired review horizon.
+
+          Parameters:
+              None. The root paths are literals so that a root added without a marker
+              is a failure here rather than an unchecked pin.
+          Returns:
+              None. Successful completion lets the workflow step exit zero.
+          Raises:
+              AssertionError: If a root omits the marker or the pin, if the marker names
+                  a different version than the pin deploys, or if the declared review
+                  horizon is today or in the past.
+          """
+
+          import datetime
+          import re
+          from pathlib import Path
+
+          ROOTS = ("infra/envs/dev/terraform.tfvars", "infra/envs/prod/terraform.tfvars")
+          MARKER = re.compile(
+              r"#\s*aurora-engine-support-review:\s*(?P<version>[0-9]+\.[0-9]+)"
+              r"\s+by\s+(?P<date>\d{4}-\d{2}-\d{2})"
+          )
+          PIN = re.compile(r'aurora_engine_version\s*=\s*"(?P<version>[^"]+)"')
+
+          today = datetime.date.today()
+          for root in ROOTS:
+              text = Path(root).read_text()
+
+              marker = MARKER.search(text)
+              assert marker is not None, (
+                  f"{root} declares no aurora-engine-support-review marker; add one "
+                  "naming the pinned version and the date its support must be re-reviewed"
+              )
+              pin = PIN.search(text)
+              assert pin is not None, f"{root} sets no aurora_engine_version"
+
+              # WHY: comparing the two rather than trusting either alone. A pin bumped
+              #   without moving the marker would inherit a horizon that was reasoned
+              #   about a DIFFERENT release, which reads as reviewed and is not.
+              assert marker.group("version") == pin.group("version"), (
+                  f"{root} pins Aurora {pin.group('version')} but its review marker "
+                  f"describes {marker.group('version')}: move the marker with the pin"
+              )
+
+              horizon = datetime.date.fromisoformat(marker.group("date"))
+              assert horizon > today, (
+                  f"{root} pins Aurora {pin.group('version')} with a review horizon of "
+                  f"{horizon}, which is not in the future: confirm the release is still "
+                  "under standard support and move the pin and its marker forward"
+              )
+              print(f"{root}: Aurora {pin.group('version')} reviewed through {horizon}")
+          ENGINE
+
       - name: Verify hand-written Terraform prose counts against the declarations
         shell: bash
         run: |
@@ -687,24 +995,29 @@ jobs:
               net_vars, "variable")
           assert spelled(net_vars, r"consumes all ([A-Za-z-]+) variables") == declared(
               net_vars, "variable")
-          assert spelled(net_vars, r"Parameters -- ([A-Za-z-]+), of which one is required") == declared(
+          assert spelled(net_vars, r"Parameters -- ([A-Za-z-]+), of which two are required") == declared(
               net_vars, "variable")
 
           # WHY : Assumptions: this is a CONNECTIVITY assertion rather than a count, and it
-          #       is here because the two rules it names were missing and their absence did
+          #       is here because rules it names were missing and their absence did
           #       not fail anything -- validate, tflint, terraform-docs and the policy scan
-          #       all passed while every object-storage call was dropped at the ENI and no
-          #       service could fetch the Cognito JWK set it needs to start. A rule whose
-          #       absence is invisible to every other gate needs one of its own.
+          #       all passed while every object-storage call was dropped at the ENI. A rule
+          #       whose absence is invisible to every other gate needs one of its own.
           # WHY : Trade-offs: it asserts the rules EXIST, not that they are reachable at
-          #       run time, which no static gate can know. Naming the two resources is
+          #       run time, which no static gate can know. Naming the three resources is
           #       still enough to stop a future tidy-up removing them as unused, which is
           #       the regression that actually happened once.
+          # WHY : Refactoring Rationale: `app_to_identity_provider` was a third required
+          #       rule here and is now ASSERTED ABSENT instead, by the check below. That
+          #       rule admitted 0.0.0.0/0 on TCP 443 from the application tier on the
+          #       premise that Cognito had no interface endpoint; the premise lapsed when
+          #       cognito-idp joined the exact endpoint set, and the rule was the only
+          #       unrestricted destination in a network carrying cardholder data. Requiring
+          #       its presence would now require the defect.
           network_body = Path(net_main).read_text()
           for required_rule in (
               "app_to_s3_gateway",
               "data_to_s3_gateway",
-              "app_to_identity_provider",
           ):
               assert re.search(
                   r'(?m)^resource "aws_vpc_security_group_egress_rule" "%s"' % required_rule,
@@ -712,10 +1025,115 @@ jobs:
               ), (
                   f"infra/modules/network/main.tf: egress rule {required_rule} is absent. "
                   "The S3 gateway endpoint carries no security group, so S3 needs a "
-                  "prefix-list rule, and Cognito has no interface endpoint in the "
-                  "specified eight-service set, so its JWK set leaves through NAT. "
-                  "Without these rules the tiers are provisioned and unreachable."
+                  "prefix-list rule; without it the tiers are provisioned and every "
+                  "object-storage call is dropped at the ENI."
               )
+
+          # WHY : Assumptions: the application tier must reach no public destination, and
+          #       this asserts the property rather than trusting a comment. Any CIDR-typed
+          #       argument in this module is a finding: every legitimate destination is a
+          #       peer security group or the S3 gateway endpoint's managed prefix list, and
+          #       vpc_cidr is consumed only by the address arithmetic, never by a rule.
+          #       Checking for the literal quad-zero as well as for cidr_ipv4/cidr_ipv6
+          #       arguments catches both the rule that was removed and any successor
+          #       written with a different resource name.
+          # WHY : Trade-offs: a legitimate future need for a CIDR-scoped rule -- an
+          #       on-premises peer, say -- would have to update this gate in the same
+          #       change, which is the intended cost: reopening egress from this tier is a
+          #       decision that belongs in a diff a reviewer reads, not in a rule that
+          #       slips in under an unrelated title.
+          # WHY : Assumptions: the property asserted is that no security-group RULE names an
+          #       address range, and it is expressed as the absence of the cidr_ipv4 and
+          #       cidr_ipv6 arguments rather than as a search for the quad-zero literal.
+          #       Those two arguments exist only on security-group rules, so their absence
+          #       is exactly the property wanted; searching the file for 0.0.0.0/0 instead
+          #       would also match aws_route.public_internet and aws_route.private_nat,
+          #       whose default routes are required and are not rules, and it would match
+          #       the rationale that records why the withdrawn rule was withdrawn.
+          # WHY : Assumptions: the comment lines are stripped first so that a rule quoted
+          #       inside an explanation cannot be read as a declaration, the same
+          #       precaution `declared` takes for block keywords.
+          network_code = "\n".join(
+              line for line in network_body.splitlines()
+              if not line.lstrip().startswith("#")
+          )
+          for cidr_argument in ("cidr_ipv4", "cidr_ipv6"):
+              assert not re.search(r"(?m)^\s+%s\s+=" % cidr_argument, network_code), (
+                  f"infra/modules/network/main.tf: a security-group rule sets {cidr_argument}. "
+                  "Every rule in this module must name a peer security group or the S3 "
+                  "gateway prefix list, so that what a tier may reach is a role rather "
+                  "than whatever holds an address in range -- and so that the application "
+                  "tier keeps no path to a public destination."
+              )
+
+          # WHY : Refactoring Rationale: this loop REQUIRED a third rule,
+          #       app_to_identity_provider, whose destination defaulted to 0.0.0.0/0 -- so a
+          #       gate written to stop a tidy-up removing a needed rule was instead the
+          #       reason an unrestricted egress rule could not be removed, and its own
+          #       message still said the identity provider had no interface endpoint after
+          #       one had been added to the exact endpoint set. The requirement is replaced
+          #       by the two assertions below, which enforce the PRIVATE path the module now
+          #       provisions: the identity provider is in the endpoint set, and no egress
+          #       rule anywhere in the module names an unrestricted destination.
+          # WHY : Assumptions: the endpoint membership is read out of the variable's default
+          #       list rather than out of prose about it, and the CIDR check scans the whole
+          #       module body rather than a named resource, because the property being
+          #       asserted is about the SET of rules -- a new rule with an open destination
+          #       must fail this gate whatever it is called.
+          endpoint_block = re.search(
+              r'(?ms)^variable "interface_endpoint_services" \{.*?^\}',
+              Path(net_vars).read_text(),
+          )
+          assert endpoint_block, (
+              "infra/modules/network/variables.tf: the interface_endpoint_services variable "
+              "is absent or no longer a top-level block, so its membership cannot be checked."
+          )
+          # WHY : Assumptions: the name is required TWICE inside that block, and the pair is
+          #       the point rather than a quirk of the search. The block states the set once as
+          #       the `default` and once inside the exact-set `validation`, and a name present
+          #       in only one of them is a defect either way: in the default alone it is
+          #       unvalidated, and in the validation alone it makes the module's own default
+          #       fail the rule it declares. Requiring both is what makes this assertion about
+          #       the endpoint CONTRACT rather than about one list.
+          assert endpoint_block.group(0).count('"cognito-idp"') >= 2, (
+              "infra/modules/network/variables.tf: cognito-idp is not in both the default and "
+              "the exact-set validation of interface_endpoint_services. Every service "
+              "resolves its issuer and JSON web key set at start-up and auth-service calls "
+              "the user pools API, so without that endpoint the only path left is a public "
+              "one -- which is the rule this module withdrew."
+          )
+
+          # WHY : Assumptions: the scan is scoped to security-group EGRESS RULE blocks, and
+          #       both halves of that scoping are load-bearing. Comment lines are stripped
+          #       because the withdrawal rationale in main.tf names 0.0.0.0/0 in prose, so an
+          #       unfiltered substring test fails on the explanation of the rule's absence --
+          #       a gate a comment can satisfy is not a gate, and one a comment can BREAK is
+          #       worse, because the cheapest way to pass it is to delete the explanation.
+          #       And the module's two `aws_route` resources legitimately carry a default
+          #       route -- an internet gateway route for the public tier and a NAT route per
+          #       zone -- so a module-wide scan would refuse the network's own routing. What
+          #       the rule set may not do is name an open destination in a security-group
+          #       rule, which is what decides reachability.
+          egress_rules = re.findall(
+              r'(?ms)^resource "aws_vpc_security_group_egress_rule" "(\w+)" \{(.*?)^\}',
+              network_body,
+          )
+          assert egress_rules, (
+              "infra/modules/network/main.tf: no aws_vpc_security_group_egress_rule blocks "
+              "were found, so this assertion would pass by measuring nothing."
+          )
+          for rule_name, rule_body in egress_rules:
+              rule_code = "\n".join(
+                  line for line in rule_body.splitlines() if not line.lstrip().startswith("#")
+              )
+              for open_cidr in ('"0.0.0.0/0"', '"::/0"'):
+                  assert open_cidr not in rule_code, (
+                      f"infra/modules/network/main.tf: egress rule {rule_name} names the "
+                      f"unrestricted destination {open_cidr}. Every destination the "
+                      "application tier may reach is a referenced security group or a "
+                      "managed prefix list; a rule naming an open CIDR reopens the allow-all "
+                      "the enumerated egress replaced."
+                  )
 
           # WHY : Assumptions: a confused-deputy condition pair is the kind of thing a
           #       refactor drops silently, because removing it changes no plan output that
@@ -746,46 +1164,75 @@ jobs:
                   "account."
               )
 
-          # WHY : Assumptions: this is a CROSS-FILE agreement check rather than a count, and
-          #       it is in this step because the values it compares are Terraform prose and
-          #       workflow literals that no other gate reads together. The telemetry sidecar
-          #       is attached to every workload, and three files have to describe the same
-          #       upstream release: both environment roots carry the tag the mirror is
-          #       labelled with, and deploy.yml carries the tag plus the digest it pulls. A
-          #       version advanced in one place and not another mirrors one release and
-          #       registers another, and nothing about that fails -- the tasks start on
-          #       whichever image the mirror happens to hold.
-          # WHY : Trade-offs: the digest is NOT compared to anything, because only one file
-          #       holds it and a second copy would be the drift this check exists to stop.
-          #       What is asserted is that a digest is present and well-formed, so the pull
-          #       cannot silently fall back to a tag.
-          dev_root = Path("infra/envs/dev/main.tf").read_text()
-          prod_root = Path("infra/envs/prod/main.tf").read_text()
-          deploy = Path(".github/workflows/deploy.yml").read_text()
+          # WHY : Refactoring Rationale: a cross-file agreement check stood here, asserting
+          #       that both environment roots and deploy.yml named the same upstream release
+          #       of an AWS Distro for OpenTelemetry collector image and that the workflow
+          #       pulled it by digest. Every input it read has been withdrawn:
+          #       infra/modules/ecs-service no longer composes a collector sidecar, so
+          #       neither root carries telemetry_collector_image_tag and deploy.yml no
+          #       longer mirrors the image. The gate is removed rather than left to fail --
+          #       a check whose subject no longer exists cannot pass, and a check relaxed to
+          #       "absent is fine" would assert nothing while looking like a control. The
+          #       reason the sidecar went is scope: the frozen specification contains no
+          #       collector, and it was forcing an eleventh ECR repository against the ten
+          #       of section 0.4.1.6 and a ninth interface endpoint against the eight of
+          #       section 0.4.1.9. What still gates image provenance is unchanged and
+          #       stronger for being uniform -- every image this deployment pushes is built
+          #       from this repository and tagged with the reviewed commit, and every base
+          #       image in every Dockerfile is digest-pinned.
 
-          collector_tags = set()
-          for label, body in (("dev", dev_root), ("prod", prod_root)):
-              found = re.search(r'telemetry_collector_image_tag\s*=\s*"([^"]+)"', body)
-              assert found, f"infra/envs/{label}/main.tf: no telemetry_collector_image_tag"
-              collector_tags.add(found.group(1))
-          assert len(collector_tags) == 1, (
-              f"the two roots pin different telemetry collector tags: {sorted(collector_tags)}"
-          )
-          root_tag = collector_tags.pop()
+          # WHY : Assumptions: the frozen plan fixes this module's image inventory at TEN
+          #   deployables (AAP sections 0.4.1.6 and 0.5.1.12), and the module asserts that
+          #   as a `validation` on var.repository_names. This check is deliberately NOT a
+          #   duplicate of it. A `validation` proves the value Terraform RESOLVED is the
+          #   ten; it cannot prove the default someone edits tomorrow still is, because a
+          #   default and its own assertion can be edited together in one commit and plan
+          #   cleanly. Reading the literal default here, against a list written out in this
+          #   workflow, means changing the inventory requires editing TWO files that no
+          #   single-module change touches at once.
+          ecr_vars = Path("infra/modules/ecr/variables.tf").read_text()
 
-          workflow_tags = set(re.findall(r'collector_tag="([^"]+)"', deploy))
-          assert workflow_tags, ".github/workflows/deploy.yml: no collector_tag assignment"
-          assert workflow_tags == {root_tag}, (
-              "the deployment workflow and the environment roots name different telemetry "
-              f"collector releases: workflow {sorted(workflow_tags)} versus roots {root_tag}. "
-              "The mirror would hold one release while the task definitions named another."
+          # WHY: slicing to the deployable variable's own block before matching. The mirror
+          #   variable further down carries a name list too, and a file-wide findall would
+          #   fold the two together and report a passing eleven-name inventory.
+          deployable_block = ecr_vars[
+              ecr_vars.index('variable "repository_names"'):
+              ecr_vars.index('variable "third_party_mirror_repository_names"')
+          ]
+          # WHY: bounding the slice to the DEFAULT list alone, not "from default onward".
+          #   The exact-set `validation` that follows the default restates all ten names, so
+          #   a findall running to the end of the block sees each name twice and any
+          #   comparison against it has to fall back to a prefix -- which is precisely how
+          #   an eleventh smuggled entry stays invisible. Terminating at the default's own
+          #   closing bracket lets the comparison below be a whole-list equality.
+          default_start = deployable_block.index("default = [") + len("default = [")
+          default_body = deployable_block[default_start:deployable_block.index("]", default_start)]
+          default_names = re.findall(r'"([a-z0-9-]+)"', default_body)
+          FROZEN_DEPLOYABLES = [
+              "auth-service",
+              "account-service",
+              "card-service",
+              "transaction-service",
+              "reference-service",
+              "batch-service",
+              "authorization-service",
+              "reporting-service",
+              "ui",
+              "data-migration",
+          ]
+          assert default_names == FROZEN_DEPLOYABLES, (
+              f"infra/modules/ecr: the deployable repository inventory is {default_names}, "
+              f"which is not the ten the frozen plan fixes {FROZEN_DEPLOYABLES}. A "
+              "third-party image this migration only caches belongs in "
+              "third_party_mirror_repository_names, not here."
           )
-          assert re.search(
-              r'collector_digest="sha256:[0-9a-f]{64}"', deploy
-          ), (
-              ".github/workflows/deploy.yml: the collector mirror must pull by @sha256 digest. "
-              "A tag in a public registry can be moved onto different bytes, so a tag-only "
-              "pull is not a pin."
+          ecr_claimed = spelled(
+              "infra/modules/ecr/variables.tf", r"Parameters -- the ([A-Za-z-]+) `variable` blocks"
+          )
+          ecr_declared = declared("infra/modules/ecr/variables.tf", "variable")
+          assert ecr_claimed == ecr_declared, (
+              f"infra/modules/ecr/variables.tf claims {ecr_claimed} variable blocks but "
+              f"declares {ecr_declared}"
           )
 
           print("Terraform prose counts: PASS")
@@ -1010,12 +1457,17 @@ jobs:
           #   reference-tree paths-ignore made the scan run on essentially every
           #   commit, which is the point of the change. It also made a latent
           #   failure manifest: the default ruleset's generic-api-key rule matches
-          #   two fabricated symmetric keys committed as TEST FIXTURES, at
-          #   InternalApiSecurityConfigTest (two constants),
-          #   MessagingIdentityConfigTest (one constant) and the account-service
-          #   test profile's signing-key. The step runs under `set -euo pipefail`
+          #   two fabricated symmetric keys committed as TEST FIXTURES, in test
+          #   sources under common-lib, account-service and authorization-service.
+          #   Refactoring Rationale: this note used to enumerate the fixture SITES
+          #   by class and count them. That enumeration went stale twice -- once as
+          #   fixtures were added and once when MessagingIdentityConfigTest was
+          #   deleted with the tokeniser chain it covered -- so the exception is
+          #   now described by the two literal VALUES it admits, which is what the
+          #   allowlist below actually matches and what cannot drift as fixture
+          #   sites move. The step runs under `set -euo pipefail`
           #   and gitleaks exits non-zero when it reports anything, so the gate
-          #   would have failed on all four every time. A gate that always fails
+          #   would have failed on every such fixture every time. A gate that always fails
           #   is strictly worse than no gate: a real leak becomes indistinguishable
           #   from the standing noise, and the usual response is to switch the gate
           #   off. Admitting exactly these two strings restores a gate whose red
@@ -1029,11 +1481,15 @@ jobs:
           #   Each literal is a visibly non-production pattern -- counting hex and
           #   its reverse -- at exactly the minimum admissible key length, and each
           #   is documented as fabricated at its own declaration site.
-          # Assumptions: the four fixtures prove the SHAPE of a signing boundary --
-          #   that a token signed with the shared key verifies and one signed with a
-          #   different key does not. Because the values are committed, no test using
-          #   them asserts anything about the confidentiality of a deployed key, and
-          #   none is read by any deployed profile.
+          # Assumptions: every fixture using either literal proves the SHAPE of a
+          #   signing boundary -- that a token signed with the shared key verifies
+          #   and one signed with a different key does not. Because the values are
+          #   committed, no test using them asserts anything about the
+          #   confidentiality of a deployed key, and none is read by any deployed
+          #   profile. `RAW_KEY` is named above and no longer occurs: it was the
+          #   constant of the deleted MessagingIdentityConfigTest, and it is kept in
+          #   the reasoning because the reasoning is about field NAMES that must stay
+          #   unallowlisted whether or not one of them is currently in use.
           cat > "$RUNNER_TEMP/gitleaks.toml" <<'TOML'
           [extend]
           useDefault = true
@@ -1324,6 +1780,7 @@ jobs:
           # variables.tf in both directions so the divergence cannot recur unnoticed.
           TF_VAR_permissions_boundary_arn: ${{ vars.CARDDEMO_PERMISSIONS_BOUNDARY_ARN }}
           TF_VAR_mask_hmac_secret_arn: ${{ vars.CARDDEMO_MASK_HMAC_SECRET_ARN }}
+          TF_VAR_mask_hmac_secret_kms_key_arn: ${{ vars.CARDDEMO_MASK_HMAC_SECRET_KMS_KEY_ARN }}
           TF_VAR_alb_certificate_arn: ${{ vars.CARDDEMO_ALB_CERTIFICATE_ARN }}
           TF_VAR_internal_service_domain_name: ${{ vars.CARDDEMO_INTERNAL_SERVICE_DOMAIN_NAME }}
           TF_VAR_cloudfront_acm_certificate_arn: ${{ vars.CARDDEMO_CLOUDFRONT_ACM_CERTIFICATE_ARN }}
@@ -1362,6 +1819,12 @@ jobs:
           set -euo pipefail
           root="infra/envs/${{ inputs.environment }}"
           mkdir -p infra-reports
+          # WHY : Assumptions: rebuilt in THIS job rather than carried from the static job
+          #   as an artifact. The archives are deterministic, so rebuilding costs a second
+          #   and removes an artifact whose staleness could not be detected; a carried
+          #   archive from a different commit would plan a function this commit does not
+          #   contain, and the hash would look perfectly valid.
+          python3 infra/lambda/build_packages.py
           terraform -chdir="$root" init -input=false -lockfile=readonly \
             -backend-config="bucket=$TF_STATE_BUCKET" \
             -backend-config="region=$TF_STATE_REGION" \

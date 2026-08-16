@@ -84,6 +84,51 @@ import { BMS_SEED_PALETTE_ANCHORS } from './tokens';
  * document without adding a choice that any caller is entitled to make
  * differently.
  */
+/**
+ * The two seed entries this application sets, named so the derived palette can be read from them.
+ *
+ * Assumptions: these are lifted out of the theme literal rather than written inline because
+ * {@link SOLID_SURFACE_TOKENS} below has to resolve the palette these seeds produce, and resolving
+ * it from a second copy of the same two values would let the copies drift. The reasoning for each
+ * entry is recorded at the `token` member that consumes this constant.
+ */
+const SEED_OVERRIDES = {
+  colorInfo: theme.defaultSeed[BMS_SEED_PALETTE_ANCHORS.TURQUOISE],
+  colorLink: theme.defaultSeed[BMS_SEED_PALETTE_ANCHORS.BLUE],
+} as const;
+
+/**
+ * The primary ramp this application's seeds actually produce, resolved once.
+ *
+ * Assumptions: the palette is read from the design system's own accessor rather than written as
+ * colour literals, so the three shades below stay whatever the pinned version derives from the
+ * measured blue anchor. Reading it here is not circular: none of the three members consumed from it
+ * is itself derived from a component override.
+ */
+const PRIMARY_RAMP = theme.getDesignToken({ token: SEED_OVERRIDES });
+
+/**
+ * Ramp shades a solid control may use behind white label text, darkest state last.
+ *
+ * Purpose: the design system paints a solid primary control in the ramp's own anchor with the
+ * light-solid text token on top, and that pairing measures 4.10:1 against white where WCAG AA asks
+ * 4.5:1 for normal text — its hover shade measures 2.99:1, worse still. These three shades measure
+ * 6.16:1, 8.97:1 and 12.08:1, so every state of a solid control clears the threshold.
+ *
+ * Assumptions: the states get progressively DARKER, reversing the design system's own direction of
+ * travel, which lightens a primary control on hover. Lightening is precisely what breaks the
+ * pairing, so the direction is inverted rather than the amount reduced; darkening on interaction is
+ * also the convention the rest of the ramp's text shades already follow.
+ */
+const SOLID_SURFACE_TOKENS = {
+  /** 6.16:1 against white — the ramp's text-grade shade, the same one this tree paints as text. */
+  rest: PRIMARY_RAMP.blue7,
+  /** 8.97:1 against white. */
+  hover: PRIMARY_RAMP.blue8,
+  /** 12.08:1 against white. */
+  active: PRIMARY_RAMP.blue9,
+} as const;
+
 export const cardDemoTheme: ThemeConfig = {
   /*
    * Alternatives Considered: `theme.compactAlgorithm` and `theme.darkAlgorithm`
@@ -248,28 +293,34 @@ export const cardDemoTheme: ThemeConfig = {
    * to the 10 tokens of the informational ramp. Verified in the same computation:
    * the primary, base text and secondary text colours do not move.
    *
-   * Trade-offs: the informational colour is measurably less contrasting as text
-   * after this change, and the numbers are stated rather than left for a reader to
-   * discover. Against white it measures 2.21:1 where the blue it used to share
-   * measured 4.10:1; inside the message band, against the informational alert
-   * background it measures 2.11:1 where it measured 3.66:1 before. The reason it
-   * is accepted is that this is the class of value every semantic colour the
-   * library ships already is — each is a mid-ramp palette anchor rather than a
-   * text shade, so measured the same way on their own alert backgrounds the
-   * success colour gives 2.21:1 and the error colour 2.99:1, and the informational
-   * role was the outlier only because it happened to be blue. Two properties keep
-   * that acceptable: the message band never carries severity by colour alone,
-   * since it renders a per-severity icon and a per-severity ARIA role alongside
-   * the colour, and the derived text-grade shade of the same ramp stays available
-   * by name to any consumer that needs a darker value. No conformance level is
-   * claimed here or anywhere in this tree, and the design-token reference records
-   * that no accessibility audit has been performed; these are measurements,
-   * offered so that the change is auditable.
+   * Refactoring Rationale: the informational separation makes the informational
+   * colour measurably WEAKER as text — 2.21:1 against white where the blue it used
+   * to share measured 4.10:1 — and an earlier revision of this comment accepted
+   * that on the ground that every semantic colour the library ships is a mid-ramp
+   * anchor rather than a text shade. The measurement was right and the conclusion
+   * was wrong: both numbers are below the 4.5:1 WCAG AA threshold for normal text,
+   * so every label, prompt, hint and value a screen painted from either name was
+   * unreadable to the AA standard, and recording the ratio did not make it
+   * readable. The seed separation is KEPT, because the hue distinction between the
+   * 157 turquoise field definitions and the 384 blue ones is a real measured design
+   * value and collapsing it is what the gap register rejects. What changed is that
+   * text no longer resolves through the hue map at all: `BMS_TEXT_COLOR_TOKENS` in
+   * `ui/src/theme/tokens.ts` resolves each role to a shade that reaches the
+   * threshold on the one surface the shell paints, and `BMS_TEXT_CONTRAST_AUDIT`
+   * records the in-family ratio each role was snapped away from. So these two
+   * entries now govern fills, borders, backgrounds and icons — where 2.21:1 as a
+   * text figure is not a claim about anything — and no consumer paints either name
+   * as text.
+   *
+   * Assumptions: the message band is where this is easiest to get wrong, so it is
+   * named. It renders the design system's alert, whose informational, success and
+   * error backgrounds are themselves tinted, and no shade of the matching ramp
+   * reaches 4.5:1 against its own tint — the darkest are 3.25:1, 3.17:1 and
+   * 4.22:1. `ui/src/layout/MessageBand.tsx` therefore paints its sentence in the
+   * neutral text-grade token and carries severity through the alert's type, its
+   * icon and its ARIA role, which is the component's own default treatment.
    */
-  token: {
-    colorInfo: theme.defaultSeed[BMS_SEED_PALETTE_ANCHORS.TURQUOISE],
-    colorLink: theme.defaultSeed[BMS_SEED_PALETTE_ANCHORS.BLUE],
-  },
+  token: SEED_OVERRIDES,
 
   /*
    * Assumptions: this is empty by decision. Version 6 of the design system was
@@ -298,6 +349,35 @@ export const cardDemoTheme: ThemeConfig = {
    * border already carries that affordance structurally. Overriding that border
    * here would replace a structural resolution with a themed one and reopen a gap
    * the bridge has already closed.
+   *
+   * Refactoring Rationale: this member is no longer empty, and the single entry
+   * below earns its place on the terms this comment sets - it names something a
+   * global token cannot carry. The button is the one component that paints TEXT on
+   * the primary ramp's own anchor instead of on the surface the shell paints, so
+   * the text-grade map in `ui/src/theme/tokens.ts` cannot reach it: that map
+   * resolves a text colour against one measured surface, and here the surface is
+   * itself the thing that has to move. Moving the global `colorPrimary` instead was
+   * rejected outright - it is the measured anchor for 289 blue field definitions
+   * and governs fills, borders and icons that no measurement asked to change - so
+   * the correction is confined to the component whose foreground was failing.
    */
-  components: {},
+  components: {
+    /*
+     * Assumptions: three states are named rather than one. A component-scoped seed
+     * does not re-derive the hover and active shades the way a global seed does, so
+     * overriding the resting colour alone would leave the design system's own hover
+     * shade in place and a solid control would go from a readable 6.16:1 at rest to
+     * 2.99:1 under the pointer - a worse pairing than the one being fixed, reachable
+     * by hovering.
+     * Trade-offs: the design system's default lightens a primary control on hover and
+     * this darkens it. The direction is given up because it is the direction that
+     * breaks the pairing; the shades are all members of the same measured blue ramp,
+     * so the family the mapsets asked for is unchanged.
+     */
+    Button: {
+      colorPrimary: SOLID_SURFACE_TOKENS.rest,
+      colorPrimaryHover: SOLID_SURFACE_TOKENS.hover,
+      colorPrimaryActive: SOLID_SURFACE_TOKENS.active,
+    },
+  },
 };

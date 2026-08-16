@@ -59,6 +59,7 @@
  */
 
 import { getApiClient, keysetPagingMembers, requestPath } from './client';
+import { MASKED_CARD_NUMBER } from './masking';
 import type {
   ContractOperation,
   PageResponse,
@@ -177,9 +178,6 @@ export const REPORTING_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
 /** HTTP status the submission answers when an execution was actually started. */
 const HTTP_CREATED = 201;
 
-/** Matches the masked rendering every statement response must carry. */
-const MASKED_CARD_NUMBER = /^[*]{12}[0-9]{4}$/u;
-
 /** The selector shape the contract publishes: twenty-two URL-safe characters, unpadded. */
 const ARTIFACT_SELECTOR_SHAPE = '[A-Za-z0-9_-]{22}';
 
@@ -218,7 +216,7 @@ const OCTET_STREAM_ACCEPT: Readonly<Record<string, string>> = {
  * Assumptions: derived from the manifest entry's own path rather than retyped, and anchored at both
  * ends, so the whole value is fixed rather than merely its beginning.
  *
- * Measured: the published form carries the version prefix. `reporting-api.yaml` L1595 declares
+ * Measured: the published form carries the version prefix. `reporting-api.yaml` L1571 declares
  * `^/api/v1/reports/statements/artifacts/[A-Za-z0-9_-]{22}$` on the two members a statement answer
  * returns, while `requestPath` in `./client` REMOVES that prefix because a build's base URL already
  * ends in it. The two forms are therefore handled separately and deliberately: this pattern is the

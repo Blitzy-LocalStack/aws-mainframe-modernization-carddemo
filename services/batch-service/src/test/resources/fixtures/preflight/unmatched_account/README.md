@@ -16,8 +16,10 @@
 >
 > **Label form.** Rationales below are tagged `Alternatives Considered:`, `Assumptions:` and
 > `Trade-offs:` -- plain, plural, colon retained, no emphasis markup. That form is fixed by
-> `docs/CODE_DOCUMENTATION_STANDARD.md` and by master section 1.4, and it is enforced repository-wide
-> by `config/rule1/rule1_gate.py`, whose `labels` check fails an emphasis-wrapped label.
+> `docs/CODE_DOCUMENTATION_STANDARD.md` and by master section 1.4. `config/rule1/rule1_gate.py`
+> enforces it repository-wide -- its `labels` check fails an emphasis-wrapped label -- but not here:
+> that gate excludes every path containing `/src/test/resources/fixtures/`, so the form in this file
+> is held by review alone.
 >
 > **Reference-only sources.** `app/**`, `tests/**` and `scripts/**` are read here and never modified.
 > Where the migrated pass behaves differently from the reference, this document says so and names the
@@ -651,9 +653,12 @@ baseline or the parity oracle.
 
 ## 10. What drives this corpus, and what reads it
 
-Master section 1.5 records which scenarios this module drives and which it mirrors, and names this one as
-driven from its `dailytran.txt` by `PreflightDailyTransactionsJobTest`, which seeds the card to an
-account it deliberately does not create. Every file here additionally has a contract consumer in
+Master section 1.5 records, file by file, which record files this module opens as job input and which it
+only holds to geometry, and it names this one as driven from its `dailytran.txt` by
+`PreflightDailyTransactionsJobTest`, which seeds the card to an account it deliberately does not create.
+The other two files here, `acctdata.txt` and `cardxref.txt`, are among the nine in the whole tree that no
+job opens -- so within this one folder both cases apply, which is why the distinction is drawn per file
+rather than per directory. Every file here additionally has a contract consumer in
 `BatchFixtureContractTest`, which enumerates this scenario among all sixteen, holds each file to its
 declared geometry, its line endings and its trailing newline, decodes every record under its declared
 layout, and asserts the relationships this document states -- including the byte-sameness of section 8.3.
@@ -671,8 +676,17 @@ sixteen things to keep in step.
 ---
 
 *This README is the mandatory Explainability carrier for the three record files in this directory,
-required by master section 10 and by user-specified Rule 1. `config/rule1/rule1_gate.py` decides the form
-of the rationale labels above, repository-wide and including Markdown, which is why they are written
-plain rather than emphasised. `config/checkstyle/checkstyle.xml` limits its audit set to `java`, so no
-linter reads this prose. Whether each rationale names a real consequence, and whether every number and
-line citation is true, are review obligations no lexical gate can decide.*
+required by master section 10 and by user-specified Rule 1. **No gate reads this prose.**
+`config/checkstyle/checkstyle.xml` limits its audit set to `java`, and `config/rule1/rule1_gate.py`
+excludes every path containing `/src/test/resources/fixtures/` in its `_is_governed` check, which is
+this path -- so neither its `labels` check nor its `what` check ever opens this file. Refactoring
+Rationale: this paragraph previously said the gate "decides the form of the rationale labels above,
+repository-wide and including Markdown". The gate does run repository-wide, which is what made the
+claim plausible, but this path is explicitly outside its remit -- so the sentence credited a
+build-failing gate with cover it does not provide, and a green build could be read as evidence about
+this document. The canonical label form is used regardless, because
+`docs/CODE_DOCUMENTATION_STANDARD.md` fixes one written form repository-wide and a Rule 1 audit finds
+a rationale by literal string search; compliance in this path is therefore **review-based** rather than
+mechanical. What IS machine-checked here is the neighbouring files' geometry, by
+`BatchFixtureContractTest`. Whether each rationale names a real consequence, and whether every number
+and line citation is true, are review obligations no lexical gate can decide.*

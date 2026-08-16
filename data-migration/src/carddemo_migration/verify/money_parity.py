@@ -241,7 +241,7 @@ MONEY_TOTAL_QUERY_NAME: Final[str] = "money_totals.sql"
 #   digest in its failure, so a forgotten pin fails with the value to paste rather than at an
 #   operator's next run. Re-measure with `sha256sum data-migration/sql/verify/money_totals.sql`.
 MONEY_TOTAL_QUERY_DIGEST: Final[str] = (
-    "08b872c4ccdc2fb3b878c425d234ae38745f9b92885d1bdf2e2400ea60d95a38"
+    "99669bc6472997ccaefb007f1d69bc8c225b88cc31cf39d4e0ff4fc55d6e5c25"
 )
 
 # WHY : Assumptions: the ONE relation the committed query is permitted to read is the aggregate-only
@@ -3140,6 +3140,11 @@ def require_reporting_session(connection: Any) -> str:
     connection, so that a pass which cannot write is a property of the session rather than a
     property of the settings some earlier call happened to be handed.
 
+    Assumptions: the caller executes ``SET TRANSACTION READ ONLY`` before reaching here, so this
+    probe runs inside a transaction the server has already been told cannot write. That ordering
+    belongs to the caller because only the caller knows which transaction the report runs in; what
+    is owned here is the identity question alone.
+
     Parameters
     ----------
     connection : Any
@@ -3258,25 +3263,32 @@ def _money_total_rows(connection: Any, query: str) -> tuple[tuple[object, ...], 
     MoneyResultSetContractError
         If the cursor yields no result set at all.
     """
-    # WHY : Assumptions: the session check is made HERE, at the one place in this module where a
-    #   query is executed, rather than in `verify_money_totals` above it. A check placed only in the
-    #   caller would leave every other path to this helper unguarded, and one guard at the single
-    #   execution site cannot be bypassed.
-    require_reporting_session(connection)
     candidate = connection.cursor()
     cursor = candidate.__enter__() if hasattr(candidate, "__enter__") else candidate
     try:
-        # WHY : Assumptions: both settings are issued as ORDINARY STATEMENTS on the same cursor,
-        #   before the query, so they apply to the transaction the query runs in. `SET TRANSACTION
-        #   READ ONLY` must be the first statement of a transaction, which it is because the driver
-        #   opens one implicitly on this first execute; `SET LOCAL statement_timeout` is
-        #   transaction-scoped for the same reason, so neither leaks into a later use of the
-        #   connection the way a session-level setting would.
+        # WHY : Assumptions: the ORDER of these four statements is load-bearing and it begins with
+        #   the read-only setting, exactly as the row-count pass orders its own. The driver opens a
+        #   transaction implicitly on the first execute, so the first statement decides what the
+        #   transaction is for every statement after it -- the identity probe included.
+        # WHY : Refactoring Rationale: the probe used to run first and the read-only setting second.
+        #   Measured against PostgreSQL 17 rather than assumed: that order is ACCEPTED, because the
+        #   engine allows a transaction's access mode to be tightened mid-transaction and refuses
+        #   only `SET TRANSACTION ISOLATION LEVEL` after a query, with SQLSTATE 25001. Leading with
+        #   the read-only statement therefore fixes no outage; what it fixes is that the probe used
+        #   to run in a still-writable transaction, and that the sequence depended on a
+        #   vendor-specific allowance rather than on the standard's own first-statement position --
+        #   a pooler or proxy that opens the transaction itself need not preserve the allowance.
+        # WHY : Assumptions: the identity probe follows in the SAME transaction, through the
+        #   published guard, and stays at this single execution site so no other path into this
+        #   helper is unguarded. It asks the server for `current_user` rather than trusting the
+        #   settings the connection was opened with, and it shares this transaction because every
+        #   cursor on one connection does.
         # WHY : Trade-offs: the timeout is stated in milliseconds from a module constant rather
         #   than bound as a parameter, because `SET` accepts no bound parameter. The value is an
         #   `int` constant declared in this module and never caller supplied, so no text from
         #   outside this file reaches the statement.
         cursor.execute(_READ_ONLY_TRANSACTION_STATEMENT)
+        require_reporting_session(connection)
         cursor.execute(f"SET LOCAL statement_timeout = {_STATEMENT_TIMEOUT_MILLISECONDS}")
         cursor.execute(query)
         fetched = cursor.fetchall()

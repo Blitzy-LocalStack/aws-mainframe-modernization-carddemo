@@ -584,23 +584,39 @@ baseline or the parity oracle.
 ---
 
 *This README is the mandatory Explainability carrier for the four record files in this directory,
-required by master section 10 and by user-specified Rule 1. `config/rule1/rule1_gate.py` decides the
-form of the rationale labels above, repository-wide and including Markdown, which is why they are
-written plain rather than emphasised. `config/checkstyle/checkstyle.xml` limits its audit set to
-`java`, so no linter reads this prose. Whether each rationale names a real consequence, and whether
+required by master section 10 and by user-specified Rule 1. **No gate reads it.** `config/rule1/rule1_gate.py` governs the written form of rationale
+labels repository-wide and does include Markdown, but it excludes every path containing
+`/src/test/resources/fixtures/`, so it reads nothing here; the plain form is used regardless,
+because `docs/CODE_DOCUMENTATION_STANDARD.md` fixes one written form repository-wide and a
+Rule 1 audit finds a rationale by literal string search. `config/checkstyle/checkstyle.xml` limits its audit set to
+`java`, so no linter reads this prose either. Whether each rationale names a real consequence, and whether
 every number and line citation is true, are review obligations no lexical gate can decide.*
 
 ---
 
 ## 10. What drives this corpus, and what reads it
 
-This corpus is a **reference mirror**, not a driven input: no test in this module seeds a run from
-`/fixtures/interest/`. What reads it is `BatchFixtureContractTest`, which enumerates this scenario
-among all sixteen fixture trees and holds every file here to its declared geometry and to the values
-that make the scenario discriminating -- so an edit is detected in this module even though no job
-consumes the bytes. The end-to-end run for this rule belongs to the reference suite.
+This corpus is a **driven input**. `CalculateInterestJobTest` declares `FIXTURE_INTEREST_ROOT` as the
+classpath prefix `fixtures/interest/`, names `acctdata.txt`, `cardxref.txt`, `discgrp.txt` and
+`tcatbal.txt` as its `DRIVING_FIXTURES`, and loads each through
+`getClassLoader().getResourceAsStream(...)` -- which resolves to these four files. It seeds the masters
+from them, runs the interest job and asserts the outcome, so **an edit to these bytes changes what that
+run asserts.** `BatchFixtureContractTest` additionally enumerates this scenario among all sixteen
+fixture trees and holds every file here to its declared geometry and to the values that make the
+scenario discriminating, so a layout mistake is caught before the job run reports a value difference.
 
-Assumptions: the distinction from `posting/**` is deliberate and is stated rather than left to
-inference. That family IS driven -- `PostTransactionsJobParityIT` declares
-`/fixtures/posting/` as its seed root and compares against `tests/golden/posting/<scenario>` -- so
-one tree serves two purposes, and only there does an edit change what a run asserts.
+Assumptions: this section said the exact opposite -- "a reference mirror, not a driven input: no test in
+this module seeds a run from `/fixtures/interest/`" -- and the correction is recorded rather than merely
+applied, because the withdrawn claim licensed precisely the edit it warned against everywhere else in
+this tree. What produced it is worth naming: `CalculateInterestJobTest` cites the repository-root
+`tests/fixtures/interest/` oracle tree repeatedly in its own prose, and additionally compares this tree
+against it byte for byte to detect drift, so a reader auditing that class finds the oracle path in it
+and can conclude that the oracle path is what it opens. It is not. A path named in a docstring is not a
+path being opened, and this folder is opened.
+
+Assumptions: the distinction from `posting/**` no longer exists in the direction this paragraph drew it.
+Both families are driven -- `PostTransactionsJobParityIT` declares `/fixtures/posting/` as its seed root
+and compares against `tests/golden/posting/<scenario>`, and `PostTransactionsJobTest` reads the same
+four files under `fixtures/posting/` -- so an edit in either family changes what a run asserts. Master
+section 1.5 holds the measured inventory for the whole tree and names the nine files, in `preflight/**`
+and `export/**`, that no job opens.

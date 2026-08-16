@@ -62,7 +62,7 @@
 #   Assumptions or Trade-offs, as the project's single user-specified rule,
 #   Rule 1 "Explainability", requires at its validation gate. No mechanical gate
 #   reads this file: config/checkstyle/checkstyle.xml narrows its Checker to
-#   fileExtensions="java" at L185, and the plan declares no linter that parses
+#   fileExtensions="java" at L178, and the plan declares no linter that parses
 #   YAML comments. Review carries the obligation, and the discipline is applied
 #   here at the rigour it is applied where a build would fail without it.
 # -----------------------------------------------------------------------------
@@ -618,7 +618,12 @@ spring:
           #       carddemo-admin or carddemo-user, which is what
           #       SecurityConfig.businessAccess() and SecurityConfig.fraudAccess()
           #       both build and what openapi/authorization-api.yaml publishes as
-          #       x-required-authority: carddemo-user on all six operations. The
+          #       x-required-authority: carddemo-user on all FIVE operations -- a
+          #       count re-derived from that document, which declares five
+          #       operations across five paths and carries the field on every one;
+          #       this sentence said six while naming five in its own breadth
+          #       ("the four reads and the one fraud write"), so it contradicted
+          #       itself in a single clause. The
           #       chain ends in denyAll(), so a validly signed token carrying
           #       neither group reaches nothing and an unnamed path is refused
           #       rather than merely authenticated.
@@ -876,8 +881,8 @@ carddemo:
 
     # WHY : Refactoring Rationale: a `mask-hmac-key` setting stood here, delivered as
     #       CARDDEMO_MASK_HMAC_KEY and shared with the extract-transform-load image, and it
-    #       keyed a SECOND tokeniser bean of the same type as the one
-    #       carddemo.messaging.hmac-key below already keys. It is withdrawn for two
+    #       keyed a SECOND tokeniser bean of the same type as one that
+    #       carddemo.messaging.hmac-key then keyed further down. It is withdrawn for two
     #       independent reasons, and the first alone is disqualifying: no deployment of THIS
     #       context supplies the property, which both roots provision for the migration
     #       workload alone, so the context could not start under its own declared
@@ -887,6 +892,11 @@ carddemo:
     #       merits: that key is held by a one-off workload that reads cardholder extracts,
     #       so it would let that workload compute values a production consumer derives and
     #       would couple the rotation of a migration secret to a running service.
+    #       Assumptions: NEITHER tokeniser survives. The messaging key that outlived this
+    #       one in that pass is itself withdrawn further down, for the separate reason
+    #       recorded there, so this context now reads exactly one secret beyond its
+    #       database credentials: the internal-identity signing key at the foot of this
+    #       file.
 
     cognito:
       # WHY : Assumptions: these exist to be COMPARED, not to be chosen.
@@ -1275,42 +1285,38 @@ carddemo:
     #       unanswered.
     reply-queue-allowlist: ${CARDDEMO_MESSAGING_REPLY_QUEUE_ALLOWLIST}
 
-    # WHY : (1) Assumptions: this keys the ONE tokeniser this context holds, and it
-    #       carries no default at all. Refactoring Rationale: it keyed the queue
-    #       GROUP and DEDUPLICATION identities, and no longer does. Specification
+    # WHY : Refactoring Rationale: an `hmac-key` setting stood here, delivered as
+    #       CARDDEMO_MESSAGING_HMAC_KEY, and it is WITHDRAWN together with the bean
+    #       it keyed (config/MessagingIdentityConfig.java), the secret both
+    #       environment roots provisioned for it, the task-role grant that read it
+    #       and the ecs-service condition that required this task to receive it.
+    #       It is recorded rather than silently dropped because a reader will find
+    #       the variable name in an older task definition, a runbook revision or a
+    #       diff.
+    #       (1) The disqualifying reason: NOTHING read the value. The key existed to
+    #       derive the queue GROUP and DEDUPLICATION identities, and specification
     #       sections 0.4.1.8 and 0.7.6 freeze those as literal values --
     #       MessageGroupId = card_num and MessageDeduplicationId = transaction_id --
     #       because both have to be computed identically by every producer on the
     #       queue and predictably by the requester that may resend, and a value
-    #       keyed from this service's own secret is neither. What the key still
-    #       covers is the identities this context derives for itself rather than
-    #       ones a producer contract fixes: the business correlation token the
-    #       mapper can compute and the redacted diagnostic digest it renders.
-    #       (2) Alternatives Considered: an unkeyed digest, or a keyed digest with
-    #       a published salt. Both rejected for one reason: the protected values are
-    #       short and structured -- a sixteen-digit number with a check digit, an
-    #       acquirer identifier of fifteen characters -- so the candidate space is
-    #       small enough to enumerate, and anyone holding a token could confirm
-    #       which input produced it. Only a secret key makes the token
-    #       unconfirmable, which is what makes it worth publishing at all.
-    #       (3) Assumptions: the key is NOT per instance. Every identity worth
-    #       deriving from it has to be stable across restarts and across instances
-    #       to be worth anything -- a correlation token that changed per instance
-    #       would not join two log lines about one authorization -- so a per-instance
-    #       key would silently produce values that look right and correlate nothing.
-    #       (4) Assumptions: this is a DIFFERENT secret from the extract-transform-
-    #       load masking key CARDDEMO_MASK_HMAC_KEY. The two have different
-    #       holders and different trust purposes -- that one is held by a one-off
-    #       migration workload reading cardholder extracts, this one by a
-    #       long-running consumer -- so sharing a single value would let the
-    #       migration workload compute values a production consumer derives and
-    #       would make rotating either one require stopping both.
-    #       (5) Assumptions: the value arrives as a container secret from the
-    #       deployment's secret store, in base64 or as raw text, and it is never a
-    #       literal in this file or in any tfvars file. config/
-    #       MessagingIdentityConfig.java detects the form and refuses anything
-    #       shorter than the tokeniser's minimum key length.
-    hmac-key: ${CARDDEMO_MESSAGING_HMAC_KEY}
+    #       keyed from this service's own secret is neither. Once those became
+    #       literal, no component of this context injected the bean at all.
+    #       (2) Alternatives Considered: keeping the key against the two identities
+    #       this context could still derive for itself -- the business correlation
+    #       token the mapper can compute and the redacted diagnostic digest it
+    #       renders. Rejected because both of those surfaces take a tokeniser as a
+    #       PARAMETER and neither is called by anything here, so retaining a
+    #       provisioned secret for them means holding a live credential against a
+    #       call site that does not exist. When one does, the secret arrives in the
+    #       same change as the caller.
+    #       (3) Trade-offs: the retained-for-now position was argued explicitly and
+    #       is worth naming, because it is the trap this withdrawal walks out of. It
+    #       held that the bean should stay because the deployment already provisioned
+    #       its key -- while the key was provisioned only because the bean declared
+    #       it. Each half cited the other, so neither could ever be the one to go,
+    #       and the standing cost was real: a secret created in two environments,
+    #       injected into a running task, readable by a task role and rotated by an
+    #       attended procedure, for a value nothing computed.
 
   extract:
     # WHY : (1) Purpose: the maintenance loader reads an unload of the hierarchical
@@ -1416,14 +1422,17 @@ carddemo:
     #       issuance and rotation for two services. A static shared header was
     #       rejected outright: it carries no expiry, names no audience and cannot be
     #       scoped, so one capture would be a permanent credential.
-    #       (3) Assumptions: it is a DIFFERENT secret from
-    #       carddemo.messaging.hmac-key above, and the separation is deliberate
-    #       rather than incidental. That key derives opaque queue-metadata tokens
-    #       and is held by this service alone; this one is a signing key held by this
-    #       service and by the account context that verifies it. Sharing a single
-    #       value would mean rotating the account context's trust anchor and this
-    #       service's queue grouping together, and would let a holder of either
-    #       capability exercise the other.
+    #       (3) Refactoring Rationale: this note argued the key's separateness from
+    #       carddemo.messaging.hmac-key above, on the ground that the other key
+    #       derived queue-metadata tokens and was held by this service alone while
+    #       this one is a signing key held by this service and by the account context
+    #       that verifies it. That key is now withdrawn, so the comparison has no
+    #       second term and this is the ONLY secret this context reads beyond its
+    #       database credentials. What survives the comparison is the rule it was
+    #       making, which still binds the next secret to arrive here: two purposes
+    #       never share one value, because sharing would let a holder of either
+    #       capability exercise the other and would couple two rotations that have
+    #       different blast radii.
     #       (3a) Refactoring Rationale: this key is now THIS SERVICE'S OWN and is not
     #       shared with the transaction context, which holds a second key of its own.
     #       While one key was shared, either signer could mint a token carrying the

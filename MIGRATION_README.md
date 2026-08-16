@@ -112,8 +112,12 @@ money-total reports on a session each proves is the read-only reporting role, an
 them to a process exit status a batch step can branch on. `verify-all` is the gate: it runs
 all three passes in the fixed order 1, 2, 3, stops at the first pass that fails, offers no
 option that could skip a pass, and reduces the result to one exit status -- which is what
-the nightly chain's `VerifyMigration` state branches on, and the only edge into business
-processing. Its coverage is a `--manifest` when an operator supplies one and every dataset
+the **cutover** verification step branches on, per
+[`docs/runbooks/data-migration.md`](docs/runbooks/data-migration.md). The nightly chain
+gates business processing differently and one state earlier: each `StageSeedDatasets`
+branch runs the same three passes over the dataset it just loaded, and a failed branch
+fails the `Map` and with it the chain, so no business state runs over data that does not
+match its source. Its coverage is a `--manifest` when an operator supplies one and every dataset
 that ships a committed extract when none is. `load-dataset` serves all **eleven** loadable
 records, covering every seeded table across the eight schemas; the three columns that hold
 ciphertext are sealed by the loader under the same key and in the same envelope framing the

@@ -841,9 +841,8 @@ components:
         published bound or carrying a character outside the published set is
         refused with 400 rather than silently replaced, so that a caller cannot
         believe it is correlating requests the service is in fact correlating
-        under a different identity. A value whose shape is that of a
-        primary account number -- only digits and the three separators, with
-        thirteen or more digits -- is refused on the same terms, because this
+        under a different identity. A value whose shape is that of a protected identifier -- only digits and the
+        three separators, with nine or more digits -- is refused on the same terms, because this
         identity is echoed and logged. The refusal carries the shared problem body
         and the response correlation header, the same as any other 400, and it names
         the rule it applied without ever repeating the value it refused.
@@ -1809,7 +1808,7 @@ components:
     CorrelationId:
       type: string
       maxLength: 24
-      pattern: '^$|^(?!(?:[._-]*[0-9]){13,}[._-]*$)[A-Za-z0-9_.-]{1,24}$'
+      pattern: '^$|^(?!(?:[._-]*[0-9]){9,}[._-]*$)[A-Za-z0-9_.-]{1,24}$'
       description: >-
         Identity of one unit of work. At most twenty-four characters drawn from
         the ASCII letters, the digits, the hyphen, the underscore and the full
@@ -1820,14 +1819,15 @@ components:
         error record already carries a twenty-character event key, ERR-EVENT-KEY
         PIC X(20) at cpy/CCPAUERY.cpy L40. The empty string appears only inside
         an error body, and only for a failure raised before any identity had been
-        established. The pattern additionally
-        refuses one narrow class the character set alone admits: a value made up
-        only of digits and the three separators, carrying thirteen or more digits.
-        That is the shape of a primary account number, in contiguous form and in
-        every separated form, and the shared correlation filter refuses it because
-        this identity is echoed on the response and written to every log line for
-        the request -- so accepting one would copy a card number into both. Ordinary
-        values are unaffected: a timestamp-like 2022-07-18-0930 carries nine digits
+        established. The pattern additionally refuses one narrow class the character set alone
+        admits: a value made up only of digits and the three separators, carrying nine
+        or more digits. That is the shape of every protected identifier this system
+        holds, in contiguous form and in every separated form -- a customer identifier
+        and a national identifier are nine digits, an account identifier eleven, a
+        card number sixteen -- and the shared correlation filter refuses it because
+        this identity is echoed on the response and written to every log line for the
+        request, so accepting one would copy a protected identifier into both.
+        Ordinary values are unaffected: a date-like 2022-07-18 carries eight digits
         and is accepted, and any value containing a letter is accepted whatever its
         digits. A value the service mints begins CD, which is a non-numeric prefix
         chosen so that a minted identity can never fall into the refused class.

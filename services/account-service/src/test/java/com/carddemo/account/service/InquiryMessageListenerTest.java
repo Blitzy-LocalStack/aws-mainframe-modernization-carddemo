@@ -1,5 +1,6 @@
 package com.carddemo.account.service;
 
+import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
@@ -22,14 +23,25 @@ import com.carddemo.account.domain.Account;
 import com.carddemo.account.mapper.AccountInquiryReplyMapper;
 import com.carddemo.account.repository.AccountRepository;
 import com.carddemo.account.repository.InquiryReplyLedger;
+import com.carddemo.common.codec.DateInquiryReplyCodec;
 import com.carddemo.common.codec.InquiryRequestCodec;
 import com.carddemo.common.messaging.MessageExpiry;
 import com.carddemo.common.messaging.MessagingCorrelationId;
+import io.awspring.cloud.autoconfigure.sqs.SqsProperties;
 import io.awspring.cloud.sqs.annotation.SqsListener;
+import io.awspring.cloud.sqs.config.SqsEndpoint;
+import io.awspring.cloud.sqs.config.SqsMessageListenerContainerFactory;
+import io.awspring.cloud.sqs.listener.SqsContainerOptions;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.math.BigDecimal;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -41,16 +53,28 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.boot.context.properties.source.ConfigurationPropertySources;
+import org.springframework.boot.env.YamlPropertySourceLoader;
+import org.springframework.core.env.MutablePropertySources;
+import org.springframework.core.env.PropertyResolver;
+import org.springframework.core.env.PropertySource;
+import org.springframework.core.env.PropertySourcesPropertyResolver;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.messaging.Message;
+import org.springframework.messaging.handler.annotation.support.DefaultMessageHandlerMethodFactory;
 import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.util.StringUtils;
 import software.amazon.awssdk.core.exception.SdkClientException;
+import software.amazon.awssdk.services.sqs.SqsAsyncClient;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.GetQueueUrlRequest;
-import software.amazon.awssdk.services.sqs.model.GetQueueUrlResponse;
 import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
 import software.amazon.awssdk.services.sqs.model.SendMessageResponse;
 
@@ -125,24 +149,20 @@ import software.amazon.awssdk.services.sqs.model.SendMessageResponse;
 class InquiryMessageListenerTest {
 
     /**
-     * The configured reply queue name.
+     * The configured reply queue URL.
+     *
+     * <p>Refactoring Rationale: this was a bare queue NAME and a separate address the substituted client
+     * resolved it to. Both are now one value, because a configured destination is an address: the deployment
+     * sets every one of these variables from a {@code module.sqs.*_queue_url} output, and the consumer no
+     * longer resolves anything. The pair of constants existed only to model a resolution step that could
+     * never have succeeded against a real deployment.</p>
      */
-    private static final String REPLY_QUEUE = "account-test-reply";
+    private static final String REPLY_URL = "https://sqs.test.invalid/000000000000/account-test-reply";
 
     /**
-     * The configured error queue name.
+     * The configured error queue URL.
      */
-    private static final String ERROR_QUEUE = "account-test-error";
-
-    /**
-     * The address the substituted client resolves the reply queue to.
-     */
-    private static final String REPLY_URL = "https://sqs.test.invalid/queue/account-test-reply";
-
-    /**
-     * The address the substituted client resolves the error queue to.
-     */
-    private static final String ERROR_URL = "https://sqs.test.invalid/queue/account-test-error";
+    private static final String ERROR_URL = "https://sqs.test.invalid/000000000000/account-test-error";
 
     /**
      * A fixed instant so the expiry comparisons are not clock-dependent.
@@ -163,6 +183,60 @@ class InquiryMessageListenerTest {
      * A second broker-assigned delivery identifier, for the two-request cases.
      */
     private static final String SECOND_BROKER_MESSAGE_ID = "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d";
+
+    /**
+     * The destination the FIRST delivery of a request recorded, distinct from either configured queue.
+     *
+     * <p>Assumptions: it is deliberately neither {@link #REPLY_URL} nor {@link #ERROR_URL}, so a re-send
+     * that resolved its destination afresh instead of reading the recorded one fails rather than passing by
+     * coincidence. A configuration change between two deliveries of one request is the case the consumer's
+     * own contract names for recording the destination at all.</p>
+     */
+    private static final String RECORDED_URL = "https://sqs.test.invalid/queue/account-recorded-reply";
+
+    /**
+     * The correlation identity the first delivery recorded, which a re-send must echo again.
+     */
+    private static final String RECORDED_CORRELATION_ID = "correlation-of-the-first-delivery";
+
+    /**
+     * The message identity the first delivery recorded, which a re-send must echo again.
+     */
+    private static final String RECORDED_MESSAGE_ID = "message-id-of-the-first-delivery";
+
+    /**
+     * The correlation identity a redelivery carries, which a re-send must NOT echo.
+     *
+     * <p>Assumptions: a broker redelivers the same message, so in a deployed environment this value equals
+     * the recorded one. It is made different here on purpose: two differing values are the only way to tell
+     * a re-send that republished the RECORDED identities from one that recomposed them out of the delivery
+     * in hand, and the two are indistinguishable when they agree.</p>
+     */
+    private static final String REDELIVERY_CORRELATION_ID = "correlation-of-the-redelivery";
+
+    /**
+     * The message identity a redelivery carries, which a re-send must NOT echo.
+     */
+    private static final String REDELIVERY_MESSAGE_ID = "message-id-of-the-redelivery";
+
+    /**
+     * The balance the account carried when the first delivery composed its answer.
+     *
+     * <p>Assumptions: it differs from the balance {@link #account()} renders, so the recorded payload and
+     * the payload a redelivery composes are different strings. That is the state the consumer's contract
+     * names -- the account moved between the two deliveries -- and it is what makes "the recorded bytes
+     * went out" an assertion rather than a restatement of a value that would match either way.</p>
+     */
+    private static final BigDecimal RECORDED_BALANCE = new BigDecimal("9876.54");
+
+    /**
+     * The framed reply the first delivery recorded, rendered from the account as it stood then.
+     *
+     * <p>Assumptions: it is rendered through the real mapper rather than transcribed, for the reason the
+     * byte-exact layout case records -- the money fields carry a sign overpunch whose character belongs to
+     * the shared codec, so a transcribed literal would pin this constant to that convention.</p>
+     */
+    private static final String RECORDED_PAYLOAD = frameReply(movedAccount());
 
     /**
      * The declared width of the durable ledger's key column.
@@ -262,13 +336,14 @@ class InquiryMessageListenerTest {
     void setUp() {
         this.accounts = mock(AccountRepository.class);
         this.sqs = mock(SqsClient.class);
-        when(this.sqs.getQueueUrl(any(GetQueueUrlRequest.class)))
-                .thenAnswer(invocation -> {
-                    GetQueueUrlRequest request = invocation.getArgument(0);
-                    return GetQueueUrlResponse.builder()
-                            .queueUrl(REPLY_QUEUE.equals(request.queueName()) ? REPLY_URL : ERROR_URL)
-                            .build();
-                });
+
+        // WHY : Refactoring Rationale: there is no name-resolution stub here any more, and its absence is
+        //   the assertion. The consumer used to call getQueueUrl with the configured value as a queue NAME,
+        //   which against a real deployment meant asking for a queue called https://... -- it could only
+        //   fail, and it failed only on the reply path, after the request had been consumed and its ledger
+        //   claim committed. A stub that answered that call is what let these cases pass while the deployed
+        //   behaviour did not work, so removing it is what keeps the two in agreement: an unstubbed mock
+        //   would now return null and every send assertion below would fail.
         when(this.sqs.sendMessage(any(SendMessageRequest.class)))
                 .thenReturn(SendMessageResponse.builder().messageId("m-1").build());
 
@@ -276,6 +351,11 @@ class InquiryMessageListenerTest {
         //   outcome every pre-existing case here is about. A mock answers false unstubbed, and false is
         //   the redelivery outcome -- so leaving it unstubbed would silently route every one of those
         //   cases down the duplicate-suppression path and assert nothing they were written for.
+        // WHY : Assumptions: both of these are DEFAULTS and not the whole contract. The conflict cases
+        //   below re-stub the claim to false through their own helper, and the retirement case re-stubs the
+        //   mark to false, so the four branches this default forecloses -- suppression, recorded re-send,
+        //   the vanished row and the lost retirement race -- are each driven explicitly by a case that
+        //   states the condition it is about rather than inheriting it from here.
         // WHY : Refactoring Rationale: the transaction-manager rationale that used to open this block has
         //   been removed from here rather than reworded. It described the manager passed to the constructor
         //   below, so sitting above the ledger mock it documented a statement it was not about, and the
@@ -290,7 +370,7 @@ class InquiryMessageListenerTest {
         //   and commits nothing. What the cases below assert is which store is touched and in what order,
         //   not that a database committed, and a read-only lookup has nothing to commit in any case.
         this.listener = new InquiryMessageListener(this.accounts, new AccountInquiryReplyMapper(),
-                this.sqs, REPLY_QUEUE, ERROR_QUEUE, this.ledger, Clock.fixed(NOW, ZoneOffset.UTC),
+                this.sqs, REPLY_URL, ERROR_URL, this.ledger, Clock.fixed(NOW, ZoneOffset.UTC),
                 mock(PlatformTransactionManager.class));
 
         this.serviceLogger =
@@ -328,6 +408,34 @@ class InquiryMessageListenerTest {
     }
 
     /**
+     * Builds the same account as it stood when an earlier delivery answered, carrying the earlier balance.
+     *
+     * <p>Assumptions: only the balance differs, so the two rows are the same account at two moments rather
+     * than two accounts. Changing the identifier as well would let a re-send case pass because it answered
+     * about a different subject, which is not the property being asserted.</p>
+     *
+     * @return the row, never {@code null}
+     */
+    private static Account movedAccount() {
+        return new Account(ACCOUNT_ID, "Y",
+                RECORDED_BALANCE, new BigDecimal("5000.00"), new BigDecimal("500.00"),
+                LocalDate.of(2020, 1, 15), LocalDate.of(2027, 12, 31), LocalDate.of(2024, 6, 1),
+                new BigDecimal("111.11"), new BigDecimal("222.22"), "12345", "DEFAULT   ");
+    }
+
+    /**
+     * Renders and frames the reply block one account row produces, as the consumer frames it before
+     * recording it.
+     *
+     * @param row the account row to render; must not be {@code null}
+     * @return the framed reply body, exactly the declared message length, never {@code null}
+     */
+    private static String frameReply(Account row) {
+        AccountInquiryReplyMapper renderer = new AccountInquiryReplyMapper();
+        return renderer.frame(renderer.accountFound(row));
+    }
+
+    /**
      * Builds a framed request payload.
      *
      * @param function the four-character function code
@@ -358,6 +466,76 @@ class InquiryMessageListenerTest {
         ArgumentCaptor<SendMessageRequest> captor = ArgumentCaptor.forClass(SendMessageRequest.class);
         verify(this.sqs, times(1)).sendMessage(captor.capture());
         return captor.getValue();
+    }
+
+    /**
+     * Builds the redelivery of one request: the broker's own identity again, its own echoed identities.
+     *
+     * <p>Assumptions: the broker identifier is what makes this a REDELIVERY rather than a second question,
+     * because that identifier is the key the claim is taken on and it is stable across every redelivery of
+     * one message. The two producer-supplied identities are deliberately the redelivery's own, so a case can
+     * tell which set a re-send echoed.</p>
+     *
+     * @return the message, never {@code null}
+     */
+    private static Message<String> redelivery() {
+        return message(request("INQA", "12345678901"), Map.of(
+                InquiryMessageListener.HEADER_BROKER_MESSAGE_ID, BROKER_MESSAGE_ID,
+                InquiryMessageListener.ATTRIBUTE_CORRELATION_ID, REDELIVERY_CORRELATION_ID,
+                InquiryMessageListener.ATTRIBUTE_MESSAGE_ID, REDELIVERY_MESSAGE_ID));
+    }
+
+    /**
+     * Builds the answer an earlier delivery recorded, in the state named.
+     *
+     * <p>Assumptions: all four recorded values differ from anything the redelivery in hand carries or
+     * composes, which is what makes the two re-send properties -- the recorded bytes and the recorded
+     * addressing -- independently observable.</p>
+     *
+     * @param status the recorded state, {@link InquiryReplyLedger#STATUS_PENDING} or
+     *     {@link InquiryReplyLedger#STATUS_SENT}; must not be {@code null}
+     * @return the recorded answer, never {@code null}
+     */
+    private static InquiryReplyLedger.RecordedReply recordedReply(String status) {
+        return new InquiryReplyLedger.RecordedReply(status, RECORDED_PAYLOAD, RECORDED_URL,
+                RECORDED_CORRELATION_ID, RECORDED_MESSAGE_ID);
+    }
+
+    /**
+     * Overrides the setup's first-delivery default so this delivery's claim reports a conflict.
+     *
+     * <p>Assumptions: the default in {@link #setUp()} is re-stubbed here rather than removed from there.
+     * The default is what the twenty-seven first-delivery cases are about, and removing it would leave a
+     * mock answering {@code false} -- which is the redelivery outcome -- so every one of those cases would
+     * silently assert the wrong branch. Alternatives Considered: stubbing the claim explicitly in all cases
+     * and having no default at all. Rejected because it would restate one line in every case to express a
+     * condition only these four are about.</p>
+     */
+    private void conflictingClaim() {
+        when(this.ledger.claim(anyString(), anyString(), anyString(), any(), any(),
+                any(LocalDateTime.class))).thenReturn(false);
+    }
+
+    /**
+     * Stubs the ledger so this delivery's claim conflicts and a read finds the recorded answer.
+     *
+     * @param recorded the answer an earlier delivery left behind; must not be {@code null}
+     */
+    private void claimConflictsWith(InquiryReplyLedger.RecordedReply recorded) {
+        conflictingClaim();
+        when(this.ledger.find(BROKER_MESSAGE_ID)).thenReturn(Optional.of(recorded));
+    }
+
+    /**
+     * Stubs the ledger so this delivery's claim conflicts and no row holds the key.
+     *
+     * <p>Assumptions: the empty answer is stubbed EXPLICITLY even though an unstubbed mock would return it
+     * anyway. A case whose subject is the empty outcome must state it, or it would keep passing after a
+     * change that made the read answer something else and the case would no longer be about anything.</p>
+     */
+    private void claimConflictsWithNoRow() {
+        conflictingClaim();
+        when(this.ledger.find(BROKER_MESSAGE_ID)).thenReturn(Optional.empty());
     }
 
     /**
@@ -411,6 +589,142 @@ class InquiryMessageListenerTest {
 
         assertThat(captureSend().messageBody())
                 .startsWith("INVALID REQUEST PARAMETERS ACCT ID : 12345678901FUNCTION : BADF");
+        verify(this.accounts, never()).findById(anyLong());
+    }
+
+    /**
+     * Verifies the date function code is answered from the clock, on the same queue, without a lookup.
+     *
+     * <p>Purpose: this consumer owns the ONE request queue the migrated topology provisions, so it answers
+     * both inquiry flows the baseline drove from {@code CARDDEMO.REQUEST.QUEUE} -- the account inquiry of
+     * {@code COACCT01.cbl} and the date-and-time inquiry of {@code CODATE01.cbl}. Without this case the merge
+     * would be asserted only by the invalid-parameters branch, which cannot distinguish a date request that
+     * was ROUTED from one that was refused.</p>
+     *
+     * <p>Assumptions: the expected body is the labelled fixed-width block {@code CODATE01.cbl} builds at
+     * physical lines 216 to 222 -- {@code 'SYSTEM DATE : '} then {@code MM-DD-YYYY}, then
+     * {@code 'SYSTEM TIME : '} then {@code HH:MM:SS} -- rendered against the fixed clock this class injects,
+     * so the assertion is on a literal rather than on a re-derivation of the formatter under test.</p>
+     *
+     * <p>Assumptions: no repository call may occur. The reference program performs no file access at all: it
+     * reads the clock and replies, so a lookup here would be work the baseline never did and would couple the
+     * date answer to the availability of the account store.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a date function code is answered with the labelled system date and time block")
+    void aDateFunctionCodeIsAnsweredFromTheClock() {
+        this.listener.onRequest(message(request("DATE", "00000000000"), Map.of()));
+
+        assertThat(captureSend().messageBody())
+                .startsWith("SYSTEM DATE : 08-07-2026SYSTEM TIME : 12:00:00");
+        verify(this.accounts, never()).findById(anyLong());
+    }
+
+    /**
+     * Verifies the date answer is the shared codec's own rendering, framed to the wire length.
+     *
+     * <p>Purpose: the layout belongs to {@code common-lib}'s {@link DateInquiryReplyCodec}, beside the request
+     * half that decodes the same 1000-character record, so that one context cannot render a body the other
+     * cannot read. This case pins that the consumer DELEGATES rather than reimplements: a second rendering
+     * here would drift from the codec silently, and the previous case's literal alone would not detect it
+     * because a local copy would satisfy the literal too.</p>
+     *
+     * <p>Assumptions: the comparison is byte-exact over the whole body, including the trailing pad, because
+     * the reply is a positional record and a consumer decoding it by offset is affected by its length as much
+     * as by its content.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the date answer is the shared codec's rendering, byte for byte")
+    void theDateAnswerIsTheSharedCodecRendering() {
+        this.listener.onRequest(message(request("DATE", "12345678901"), Map.of()));
+
+        assertThat(captureSend().messageBody())
+                .isEqualTo(DateInquiryReplyCodec.framedSystemDateAndTime(
+                        LocalDateTime.ofInstant(NOW, ZoneOffset.UTC)));
+    }
+
+    /**
+     * Verifies the date route precedes the account guard, so a key the account route refuses still answers.
+     *
+     * <p>Purpose: {@code CODATE01.cbl} declares {@code WS-FUNC} and {@code WS-KEY} at physical lines 110 and
+     * 111 and reads neither, so the date answer cannot depend on the key. The account route's own guard is
+     * the opposite -- {@code IF WS-FUNC = 'INQA' AND WS-KEY > ZEROES} refuses a zero key without a lookup --
+     * so driving a zero key here distinguishes an implementation that dispatched before the guard from one
+     * that fell through it and refused a request the baseline answered.</p>
+     *
+     * <p>Assumptions: the same zero key is driven through the account route in
+     * {@link #aZeroKeyIsRefusedWithoutALookup()}, so the two cases together establish that the guard still
+     * applies where it did and no longer applies where it did not.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the date route ignores the key the account guard refuses")
+    void theDateRouteIgnoresTheKey() {
+        this.listener.onRequest(message(request("DATE", "00000000000"), Map.of()));
+
+        assertThat(captureSend().messageBody())
+                .startsWith("SYSTEM DATE : ")
+                .doesNotContain("INVALID REQUEST PARAMETERS");
+        verify(this.accounts, never()).findById(anyLong());
+    }
+
+    /**
+     * Verifies the date discriminator is matched case sensitively, as the baseline's literal test is.
+     *
+     * <p>Purpose: the function code is compared against a COBOL literal in both reference programs, and a
+     * literal comparison is case sensitive, so a lower-case variant is an unrecognised code rather than a
+     * date request. This case is the divergence boundary the merge introduces: on separate trigger queues an
+     * unrecognised code reaching the date program was answered with the date, because that program tests
+     * nothing; on one queue it receives {@code COACCT01}'s own refusal. That is the stricter of the two
+     * baseline behaviours and is registered in {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+     *
+     * <p>Assumptions: the refusal sentence is asserted rather than merely the absence of a date block,
+     * because an implementation that dropped the message silently would also lack a date block, and a
+     * dropped request is acknowledged with no answer at all.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a lower-case date code is an unrecognised code, not a date request")
+    void aLowerCaseDateCodeIsRefused() {
+        this.listener.onRequest(message(request("date", "12345678901"), Map.of()));
+
+        assertThat(captureSend().messageBody())
+                .startsWith("INVALID REQUEST PARAMETERS ACCT ID : 12345678901FUNCTION : date")
+                .doesNotContain("SYSTEM DATE");
+        verify(this.accounts, never()).findById(anyLong());
+    }
+
+    // WHY : Assumptions: the payload is driven EMPTY rather than short-but-present, because an empty body is
+    //       a real wire condition on this queue -- services/reference-service/src/test/resources/fixtures/
+    //       date_conversion/empty_input/date-request.txt is a zero-byte fixture of exactly this shape -- and
+    //       because it is the one input on which the merged consumer's two halves could disagree. The codec
+    //       pads a short payload to the declared length, so the function field arrives as four spaces, which
+    //       is neither of the two codes the dispatch recognises.
+    // WHY : Trade-offs: the case asserts the message is ANSWERED, not dropped. Refusing it would dead-letter
+    //       a delivery the baseline replied to, and answering it with the date would make a blank field mean
+    //       DATE. Refusing it IN THE REPLY is the only reading that both consumes the message and keeps the
+    //       blank field distinguishable from the date request.
+    /**
+     * Verifies an empty payload is answered with the refusal rather than with the date or a dead letter.
+     */
+    @Test
+    @DisplayName("an empty payload is answered with the refusal, not with the date")
+    void anEmptyPayloadIsAnsweredWithTheRefusal() {
+        this.listener.onRequest(message("", Map.of()));
+
+        assertThat(captureSend().messageBody())
+                .as("a padded-to-blank function code is neither DATE nor INQA, so the guard answers")
+                .startsWith("INVALID REQUEST PARAMETERS ACCT ID : ")
+                .doesNotContain("SYSTEM DATE");
+        assertThat(InquiryRequestCodec.decode("").functionLabel())
+                .as("what a journal line receives for a blank field is the blank token, not the field")
+                .isEqualTo(InquiryRequestCodec.FUNCTION_LABEL_BLANK);
         verify(this.accounts, never()).findById(anyLong());
     }
 
@@ -718,20 +1032,78 @@ class InquiryMessageListenerTest {
     }
 
     /**
-     * Verifies the queue address is resolved once and then reused.
+     * Verifies the configured address is published to directly, with no name resolution at any point.
+     *
+     * <p>Refactoring Rationale: this case asserted that the address was resolved ONCE and cached. The
+     * resolution is gone rather than optimised, so the case now asserts that it never happens -- across
+     * three deliveries, not one, because a per-message call is exactly what a cache was there to prevent
+     * and a single delivery could not tell a removed call from a cached one.</p>
      */
     @Test
-    @DisplayName("the queue address is resolved once and reused")
-    void theQueueAddressIsResolvedOnce() {
+    @DisplayName("the configured address is published to directly and no name resolution occurs")
+    void noQueueNameResolutionOccurs() {
         when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
 
         for (int attempt = 0; attempt < 3; attempt++) {
             this.listener.onRequest(message(request("INQA", "12345678901"), Map.of()));
         }
 
-        verify(this.sqs, times(1)).getQueueUrl(any(GetQueueUrlRequest.class));
+        verify(this.sqs, never()).getQueueUrl(any(GetQueueUrlRequest.class));
         verify(this.sqs, times(3)).sendMessage(any(SendMessageRequest.class));
     }
+
+    /**
+     * Verifies a destination configured as a URL is used as one, with no resolution call at all.
+     *
+     * <p>Purpose: this is the deployed configuration and it is what the checkpoint's dev and prod roots
+     * actually produce. Both roots inject {@code CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE_URL} and
+     * {@code CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE_URL} from the queue module's {@code *_queue_url} outputs, so
+     * the values this consumer receives in a provisioned environment are addresses. Before the fix every
+     * one of them was passed to {@code GetQueueUrl} as a queue NAME -- which a URL cannot be, a name
+     * admitting only alphanumerics, hyphens and underscores -- so both the reply and the diagnostic failed
+     * at the resolution call before their send, the request was redelivered into the same failure and
+     * dead-lettered, and the requester received nothing.</p>
+     *
+     * <p>Assumptions: the assertion is that {@code getQueueUrl} is called ZERO times and not merely that
+     * the send reached the right address. A resolution call would still be made against a mock that
+     * answers one, so the address alone would pass on the broken code path in this class's fixture; the
+     * interaction count is the part that cannot.</p>
+     *
+     * <p>Assumptions: both destinations are exercised in one case, through a reply and through a
+     * diagnostic, because the two are configured independently and a fix applied to one alone would leave
+     * the other failing in a provisioned environment while a reply-only case stayed green.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a destination configured as a URL is sent to directly with no resolution call")
+    void aUrlDestinationIsUsedWithoutResolution() {
+        SqsClient client = mock(SqsClient.class);
+        when(client.sendMessage(any(SendMessageRequest.class)))
+                .thenReturn(SendMessageResponse.builder().messageId("m-url").build());
+        AccountRepository repository = mock(AccountRepository.class);
+        when(repository.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+        InquiryReplyLedger replyLedger = mock(InquiryReplyLedger.class);
+        when(replyLedger.claim(anyString(), anyString(), anyString(), any(), any(),
+                any(LocalDateTime.class))).thenReturn(true);
+        when(replyLedger.markSent(anyString(), any(LocalDateTime.class))).thenReturn(true);
+
+        InquiryMessageListener addressed = new InquiryMessageListener(repository,
+                new AccountInquiryReplyMapper(), client, REPLY_URL, ERROR_URL, replyLedger,
+                Clock.fixed(NOW, ZoneOffset.UTC), mock(PlatformTransactionManager.class));
+
+        addressed.onRequest(message(request("INQA", "12345678901"), Map.of()));
+        addressed.publishError("ERROR WHILE READING ACCTFILE");
+
+        verify(client, never()).getQueueUrl(any(GetQueueUrlRequest.class));
+        ArgumentCaptor<SendMessageRequest> sends = ArgumentCaptor.forClass(SendMessageRequest.class);
+        verify(client, times(2)).sendMessage(sends.capture());
+        assertThat(sends.getAllValues())
+                .extracting(SendMessageRequest::queueUrl)
+                .as("the injected addresses are used verbatim, in reply-then-diagnostic order")
+                .containsExactly(REPLY_URL, ERROR_URL);
+    }
+
 
     /**
      * Verifies a diagnostic goes to the error queue and never to the reply queue.
@@ -749,24 +1121,38 @@ class InquiryMessageListenerTest {
     }
 
     /**
-     * Verifies a blank configured queue name is refused at construction, naming the property.
+     * Verifies a destination that is not a fully-qualified queue URL is refused at construction.
+     *
+     * <p>Refactoring Rationale: this case checked only that a BLANK destination was refused, which is the
+     * weaker half of the contract and the half that was never the problem. A bare queue name passed the old
+     * check, and a bare queue name is exactly what the consumer could not publish to -- so the case now
+     * covers blank and bare-name alike, on both destinations, and each refusal must still name the property
+     * an operator has to set.</p>
      */
     @Test
-    @DisplayName("a blank configured queue name is refused at construction")
-    void aBlankQueueNameIsRefused() {
+    @DisplayName("a blank or bare-name destination is refused at construction, naming the property")
+    void aDestinationThatIsNotAQueueUrlIsRefused() {
         AccountInquiryReplyMapper mapper = new AccountInquiryReplyMapper();
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
 
         PlatformTransactionManager transactions = mock(PlatformTransactionManager.class);
 
         assertThatThrownBy(() -> new InquiryMessageListener(this.accounts, mapper, this.sqs,
-                " ", ERROR_QUEUE, this.ledger, clock, transactions))
+                " ", ERROR_URL, this.ledger, clock, transactions))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("carddemo.account.inquiry.reply-queue");
+                .hasMessageContaining("carddemo.account.inquiry.reply-queue-url");
         assertThatThrownBy(() -> new InquiryMessageListener(this.accounts, mapper, this.sqs,
-                REPLY_QUEUE, "", this.ledger, clock, transactions))
+                REPLY_URL, "", this.ledger, clock, transactions))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("carddemo.account.inquiry.error-queue");
+                .hasMessageContaining("carddemo.account.inquiry.error-queue-url");
+        assertThatThrownBy(() -> new InquiryMessageListener(this.accounts, mapper, this.sqs,
+                "account-test-reply", ERROR_URL, this.ledger, clock, transactions))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("carddemo.account.inquiry.reply-queue-url");
+        assertThatThrownBy(() -> new InquiryMessageListener(this.accounts, mapper, this.sqs,
+                REPLY_URL, "account-test-error", this.ledger, clock, transactions))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("carddemo.account.inquiry.error-queue-url");
     }
 
     /**
@@ -1017,9 +1403,22 @@ class InquiryMessageListenerTest {
      *
      * <p>Assumptions: the claim ledger this consumer DOES hold is not an outbox, and the distinction is the
      * guarantee rather than the mechanism. An outbox guarantees a reply EXISTS for every committed decision;
-     * this exchange commits no decision, because its read is read-only. The ledger guarantees a reply is not
-     * sent TWICE. Asserting the absence of the first while the second is present is the whole point of the
-     * case, so the ledger is deliberately not treated as a violation.</p>
+     * this exchange commits no decision, because its read is read-only. The ledger guarantees that no
+     * requester is answered TWICE with DIFFERING content -- a redelivery either suppresses its duplicate or
+     * re-sends the recorded bytes verbatim. Asserting the absence of the first while the second is present is
+     * the whole point of the case, so the ledger is deliberately not treated as a violation.</p>
+     *
+     * <p>Refactoring Rationale: this paragraph stated the guarantee as "a reply is not sent TWICE", and that
+     * is not what the implementation provides. {@code answerOnce} commits the claim, sends, and only then
+     * marks the claim sent, so a task that dies between the send and the mark leaves the claim outstanding
+     * and the redelivery SENDS AGAIN -- the class documentation says so in its own Trade-offs paragraph, and
+     * closing that window would need the queue send and the database mark to commit together, which is the
+     * two-phase commit AAP section 0.7.6 records as eliminated. A test asserting the stronger property
+     * certified something no code here delivers, which is worse than asserting nothing: a reader takes a
+     * green suite as evidence. The guarantee is restated as the one that holds, and the two arms that make
+     * it hold are now exercised by
+     * {@link #anOutstandingClaimResendsTheRecordedReply()} and
+     * {@link #aRetiredClaimSuppressesTheDuplicate()} rather than only described here.</p>
      *
      * <p>Trade-offs: the type check is by name through reflection rather than by a layering rule, and it
      * therefore cannot catch an outbox introduced under a name this list does not anticipate. Alternatives
@@ -1068,10 +1467,15 @@ class InquiryMessageListenerTest {
         //   distinguishes direct publication from an outbox, which would instead have committed a row and
         //   returned with nothing sent. Pinning the interaction count closed is what makes the distinction
         //   an assertion rather than an observation: an added relay would raise it.
+        // WHY : Refactoring Rationale: the interaction pinned here was a name-resolution call, which no
+        //   longer exists -- the consumer publishes to the configured address directly. The count that now
+        //   carries the same weight is the send count: exactly one publication per delivery, which an added
+        //   relay would move out of this invocation entirely.
         SendMessageRequest sent = captureSend();
         assertThat(sent.queueUrl()).isEqualTo(REPLY_URL);
         assertThat(sent.messageBody()).startsWith(LABEL_ACCOUNT_ID);
-        verify(this.sqs, times(1)).getQueueUrl(any(GetQueueUrlRequest.class));
+        verify(this.sqs, times(1)).sendMessage(any(SendMessageRequest.class));
+        verify(this.sqs, never()).getQueueUrl(any(GetQueueUrlRequest.class));
 
         // WHY : Assumptions: the ORDER is the other half of the distinction, and it runs the opposite way
         //   round from an outbox. An outbox records the reply and commits, and a relay sends it afterwards in
@@ -1084,6 +1488,107 @@ class InquiryMessageListenerTest {
         sequence.verify(this.sqs).sendMessage(any(SendMessageRequest.class));
         sequence.verify(this.ledger).markSent(eq(BROKER_MESSAGE_ID), any(LocalDateTime.class));
         verifyNoMoreInteractions(this.sqs);
+    }
+
+    /**
+     * Verifies a redelivery whose claim is still OUTSTANDING re-sends the recorded bytes, not a fresh reply.
+     *
+     * <p>Purpose: this is the crash window the class documentation names, and it was the one arm of the claim
+     * ledger no case exercised. {@code answerOnce} commits the claim, sends, and only then marks the claim
+     * sent, so a task killed between the send and the mark -- or one whose acknowledgement is lost, or whose
+     * visibility timeout elapses while the send is in flight -- leaves the row PENDING. The next delivery of
+     * the same message finds the claim taken and must re-send what was recorded rather than recompose an
+     * answer, because the account may have moved in between and two replies bearing one correlation
+     * identifier that disagree about a balance is the outcome the ledger exists to prevent.</p>
+     *
+     * <p>Assumptions: the crash is represented by the LEDGER's answers rather than by killing anything. The
+     * claim reports a conflict and the row reports {@code PENDING}, which is exactly the durable state a task
+     * that died after its send leaves behind, so the arm under test is reached without a second process and
+     * without a real database.</p>
+     *
+     * <p>Assumptions: the recorded values are deliberately DIFFERENT from the ones this delivery would
+     * compose -- a distinct payload, the error queue as the recorded destination, and distinct identities --
+     * so the assertion can tell "re-sent the record" from "recomposed and happened to match". A recorded copy
+     * identical to a fresh one would make the case pass on an implementation that ignored the record.</p>
+     *
+     * <p>Assumptions: the send happens BEFORE the mark on this arm too, and the order is asserted. A
+     * redelivery that marked first would suppress the re-send of a reply that never reached the queue,
+     * turning a duplicated answer into a missing one -- the worse of the two failures.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a redelivery with an outstanding claim re-sends the recorded reply verbatim")
+    void anOutstandingClaimResendsTheRecordedReply() {
+        String recordedPayload = "RECORDED REPLY BYTES";
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+        when(this.ledger.claim(anyString(), anyString(), anyString(), any(), any(),
+                any(LocalDateTime.class))).thenReturn(false);
+        when(this.ledger.find(BROKER_MESSAGE_ID)).thenReturn(Optional.of(
+                new InquiryReplyLedger.RecordedReply(InquiryReplyLedger.STATUS_PENDING, recordedPayload,
+                        ERROR_URL, "recorded-corr", "recorded-msg")));
+
+        this.listener.onRequest(message(request("INQA", "12345678901"), Map.of(
+                InquiryMessageListener.HEADER_BROKER_MESSAGE_ID, BROKER_MESSAGE_ID,
+                InquiryMessageListener.ATTRIBUTE_CORRELATION_ID, "this-delivery-corr")));
+
+        SendMessageRequest sent = captureSend();
+        assertThat(sent.messageBody())
+                .as("the recorded bytes are re-sent rather than an answer composed on this delivery")
+                .isEqualTo(recordedPayload);
+        assertThat(sent.queueUrl())
+                .as("the recorded destination is used, so a configuration change between deliveries cannot"
+                        + " split one answer across two queues")
+                .isEqualTo(ERROR_URL);
+        assertThat(sent.messageAttributes().get(InquiryMessageListener.ATTRIBUTE_CORRELATION_ID)
+                        .stringValue())
+                .as("the recorded correlation identity is echoed, not this delivery's")
+                .isEqualTo("recorded-corr");
+        assertThat(sent.messageAttributes().get(InquiryMessageListener.ATTRIBUTE_MESSAGE_ID)
+                        .stringValue())
+                .as("the recorded message identity is echoed too")
+                .isEqualTo("recorded-msg");
+
+        InOrder sequence = inOrder(this.ledger, this.sqs);
+        sequence.verify(this.ledger).find(BROKER_MESSAGE_ID);
+        sequence.verify(this.sqs).sendMessage(any(SendMessageRequest.class));
+        sequence.verify(this.ledger).markSent(eq(BROKER_MESSAGE_ID), any(LocalDateTime.class));
+    }
+
+    /**
+     * Verifies a redelivery whose claim has been RETIRED sends nothing and still acknowledges the request.
+     *
+     * <p>Purpose: this is the other half of the guarantee. Once the mark has been committed the requester
+     * demonstrably has its answer, so a further delivery of the same message must be dropped: sending again
+     * would hand a second copy to a requester that already paired the first to its question, and raising
+     * would put a correctly answered request through redelivery to the dead-letter queue.</p>
+     *
+     * <p>Assumptions: the assertion is that NO send occurs and that the handler returns normally. Those two
+     * together are what "acknowledged and suppressed" means over this API -- the container deletes the
+     * message precisely because the handler did not throw -- and the absent mark is what says this delivery
+     * did not claim credit for a send it never made.</p>
+     *
+     * <p>Assumptions: the account is deliberately still stubbed as readable, so the suppression is decided
+     * from the ledger rather than from a failed read. A case whose account was absent would pass for the
+     * wrong reason.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a redelivery with a retired claim suppresses the duplicate and sends nothing")
+    void aRetiredClaimSuppressesTheDuplicate() {
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+        when(this.ledger.claim(anyString(), anyString(), anyString(), any(), any(),
+                any(LocalDateTime.class))).thenReturn(false);
+        when(this.ledger.find(BROKER_MESSAGE_ID)).thenReturn(Optional.of(
+                new InquiryReplyLedger.RecordedReply(InquiryReplyLedger.STATUS_SENT, "SENT BYTES",
+                        REPLY_URL, "recorded-corr", "recorded-msg")));
+
+        this.listener.onRequest(message(request("INQA", "12345678901"), Map.of(
+                InquiryMessageListener.HEADER_BROKER_MESSAGE_ID, BROKER_MESSAGE_ID)));
+
+        verify(this.sqs, never()).sendMessage(any(SendMessageRequest.class));
+        verify(this.ledger, never()).markSent(anyString(), any(LocalDateTime.class));
     }
 
     /**
@@ -1126,17 +1631,37 @@ class InquiryMessageListenerTest {
     }
 
     /**
-     * The polling contract carries the reference program's own wait and hard-codes no destination.
+     * The handler's annotation binds a queue and sizes nothing, so one namespace governs the container.
      *
-     * <p>Purpose: the container, not this class, performs the baseline's driver loop, so the only place the
-     * loop's parameters are visible is the annotation that configures it. This case reads that annotation and
-     * asserts the four properties carried across from the reference, none of which any behavioural case can
-     * observe.</p>
+     * <p>Purpose: the container, not this class, performs the baseline's driver loop, and its parameters may
+     * be declared in two places -- on this annotation, or under {@code spring.cloud.aws.sqs.listener} in the
+     * profiles. This case asserts that the annotation declares NONE of them, which is what leaves the
+     * profiles as the single authority; the sibling case asserts what those profiles then resolve to.</p>
      *
-     * <p>Assumptions: the wait is the baseline's own. Physical line 337 of
-     * {@code app/app-vsam-mq/cbl/COACCT01.cbl} moves 5000 into {@code MQGMO-WAITINTERVAL}, expressed by that
-     * interface in milliseconds, so the target's default of five seconds is the same wait and not a chosen
-     * one.</p>
+     * <p>Refactoring Rationale: this annotation used to carry {@code maxConcurrentMessages},
+     * {@code maxMessagesPerPoll} and {@code pollTimeoutSeconds}, each a placeholder over a
+     * {@code carddemo.account.inquiry.*} key with a literal default of 10, 10 and 5, and this case read those
+     * attribute STRINGS -- asserting that the poll attribute ended in {@code ":5}"}. That assertion passed on
+     * text while the deployed behaviour was wrong: none of the three keys was declared in any profile, so the
+     * literal defaults applied, and an endpoint value overrides the factory's options rather than defaulting
+     * beneath them. The development profile's concurrency of two therefore ran as ten against a
+     * four-connection pool, and reading an attribute's text could not have detected it. Asserting the emptiness
+     * of every sizing attribute is the assertion that HAS to hold for the profile to be in charge.</p>
+     *
+     * <p>Assumptions: the wait itself is the baseline's own and is asserted in the sibling case rather than
+     * here. Physical line 337 of {@code app/app-vsam-mq/cbl/COACCT01.cbl} moves 5000 into
+     * {@code MQGMO-WAITINTERVAL}, expressed by that interface in milliseconds, so five seconds is the same
+     * wait and not a chosen one -- and {@code application.yml} is where it now appears, as
+     * {@code poll-timeout: 5s}.</p>
+     *
+     * <p>Refactoring Rationale: the wait is asserted as a bare PLACEHOLDER rather than as a placeholder
+     * carrying a five-second fallback, and the change is the point. Every one of the three container
+     * attributes used to carry an inline default, and an annotation attribute takes precedence over the
+     * container factory's own setting -- so the fallback silently overrode whatever a profile declared for
+     * the same limit, and {@code application-dev.yml}'s deliberately smaller concurrency pair had no effect
+     * at all. The properties are declared in {@code application.yml} instead, which is where a profile can
+     * reach them, and an undeclared limit now stops start-up rather than reinstating a value no file
+     * states.</p>
      *
      * <p>Assumptions: no queue location appears anywhere in the configuration, which is the baseline's own
      * position rather than a modern convention. Its queue block at physical line 92 declares four names --
@@ -1163,6 +1688,15 @@ class InquiryMessageListenerTest {
      * dead-lettered. Rejected because that value lives in the queue definition, and a test that restated it
      * from here would assert a literal of its own rather than the deployed value.</p>
      *
+     * <p>Refactoring Rationale: this case previously asserted that the annotation CARRIED the five-second
+     * wait, and that assertion is inverted here rather than deleted. A non-null annotation attribute is
+     * applied over the container factory the {@code spring.cloud.aws.sqs.listener} keys configure, so the
+     * three sizing attributes this annotation once declared -- the wait and both concurrency bounds -- made
+     * every per-profile value inert, including the development profile's deliberately smaller pair. The
+     * attributes are withdrawn, so what this case now pins is that the annotation declares a queue and
+     * nothing else; the wait itself is asserted where it now lives by
+     * {@link #theBaselineWaitIsDeclaredInConfiguration()}, so the value is not merely dropped here.</p>
+     *
      * <p>Assumptions: no attribute imposes a ceiling on the number of messages an execution may process, so
      * the loop ends on queue emptiness alone -- the target form of physical lines 377 and 378, which set the
      * no-more-messages condition when the get reports nothing available. The five-hundred-message ceiling
@@ -1173,13 +1707,13 @@ class InquiryMessageListenerTest {
      *
      * @throws NoSuchMethodException if the handler method cannot be found, which would mean the contract this
      *     case reads has been renamed rather than that the assertion failed
+     * @throws IOException if the base configuration cannot be read from the class path, which would mean the
+     *     module publishes no {@code application.yml} and its mandatory limits could not resolve
      */
     @Test
-    @DisplayName("the polling contract carries the baseline wait and hard-codes no destination")
-    void thePollingContractCarriesTheBaselineWaitInterval() throws NoSuchMethodException {
-        SqsListener annotation = InquiryMessageListener.class
-                .getMethod("onRequest", Message.class)
-                .getAnnotation(SqsListener.class);
+    @DisplayName("the handler's annotation binds a queue and sizes nothing")
+    void thePollingContractCarriesNoSizingAttribute() throws NoSuchMethodException {
+        SqsListener annotation = handlerAnnotation();
 
         assertThat(annotation)
                 .as("the handler must be bound to a queue by the container")
@@ -1191,9 +1725,15 @@ class InquiryMessageListenerTest {
                 .as("a destination must be resolved at run time, as COACCT01 L93-L96 expect")
                 .startsWith("${")
                 .endsWith("}");
+        assertThat(annotation.maxConcurrentMessages())
+                .as("concurrency belongs to spring.cloud.aws.sqs.listener, which dev reduces to two")
+                .isEmpty();
+        assertThat(annotation.maxMessagesPerPoll())
+                .as("batch size belongs to spring.cloud.aws.sqs.listener, which dev reduces to two")
+                .isEmpty();
         assertThat(annotation.pollTimeoutSeconds())
-                .as("the wait must be the baseline's 5000 milliseconds from COACCT01 L337")
-                .endsWith(":" + BASELINE_POLL_WAIT_SECONDS + "}");
+                .as("the baseline's wait belongs to application.yml as poll-timeout: 5s")
+                .isEmpty();
         assertThat(annotation.factory())
                 .as("SqsConfig declares no container factory, so none may be named")
                 .isEmpty();
@@ -1203,6 +1743,196 @@ class InquiryMessageListenerTest {
         assertThat(annotation.acknowledgementMode())
                 .as("acknowledgement must stay on successful processing, never before it")
                 .isEmpty();
+    }
+
+    /**
+     * The container options the profiles actually resolve to are the profiles' own, not the annotation's.
+     *
+     * <p>Purpose: the preceding case asserts that the handler's annotation declares no sizing attribute, which
+     * is necessary for the profile to govern but not sufficient to show what the profile then produces. This
+     * case produces it: it loads the module's real {@code application.yml} and the real profile document on
+     * top of it, binds them through the framework's own {@code SqsProperties}, feeds the result to a real
+     * {@code SqsMessageListenerContainerFactory} exactly as {@code SqsAutoConfiguration} does, builds a real
+     * container for an endpoint derived from the real {@code @SqsListener} annotation, and reads the RESOLVED
+     * options back off that container.</p>
+     *
+     * <p>Refactoring Rationale: the endpoint's three sizing values are derived from the annotation by the same
+     * rule the framework applies -- resolve the attribute as a placeholder against the same property sources,
+     * then parse it if it has text and contribute {@code null} if it does not -- rather than being hard-coded
+     * as absent. That is the whole point of the case. If either sizing attribute is ever restored to the
+     * annotation, this test resolves it, the endpoint carries it, the factory applies it through
+     * {@code ConfigUtils.acceptIfNotNull}, and the resolved option stops matching the profile, so the
+     * regression that made A-5 possible fails here instead of reaching a deployment. Verified by construction
+     * against the pinned {@code spring-cloud-aws-sqs 4.1.0}: reinstating
+     * {@code maxConcurrentMessages = "${...:10}"} yields a resolved concurrency of ten against the
+     * development profile's declared two.</p>
+     *
+     * <p>Assumptions: an SQS client is required to build a container but is never called, because nothing here
+     * starts the container -- {@code createContainer} configures and returns it, and only {@code start} would
+     * poll. A mock therefore stands in with no stubbing at all, which is why this case does not need a queue,
+     * an emulator or a network.</p>
+     *
+     * <p>Assumptions: the endpoint's queue name is a literal rather than the resolved placeholder, and that is
+     * deliberate. {@code carddemo.account.inquiry.request-queue} resolves to
+     * {@code ${CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE_URL}}, which is supplied by the deployment and is absent
+     * here; the destination has no bearing on container sizing, and the preceding case already asserts that
+     * the annotation commits no location. Alternatives Considered: setting the variable for this case, which
+     * was rejected because it would make a sizing assertion depend on a value it does not read.</p>
+     *
+     * <p>Assumptions: both profiles are exercised rather than development alone, because the failure this case
+     * exists to catch is an override that applies to EVERY profile. A case that asserted two under development
+     * only would pass just as happily if production's ten were also an annotation default, and production's
+     * ten is the number that is paid for in database connections against a pool of twenty.</p>
+     *
+     * <p>Trade-offs: this reproduces the autoconfiguration's three-line contribution rather than invoking it,
+     * because {@code SqsAutoConfiguration.configureProperties} is private and the alternative -- standing up a
+     * context with the AWS autoconfiguration active -- would require a region and would construct a real
+     * client. What is accepted is that a fourth listener property added to the autoconfiguration would not be
+     * covered here; what is bought is that the three properties this module declares are asserted as the
+     * container receives them, with no emulator and no context refresh.</p>
+     *
+     * @param profile the Spring profile whose document is layered over the base, as a resource name component
+     * @param expectedConcurrency the concurrent-message ceiling that profile must resolve to
+     * @param expectedBatch the messages-per-poll batch that profile must resolve to
+     * @param expectedPollSeconds the long-poll wait in seconds that profile must resolve to
+     * @throws NoSuchMethodException if the handler method cannot be found, which would mean the contract this
+     *     case reads has been renamed rather than that the assertion failed
+     */
+    @ParameterizedTest(name = "the {0} profile resolves {1} concurrent, {2} per poll, {3}s wait")
+    @CsvSource({"dev, 2, 2, 5", "prod, 10, 10, 5"})
+    @DisplayName("the resolved container options are the profile's own")
+    void theResolvedContainerOptionsAreTheProfilesOwn(String profile, int expectedConcurrency,
+            int expectedBatch, int expectedPollSeconds) throws NoSuchMethodException {
+        MutablePropertySources sources = profileSources(profile);
+        SqsProperties properties = new Binder(ConfigurationPropertySources.from(sources))
+                .bindOrCreate(SqsProperties.PREFIX, SqsProperties.class);
+        PropertyResolver resolver = new PropertySourcesPropertyResolver(sources);
+
+        SqsContainerOptions resolved = containerFor(properties, resolver);
+
+        assertThat(properties.getListener().getMaxConcurrentMessages())
+                .as("the %s profile must declare its own concurrency ceiling", profile)
+                .isEqualTo(expectedConcurrency);
+        assertThat(resolved.getMaxConcurrentMessages())
+                .as("the container must run at the %s profile's ceiling, not an annotation default", profile)
+                .isEqualTo(expectedConcurrency);
+        assertThat(resolved.getMaxMessagesPerPoll())
+                .as("the container must poll the %s profile's batch, not an annotation default", profile)
+                .isEqualTo(expectedBatch);
+        assertThat(resolved.getPollTimeout())
+                .as("the wait must be COACCT01 L337's 5000 milliseconds in every profile")
+                .isEqualTo(Duration.ofSeconds(expectedPollSeconds));
+        assertThat(expectedPollSeconds)
+                .as("the profiles may not vary the transcribed wait")
+                .isEqualTo(BASELINE_POLL_WAIT_SECONDS);
+    }
+
+    /**
+     * Reads the consumer's handler method.
+     *
+     * @return the method the container dispatches to; never {@code null}
+     * @throws NoSuchMethodException if the handler method has been renamed
+     */
+    private static Method handlerMethod() throws NoSuchMethodException {
+        return InquiryMessageListener.class.getMethod("onRequest", Message.class);
+    }
+
+    /**
+     * Reads the handler's queue-binding annotation.
+     *
+     * @return the annotation declared on the consumer's handler method; never {@code null} in a green build
+     * @throws NoSuchMethodException if the handler method has been renamed
+     */
+    private static SqsListener handlerAnnotation() throws NoSuchMethodException {
+        return handlerMethod().getAnnotation(SqsListener.class);
+    }
+
+    /**
+     * Loads this module's own base configuration with one profile document layered over it.
+     *
+     * <p>Assumptions: the profile document is added FIRST and the base second, because a
+     * {@code MutablePropertySources} resolves in order and the earlier source wins -- which is the precedence
+     * Spring Boot itself gives a profile document over the base one.</p>
+     *
+     * @param profile the profile whose document to layer over the base, as a resource name component
+     * @return the two documents as ordered property sources; never {@code null}
+     * @throws UncheckedIOException if either document cannot be read, which fails rather than skips because an
+     *     unreadable configuration file is the failure this case is looking for
+     */
+    private static MutablePropertySources profileSources(String profile) {
+        MutablePropertySources sources = new MutablePropertySources();
+        YamlPropertySourceLoader loader = new YamlPropertySourceLoader();
+        for (String resource : List.of("application-" + profile + ".yml", "application.yml")) {
+            try {
+                for (PropertySource<?> loaded : loader.load(resource, new ClassPathResource(resource))) {
+                    sources.addLast(loaded);
+                }
+            } catch (IOException unreadable) {
+                throw new UncheckedIOException("cannot read " + resource, unreadable);
+            }
+        }
+        return sources;
+    }
+
+    /**
+     * Builds a real listener container the way the framework's own autoconfiguration builds it.
+     *
+     * <p>Assumptions: the endpoint is bound to the consumer's REAL handler method, because the method's
+     * parameter shape is what decides the container's listener mode -- a {@code Message<String>} parameter is
+     * a single-message listener, and a {@code List} parameter would be a batch one. The bean beside it is a
+     * bare object because nothing invokes the method: {@code createContainer} builds the invocable handler and
+     * returns, and only starting the container would dispatch to it.</p>
+     *
+     * @param properties the listener properties bound from the profile documents; must not be {@code null}
+     * @param resolver the resolver over the same documents, used to expand any placeholder an attribute holds
+     * @return the options the constructed container actually carries; never {@code null}
+     * @throws NoSuchMethodException if the handler method has been renamed
+     */
+    private static SqsContainerOptions containerFor(SqsProperties properties, PropertyResolver resolver)
+            throws NoSuchMethodException {
+        SqsListener annotation = handlerAnnotation();
+        SqsMessageListenerContainerFactory<Object> factory = SqsMessageListenerContainerFactory
+                .<Object>builder()
+                .sqsAsyncClient(mock(SqsAsyncClient.class))
+                .messageListener(received -> { })
+                .configure(options -> {
+                    options.maxConcurrentMessages(properties.getListener().getMaxConcurrentMessages());
+                    options.maxMessagesPerPoll(properties.getListener().getMaxMessagesPerPoll());
+                    options.pollTimeout(properties.getListener().getPollTimeout());
+                })
+                .build();
+        SqsEndpoint endpoint = SqsEndpoint.builder()
+                .queueNames(List.of("carddemo-inquiry-request-under-test"))
+                .id("account-inquiry-under-test")
+                .maxConcurrentMessages(attributeAsInteger(annotation.maxConcurrentMessages(), resolver))
+                .maxMessagesPerPoll(attributeAsInteger(annotation.maxMessagesPerPoll(), resolver))
+                .pollTimeoutSeconds(attributeAsInteger(annotation.pollTimeoutSeconds(), resolver))
+                .build();
+        endpoint.setBean(new Object());
+        endpoint.setMethod(handlerMethod());
+        DefaultMessageHandlerMethodFactory handlerMethods = new DefaultMessageHandlerMethodFactory();
+        handlerMethods.afterPropertiesSet();
+        endpoint.setHandlerMethodFactory(handlerMethods);
+        return factory.createContainer(endpoint).getContainerOptions();
+    }
+
+    /**
+     * Resolves one annotation attribute to the integer the framework would contribute for it.
+     *
+     * <p>Assumptions: this reproduces {@code AbstractListenerAnnotationBeanPostProcessor.resolveAsInteger}
+     * from the pinned {@code spring-cloud-aws-sqs 4.1.0} -- an attribute with no text contributes
+     * {@code null}, which the factory then skips through {@code ConfigUtils.acceptIfNotNull}. Reproducing the
+     * rule rather than assuming absence is what lets a restored attribute fail this case.</p>
+     *
+     * @param attribute the raw attribute value, which may be empty or may hold a property placeholder
+     * @param resolver the resolver over the profile documents; must not be {@code null}
+     * @return the integer the endpoint should carry, or {@code null} when the attribute contributes nothing
+     * @throws NumberFormatException if the attribute resolves to text that is not an integer, which would mean
+     *     an unresolvable placeholder rather than a failed assertion
+     */
+    private static Integer attributeAsInteger(String attribute, PropertyResolver resolver) {
+        String resolved = resolver.resolvePlaceholders(attribute);
+        return StringUtils.hasText(resolved) ? Integer.valueOf(resolved.trim()) : null;
     }
 
     /**
@@ -1357,5 +2087,139 @@ class InquiryMessageListenerTest {
         assertThat(BROKER_MESSAGE_ID.length())
                 .as("a broker identifier must fit the same column")
                 .isLessThanOrEqualTo(LEDGER_KEY_COLUMN_WIDTH);
+    }
+
+    // WHY : Refactoring Rationale: every case above this point drives the FIRST-DELIVERY path, because
+    //   the shared fixture answers the claim with true and no case overrode it. The three outcomes a
+    //   REFUSED claim selects between -- suppress a duplicate, re-send an outstanding reply, or fail
+    //   because the row the conflict implies is not there -- were therefore unexercised, and they are
+    //   the whole reason the ledger exists: they are what a redelivery meets. A consumer that answered
+    //   a redelivery from the reply it had just recomposed, or that treated a missing row as a first
+    //   delivery, would have passed this class as it stood while sending a second, different answer
+    //   under one correlation identifier.
+    // WHY : Assumptions: the three cases substitute the ledger's own answers rather than standing up a
+    //   database, because what is under test is the CONSUMER's branch on those answers. The durable
+    //   behaviour of the claim itself -- that exactly one of two concurrent inserts succeeds -- belongs
+    //   to the repository's own integration test against a real engine and is neither repeated nor
+    //   contradicted here.
+
+    /**
+     * Builds a recorded reply as an earlier delivery would have left it in the ledger.
+     *
+     * @param status the recorded status, either the sent or the pending sentinel the ledger stores
+     * @param payload the reply bytes the earlier delivery recorded
+     * @param destination the reply destination the earlier delivery recorded, which is the RESOLVED
+     *     queue address rather than a queue name, because the consumer resolves the address before it
+     *     records the claim and re-sends whatever it recorded
+     * @return the recorded row, never {@code null}
+     */
+    private static InquiryReplyLedger.RecordedReply recorded(String status, String payload,
+            String destination) {
+
+        return new InquiryReplyLedger.RecordedReply(status, payload, destination,
+                "recorded-correlation", "recorded-message-id");
+    }
+
+    /**
+     * Verifies a redelivery whose recorded reply was already sent is dropped rather than answered twice.
+     *
+     * <p>Purpose: this is the outcome the ledger exists for. The requester already has its answer, so the
+     * duplicate is suppressed and the request is still acknowledged -- raising instead would redeliver a
+     * request that was correctly answered until it dead-lettered.</p>
+     *
+     * <p>Assumptions: the assertion is that NO send occurs at all, and it is stated as zero rather than as
+     * "not the same body", because a consumer that re-sent an identical body would satisfy a body
+     * comparison while putting a second copy of one answer on the queue.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a redelivery of an already-sent reply is suppressed without a second send")
+    void anAlreadySentReplyIsSuppressed() {
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+        when(this.ledger.claim(anyString(), anyString(), anyString(), any(), any(),
+                any(LocalDateTime.class))).thenReturn(false);
+        when(this.ledger.find(BROKER_MESSAGE_ID)).thenReturn(Optional.of(
+                recorded(InquiryReplyLedger.STATUS_SENT, "recorded reply body", REPLY_URL)));
+
+        this.listener.onRequest(message(request("INQA", "12345678901"), Map.of(
+                InquiryMessageListener.HEADER_BROKER_MESSAGE_ID, BROKER_MESSAGE_ID)));
+
+        verify(this.sqs, never()).sendMessage(any(SendMessageRequest.class));
+
+        // WHY : Assumptions: the claim is not retired again either. The earlier delivery already
+        //   retired it, so a second mark would be a write with nothing to change, and asserting its
+        //   absence is what distinguishes suppression from a re-send whose send happened to fail.
+        verify(this.ledger, never()).markSent(anyString(), any(LocalDateTime.class));
+        assertThat(this.captured.list)
+                .as("the suppression is recorded, so an operator can tell it from a lost request")
+                .anyMatch(event -> event.getFormattedMessage()
+                        .contains("event=account.inquiry.duplicate-suppressed"));
+    }
+
+
+    /**
+     * Verifies a conflict with no recorded row fails rather than being answered as a first delivery.
+     *
+     * <p>Purpose: the claim reported that a row already holds the key, so a read finding none means the
+     * row was removed underneath this delivery. Answering anyway would send a reply this consumer can no
+     * longer record, so the failure propagates and the request becomes visible again instead of being
+     * acknowledged with an unrecorded answer out on the queue.</p>
+     *
+     * <p>Assumptions: the assertion is that nothing was sent BEFORE the failure, not merely that a
+     * failure was raised. A consumer that sent first and then discovered the missing row would raise the
+     * same exception while having already published the answer it could not record.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a claim conflict with no recorded row fails and sends nothing")
+    void aClaimConflictWithNoRecordedRowFails() {
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+        when(this.ledger.claim(anyString(), anyString(), anyString(), any(), any(),
+                any(LocalDateTime.class))).thenReturn(false);
+        when(this.ledger.find(BROKER_MESSAGE_ID)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> this.listener.onRequest(message(request("INQA", "12345678901"),
+                Map.of(InquiryMessageListener.HEADER_BROKER_MESSAGE_ID, BROKER_MESSAGE_ID))))
+                .isInstanceOf(IllegalStateException.class);
+
+        // WHY : Assumptions: the one send this case permits is the DIAGNOSTIC to the error sink, which
+        //   the consumer emits for any unexpected failure before letting it propagate, and the
+        //   assertion is written as "nothing reached the reply queue" rather than "nothing was sent" so
+        //   that the operational report is not mistaken for the answer. The distinction is the whole
+        //   point of the case: an answer this consumer can no longer record must not reach the
+        //   requester, while the failure must still be visible to an operator.
+        SendMessageRequest reported = captureSend();
+        assertThat(reported.queueUrl())
+                .as("the only send is the diagnostic, and it goes to the error sink")
+                .isEqualTo(ERROR_URL);
+        verify(this.ledger, never()).markSent(anyString(), any(LocalDateTime.class));
+    }
+
+    /**
+     * Verifies a claim retired by a concurrent delivery is reported and does not fail the exchange.
+     *
+     * <p>Purpose: the mark is not required to succeed for the exchange to be complete. A concurrent
+     * delivery may have retired the claim between this one's insert and its mark, in which case THIS
+     * send was the duplicate; the request is still acknowledged, because the requester has its answer.
+     * Raising here would redeliver a request the requester has already been answered twice for.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a claim already retired by a concurrent delivery is reported, not raised")
+    void aClaimAlreadyRetiredIsReportedNotRaised() {
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+        when(this.ledger.markSent(anyString(), any(LocalDateTime.class))).thenReturn(false);
+
+        this.listener.onRequest(message(request("INQA", "12345678901"), Map.of(
+                InquiryMessageListener.HEADER_BROKER_MESSAGE_ID, BROKER_MESSAGE_ID)));
+
+        verify(this.sqs, times(1)).sendMessage(any(SendMessageRequest.class));
+        assertThat(this.captured.list)
+                .as("the lost race is recorded, because it means one answer went out twice")
+                .anyMatch(event -> event.getFormattedMessage()
+                        .contains("event=account.inquiry.claim-already-retired"));
     }
 }

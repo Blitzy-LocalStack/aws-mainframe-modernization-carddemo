@@ -2,7 +2,7 @@
 
 > **Purpose.** Build, run, test, configure and operate the reference-data service:
 > the migrated form of the Db2 transaction-type screens, the batch reference
-> updater and the queue-driven date conversion. This page is the per-package
+> updater and the synchronous half of the date conversion. This page is the per-package
 > contract for anyone who has to compile this module, start it, probe it, change
 > its schema or reason about the behaviour it is not allowed to lose.
 >
@@ -40,8 +40,26 @@ golden master covers this module's online paths**, and that limit is real.
 `reference-service` is the reference-data bounded context of the CardDemo
 mainframe-to-AWS migration. It serves transaction-type and category maintenance,
 disclosure-group interest-rate lookup, the seeded United States address
-allow-lists, and date conversion — over REST and, for date conversion, over a
-queue.
+allow-lists, and date conversion — over REST, and over REST only. This module
+consumes no queue and publishes no message.
+
+Refactoring Rationale: it did consume one. The baseline drives BOTH of its inquiry
+programs from a single request destination —
+`DEFINE QLOCAL('CARDDEMO.REQUEST.QUEUE')` at
+[`app/app-vsam-mq/README.md`](../../app/app-vsam-mq/README.md) L53, aliased to CICS
+as `MQQUEUE(CARDREQ)` at L71 — and the migrated topology provisions that one queue
+rather than one per consumer. A queue admits exactly **one owning consumer**,
+because a receive hides the message from every other consumer rather than
+delivering a copy to each, so two consumers on one queue do not share work: each
+takes work only the other can answer. The owner is `account-service`'s
+`InquiryMessageListener`, which dispatches on the request's four-character function
+code — `INQA` to the account inquiry, `DATE` to the shared reply renderer in
+`common-lib`, anything else to `COACCT01`'s own invalid-parameters reply. What stays
+here is the date **evaluation** of `CSUTLDTC`, answered synchronously, which is a
+different question: the queue route emits the current system date and time and reads
+no field of its request, while this route judges a date a caller submits. The
+baseline keeps them apart too — a search for `CSUTLDTC` across all 524 lines of
+`CODATE01.cbl` returns zero occurrences.
 
 ### 1.1 What this module replaces
 
@@ -50,7 +68,7 @@ queue.
 | `COTRTLIC` | `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` | `CTLI` | Transaction-type and category browse, keyset-paged |
 | `COTRTUPC` | `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` | `CTTU` | Transaction-type and category add, edit and delete |
 | `COBTUPDT` | `app/app-transaction-type-db2/cbl/COBTUPDT.cbl` | none | A reference-maintenance **service method**, reached over the API |
-| `CODATE01` | `app/app-vsam-mq/cbl/CODATE01.cbl` | `CDRD` | A date-conversion REST endpoint **and** an SQS consumer |
+| `CODATE01` | `app/app-vsam-mq/cbl/CODATE01.cbl` | `CDRD` | A date-conversion REST endpoint here; its **queue** route is answered by `account-service`, the single owner of the shared inquiry request queue |
 | `CSUTLDTC` | `app/cbl/CSUTLDTC.cbl` | none | Already migrated into `common-lib` as `DateEditValidator`; **this module calls it and does not re-implement it** |
 
 The transaction and program bindings above are the baseline's own: `CTLI` is
@@ -70,9 +88,9 @@ that drift independently, which is the property the baseline did not have.
 Assumptions: `app/app-vsam-mq/csd/CRDDEMOM.csd` defines two transactions and only
 one of them is this context's. Its L17 defines `TRANSACTION(CDRA)` and L18 binds
 `PROGRAM(COACCT01)` — the account-inquiry consumer, which belongs to
-`account-service`. Both transactions arrive over the same queue-driven pattern, so
-a reader who assumes one CSD means one context would place the account inquiry
-here.
+`account-service`. Both transactions arrive over the same queue-driven pattern and,
+in the baseline, over the same request queue, which is why the migrated queue half
+of BOTH is answered in that one module and neither is answered here.
 
 ---
 
@@ -139,7 +157,7 @@ tried to would need privileges the runtime role deliberately does not hold.
 |---|---|---|
 | JDK | Amazon Corretto **21** | Compiling and running this module; the enforcer rule requires `[21,)` |
 | Maven | **3.9.16** or newer | The reactor build; the enforcer rule requires `[3.9.0,)` |
-| Container runtime | any Docker-compatible daemon | The ten Testcontainers-backed `*IT` classes, and building the image |
+| Container runtime | any Docker-compatible daemon | The twelve Testcontainers-backed `*IT` classes, and building the image |
 | PostgreSQL | **17** reachable | Running the service locally; Flyway applies both migrations at startup |
 | Python | **3.13** | Only for the repository-wide Rule 1 gate described in [§14](#14-documentation-gate) |
 
@@ -224,8 +242,9 @@ page uses the tools listed in [§3](#3-prerequisites) directly.
 A local run needs, in the order the startup sequence requires them: a reachable
 **database** — the migration credential is used before the runtime one — a
 reachable **token issuer**, whose discovery document is fetched while the context
-is being built rather than on the first request, a free port, and an
-**SQS-compatible endpoint whose three queues already exist**.
+is being built rather than on the first request, and a
+free port. **No queue, no queue endpoint and no region are needed**: this module
+builds no queue client.
 
 Every setting is supplied by name from an out-of-band file. **No value of any of
 them appears anywhere in this repository**, and [§8](#8-configuration-and-environment-variables)
@@ -263,12 +282,10 @@ git check-ignore -v .env.reference-service.local
 #       process would fail while trying to open one. SERVER_ADDRESS binds the
 #       listener to loopback, which is what makes disabling TLS defensible here:
 #       nothing off-host can reach the port.
-# WHY : Assumptions: AWS_REGION is required to START, not merely to reach AWS.
-#       This module declares the SQS starter for the date-conversion consumer and
-#       the client bean is built while the context is constructed, so a context
-#       with no region enters the SDK's resolution chain and waits on
-#       instance-metadata discovery before failing. Credentials are NOT needed to
-#       start, because they resolve on the first call.
+# WHY : Refactoring Rationale: AWS_REGION is NOT exported here and is no longer
+#       required to start. It was, because a declared SQS starter builds its client
+#       while the context is constructed; the starter is withdrawn from this module
+#       with its consumer, so a local run needs no region and no credential at all.
 mvn -B -f services/pom.xml -pl reference-service -am package
 
 ( set -a; . ./.env.reference-service.local; set +a
@@ -276,32 +293,30 @@ mvn -B -f services/pom.xml -pl reference-service -am package
   java -jar services/reference-service/target/reference-service-1.0.0-SNAPSHOT.jar )
 ```
 
-Flyway applies **both** migrations during startup — `V1__reference.sql` creates the
-six tables and `V2__seed_reference.sql` seeds them. The actuator health endpoint
-reports not-ready until that finishes.
+Flyway applies **all three** migrations during startup — `V1__reference.sql` creates
+the six reference tables, `V2__seed_reference.sql` seeds them, and
+`V3__reference_inquiry_reply_ledger.sql` creates the one operational table the
+date-inquiry exchange records its answers in. The actuator health endpoint reports
+not-ready until that finishes.
 
-Assumptions: the three inquiry queue names are required to start and are not
-safely omittable. Two of them reach `DateInquiryMessageListener` as `@Value`
-constructor arguments, which raise on an unresolvable placeholder, and each is
-additionally passed through that class's own `requireQueueName` check; the third is
-the `@SqsListener(queueNames = ...)` placeholder, resolved when the listener
-endpoint is registered rather than when a message arrives. Omitting any of the
-three therefore aborts context refresh instead of producing a process that starts
-and fails on first use. `application.yml` additionally pins
-`queue-not-found-strategy: fail`, so the queues must already exist.
-
-Trade-offs: `fail` is chosen over the framework's queue-creating default
-deliberately. An auto-created queue has neither the dead-letter queue nor the
-encryption the provisioned one has, so the service would start healthy against a
-queue nothing else publishes to and look idle rather than misconfigured.
+Refactoring Rationale: three inquiry queue names, a region and a
+`queue-not-found-strategy` pin used to be startup requirements of this module and
+are all withdrawn. They existed for the queue consumer described in
+[§1](#1-overview), which now lives in `account-service` because the single shared
+request queue has a single owner. `ReferenceServiceStructureTest` asserts that no
+member of this module binds a queue listener AND that the queue-listener annotation
+does not resolve from this module's classpath at all, so the withdrawal is measured
+rather than described — re-adding a consumer here would have to restore the starter,
+the configuration keys and a queue receive grant together, each of which is a
+visible decision.
 
 ---
 
 ## 6. Test
 
-<!-- test-inventory: 34 tests + 10 integration tests -->
-**44** test classes across nine packages: **34** matching `*Test`, run by
-Surefire, and **10** matching `*IT`, run by Failsafe. Those two totals are
+<!-- test-inventory: 34 tests + 12 integration tests -->
+**46** test classes across nine packages: **34** matching `*Test`, run by
+Surefire, and **12** matching `*IT`, run by Failsafe. Those two totals are
 machine-checked — `ServiceReadmeInventoryTest` in `common-lib` parses the HTML
 comment above this paragraph and re-counts both tiers from this module's test
 tree, so adding a test class without updating the marker fails the build.
@@ -309,10 +324,27 @@ tree, so adding a test class without updating the marker fails the build.
 | Package | Classes | Package | Classes |
 |---|---|---|---|
 | `service` | 12 (11 `*Test`, 1 `*IT`) | `api` | 9 |
-| `repository` | 9 (all `*IT`) | `config` | 5 |
+| `repository` | 10 (all `*IT`) | `config` | 5 |
 | `mapper` | 3 | `dto` | 2 |
 | `fixtures` | 2 | `domain` | 1 |
 | root `com.carddemo.reference` | 1 | | |
+
+Refactoring Rationale: four classes left these counts and one arrived, on the one
+topology fact recorded in [§1](#1-overview) rather than on four decisions.
+`config/SqsConfigTest` covered a queue client this module no longer builds;
+`mapper/DateInquiryReplyMapperTest` covered a renderer that moved to `common-lib`,
+where `DateInquiryReplyCodecTest` now covers it;
+`service/DateInquiryMessageListenerTest` covered a consumer that moved to
+`account-service`, where `InquiryMessageListenerTest` covers it — including the date
+dispatch; and `service/ReferenceQueueConsumerContractTest` asserted that exactly ONE
+consumer was bound here, a claim now inverted inside
+`service/ReferenceServiceStructureTest`, which asserts that none is and that the
+queue-listener annotation does not resolve from this module at all.
+`service/DateConversionFlowContractTest` arrived in place of
+`DateConversionMessageListenerTest`, holding the same flow's surviving properties —
+the withdrawal itself, the copybook-versus-codec offset agreement, the two
+ten-character date pictures, the delegation of every rule to the shared validator,
+and the two separate four-character codes — without driving a transport.
 
 One further file under `src/test/java` is deliberately not in those counts:
 `repository/ReferencePersistenceBase.java` is the shared Testcontainers base
@@ -321,8 +353,8 @@ class, and it matches neither suffix because it carries no test case of its own.
 ```bash
 # WHAT: run both test tiers for this module and the module it depends on.
 # WHY : Assumptions: `verify` rather than `test`, because Failsafe binds to the
-#       `integration-test` and `verify` phases. Stopping at `test` runs 34 of the
-#       44 classes and skips all TEN Failsafe classes -- every persistence
+#       `integration-test` and `verify` phases. Stopping at `test` runs 36 of the
+#       46 classes and skips all TEN Failsafe classes -- every persistence
 #       assertion in the module, including the referential refusal and the padded
 #       `DEFAULT` seed, which are the two properties this schema exists to
 #       preserve. A container runtime is required.
@@ -439,20 +471,36 @@ group **and** by this container check. Two probes reading one endpoint cannot re
 opposite verdicts about one instance, whereas a container check on a bespoke path
 could report healthy while the load balancer drained the task.
 
-### 7.3 The 9 / 8 / 10 counts — state them correctly and do not "correct" them
+### 7.3 The 9 / 8 / 10 / 11 counts — state them correctly and do not "correct" them
 
 | Count | Value | What it is |
 |---|---|---|
 | Maven modules | **9** | `common-lib` plus eight services, as `services/pom.xml` declares |
 | Service Dockerfiles | **8** | One per service; **`common-lib` has none** |
-| Container images and ECR repositories | **10** | The eight services plus `ui` and `data-migration` |
+| Container images this project builds | **10** | The eight services plus `ui` and `data-migration` |
+| ECR repositories provisioned | **11** | Those ten plus `aws-otel-collector`, a mirror of a third-party image this project does not build |
 
-Assumptions: `common-lib` is a library, not a deployable, which is the whole
-reason the three numbers differ. Borrowing the image count for the module count
-invents a tenth Maven module that does not exist; borrowing the module count for
-the repository count produces an eleventh phantom repository, or builds one image
-too few. A reader who believes there are ten modules goes looking for one that is
-not there.
+Assumptions: `common-lib` is a library, not a deployable, which is why the first
+two numbers differ; the third and fourth differ for an unrelated reason, which is
+that one repository holds an image built elsewhere. `infra/modules/ecr` is the
+authority for the fourth: its `repository_names` default lists eleven entries and
+a validation block refuses any set that is not exactly those eleven, naming the
+eleventh as "the mirror of the pinned telemetry sidecar image". The mirror exists
+because the observability sidecar every task runs must be pullable without giving
+the application tier egress to the public internet, which the network module does
+not grant. Borrowing the image count for the module count invents a tenth Maven
+module that does not exist; borrowing the module count for either registry figure
+builds one image too few.
+
+Refactoring Rationale: this table stated **10** for "Container images and ECR
+repositories" as one row, and the paragraph beneath it said that borrowing the
+module count "produces an eleventh phantom repository". The eleventh repository is
+not a phantom -- it is provisioned, it is validated as mandatory, and a plan that
+omitted it would be refused. Keeping the two figures in one row also made the
+sentence unfalsifiable in the direction that matters: a reader reconciling this
+README against `terraform plan` finds eleven repositories and no row that admits
+one, and the available conclusions are that the plan is wrong or that this
+document is. Splitting the row is what lets both be right.
 
 ### 7.4 Publishing and rollback
 
@@ -504,10 +552,7 @@ thirteen must be present or the context fails to refresh.
 | `SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI` | Issuer whose keys validate a presented token |
 | `CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID` | App client a presented token must name |
 | `CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD` | Opens the listener keystore; not read while TLS is disabled |
-| `AWS_REGION` | Region for the queue client |
-| `CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE` | Queue the date-conversion listener consumes |
-| `CARDDEMO_REFERENCE_INQUIRY_REPLY_QUEUE` | Queue replies are published to |
-| `CARDDEMO_REFERENCE_INQUIRY_ERROR_QUEUE` | Terminal error sink |
+
 | `CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY` | Seals keyset cursors; binds to `carddemo.pagination.cursor.signing-key` |
 
 Assumptions: the cursor signing key is required even though it appears in no
@@ -570,8 +615,22 @@ module adds no converter of its own.
 
 - **Writes are administrative.** `POST`, `PUT`, `PATCH` and `DELETE` each require
   the `carddemo-admin` authority.
-- **Reads are available to any authenticated caller**, because every other context
-  reads these rows to validate an address or price interest.
+- **Reads require a recognized CardDemo authority — either group.** A `GET` on the
+  reference surface is granted by `carddemo-user` **or** `carddemo-admin`, so an
+  administrator is never denied a read while a token carrying neither group reaches
+  nothing. This is what `SecurityConfig`'s read rule installs
+  (`hasAnyAuthority(BUSINESS_AUTHORITIES)`), and it is the authority the published
+  contract marks each read with.
+
+  Refactoring Rationale: this bullet read "available to any authenticated caller",
+  and that is measurably not what the chain enforces — the catch-all below is
+  `denyAll()`, so a token issued by the configured pool but carrying no CardDemo
+  group is refused rather than admitted. The claim was also internally inconsistent
+  with the `denyAll()` paragraph two lines further down, which argues that
+  `authenticated()` would be too permissive. The wrong direction of that error is
+  the dangerous one: a reader integrating another context would have provisioned a
+  group-less client, seen every read answered `403`, and had nothing in this
+  document to point at.
 - The health endpoint is unauthenticated so the load balancer and the container
   check can both reach it; the build-identity and metric-scrape endpoints are
   restricted.
@@ -586,21 +645,36 @@ than quietly exposed.
 
 ## 9. Database schema and migrations
 
-Two migrations, both applied at startup.
+Three migrations, all applied at startup.
 
 | Migration | Contents |
 |---|---|
 | [`V1__reference.sql`](src/main/resources/db/migration/V1__reference.sql) | The six tables, their keys, the referential constraint and the classification check |
 | [`V2__seed_reference.sql`](src/main/resources/db/migration/V2__seed_reference.sql) | The seed rows, idempotently |
+| [`V3__reference_inquiry_reply_ledger.sql`](src/main/resources/db/migration/V3__reference_inquiry_reply_ledger.sql) | `reference.inquiry_reply_ledger` — one row per answered date-conversion request, so a redelivery is answered with the FIRST answer rather than a later timestamp. See [§12.6](#126-date-conversion--two-front-doors-one-implementation) |
 
-### 9.1 Why this module carries the only `V2` in the migration
+Assumptions: `V3` is the only table in this schema that holds no reference DATA, and
+it is called out here so a reader browsing the schema does not take it for a lookup
+that failed to seed. The migration header records why it lives beside the context
+that owns the exchange rather than in a schema of its own.
 
-Assumptions: no other service in the tree has a second migration. This one does
+### 9.1 Why this module carries the only seed migration in the tree
+
+Assumptions: no other service in the tree ships a SEED migration. This one does
 because the data it seeds is read by `batch-service` and `account-service`, which
 must never own it — a seed placed in a consuming service would make two services
 authoritative for one table, and a seed omitted entirely would make the interest
 batch abend. Seeding beside the schema that owns the tables is what keeps one
 owner and one source.
+
+Refactoring Rationale: this heading and its opening sentence said this module carries
+"the only `V2`" and that "no other service in the tree has a second migration", which
+was a claim about migration COUNTS rather than about seeding and is no longer true of
+either — `account-service`, `card-service`, `transaction-service`, `auth-service` and
+`authorization-service` all carry more than one, and this module now carries three.
+The property that is actually distinctive, and the one the paragraph argues for, is
+that the seed lives with the schema that owns the tables; the heading now states
+that instead of a count that has to be re-measured every time a module adds a table.
 
 ### 9.2 The referential constraint
 
@@ -657,29 +731,41 @@ and then fails at run time when it tries to select a dialect. Both are managed i
 Nineteen operations across thirteen paths, all under `/api/v1/reference`, as
 published by
 [`openapi/reference-api.yaml`](src/main/resources/openapi/reference-api.yaml).
-Write operations require the `carddemo-admin` authority; reads require only an
-authenticated caller.
+Write operations require the `carddemo-admin` authority; reads require a recognized
+CardDemo authority — `carddemo-user` **or** `carddemo-admin`, the two being
+interchangeable for a read. The **Authority** column below states `carddemo-user`
+on every read for that reason, matching what
+[`openapi/reference-api.yaml`](src/main/resources/openapi/reference-api.yaml) marks
+each operation with; a token carrying neither group reaches nothing, because the
+chain's catch-all is `denyAll()`.
+
+Refactoring Rationale: every read row of this table read `authenticated`, and the
+sentence above it said reads "require only an authenticated caller". Neither matched
+`SecurityConfig`, whose read rule is `hasAnyAuthority(BUSINESS_AUTHORITIES)` over the
+two CardDemo groups. A table is where an integrator reads an authority off, so the
+column is corrected to the authority actually required rather than the one it was
+described as.
 
 | Method | Path | Purpose | Authority | Derives from |
 |---|---|---|---|---|
-| `GET` | `/transaction-types` | Keyset page of type codes | authenticated | `COTRTLIC` |
+| `GET` | `/transaction-types` | Keyset page of type codes | `carddemo-user` | `COTRTLIC` |
 | `POST` | `/transaction-types` | Add a type | `carddemo-admin` | `COTRTUPC` |
-| `GET` | `/transaction-types/{typeCd}` | One type | authenticated | `COTRTUPC` |
+| `GET` | `/transaction-types/{typeCd}` | One type | `carddemo-user` | `COTRTUPC` |
 | `PUT` | `/transaction-types/{typeCd}` | Edit a type | `carddemo-admin` | `COTRTUPC` |
 | `DELETE` | `/transaction-types/{typeCd}` | Delete a type; **409 when categories reference it** | `carddemo-admin` | `COTRTUPC` |
-| `GET` | `/transaction-categories` | Keyset page of type and category pairs | authenticated | `COTRTLIC` |
+| `GET` | `/transaction-categories` | Keyset page of type and category pairs | `carddemo-user` | `COTRTLIC` |
 | `POST` | `/transaction-categories` | Add a pair | `carddemo-admin` | `COTRTUPC` |
-| `GET` | `/transaction-categories/{typeCd}/{catCd}` | One pair | authenticated | `COTRTUPC` |
+| `GET` | `/transaction-categories/{typeCd}/{catCd}` | One pair | `carddemo-user` | `COTRTUPC` |
 | `PUT` | `/transaction-categories/{typeCd}/{catCd}` | Edit a pair | `carddemo-admin` | `COTRTUPC` |
 | `DELETE` | `/transaction-categories/{typeCd}/{catCd}` | Delete a pair | `carddemo-admin` | `COTRTUPC` |
-| `GET` | `/disclosure-groups/{acctGroupId}/{tranTypeCd}/{tranCatCd}` | Interest rate for one key | authenticated | the lookup `CBACT04C` performs |
-| `GET` | `/us-phone-area-codes` | Keyset page of area codes, optionally by classification | authenticated | `CSLKPCDY` |
-| `GET` | `/us-phone-area-codes/{areaCd}` | One area code | authenticated | `CSLKPCDY` |
-| `GET` | `/us-states` | Keyset page of state codes | authenticated | `CSLKPCDY` |
-| `GET` | `/us-states/{stateCd}` | One state code | authenticated | `CSLKPCDY` |
-| `GET` | `/us-state-zip-prefixes` | Keyset page of state and ZIP-prefix pairs | authenticated | `CSLKPCDY` |
-| `GET` | `/us-state-zip-prefixes/{stateZipCd}` | One state and ZIP-prefix pair | authenticated | `CSLKPCDY` |
-| `GET` | `/date-evaluations` | Evaluate a date against the baseline edit rules | authenticated | `CSUTLDTC`, `CODATE01` |
+| `GET` | `/disclosure-groups/{acctGroupId}/{tranTypeCd}/{tranCatCd}` | Interest rate for one key | `carddemo-user` | the lookup `CBACT04C` performs |
+| `GET` | `/us-phone-area-codes` | Keyset page of area codes, optionally by classification | `carddemo-user` | `CSLKPCDY` |
+| `GET` | `/us-phone-area-codes/{areaCd}` | One area code | `carddemo-user` | `CSLKPCDY` |
+| `GET` | `/us-states` | Keyset page of state codes | `carddemo-user` | `CSLKPCDY` |
+| `GET` | `/us-states/{stateCd}` | One state code | `carddemo-user` | `CSLKPCDY` |
+| `GET` | `/us-state-zip-prefixes` | Keyset page of state and ZIP-prefix pairs | `carddemo-user` | `CSLKPCDY` |
+| `GET` | `/us-state-zip-prefixes/{stateZipCd}` | One state and ZIP-prefix pair | `carddemo-user` | `CSLKPCDY` |
+| `GET` | `/date-evaluations` | Evaluate a date against the baseline edit rules | `carddemo-user` | `CSUTLDTC`, `CODATE01` |
 | `POST` | `/maintenance-actions` | Apply a batch of reference maintenance actions | `carddemo-admin` | `COBTUPDT` |
 
 The contract is **OpenAPI 3.1**. Assumptions:
@@ -692,30 +778,20 @@ browser-client-breaking change, not an internal one.
 
 ## 11. Messaging
 
-`CODATE01`'s IBM MQ request and reply becomes a standard queue pair plus a terminal
-error sink. The names arrive as the three variables in
-[§8.1](#81-required-to-start).
+**This module consumes no queue and publishes no message.** It declares no messaging
+starter, builds no queue client, requires no region and holds no queue name.
 
 | Role | Consumed or produced | Notes |
 |---|---|---|
-| Request | consumed by `DateInquiryMessageListener` | Standard queue; delete-on-success |
+| Request | consumed by `DateInquiryMessageListener` | Standard queue; delete-on-success, with the composed reply recorded and committed **before** it is sent — see [§12.6](#126-date-conversion--two-front-doors-one-implementation) |
 | Reply | produced | Shared with the account-inquiry flow, which publishes its own replies to the same queue |
 | Error | produced | Terminal sink for a message this service cannot answer |
 
-Each source queue has its own dead-letter queue with `maxReceiveCount` **5**, and
-every queue is encrypted at rest with a customer-managed key. The consumer polls
-with a receive wait of **5 seconds**, which is the exact analogue of the baseline's
-own interval: `app/app-vsam-mq/cbl/CODATE01.cbl` L285 comments *"ADDED 5000 MS
-(5 SECS) AS THE WAIT INTERVAL FOR GET"* and L286 sets it.
-
-Assumptions: standard queues are correct here and ordering is not required. The
-baseline's date conversion answers each request independently from a program
-declared `PROGRAM-ID. CODATE01 IS INITIAL.` at that file's L2, which guarantees
-fresh working storage on every invocation — so the baseline itself kept no state
-between requests and imposed no order across them. The authorization flow, which
-does require per-card ordering, is a different context and uses ordered queues; the
-distinction is recorded in
-[`docs/adr/ADR-004-messaging.md`](../../docs/adr/ADR-004-messaging.md).
+Assumptions: what this module answers for on that flow is the date **evaluation**
+of `CSUTLDTC`, over REST, plus the shared request GEOMETRY —
+`DateConversionFlowContractTest` holds the independent copybook transcription
+against `common-lib`'s codec, and asserts that no withdrawn consumer has
+returned.
 
 ---
 
@@ -864,37 +940,81 @@ only resolves because the column pads it to ten characters.
   re-entry distinction to make. The service holds **no session state**: no sticky
   sessions and no server-side session store.
 
-### 12.6 Date conversion — two front doors, one implementation
+### 12.6 Date conversion — two questions, two owners, one set of rules
 
-`CODATE01`'s queue-driven request and reply becomes both a synchronous REST
-endpoint on `DateConversionController` and a queue consumer,
-`DateInquiryMessageListener`.
+`CODATE01`'s queue-driven request and reply becomes a synchronous REST endpoint on
+`DateConversionController` here, and a queue route owned by `account-service` as the
+single consumer of the shared inquiry request queue (see [§11](#11-messaging)).
 
-**Both delegate to `DateEditValidator` in `common-lib`.** The rules exist in exactly
-one place and are **not re-implemented here** — `DateConversionService` imports that
-type and calls it with the shared format mask.
+Refactoring Rationale: this section described both routes as this module's two front
+doors onto one implementation. That reading was wrong about the relationship even
+before the queue route moved, and the baseline is what settles it: the two routes
+answer DIFFERENT questions. This one judges a date a caller submits; the queue route
+emits the current system date and time and reads no field of its request —
+`WS-FUNC` and `WS-KEY` are declared at `CODATE01.cbl` L110 and L111 and never read.
+A search for `CSUTLDTC` across all 524 lines of that file returns **zero**
+occurrences, so the queue-borne program never called the date-edit utility at all.
 
-Assumptions: the baseline exposed this over a message queue only, so the REST
-endpoint is an addition rather than a replacement, and the queue path becomes the
-standard queue pair of [§11](#11-messaging). Same rules, two transports; the
-transport is not allowed to change the answer.
+**The evaluation delegates to `DateEditValidator` in `common-lib`.** The rules exist
+in exactly one place and are **not re-implemented here** — `DateConversionService`
+imports that type and calls it with the shared format mask. The queue reply's layout
+is likewise single-sourced, in `common-lib`'s `DateInquiryReplyCodec`, beside the
+request codec of the same one-thousand-character wire.
 
-Assumptions: the fixed-layout reply is preserved exactly, encoded and decoded with
-the shared fixed-width codec. With a string-format payload, **field order and
-delimiter are the contract** — there is no self-describing envelope to fall back
-on, so a field inserted in the middle is a silent breaking change to every
-consumer.
+Assumptions: the baseline exposed the emission over a message queue only, so this
+REST **evaluation** endpoint is an addition rather than a replacement — and it is an
+addition of a different capability, not a second transport over the same one.
 
-Assumptions: **no transactional outbox is needed on this path.** The baseline's
-inquiry get runs under syncpoint — `app/app-vsam-mq/cbl/CODATE01.cbl` L296–L299
-composes its get options from `MQGMO-SYNCPOINT`, `MQGMO-FAIL-IF-QUIESCING`,
-`MQGMO-CONVERT` and `MQGMO-WAIT` — which maps cleanly onto visibility timeout plus
-delete-on-success. Unlike the authorization flow, there is no lost-reply window to
-close, because this service commits nothing before it answers.
+Assumptions: **no transactional outbox is needed on this path**, and that is not the
+same as needing nothing. The baseline's inquiry get runs under syncpoint —
+`app/app-vsam-mq/cbl/CODATE01.cbl` L296–L299 composes its get options from
+`MQGMO-SYNCPOINT`, `MQGMO-FAIL-IF-QUIESCING`, `MQGMO-CONVERT` and `MQGMO-WAIT` — so
+unlike the authorization flow there is no lost-reply window to close: this service
+commits no business row before it answers, so no committed state a missing reply
+would contradict exists. A drained outbox would therefore be machinery with nothing
+to guarantee.
 
-A queue configuration class **is** required here. There is **no** batch
-configuration class: `COBTUPDT` becomes a reference-maintenance service method
-reached over `/maintenance-actions`, not a Spring Batch job-repository owner.
+Refactoring Rationale: this section previously concluded from that observation that
+the baseline discipline "maps cleanly onto visibility timeout plus
+delete-on-success", full stop. The observation is right and the conclusion was not.
+On the target the send completes **before** the listener acknowledges, and the
+acknowledgement is a separate call — so a task killed between the two leaves the
+request visible again. Because this reply body is the system date and time read at
+the moment of composition (L343–L353), a redelivery that recomposed would answer with
+a **later timestamp**, and a requester pairing on one correlation identifier would
+hold two replies that disagree with nothing on the wire to say which was the answer.
+
+What the consumer therefore does is narrower than an outbox and stronger than
+delete-on-success alone: it records the composed reply in
+`reference.inquiry_reply_ledger`, commits, sends, and only then marks the row sent.
+A redelivery whose row is outstanding re-sends the **recorded bytes**; one whose row
+is retired sends nothing. The guarantee is that one request is never answered with
+two *different* answers — not that the reply is sent only once. The residual window,
+a task dying between the send and the mark, sends a byte-identical duplicate carrying
+the same two echoed identities, and is recorded in [§13](#13-known-limitations).
+
+Assumptions: both requester identities are echoed and both are **bounded at intake**.
+The baseline restores its saved message identifier at L373 and its saved correlation
+identifier at L374 immediately before the put at L383, so a reply carrying one of the
+two carries less than the baseline carried; and each is admitted only if it satisfies
+the shared queue-identity rule in `common-lib`
+(`MessagingCorrelationId.isCanonical` — non-blank, within the shared length bound,
+printable US-ASCII other than the space). A value that fails it is treated as
+**absent**: not echoed, not recorded, not keyed on, with the business answer still
+sent and a protocol diagnostic naming the attribute and its *length* published to the
+error sink. Truncating instead would store and echo a value that is neither the
+requester's nor absent.
+
+Assumptions: the delivery guarantees of the queue path — visibility timeout plus
+delete-on-success, and the absence of any transactional outbox on it — belong with
+its consumer and are recorded there rather than restated here.
+
+Refactoring Rationale: a queue configuration class used to be required here and is
+withdrawn with the consumer that used it — a queue client nothing injects still makes
+a region a startup requirement and still reads as evidence of a message flow. There
+is likewise **no** batch configuration class: `COBTUPDT` becomes a
+reference-maintenance service method reached over `/maintenance-actions`, not a
+Spring Batch job-repository owner.
 
 ---
 
@@ -902,6 +1022,23 @@ reached over `/maintenance-actions`, not a Spring Batch job-repository owner.
 
 Recorded plainly, in the manner of [`tests/README.md`](../../tests/README.md) §1.1,
 so that no claim above hides a gap.
+
+- ⚠ **A date-inquiry reply can still be delivered twice — never with two different
+  answers.** The reply ledger of [§12.6](#126-date-conversion--two-front-doors-one-implementation)
+  records the composed reply, commits, sends, and only then marks the row sent. A task
+  that dies **after** the send and **before** the mark leaves the row outstanding, so
+  the redelivery re-sends it and the requester receives two copies. The copies are
+  byte-identical and carry the same two echoed identities, so the far end can discard
+  either; `reference.inquiry_reply_ledger.attempts` counts the sends, which is how an
+  operator measures whether this window was actually entered.
+
+  Alternatives Considered: committing the send and the mark together, which would
+  close the window entirely. Rejected because that is a distributed transaction across
+  the database and the queue, and AAP §0.7.6 records this migration's elimination of
+  two-phase commit as a property to keep rather than a gap to refill. Trade-offs: what
+  is bought instead is that a **differing** answer is unreachable — the failure that
+  matters here, because the reply body is a timestamp and a requester cannot tell which
+  of two disagreeing replies was the answer.
 
 - ⚠ **No golden master covers this module's paths.** The repository's parity oracle
   is a batch oracle. `tests/README.md` §1.1 records that the online `CO*` programs

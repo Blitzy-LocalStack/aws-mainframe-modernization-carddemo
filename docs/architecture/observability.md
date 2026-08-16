@@ -1151,10 +1151,20 @@ The controls that **are authored** are narrower and measurable:
    authorization headers and claims. It deliberately retains `sourceIp`.
    A source IP can identify a person or household and is treated as sensitive;
    production therefore requires a customer-managed key for this group, while
-   development may use service-managed encryption. Replacing business identifiers
-   in request paths with opaque aliases was considered and rejected because AAP
-   §0.7.1 requires selection context in the path; logging the route template rather
-   than the resolved path preserves that API contract without persisting the value.
+   development may use service-managed encryption. Logging the route template rather
+   than the resolved path is what keeps a business identifier out of this group in
+   any case. Refactoring Rationale: this sentence also recorded that replacing
+   business identifiers in request paths with opaque aliases was rejected "because
+   AAP §0.7.1 requires selection context in the path". Both halves are withdrawn.
+   The delivered account and customer operations carry no identifier in a path at
+   all — every one is a `POST` whose key is in the request body, registered as
+   `D-ACCOUNT-SELECTION-IN-BODY` in
+   [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) §7.4 —
+   and the card context goes further, addressing a single card by an opaque sealed
+   selector under `D-CARD-SELECTOR`. So the alias question this sentence declined is
+   already answered in the affirmative where it applies, and the §0.7.1 wording it
+   leaned on is the wording that entry departs from. The route-template rule stays
+   exactly as it is: it is what bounds the residue, and it costs nothing.
 2. **CloudFront access logging is enabled, as standard logging v2, under a field
    allow-list.** `cloudfront-spa/main.tf` declares
    `aws_cloudwatch_log_delivery_source.cloudfront_access`, its matching
@@ -1399,7 +1409,7 @@ that could not be given both is not listed.
   rejects exist. `TRANBKP.jcl` L51 is unrelated: it is a job-local gate after that
   job's own delete/redefine sequence. The explicit target status handoff and warn
   edge are owned by
-  [`batch-orchestration.md`](batch-orchestration.md#the-state-5-status-handoff-is-explicit);
+  [`batch-orchestration.md`](batch-orchestration.md#the-state-4-status-handoff-is-explicit);
   what belongs here is that the count has to be a first-class series, because an
   alarm on it is the difference between "some rejects, as every run has" and "this
   run rejected an input file's worth".
@@ -1408,15 +1418,25 @@ that could not be given both is not listed.
   alongside `health` and `info`. Moving the base path or renaming the health
   endpoint would break target-group registration and container liveness in the same
   change.
-- Assumptions: the collection path is composed end to end.
+- Refactoring Rationale: **the collection path is no longer composed end to end, and
+  saying so is the point of this entry.** It previously read that
   `infra/modules/ecs-service` runs an OpenTelemetry collector sidecar whose
   `prometheus` receiver scrapes `/actuator/prometheus` and whose `awsemf` exporter
-  publishes the scraped meters to the `CardDemo` namespace;
+  publishes the scraped meters to the `CardDemo` namespace. That sidecar has been
+  **withdrawn**: it is not in the frozen AAP, and it was forcing two topology changes
+  that are not in the AAP either — an eleventh ECR repository to mirror its image
+  into, against the ten of AAP §0.4.1.6, because Amazon ECR Public is not served by
+  the `ecr.api`/`ecr.dkr` endpoints, and a ninth interface endpoint for `xray`,
+  against the eight of AAP §0.4.1.9. What remains is the producer half and the
+  consumer half with no scraper between them: each service exposes
+  `/actuator/prometheus` and applies `common-lib`'s `MetricsConfig` common tags, and
   `infra/modules/observability` declares `aws_cloudwatch_dashboard.operations` with a
-  widget reading that namespace; and both environment roots compose the two modules.
-  What endpoint configuration cannot be is evidence that metrics are being
-  COLLECTED — that requires a deployment, and this document claims only the
-  narrower thing.
+  widget reading the `CardDemo` namespace. Trade-offs: until a scraper is introduced
+  that fits the AAP's endpoint and repository counts, that dashboard widget has no
+  publisher, and this document states that rather than implying meters arrive.
+  Container logs, which are the signal every operational procedure in this repository
+  actually reads, are unaffected — they travel through the `awslogs` driver to each
+  workload's own group.
 
 ---
 
@@ -1428,22 +1448,31 @@ log line can be pivoted to its trace and a trace back to its log lines.
 
 The four pieces the contract rests on, and where each lives:
 
-- **Library and bridge.** `services/common-lib/pom.xml` L350 declares
+- **Library and bridge.** `services/common-lib/pom.xml` L341 declares
   `spring-boot-starter-opentelemetry`, which supplies the OpenTelemetry SDK, the
   Micrometer tracing bridge and the OTLP exporter to every service that puts the
   shared kernel on its path.
 - **Service configuration.** `carddemo-common-defaults.yml` defaults OTLP trace
   export to `false`, so a local run or a test does not attempt to reach a
-  collector that is not listening, and the deployed path re-enables it explicitly
-  — see the environment mapping below.
-- **Collector.** `infra/modules/ecs-service` runs an `aws-otel-collector` sidecar
-  (L1427) with an `awsxray` exporter (L227) on its traces pipeline (L244).
-- **Producer wiring.** The task definition sets the collector's OTLP endpoint and
-  the exporter selection as `OTEL_*` environment variables, and Spring Boot 4.1's
-  own `OpenTelemetryEnvironmentVariableEnvironmentPostProcessor` maps those onto
-  `management.tracing.export.otlp.enabled` and the OTLP endpoint property, with
-  the mapping enabled by default and contributed at highest precedence. So the
-  X-Ray pipeline has an application-side producer in ECS.
+  collector that is not listening.
+- **Correlation.** `common-lib`'s `CorrelationIdFilter` puts one identifier into the
+  diagnostic context for the whole handling of a request and returns it on the
+  response, so a unit of work is followable across services in the logs
+  independently of whether any span was exported.
+- **No span export path in the deployed topology.** Refactoring Rationale: two
+  entries stood here — a `Collector` entry naming an `aws-otel-collector` sidecar in
+  `infra/modules/ecs-service` with an `awsxray` exporter, and a `Producer wiring`
+  entry describing the `OTEL_*` environment variables the task definition set to
+  point the application at it. Both are **withdrawn with the sidecar**, which is not
+  in the frozen AAP and which was forcing an eleventh ECR repository against the ten
+  of AAP §0.4.1.6 and a ninth interface endpoint against the eight of AAP §0.4.1.9.
+  The consequence is stated plainly rather than left implied: **spans are produced by
+  the library and are not exported anywhere from an ECS task.** Trade-offs:
+  re-introducing export has to argue for its own interface endpoint or its own
+  egress, and neither is available inside the AAP's stated counts and the network
+  module's enumerated egress — which is exactly the argument that was skipped when
+  the sidecar was added. What is not lost is cross-service followability, which the
+  correlation identifier above provides through the logs.
 
 What is still outstanding is instrumentation of this project's own code — no
 custom span is created anywhere — and execution: nothing is deployed, so no trace
@@ -1451,6 +1480,31 @@ has been sampled. The nightly module additionally asserts
 `tracing_configuration { enabled = true }` on both of its state machines —
 `infra/modules/step-functions-batch/main.tf` L1282 and L1457 — so X-Ray tracing is
 enabled on the state machines themselves as well as on the services.
+
+**The four glue Lambdas are traced too**, and they were the one gap in this
+contract. `quiesce`, `resume`, `database_admin` and `dataset_retention` each set
+`tracing_config { mode = "Active" }` in both environment roots, and a single shared
+inline policy — `aws_iam_role_policy.lambda_xray`, attached to all three Lambda
+roles — grants `xray:PutTraceSegments` and `xray:PutTelemetryRecords` and nothing
+else.
+
+> Refactoring Rationale: this section previously described the tracing contract as
+> the services plus the state machines, and that was the whole of what was
+> configured. Lambda defaults to `PassThrough`, under which a function emits no
+> segment of its own and only forwards a header it receives — so the nightly chain
+> produced a trace in which every state-machine transition was visible and the four
+> steps that actually quiesce online writes, bootstrap the database and scratch
+> generations were blank. The steps most likely to need explaining after a failed
+> batch window were the ones with no segment. Assumptions: these functions carry no
+> `vpc_config`, so they reach the X-Ray endpoint over the public service path and no
+> `xray` interface endpoint is required — which matters because AAP §0.4.1.9 fixes
+> the VPC endpoint inventory and does not include one. Trade-offs: the X-Ray write
+> statement's resource is `*`, which is not a narrowing failure but the only form the
+> service accepts — segment ingestion has no ARN to name, because the segment does
+> not exist until the call that submits it. The narrowing that is available is
+> applied: two write-only actions, and no X-Ray read permission on any of the three
+> roles. The `AWSXRayDaemonWriteAccess` managed policy was rejected for granting
+> three sampling-rule reads these functions never make.
 
 > Refactoring Rationale: this paragraph named a `tracing_enabled` input on that
 > module and cited a line in its `variables.tf`. No such input exists: the module
@@ -1675,7 +1729,7 @@ explicit: a run at or below 4 lets the job succeed and a run at or above 8 fails
   when rejects exist. `TRANBKP.jcl` L42/L45/L51 is a separate, job-local
   delete/redefine sequence and is not evidence for posting semantics. The target
   status handoff is specified in
-  [`batch-orchestration.md`](batch-orchestration.md#the-state-5-status-handoff-is-explicit);
+  [`batch-orchestration.md`](batch-orchestration.md#the-state-4-status-handoff-is-explicit);
   the observability consequence is that pass, warn, fail and fatal remain distinct
   values rather than being collapsed to a boolean.
 
@@ -1701,7 +1755,7 @@ win.
 | Every online service is **stateless** | Decomposition into client history, signed claims and request parameters — see [`service-catalog.md`](service-catalog.md#why-every-context-is-stateless) | Every request must carry its own identity and selection context, so a request is larger and a client holds navigation state it previously did not |
 | Services **scale horizontally** without sticky sessions | Consequence of statelessness | None beyond the above; this is the property statelessness exists to buy |
 | Database capacity is **elastic and can scale to zero in development** | Aurora module resource graph, composed by both environment roots | Trade-offs: a paused cluster has resume latency on the first connection, which is why the target production minimum is held above zero |
-| Authorization processing is **per-card ordered and duplicate-suppressed** | FIFO queue resources plus `AuthorizationRequestListener` in `authorization-service`; the external producer is not supplied by this repository — specified in [`messaging-contracts.md`](messaging-contracts.md#the-five-baseline-queues-and-six-target-primary-queues) | Trade-offs: ordering is guaranteed only *within* a card, and throughput across cards is what recovers the parallelism that a globally ordered queue would forfeit |
+| Authorization processing is **per-card ordered and duplicate-suppressed** | FIFO queue resources plus `AuthorizationRequestListener` in `authorization-service`; the external producer is not supplied by this repository — specified in [`messaging-contracts.md`](messaging-contracts.md#the-five-baseline-queues-and-five-target-primary-queues) | Trade-offs: ordering is guaranteed only *within* a card, and throughput across cards is what recovers the parallelism that a globally ordered queue would forfeit |
 | Batch has **per-state retry, redrive and a durable step ledger** | Ledger DDL and the `BatchRun` entity in `batch-service`, plus the state-machine resources in `infra/modules/step-functions-batch` — see [`batch-orchestration.md`](batch-orchestration.md#per-state-resilience-settings) | Trade-offs: this is an **addition**, not a port. The baseline has no checkpoint contract to preserve, and every redrivable step must be idempotent |
 | **Cost discipline is an explicit tie-breaker** | Managed and pay-per-use options preferred; development capacity sized independently of production | Trade-offs: a smaller development environment is not a faithful rehearsal of production capacity, so a capacity problem can only be found in production or in a deliberately sized test |
 

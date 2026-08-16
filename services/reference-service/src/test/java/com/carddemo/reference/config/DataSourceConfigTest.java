@@ -19,6 +19,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.boot.jdbc.autoconfigure.DataSourceProperties;
+import org.springframework.jdbc.datasource.SimpleDriverDataSource;
 import org.yaml.snakeyaml.Yaml;
 
 /**
@@ -267,6 +268,76 @@ class DataSourceConfigTest {
         when(result.next()).thenReturn(true);
         when(result.getString(1)).thenReturn(effectiveSchema);
         return pool;
+    }
+
+    /**
+     * Confirms the Flyway data source carries the same verified transport terms the runtime pool does.
+     *
+     * <p>Purpose: this is the assertion that closes the gap the bean was added for. Setting
+     * {@code spring.flyway.user} makes Spring Boot build Flyway a migration data source of its own, and its
+     * {@code applyConnectionDetails} copies the URL, the driver class, the user and the password and nothing
+     * else -- so the {@code sslmode} and {@code sslrootcert} terms bound under
+     * {@code spring.datasource.hikari.data-source-properties} never reached it. Every DDL statement this
+     * module applies therefore negotiated the PostgreSQL driver's default mode, {@code prefer}, which
+     * accepts an unencrypted session and validates no certificate at all. The runtime path was unaffected,
+     * which is exactly why nothing surfaced: a deployment could verify every query and verify none of its
+     * schema changes.</p>
+     *
+     * <p>Assumptions: the connection properties are asserted rather than a connection attempted, because
+     * what was wrong was the CONFIGURATION being carried, not the driver's honouring of it. Attempting a
+     * connection would need a server and would prove the driver, which is not this repository's code.</p>
+     */
+    @Test
+    @DisplayName("the Flyway data source carries verify-full and the certificate bundle")
+    void theFlywayDataSourceCarriesTheVerifiedTransportTerms() {
+        DataSourceProperties properties = new DataSourceProperties();
+        properties.setUrl("jdbc:postgresql://db.invalid:5432/carddemo");
+        properties.setUsername("carddemo_reference_app");
+        properties.setPassword("not-the-migration-password");
+
+        SimpleDriverDataSource migrations = config.flywayDataSource(properties,
+                "carddemo_reference_migrator", "migration-password",
+                "verify-full", "/etc/ssl/certs/carddemo-rds-ca-bundle.pem");
+
+        assertThat(migrations.getUrl())
+                .as("migrations must address the same cluster the runtime pool does")
+                .isEqualTo("jdbc:postgresql://db.invalid:5432/carddemo");
+        assertThat(migrations.getUsername())
+                .as("migrations must run as the migration login, never as the runtime one")
+                .isEqualTo("carddemo_reference_migrator");
+        assertThat(migrations.getConnectionProperties())
+                .as("the transport terms the pool carries must reach the migration connection too")
+                .containsEntry("sslmode", "verify-full")
+                .containsEntry("sslrootcert", "/etc/ssl/certs/carddemo-rds-ca-bundle.pem");
+    }
+
+    /**
+     * Confirms the base profile declares the two transport keys the Flyway data source binds.
+     *
+     * <p>Purpose: the bean above reads {@code carddemo.database.ssl.mode} and
+     * {@code carddemo.database.ssl.root-cert} as mandatory placeholders, and the Hikari driver-property map
+     * references the same two keys. Asserting the declaration here is what keeps the single source single: a
+     * profile that reverted the Hikari map to literals would leave two values for one deployment fact, which
+     * is the arrangement that let the migration path diverge in the first place.</p>
+     */
+    @Test
+    @DisplayName("the base profile declares the transport terms once and both consumers reference them")
+    void theBaseProfileDeclaresTheTransportTermsOnce() {
+        assertThat(value(BASE_PROFILE, "carddemo", "database", "ssl", "mode"))
+                .as("the transport mode must be declared, or the Flyway data source cannot resolve it")
+                .isEqualTo("verify-full");
+        assertThat(value(BASE_PROFILE, "carddemo", "database", "ssl", "root-cert"))
+                .as("the certificate bundle must be declared, with the image path as its fallback")
+                .isEqualTo("${CARDDEMO_DB_SSL_ROOT_CERT:/etc/ssl/certs/carddemo-rds-ca-bundle.pem}");
+
+        assertThat(value(BASE_PROFILE, "spring", "datasource", "hikari", "data-source-properties",
+                "sslmode"))
+                .as("the pool must reference the shared key rather than repeating its value")
+                .isEqualTo("${carddemo.database.ssl.mode}");
+        assertThat(value(BASE_PROFILE, "spring", "datasource", "hikari", "data-source-properties",
+                "sslrootcert"))
+                .as("the pool must reference the shared key rather than repeating its value")
+                .isEqualTo("${carddemo.database.ssl.root-cert}");
     }
 
     /**

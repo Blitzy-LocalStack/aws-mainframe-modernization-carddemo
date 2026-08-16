@@ -96,6 +96,15 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 
+# Assumptions: the double's contract EXCEPTION is imported from ``conftest`` by name, because the
+#   fixture hands back an instance and one case below asserts the class the instance raises.
+#   pytest's default import mode puts the tests directory on the path, so the sibling import
+#   resolves however the suite is invoked, and ``test_doubles.py`` reaches these classes so too.
+# Trade-offs: the import sorter groups ``conftest`` with the third-party block because it cannot
+#   tell a sibling test module from an installed distribution. That placement is accepted rather
+#   than suppressed, since a per-file ignore would switch the rule off for every later import here.
+from conftest import FakeClientContractError
+
 from carddemo_migration.copybook import ISO_FORM, layouts
 from carddemo_migration.copybook.layouts import ACCOUNT_LAYOUT as _ACCOUNT_LAYOUT
 from carddemo_migration.copybook.layouts import DALYTRAN_LAYOUT, INTTRAN_LAYOUT
@@ -4915,7 +4924,7 @@ def test_a_query_reading_an_unexpected_relation_is_refused(
 def test_the_row_count_report_runs_read_only_and_under_a_timeout(
     fake_aurora: FakeAuroraDatabase,
 ) -> None:
-    """Set a read-only transaction and a statement timeout before the row-count query runs.
+    """Open the transaction read-only, then probe the role, then bound and run the query.
 
     Parameters
     ----------
@@ -4930,7 +4939,7 @@ def test_the_row_count_report_runs_read_only_and_under_a_timeout(
     Raises
     ------
     AssertionError
-        If either setting is absent, or is issued after the query.
+        If any of the three statements is absent, or arrives out of the server-valid order.
     """
     connection = _reporting_connection(fake_aurora)
     fake_aurora.arrange_rows("sentinel_report", [])
@@ -4938,18 +4947,111 @@ def test_the_row_count_report_runs_read_only_and_under_a_timeout(
     _row_count_rows(connection, "select 1 -- sentinel_report")
 
     executed = fake_aurora.executed_sql()
-    # WHY : the ORDER is asserted, not merely the presence. A read-only setting issued after the
-    #   query has protected nothing, and `SET TRANSACTION READ ONLY` must be the first statement of
-    #   its transaction to take effect at all -- so a correct-looking log in the wrong order is
-    #   exactly the regression this catches.
-    assert "current_user" in executed[0]
-    assert "READ ONLY" in executed[1]
+    # WHY : the ORDER is asserted, not merely the presence, and this is the SERVER-VALID order:
+    #   `SET TRANSACTION READ ONLY` states a property OF the transaction, so it belongs at its
+    #   start, before anything -- the identity probe included -- has run in it. The probe follows
+    #   inside that same transaction, then the timeout, then the report.
+    # WHY : Refactoring Rationale: this assertion previously required `current_user` FIRST and the
+    #   read-only setting SECOND, while its own comment said the setting had to be first. The
+    #   implementation matched the assertion, so the probe ran in a still-writable transaction, and
+    #   the double accepted any order so neither half could contradict the other. Both are corrected
+    #   together: `FakeAuroraConnection.note_transaction_statement` now refuses a late
+    #   `SET TRANSACTION`, which means this test cannot be satisfied by restoring the old order.
+    assert "READ ONLY" in executed[0]
+    assert "current_user" in executed[1]
     assert "statement_timeout" in executed[2]
     assert "sentinel_report" in executed[3]
     # WHY : the two guards fail differently and both are kept: the ROLE is what makes writing
     #   impossible, and the transaction setting is what makes an attempt to write fail loudly on a
     #   cluster where the role was mis-provisioned. Asserting the setting is asserting the second.
     assert not any("sentinel_report" in sql for sql in executed[:3])
+
+
+def test_the_money_total_report_runs_read_only_and_under_a_timeout(
+    fake_aurora: FakeAuroraDatabase,
+) -> None:
+    """Hold the money pass to the same four-statement order as the row-count pass.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double answering the session probe and then the report.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If any of the three statements is absent, or arrives out of the server-valid order.
+    """
+    # WHY : Refactoring Rationale: the money pass had no order assertion at all, only the row-count
+    #   pass did -- which is how the same ordering defect came to exist in both modules and be
+    #   reported once. Both passes execute the identical discipline, so both are asserted, and a
+    #   correction applied to one of them can no longer leave the other behind.
+    connection = _reporting_connection(fake_aurora)
+    fake_aurora.arrange_rows("sentinel_money", [])
+
+    _money_total_rows(connection, "select 1 -- sentinel_money")
+
+    executed = fake_aurora.executed_sql()
+    assert "READ ONLY" in executed[0]
+    assert "current_user" in executed[1]
+    assert "statement_timeout" in executed[2]
+    assert "sentinel_money" in executed[3]
+    assert not any("sentinel_money" in sql for sql in executed[:3])
+
+
+def test_the_double_refuses_a_read_only_setting_issued_after_a_query(
+    fake_aurora: FakeAuroraDatabase,
+) -> None:
+    """Assert the double models transaction order rather than merely logging statements.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double standing in for the connection boundary.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the double admits a late ``SET TRANSACTION``, or refuses one that opens a fresh
+        transaction after a commit.
+    """
+    # WHY : Assumptions: this is the NEGATIVE probe for the two order assertions above. They can
+    #   only be trusted while the double they run against is capable of refusing the wrong order,
+    #   and it was not: it recorded statements and had no notion of a transaction, so the previous
+    #   order passed and read as verified. Proving the refusal here is what makes the two
+    #   assertions above evidence rather than restatement.
+    connection = _reporting_connection(fake_aurora)
+
+    with connection.cursor() as cursor:  # type: ignore[attr-defined]
+        cursor.execute("select current_user")
+        cursor.fetchone()
+        with pytest.raises(FakeClientContractError, match="first statement"):
+            cursor.execute("SET TRANSACTION READ ONLY")
+
+    # WHY : Assumptions: a commit ends the transaction, so the same connection may legitimately
+    #   open a new one and set it read-only. Asserting that too keeps the rule from being a blanket
+    #   ban that a reused connection would trip over.
+    connection.commit()  # type: ignore[attr-defined]
+    with connection.cursor() as cursor:  # type: ignore[attr-defined]
+        cursor.execute("SET TRANSACTION READ ONLY")
+        # WHY : Assumptions: re-stating a mode the transaction already holds is admitted, and it is
+        #   asserted here because the verification gate depends on it: three passes share one
+        #   connection without committing between them, so passes two and three each re-assert
+        #   `READ ONLY` on the transaction pass one opened. Only a FIRST establishment arriving late
+        #   is a defect.
+        cursor.execute("select current_user")
+        cursor.fetchone()
+        cursor.execute("SET TRANSACTION READ ONLY")
 
 
 @pytest.mark.parametrize(

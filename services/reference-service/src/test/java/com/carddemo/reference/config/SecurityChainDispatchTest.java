@@ -5,8 +5,11 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -23,9 +26,13 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.web.MockServletContext;
@@ -36,13 +43,16 @@ import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.support.AnnotationConfigWebApplicationContext;
 import org.springframework.web.servlet.config.annotation.EnableWebMvc;
+import org.yaml.snakeyaml.Yaml;
 
 /**
- * Asserts what the installed filter chain does with the container's ERROR dispatch, and what it still does
- * with a caller who addresses the error path directly.
+ * Asserts what the installed filter chain does with the container's ERROR dispatch, what it still does with
+ * a caller who addresses the error path directly, and what it does with the five documentation paths it
+ * grants ahead of its administrator-only method rules.
  *
  * <p><strong>Purpose.</strong> Every other assertion about this context's authorization matrix is made
  * against the rule table {@link SecurityConfig} declares, because a table is addressable without a servlet
@@ -66,12 +76,21 @@ import org.springframework.web.servlet.config.annotation.EnableWebMvc;
  * {@link #anErrorDispatchOfAMutatingMethodIsAdmitted()} and
  * {@link #anErrorDispatchToAPublishedPathIsAdmitted()} -- each answering 401, while
  * {@link #theChainIsInstalled()} and {@link #aDirectRequestToTheErrorPathIsStillRefused()} keep passing.
- * That division is what shows the five cases separate the rule from the rules it sits in front of rather
+ * That division is what shows those five cases separate the rule from the rules it sits in front of rather
  * than measuring one condition five times. The 401 rather than 403 is itself informative and matches what
  * the account, card and authorization contexts measured: the authentication filters extend
  * {@code OncePerRequestFilter}, whose {@code shouldNotFilterErrorDispatch()} answers true, so the
  * bearer-token filter does not run on an ERROR dispatch at all, and the authorization filter -- which is not
  * a {@code OncePerRequestFilter} and does run -- reaches the rules with no principal.
+ *
+ * <p>⚠️ Refactoring Rationale: the class now covers a SECOND subject, in the nested group at the foot of
+ * it, and the two share this file because they share the one thing that is expensive here -- a refreshed
+ * web context with the deployed chain installed in front of a dispatcher. That subject is the documentation
+ * grant: five path patterns granted to either business group, declared ahead of the four
+ * administrator-only method rules. It was reachable and covered by nothing. Two of its properties are not
+ * expressible against the rule table either, for the same reason the dispatcher-type rule is not: whether a
+ * multi-segment wildcard admits the nested assets a browser fetches, and which of two rules matching the
+ * same request wins, are both answers a dispatch gives and a table does not.
  *
  * <p>Assumptions: the deployed configuration is INSTANTIATED here and only the two bean methods this slice
  * needs are called, rather than the class being registered. That distinction is what makes a web context
@@ -111,6 +130,25 @@ class SecurityChainDispatchTest {
 
     /** A representative published path of this context, used to prove the rule is not path-scoped. */
     private static final String BUSINESS_PATH = "/api/v1/reference/transaction-categories";
+
+    /**
+     * The machine-readable document's own path, used as the mutating-method probe.
+     *
+     * <p>Assumptions: this is the first of the five deployed documentation patterns and it is an exact
+     * path rather than a wildcard, so a mutating request to it can only be matched by the documentation
+     * grant or by one of the four whole-tree method rules -- which is exactly the ambiguity the ordering
+     * case has to resolve.</p>
+     */
+    private static final String DOCUMENT_PATH = "/v3/api-docs";
+
+    /**
+     * A group name the deployed authority converter does not recognise.
+     *
+     * <p>Assumptions: a token carrying only this decodes successfully and yields NO authority, so its
+     * caller is authenticated and unauthorised. That is the only way to reach the forbidden answer on a
+     * path the grant covers; an absent token reaches the challenge instead.</p>
+     */
+    private static final String UNRECOGNISED_GROUP = "carddemo-unrecognised-group";
 
     /** The context the chain is built in, refreshed once for the class. */
     private static AnnotationConfigWebApplicationContext context;
@@ -253,6 +291,271 @@ class SecurityChainDispatchTest {
     }
 
     /**
+     * Holds the documentation grant to what the chain actually does with each of its five patterns.
+     *
+     * <p>Purpose: this group exists because five path patterns were granted to either business group,
+     * ahead of the four administrator-only method rules, and no request test covered any of them. The
+     * grant is the only rule in this chain that admits a caller to a path the reference surface does not
+     * publish, and its POSITION in the rule order changes the answer for four HTTP methods, so both the
+     * grant and its ordering are asserted here against the deployed chain rather than against a table.
+     *
+     * <p>Assumptions: the deployed pattern list is read REFLECTIVELY and asserted to be exactly the five
+     * this group probes, rather than the patterns being restated as this class's own constants. The list
+     * is private to the deployed configuration and widening it so a test could read it would relax
+     * production visibility for a test's convenience. Reading it is what ties every probe below to the
+     * production rule: a pattern added, removed or renamed there fails the first case rather than leaving
+     * the probes quietly covering a list that no longer exists.
+     *
+     * <p>Assumptions: an ADMITTED request answers 404 in this slice, because the slice mounts the chain
+     * and nothing else -- no controller, no document, no static asset. That is why admission is asserted
+     * as "not either refusal" rather than as a particular status, using the same helper the
+     * error-dispatch cases use. What a documentation path SERVES is a property of the springdoc
+     * configuration and is asserted from that configuration in the last case here.
+     *
+     * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
+     * parameter, return or exception at-clause; every member below carries its own.
+     */
+    @Nested
+    @DisplayName("on the documentation grant and its position in the rule order")
+    class OnTheDocumentationGrant {
+
+        /**
+         * The deployed grant covers exactly the five patterns this group probes, in that order.
+         *
+         * <p>Assumptions: the order is asserted as well as the membership. The list is expanded into the
+         * matcher arguments in declaration order, and while Spring Security evaluates the resulting
+         * matchers as alternatives within one rule, a reader auditing the chain reads the list as the
+         * enumeration of what the grant covers. Asserting the sequence keeps this class's probe list
+         * readable against the production list line for line.
+         *
+         * @throws Exception if the field cannot be read, which a rename or a change of modifier causes and
+         *     which must surface as a failure rather than as a silently skipped assertion
+         */
+        @Test
+        @DisplayName("the grant covers exactly the five published documentation patterns")
+        void theGrantCoversExactlyTheFivePublishedPatterns() throws Exception {
+            assertThat(deployedDocumentationPatterns())
+                    .as("every probe in this group is chosen to match one of these patterns, so a"
+                            + " change here without a matching probe leaves a pattern uncovered")
+                    .containsExactly(
+                            "/v3/api-docs", "/v3/api-docs/**", "/reference-api.yaml",
+                            "/swagger-ui.html", "/swagger-ui/**");
+        }
+
+        /**
+         * A documentation path presented with no token at all is challenged, not served.
+         *
+         * <p>Assumptions: the grant is by AUTHORITY and not openly, so an unauthenticated caller must be
+         * challenged on every one of the five patterns. This is the case that separates "granted to both
+         * groups" from "public": a rule written with a permit instead of an authority manager would pass
+         * every other case in this group and fail only this one.
+         *
+         * @param path a concrete path matching one of the five deployed patterns
+         * @throws Exception if the request cannot be performed
+         */
+        @ParameterizedTest
+        @MethodSource(
+                "com.carddemo.reference.config.SecurityChainDispatchTest#documentationProbePaths")
+        @DisplayName("a documentation path with no token is challenged rather than served")
+        void aDocumentationPathWithNoTokenIsChallenged(String path) throws Exception {
+            mockMvc.perform(get(path))
+                    .andExpect(status().isUnauthorized())
+                    .andExpect(jsonPath("$.code")
+                            .value(ApiErrorSecurityHandlers.CODE_UNAUTHENTICATED));
+        }
+
+        /**
+         * A documentation path presented with a token carrying neither business group is refused.
+         *
+         * <p>Assumptions: the token DECODES successfully and simply carries a group name the authority
+         * converter does not recognise, so the caller is authenticated and unauthorised rather than
+         * unauthenticated. That is the distinction between this case and the one above, and it is why the
+         * expected status is 403 with the forbidden code rather than 401.
+         *
+         * @param path a concrete path matching one of the five deployed patterns
+         * @throws Exception if the request cannot be performed
+         */
+        @ParameterizedTest
+        @MethodSource(
+                "com.carddemo.reference.config.SecurityChainDispatchTest#documentationProbePaths")
+        @DisplayName("a documentation path with neither business group is refused")
+        void aDocumentationPathWithNeitherGroupIsRefused(String path) throws Exception {
+            stubDecoderWithGroups(List.of(UNRECOGNISED_GROUP));
+
+            mockMvc.perform(get(path).header(HttpHeaders.AUTHORIZATION, bearerHeader()))
+                    .andExpect(status().isForbidden())
+                    .andExpect(jsonPath("$.code").value(GlobalExceptionHandler.CODE_FORBIDDEN));
+        }
+
+        /**
+         * Either business group is admitted to every documentation path, the administrator included.
+         *
+         * <p>Assumptions: BOTH groups are driven for every pattern rather than one of them, because the
+         * grant names both and a rule naming only the administrator would satisfy an assertion made with
+         * an administrator token alone. The administrator half also matters in its own right: the four
+         * method rules beneath this grant are administrator-only, so a reader could reasonably expect the
+         * administrator to be the one admitted here and the ordinary user to be refused, and this case
+         * records that the read half of the contract admits both.
+         *
+         * @param path a concrete path matching one of the five deployed patterns
+         * @throws Exception if the request cannot be performed
+         */
+        @ParameterizedTest
+        @MethodSource(
+                "com.carddemo.reference.config.SecurityChainDispatchTest#documentationProbePaths")
+        @DisplayName("both business groups are admitted to every documentation path")
+        void bothBusinessGroupsAreAdmittedToADocumentationPath(String path) throws Exception {
+            stubDecoderWithGroups(List.of(JwtRoleConverter.USER_AUTHORITY));
+            assertNotRefused(mockMvc
+                    .perform(get(path).header(HttpHeaders.AUTHORIZATION, bearerHeader()))
+                    .andReturn()
+                    .getResponse()
+                    .getStatus());
+
+            stubDecoderWithGroups(List.of(JwtRoleConverter.ADMIN_AUTHORITY));
+            assertNotRefused(mockMvc
+                    .perform(get(path).header(HttpHeaders.AUTHORIZATION, bearerHeader()))
+                    .andReturn()
+                    .getResponse()
+                    .getStatus());
+        }
+
+        /**
+         * The two wildcard patterns cover nested assets and the interactive page's own configuration.
+         *
+         * <p>Purpose: two of the five patterns end in a multi-segment wildcard, and the paths a browser
+         * actually fetches under them are nested rather than flat -- the page requests its own
+         * configuration document, its stylesheet and its script bundles. A rule written with a
+         * single-segment wildcard would satisfy every other case in this group, because each of those
+         * probes one flat path, and would refuse exactly the requests a real page makes.
+         *
+         * <p>Assumptions: the paths below are two and three segments deep beneath their pattern's prefix,
+         * so both the multi-segment property and the ordinary one-segment case are exercised. They are
+         * driven with an ordinary user token, which is the weaker of the two admitted authorities, and
+         * additionally without a token, so the nesting is shown to inherit the grant rather than to
+         * escape the chain altogether -- an escape would answer 404 for a reason that has nothing to do
+         * with the rule.
+         *
+         * @param nested a path nested beneath one of the two wildcard patterns
+         * @throws Exception if the request cannot be performed
+         */
+        @ParameterizedTest
+        @ValueSource(strings = {
+            "/v3/api-docs/swagger-config",
+            "/v3/api-docs/reference/transaction-types",
+            "/swagger-ui/index.html",
+            "/swagger-ui/assets/swagger-ui.css"
+        })
+        @DisplayName("nested documentation assets inherit the grant and are still challenged unauthenticated")
+        void nestedDocumentationAssetsInheritTheGrant(String nested) throws Exception {
+            mockMvc.perform(get(nested))
+                    .andExpect(status().isUnauthorized())
+                    .andExpect(jsonPath("$.code")
+                            .value(ApiErrorSecurityHandlers.CODE_UNAUTHENTICATED));
+
+            stubDecoderWithGroups(List.of(JwtRoleConverter.USER_AUTHORITY));
+            assertNotRefused(mockMvc
+                    .perform(get(nested).header(HttpHeaders.AUTHORIZATION, bearerHeader()))
+                    .andReturn()
+                    .getResponse()
+                    .getStatus());
+        }
+
+        /**
+         * A mutating request to a documentation path is judged by the grant, not by the method rules.
+         *
+         * <p>Purpose: this is the ORDERING property, and it is the reason the deployed configuration
+         * records at length that this grant's position is load-bearing rather than immaterial. The four
+         * method rules beneath it pair a method with the whole tree, so they reach documentation paths
+         * too; declared after them, a mutating request to a documentation path would be judged
+         * administrator-or-nothing while a read of the same path was judged by the grant. Declared where
+         * it is, one rule answers for those paths whatever method arrives.
+         *
+         * <p>Assumptions: an ordinary user token is used, which is what makes the case decide the
+         * ordering. An administrator token satisfies both the grant and the method rules, so it would
+         * pass whichever rule matched and the case would establish nothing.
+         *
+         * <p>Assumptions: the same four methods are driven against a published business path as the
+         * CONTROL, and it is what keeps the case from passing vacuously. Without it a chain that had
+         * simply stopped judging mutating methods at all would satisfy the first half; the control shows
+         * the administrator-only rules are still in force where they are meant to be.
+         *
+         * @throws Exception if a request cannot be performed
+         */
+        @Test
+        @DisplayName("a mutating request to a documentation path is judged by the grant, not the method rules")
+        void aMutatingRequestToADocumentationPathIsJudgedByTheGrant() throws Exception {
+            stubDecoderWithGroups(List.of(JwtRoleConverter.USER_AUTHORITY));
+
+            for (MockHttpServletRequestBuilder mutating : List.of(
+                    post(DOCUMENT_PATH), put(DOCUMENT_PATH),
+                    patch(DOCUMENT_PATH), delete(DOCUMENT_PATH))) {
+                assertNotRefused(mockMvc
+                        .perform(mutating.header(HttpHeaders.AUTHORIZATION, bearerHeader()))
+                        .andReturn()
+                        .getResponse()
+                        .getStatus());
+            }
+
+            for (MockHttpServletRequestBuilder mutating : List.of(
+                    post(BUSINESS_PATH), put(BUSINESS_PATH),
+                    patch(BUSINESS_PATH), delete(BUSINESS_PATH))) {
+                mockMvc.perform(mutating.header(HttpHeaders.AUTHORIZATION, bearerHeader()))
+                        .andExpect(status().isForbidden())
+                        .andExpect(jsonPath("$.code").value(GlobalExceptionHandler.CODE_FORBIDDEN));
+            }
+        }
+
+        /**
+         * Production removes the interactive page through configuration, and the chain rule is unchanged.
+         *
+         * <p>Purpose: the two halves of the production posture are easy to conflate, and conflating them
+         * would leave one of them unasserted. The chain grants the five patterns identically under every
+         * profile -- the rule is keyed by path and authority and reads no profile at all -- while the
+         * production overlay switches the interactive page off with
+         * {@code springdoc.swagger-ui.enabled: false} and deliberately leaves the machine-readable
+         * document enabled. So in production an admitted caller reaching the page path is answered by the
+         * page's ABSENCE rather than by an authorization refusal, which is a different diagnosis from the
+         * one an operator would reach if the chain had been narrowed.
+         *
+         * <p>Assumptions: the two configuration files are parsed rather than the two values being
+         * restated here, so a profile that switched the document off alongside the page, or switched the
+         * page back on, fails this case. The base file is read for the document setting because that is
+         * where it is declared; the production overlay is read for the page setting because that is the
+         * one key the overlay adds, which its own comment block records as a bounded exception.
+         *
+         * @throws Exception if either configuration file cannot be read
+         */
+        @Test
+        @DisplayName("production disables the page by configuration while the chain grant is unchanged")
+        void productionDisablesThePageByConfigurationAndNotByTheChain() throws Exception {
+            assertThat(yamlValueAt("src/main/resources/application.yml",
+                    "springdoc", "api-docs", "enabled"))
+                    .as("the machine-readable document stays served; it is the contract a client"
+                            + " generator reads and is not the interactive form")
+                    .isEqualTo(Boolean.TRUE);
+            assertThat(yamlValueAt("src/main/resources/application-prod.yml",
+                    "springdoc", "swagger-ui", "enabled"))
+                    .as("production removes the page that composes and sends requests")
+                    .isEqualTo(Boolean.FALSE);
+
+            // WHY : Assumptions: the chain is then driven at the page path under an ordinary token, in
+            //       the same slice, to show the GRANT is untouched by that configuration. The two
+            //       assertions together are what separate "the page is gone" from "the caller was
+            //       refused" -- an operator reading a 403 would look at authorities, and an operator
+            //       reading a 404 would look at whether the page is enabled, so which one production
+            //       answers with decides where the next hour is spent.
+            stubDecoderWithGroups(List.of(JwtRoleConverter.USER_AUTHORITY));
+            assertNotRefused(mockMvc
+                    .perform(get("/swagger-ui.html")
+                            .header(HttpHeaders.AUTHORIZATION, bearerHeader()))
+                    .andReturn()
+                    .getResponse()
+                    .getStatus());
+        }
+    }
+
+    /**
      * Asserts a status is neither of the two refusals the security chain renders.
      *
      * @param status the status the slice answered with
@@ -310,6 +613,70 @@ class SecurityChainDispatchTest {
     }
 
     /**
+     * Reads the deployed documentation pattern list out of the configuration that declares it.
+     *
+     * <p>Assumptions: read reflectively because the field is private to the deployed configuration.
+     * Widening it so a test could read it would relax production visibility for a test's convenience,
+     * which is the wrong direction of the two; reading it here keeps the probe list below tied to the
+     * production rule without changing what production publishes.</p>
+     *
+     * @return the patterns the deployed grant covers, in declaration order; never {@code null}
+     * @throws ReflectiveOperationException if the field is absent or no longer a list of strings, which a
+     *     rename or a restructuring causes and which must surface as a failure
+     */
+    @SuppressWarnings("unchecked")
+    private static List<String> deployedDocumentationPatterns() throws ReflectiveOperationException {
+        java.lang.reflect.Field declared =
+                SecurityConfig.class.getDeclaredField("DOCUMENTATION_PATHS");
+        declared.setAccessible(true);
+        return (List<String>) declared.get(null);
+    }
+
+    /**
+     * Supplies one concrete path per deployed documentation pattern.
+     *
+     * <p>Assumptions: five probes for five patterns, each chosen to match exactly one of them -- the three
+     * exact patterns as themselves, and one flat child for each of the two wildcard patterns. The deeper
+     * nesting the two wildcards also admit is driven by its own case, because a flat child cannot
+     * distinguish a multi-segment wildcard from a single-segment one.</p>
+     *
+     * @return the probe paths, in the same order as the deployed pattern list; never {@code null}
+     */
+    static List<String> documentationProbePaths() {
+        return List.of(
+                "/v3/api-docs", "/v3/api-docs/swagger-config", "/reference-api.yaml",
+                "/swagger-ui.html", "/swagger-ui/index.html");
+    }
+
+    /**
+     * Reads one scalar out of a configuration file by walking a path of mapping keys.
+     *
+     * <p>Assumptions: the file is parsed as YAML rather than searched as text, so an assertion cannot be
+     * satisfied by a key of the same name under a different parent -- which is precisely the mistake a
+     * text search makes on a file that declares the same leaf under two nodes.</p>
+     *
+     * @param file the module-relative path of the configuration file to read
+     * @param keys the mapping keys to walk, outermost first
+     * @return the scalar found at that path, or {@code null} if any key along the way is absent
+     * @throws java.io.IOException if the file cannot be read, which must surface rather than yielding an
+     *     absent value that would read as a deliberate omission
+     */
+    private static Object yamlValueAt(String file, String... keys) throws java.io.IOException {
+        Object current;
+        try (java.io.InputStream source = java.nio.file.Files.newInputStream(
+                java.nio.file.Path.of(file))) {
+            current = new Yaml().load(source);
+        }
+        for (String key : keys) {
+            if (!(current instanceof java.util.Map<?, ?> mapping)) {
+                return null;
+            }
+            current = mapping.get(key);
+        }
+        return current;
+    }
+
+    /**
      * Wires the smallest context that can hold the deployed chain: a clock, a substituted decoder, the
      * deployed authority converter and the deployed chain itself.
      *
@@ -321,7 +688,17 @@ class SecurityChainDispatchTest {
      * <p>Assumptions: of the four content elements user-specified Rule 1 enumerates, only Purpose applies to
      * a type declaration, so the other three are inapplicable rather than omitted.</p>
      */
-    @Configuration(proxyBeanMethods = false)
+    // WHY : Refactoring Rationale: this is a @TestConfiguration and not a plain @Configuration, and the
+    //       difference is load-bearing rather than stylistic. This module now carries the Spring Boot MVC
+    //       test slice, and a slice component-scans from the application package -- which is this package's
+    //       own root -- while its include filter admits any WebMvcConfigurer it finds. A plain
+    //       @Configuration declared here therefore leaked into every sibling slice's context and collided
+    //       with the beans that slice declared for itself; the first symptom was a duplicate clock
+    //       definition reported against a class in a different file from the failing test.
+    //       @TestConfiguration carries @TestComponent, which the test type-exclude filter removes from
+    //       component scanning, while explicit registration and explicit import both still work -- which is
+    //       how the case that needs this class obtains it.
+    @TestConfiguration(proxyBeanMethods = false)
     @EnableWebMvc
     @EnableWebSecurity
     static class SliceWiring {

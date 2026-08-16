@@ -2,7 +2,7 @@
 // WHY : Assumptions: this file is written against exactly one authority for the
 //       physical shape of the row it maps, namely
 //       services/reference-service/src/main/resources/db/migration/
-//       V1__reference.sql, whose us_states block at L424 through L441 declares
+//       V1__reference.sql, whose us_states block at L413 through L430 declares
 //       one column and one constraint and nothing further. The column name in
 //       the mapping below is transcribed from that block rather than derived
 //       from this class's member name, because the two deliberately differ:
@@ -82,7 +82,7 @@ import org.hibernate.type.SqlTypes;
  * {@code app/cbl/COACTUPC.cbl} L2495 accepts, because the district and the five territories are
  * members of the very same condition name as the states and the baseline draws no distinction
  * between them. The table this type maps is named {@code us_states}, transcribed from
- * {@code V1__reference.sql} L424 exactly as it stands there; the name identifies the table and does
+ * {@code V1__reference.sql} L413 exactly as it stands there; the name identifies the table and does
  * not bound its contents, so it is not a licence to hold fewer rows than the list carries. This is
  * recorded because the narrower reading is the one a reader arrives at from the name alone, and
  * because it would fail quietly: a rejected territory address presents as a data-entry mistake
@@ -94,7 +94,7 @@ import org.hibernate.type.SqlTypes;
  * literals. All 56 literals are alphabetic, so a numeric type could not represent this domain at
  * all rather than merely representing it awkwardly: {@code 'AL'} has no integer value. The declared
  * width is part of the contract and not display padding, which is why {@code V1__reference.sql}
- * L438 declares the column {@code CHAR(2)} and why the width is restated on the mapping below.
+ * L427 declares the column {@code CHAR(2)} and why the width is restated on the mapping below.
  * This package's charter records the consequence that makes the character type the right one: a
  * probe arriving already blank-padded from a declared-width source still matches a {@code bpchar}
  * row, whereas a varying-width column would match nothing and would raise no error either, so the
@@ -109,8 +109,8 @@ import org.hibernate.type.SqlTypes;
  * from a list of {@code 88}-level literals held over a working-storage item, so there is no legacy
  * column name to inherit, no record length to reconcile and no padding field to drop. What matters
  * more is what the list does not carry: between L1014 and L1069 it holds codes only, with no
- * display name and no description anywhere in it. The block at {@code V1__reference.sql} L424
- * through L441 accordingly declares one column, {@code state_cd CHAR(2) NOT NULL}, together with
+ * display name and no description anywhere in it. The block at {@code V1__reference.sql} L413
+ * through L430 accordingly declares one column, {@code state_cd CHAR(2) NOT NULL}, together with
  * one constraint, {@code pk_us_states}, over that column. This type therefore holds exactly one
  * persistent member. A name or description member was the obvious alternative and is refused twice
  * over: the column does not exist, so the mapping could only fail against the schema, and the
@@ -130,7 +130,7 @@ import org.hibernate.type.SqlTypes;
  * <p>Assumptions: <b>the consumer of this lookup belongs to another bounded context and reaches it
  * through the published contract, never through this type.</b> The address validation that needs
  * these codes runs in account-service, which neither owns nor seeds this table, and
- * {@code V1__reference.sql} L370 through L373 records the same division from the schema side. Rule
+ * {@code V1__reference.sql} L359 through L362 records the same division from the schema side. Rule
  * A2 of the shared architecture test at
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java}
  * forbids a class under one bounded-context package root from depending on a {@code domain} class
@@ -146,7 +146,7 @@ import org.hibernate.type.SqlTypes;
  * version counter belongs to the two transaction-reference entities alone, those being the only
  * rows this context replaces, and that the remaining four carry none because their tables declare
  * none. The schema is the authority and it agrees, since the block at {@code V1__reference.sql}
- * L424 through L441 declares no version column, so mapping one would name a column that is not
+ * L413 through L430 declares no version column, so mapping one would name a column that is not
  * there. The absence also matches the operations this data supports, being loaded once and
  * thereafter read: a counter written once and never compared would advertise a maintenance path
  * this context does not offer. </p>
@@ -183,7 +183,7 @@ import org.hibernate.type.SqlTypes;
 @Table(name = "us_states", schema = "reference")
 public class UsState {
 
-    // WHY : Assumptions: the column name is state_cd, transcribed from V1__reference.sql L438, while
+    // WHY : Assumptions: the column name is state_cd, transcribed from V1__reference.sql L427, while
     //       this member is stateCode. The two differ on purpose -- the column follows the
     //       abbreviated form the schema uses throughout, the member spells the word out -- so the
     //       name attribute is mandatory rather than decorative: an implicit naming strategy would
@@ -277,7 +277,7 @@ public class UsState {
      * Reports whether another object denotes the same state or territory row as this one.
      *
      * <p>Assumptions: the comparison rests on the code, which is the whole of the key, since
-     * {@code V1__reference.sql} L440 declares {@code pk_us_states} over {@code state_cd} alone and
+     * {@code V1__reference.sql} L429 declares {@code pk_us_states} over {@code state_cd} alone and
      * this type has no second member to weigh. That no alternative basis exists is itself worth
      * recording, because on the wider entities of this migration the choice between key-only and
      * whole-record equality is a genuine one and a reader may arrive here expecting to find it

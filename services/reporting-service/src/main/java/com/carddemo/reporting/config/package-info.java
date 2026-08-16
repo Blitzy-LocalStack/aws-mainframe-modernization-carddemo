@@ -58,7 +58,7 @@
  *       sizing.</li>
  *   <li>{@code OpenApiConfig} -- LANDED. The OpenAPI 3.1 document metadata consumed by
  *       springdoc, whose starter is the dependency declared at this module's {@code pom.xml}
- *       L234. It contributes exactly three members to the served document -- the information
+ *       L225. It contributes exactly three members to the served document -- the information
  *       block, one bearer scheme and the document-level requirement naming that scheme -- and
  *       no path, operation, schema or response. Assumptions: that emptiness is deliberate and
  *       is not an unfinished edge. The contract of record is the hand-authored
@@ -70,7 +70,7 @@
  *       against the handlers and the filter chain.</li>
  *   <li>{@code StepFunctionsConfig} -- LANDED. The client through which a
  *       {@code states:StartExecution} call starts a report execution. The AWS SDK Step
- *       Functions artifact backing it is declared at this module's {@code pom.xml} L280.
+ *       Functions artifact backing it is declared at this module's {@code pom.xml} L271.
  *       Assumptions: it declares a call timeout and nothing else -- no region, no credential
  *       provider and no endpoint override appear in source, because all three are resolved
  *       from the task environment the deployment supplies, and hard-coding any of them would
@@ -105,7 +105,7 @@
  * or into one combined configuration class, rather than giving them a package of their
  * own. Rejected on the strength of the module's own dependency set, which shows the
  * concerns arriving from unrelated directions: the resource server from the security
- * and OAuth2 starters at {@code pom.xml} L185 and L190, the datasource from the JPA
+ * and OAuth2 starters at {@code pom.xml} L176 and L190, the datasource from the JPA
  * starter and the driver at L153 and L220, the document metadata from springdoc at L234,
  * and the execution client from the AWS SDK at L280. One class holding every concern would take
  * a change for any one of them and would make the blast radius of that change the whole
@@ -140,7 +140,7 @@
  * {@code JavadocPackage} sits at Checker level, because it inspects the file system rather
  * than a parsed tree, and it requires a {@code package-info.java} to be present in every
  * directory holding a processed Java file. {@code MissingJavadocPackage} sits inside the
- * tree walker, at {@code checkstyle.xml} L378, and requires that file to carry Javadoc. An
+ * tree walker, at {@code checkstyle.xml} L371, and requires that file to carry Javadoc. An
  * empty {@code package-info.java} satisfies the first and fails the second, so both are
  * needed to express the actual requirement, and the rule set says so in its own words at
  * L236 to L243 and again at L369 to L376. A third module reaches the prose written here:
@@ -153,8 +153,8 @@
  * <p>Assumptions: the gate is inherited and is never configured from this subtree. The
  * {@code maven-checkstyle-plugin} execution named {@code checkstyle-documentation-gate} is
  * declared once, in {@code services/pom.xml}, bound to the {@code validate} phase at its
- * L730, with {@code failOnViolation} true at L819 and {@code violationSeverity} at warning
- * at L820, and it audits test sources too by way of L847. Because {@code validate}
+ * L721, with {@code failOnViolation} true at L810 and {@code violationSeverity} at warning
+ * at L811, and it audits test sources too by way of L838. Because {@code validate}
  * precedes compilation, a violation here stops the build before the compiler runs, on a
  * local build and inside the container image build alike. No suppression filter of any
  * kind is wired into the rule set, so a finding in this file cannot be waived from inside
@@ -195,7 +195,7 @@
  * <p>Alternatives Considered: a {@code BatchConfig} class here, giving this context its own
  * batch job repository. Rejected, and the module's dependency set already reflects the
  * decision: no batch starter is on this module's classpath, and this module's
- * {@code pom.xml} records the omission in prose at its L465 to L474 rather than leaving it
+ * {@code pom.xml} records the omission in prose at its L456 to L465 rather than leaving it
  * to be inferred. The substantive reason is the direction of control. This context starts
  * a state machine execution and returns; the step ledger that records which runs and which
  * steps completed belongs to batch-service, which owns it. A second job repository here
@@ -204,7 +204,7 @@
  *
  * <p>Alternatives Considered: an {@code SqsConfig} class here, modelling the report request
  * as a queued message. Rejected, and again no queue starter is on the classpath, with this
- * module's {@code pom.xml} recording the reasoning at its L476 to L484. The baseline
+ * module's {@code pom.xml} recording the reasoning at its L467 to L475. The baseline
  * submission this context encodes was not a request and reply exchange: the queue defined
  * at {@code app/csd/CARDDEMO.CSD} L499 to L505 is declared {@code TYPEFILE(OUTPUT)} at
  * L502, write-only with no reply queue anywhere in the definition, so modelling it as an

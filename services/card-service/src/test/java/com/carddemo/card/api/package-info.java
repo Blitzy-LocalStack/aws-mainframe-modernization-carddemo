@@ -247,7 +247,7 @@
  * nothing but its package statement. Both were weighed against the gate that actually runs, and each
  * fails it in a different place, which is why this file is neither absent nor bare. Two checks act
  * here and they act on different things. {@code JavadocPackage} is declared at Checker level in
- * {@code config/checkstyle/checkstyle.xml} at line 276, so it is a file-set check that fires for any
+ * {@code config/checkstyle/checkstyle.xml} at line 269, so it is a file-set check that fires for any
  * directory holding an audited {@code .java} file and demands that a {@code package-info.java} exist
  * in it. {@code MissingJavadocPackage} is declared inside {@code TreeWalker} at line 409 of that
  * same ruleset, and it demands that the file carry a documentation comment. A charter reduced to its

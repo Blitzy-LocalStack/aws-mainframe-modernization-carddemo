@@ -13,23 +13,36 @@ message text, keyboard actions, and keyset navigation while replacing the fixed
 
 ## Layout composition
 
-AAP section 0.4.4 names three shared shell elements, and `ui/src/layout/**`
-authors each once rather than repeating it across the 21 screen routes. Their
-consumers differ by design, so the table records which composes which:
+AAP section 0.4.4 names three shared shell elements, and `ui/src/layout/**` authors
+each once rather than repeating it across the screen routes. Their consumers
+differ by design, so the table records which composes which:
 
-| Shared element                | Composed by      | State                              |
-| ----------------------------- | ---------------- | ---------------------------------- |
-| `MessageBand`                 | each screen body | wired by all four authored screens |
-| `ScreenHeader`                | each screen body | wired by all four authored screens |
-| `PfKeyBar` (with `usePfKeys`) | each screen body | wired by all four authored screens |
+| Shared element                | Composed by                           | State                                                           |
+| ----------------------------- | ------------------------------------- | --------------------------------------------------------------- |
+| `MessageBand`                 | each screen body                      | wired by all 12 authored screens                                |
+| `ScreenHeader`                | 10 screen bodies; `AppShell` for 2    | `accountView` and `authSummary` delegate through `useShellSlot` |
+| `PfKeyBar` (with `usePfKeys`) | each screen body                      | wired by all 12 authored screens                                |
+| `AppShell`                    | `ui/src/router.tsx` as a layout route | wraps every route; mounted with `ownsFunctionKeys={false}`      |
 
-The four authored screens are `signon`, `cardList`, `cardDetail` and `cardUpdate`.
-Each composes all three elements, and
-`ui/src/screens/cardScreenShell.test.tsx` plus
-`ui/src/screens/signon/signon.test.tsx` assert that per screen -- the header band
-naming that screen's own transaction and program, and the key bar painting exactly
-the keys its mapset paints. The remaining 17 routes are not authored; each will
-compose the same three when it lands.
+The 12 authored screens are `signon`, `menu`, `admin`, `accountView`,
+`accountUpdate`, `cardList`, `cardDetail`, `cardUpdate`, `transactionAdd`,
+`authSummary`, `userUpdate` and `refTypeList`. Every one of them is mounted in
+`ui/src/router.tsx`, and `ui/src/routerReachability.test.tsx` walks each declared
+path to prove it resolves to a screen rather than to the not-found result. The
+remaining 9 of the 21 routes are not authored yet; each will compose the same
+elements when it lands.
+
+Per-screen behaviour is asserted by `ui/src/screens/signon/signon.test.tsx`,
+`menuScreens.test.tsx`, `cardScreenShell.test.tsx`, `cardScreens.test.tsx`,
+`accountScreens.test.tsx`, `referenceAndAuthScreens.test.tsx` and
+`entryScreens.test.tsx`; the frame itself by `ui/src/layout/appShell.test.tsx`
+and the session store behind it by `ui/src/hooks/useAuth.test.tsx`.
+
+`AppShell` is mounted with `ownsFunctionKeys={false}` deliberately. It otherwise
+binds PF12 to sign-off, and PF12 is `F12=Cancel` on three of the authored
+screens; `usePfKeys` installs one document listener per call site with no
+arbitration, so leaving the frame's binding in place would make one keystroke
+both cancel an edit and end the session.
 
 `MessageBand` is composed per screen because the message it carries is that
 screen's own outcome: it is the browser form of terminal row 23, which each
@@ -40,17 +53,16 @@ exactly one band and hands it text plus a severity, and no screen renders a raw
 the reserved-space behaviour that keeps a message appearing or clearing from
 moving the content around it.
 
-`ScreenHeader` and `PfKeyBar` are composed **per screen**, for the same reason
-`MessageBand` is: their content is per-screen data, not a constant.
+`PfKeyBar` is composed **per screen**, for the same reason `MessageBand` is: its
+content is per-screen data, not a constant. `ScreenHeader` is composed per screen
+by eight of the ten and delegated by two, because its content is per-screen data
+that a screen can hand upwards as two strings -- which the bands cannot be, being
+live state rather than identity.
 
-Refactoring Rationale: this section previously said the opposite -- that both were
-deliberately withheld from screens because their content is "constant across the
-mapsets", pending an `AppShell.tsx` that would compose them once. That premise does
-not hold, and the components' own interfaces are the first evidence against it:
-`ScreenHeaderProps` requires `transactionId` and `programName`, and `PfKeyBarProps`
-requires the `keys` bindings and an `onInvoke` callback. None of those four values
-exists at shell level. The mapsets are the second and decisive evidence -- row 24
-is **not** a shared literal:
+The reason no screen's key bar can move to the frame is the mapsets: row 24 is
+**not** a shared literal, and neither is the value a screen would have to supply --
+`PfKeyBarProps` requires resolved bindings and an `onInvoke` callback, both of which
+exist only where the keys are bound:
 
 | Mapset    | Legend literal it paints  |
 | --------- | ------------------------- |
@@ -61,13 +73,17 @@ is **not** a shared literal:
 So a single shell-level bar could not render any screen's legend correctly, and
 `usePfKeys` is built for the per-screen shape it actually has: a screen declares
 which attention identifiers it handles, and the hook returns the bindings the bar
-renders. Composing at shell level was never reachable from this API. The consequence
-recorded honestly: `AppShell.tsx` is not authored and is **no longer required** for
-either element.
+renders. What the frame does instead is RENDER a legend a screen has delegated,
+forwarding activations back to that screen's own dispatcher, and bind no key of its
+own -- `RETIRED_SHELL_FUNCTION_KEY` in `ui/src/layout/AppShell.tsx` records the one
+key it used to bind and why it stopped: the hook installs a listener per call site
+with no ownership registry, and the three update screens bind F12 as cancel, so a
+frame-level F12 would have discarded an edit and ended the session on one keypress.
+Sign-off is a visible control in the frame instead.
 
-The four legends the authored screens paint show why the per-screen shape is the
-only workable one -- each is read from that screen's own mapset, and one screen
-paints two legend fields rather than one:
+Four of the ten legends show why the per-screen shape is the only workable one --
+each is read from that screen's own mapset, and one screen paints two legend fields
+rather than one:
 
 | Screen       | Mapset    | Legend the mapset paints            | Note                                                                                          |
 | ------------ | --------- | ----------------------------------- | --------------------------------------------------------------------------------------------- |
@@ -109,6 +125,14 @@ Populate `VITE_API_BASE_URL`, `VITE_CORRELATION_ID_HEADER`, and
 authenticate directly with the user pool: it posts credentials to
 `auth-service`'s published sign-on operation and holds only the tokens that
 operation returns.
+
+Assumptions: those tokens are held **in memory only** and are written to no browser store — no
+`sessionStorage` key, no `localStorage` key and no cookie. A client-side route change keeps the
+session; a page reload, a restored tab or a second tab holds nothing and the operator signs on
+again. That is a deliberate reduction in session durability, taken to remove a credential exposure
+rather than to narrow it, and it is registered as `D-SESSION-NOT-PERSISTED` in
+`docs/architecture/cobol-to-service-traceability.md` with the two rejected alternatives argued in
+full. `ui/.env.example` states the same for a reader who never opens that document.
 
 Assumptions: **`VITE_API_BASE_URL` configures a local development server only.**
 Vite inlines it at build time, so it cannot carry a deployed environment's

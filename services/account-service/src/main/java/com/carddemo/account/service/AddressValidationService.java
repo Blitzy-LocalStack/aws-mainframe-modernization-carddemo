@@ -52,8 +52,8 @@ import org.springframework.stereotype.Service;
  * distinct literals in each range of the copybook gives 490 for line 30, 410 for line 521 and 80 for
  * line 931; 410 and 80 sum to 490, the two narrower lists share no member, and their union equals
  * the broad one exactly. The migrated schema records that partition rather than rediscovering it:
- * {@code services/reference-service/src/main/resources/db/migration/V1__reference.sql} line 327
- * declares {@code reference.us_phone_area_codes} with a classification column bounded at line 359 to
+ * {@code services/reference-service/src/main/resources/db/migration/V1__reference.sql} line 316
+ * declares {@code reference.us_phone_area_codes} with a classification column bounded at line 348 to
  * the two values {@code 'G'} and {@code 'E'}. Presence of a row therefore answers line 30,
  * classification {@code 'G'} answers line 521 and classification {@code 'E'} answers line 931.</p>
  *
@@ -155,7 +155,7 @@ import org.springframework.stereotype.Service;
  * <p>Assumptions: the values in the reference tables are stored in a blank-insensitive fixed-width
  * type, so a padded probe still matches its row. The three columns are declared {@code CHAR(3)},
  * {@code CHAR(2)} and {@code CHAR(4)} at
- * {@code services/reference-service/src/main/resources/db/migration/V1__reference.sql} lines 328, 390
+ * {@code services/reference-service/src/main/resources/db/migration/V1__reference.sql} lines 317, 379
  * and 413, and the note beside the state column records that the choice is what lets a value arriving
  * from a fixed-width source match without being trimmed first.</p>
  *
@@ -1216,7 +1216,7 @@ public class AddressValidationService {
      * {@code app/cpy/CSLKPCDY.cpy} partition the broad one exactly. The stored form is the
      * single-character code that
      * {@code services/reference-service/src/main/resources/db/migration/V1__reference.sql} bounds at
-     * line 359 to {@code 'G'} and {@code 'E'}, so this enumeration and that constraint are two
+     * line 348 to {@code 'G'} and {@code 'E'}, so this enumeration and that constraint are two
      * spellings of one closed domain and a third class would have to be added to both or to
      * neither.</p>
      */

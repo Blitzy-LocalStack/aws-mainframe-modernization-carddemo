@@ -189,6 +189,19 @@ _SYNTHETIC_SUBJECT: Final[str] = "00000000-0000-4000-8000-000000000001"
 #   unnoticed while a duplicate key inside one delivery was silently collapsed by the merge;
 #   now that the loader refuses such a delivery the fixture's own defect is visible. A pool,
 #   each with its own subject, is what makes the builder's documented property true.
+# WHY : Assumptions: this is a CAPACITY, and :func:`_synthetic_records` refuses a batch larger than
+#   it rather than emitting a user the document cannot resolve. That refusal is what makes the
+#   number safe to choose rather than something to get right: eight is headroom over the largest
+#   batch any case here builds -- three, at the two re-run proofs -- and it costs two short strings
+#   per entry in a document rebuilt per context, so there is nothing to save by trimming it to the
+#   exact figure and nothing to gain by publishing an unbounded one.
+# WHY : ⚠️ Refactoring Rationale: the bound was neither explained nor enforced, and the two
+#   omissions compounded. :func:`_synthetic_records` documented an arbitrary ``count`` while a
+#   SECUSER batch above this many records emitted SYNTH009 onward -- identifiers absent from the
+#   subject document -- so the subject projection refused them and the failure surfaced as a
+#   loader error inside whichever case had grown, naming the projection rather than the fixture
+#   that outgrew its pool. Enforcing the bound at the builder moves the diagnosis to the line that
+#   caused it, and states in its message what to change.
 _SYNTHETIC_SUBJECT_POOL: Final[int] = 8
 # Assumptions: the stamp is the canonical 26-character form the timestamp module renders, taken
 #   from the committed transaction fixture's own originating stamp so it is a shape the reference
@@ -249,7 +262,7 @@ class _GenerationFamilyFact(NamedTuple):
     name_line: str
 
 
-# WHY : Assumptions: the eleven targets are transcribed from the migration plan's own
+# Assumptions: the eleven targets are transcribed from the migration plan's own
 #   enumeration rather than read back from ``aurora.TARGETS``, because a test that derives its
 #   expectation from the thing under test cannot detect a target being dropped. The eleven span
 #   FIVE distinct schemas -- auth, account, card, ledger and reference -- and that figure is
@@ -271,7 +284,7 @@ _ELEVEN_TARGET_TABLES: Final[tuple[_TargetTable, ...]] = (
     _TargetTable("DISGROUP", "reference", "disclosure_groups"),
 )
 
-# WHY : Assumptions: there are TEN generation families, not six, and the arithmetic is written
+# Assumptions: there are TEN generation families, not six, and the arithmetic is written
 #   out so a reader can add it up: SIX are defined in ``app/jcl/DEFGDGB.jcl`` (NAME operands at
 #   L25, L31, L37, L43, L49 and L55), THREE in ``app/jcl/DEFGDGD.jcl`` (L28, L51, L74) and ONE in
 #   ``app/jcl/DALYREJS.jcl`` (L25, inside the DEFINE opened at L24). 6 + 3 + 1 = 10, and every one
@@ -310,13 +323,13 @@ _TEN_GENERATION_FAMILIES: Final[tuple[_GenerationFamilyFact, ...]] = (
     _GenerationFamilyFact("dalyrejs", "AWS.M2.CARDDEMO.DALYREJS", "app/jcl/DALYREJS.jcl", "L25"),
 )
 
-# WHY : Assumptions: the business date is the one ``app/jcl/INTCALC.jcl`` injects at L22 as
+# Assumptions: the business date is the one ``app/jcl/INTCALC.jcl`` injects at L22 as
 #   ``PARM='2022071800'``. Reusing the baseline's own injected date rather than inventing one
 #   keeps every staged prefix in this module comparable with the reference pipeline's, and it is
 #   the same date the parity suite runs its interest cycle against.
 _BUSINESS_DATE: Final[date] = date(2022, 7, 18)
 
-# WHY : Assumptions: a second date is needed by exactly one property -- that ``(+1)`` is scoped
+# Assumptions: a second date is needed by exactly one property -- that ``(+1)`` is scoped
 #   to the target business date while ``(0)`` spans the family -- and it is the day after the
 #   first so the ordering between the two is unambiguous.
 _LATER_BUSINESS_DATE: Final[date] = date(2022, 7, 19)
@@ -325,7 +338,7 @@ _LATER_BUSINESS_DATE: Final[date] = date(2022, 7, 19)
 #: :meth:`conftest.SeedCorpus.ebcdic_path` accepts it.
 _BINARY_EXTRACT: Final[str] = "EXPORT.DATA.PS"
 
-# WHY : Assumptions: these three figures are MEASURED from the committed file rather than
+# Assumptions: these three figures are MEASURED from the committed file rather than
 #   declared -- 250000 bytes carrying five stray 0x0A bytes and eleven stray 0x0D bytes -- and
 #   they are what makes the verbatim assertion meaningful instead of decorative. A text-mode
 #   write or a newline normalisation would rewrite exactly those sixteen bytes, and a byte count
@@ -339,7 +352,7 @@ _BINARY_EXTRACT_BYTE_SIZE: Final[int] = 250000
 _BINARY_EXTRACT_STRAY_LINE_FEEDS: Final[int] = 5
 _BINARY_EXTRACT_STRAY_CARRIAGE_RETURNS: Final[int] = 11
 
-# WHY : Assumptions: the padding cases straddle every digit boundary the four-digit component
+# Assumptions: the padding cases straddle every digit boundary the four-digit component
 #   has -- one, nine, ten, ninety-nine, one hundred and one thousand -- because zero padding is
 #   what makes a LEXICAL prefix listing sort in numeric order. Without it ``gen=10`` sorts before
 #   ``gen=9``, and the highest-existing-generation discovery below reads the wrong generation as
@@ -353,7 +366,7 @@ _GENERATION_PADDING_CASES: Final[tuple[tuple[int, str], ...]] = (
     (1000, "gen=1000/"),
 )
 
-# WHY : Assumptions: exactly three baseline field names are misspelled and each correction is
+# Assumptions: exactly three baseline field names are misspelled and each correction is
 #   recorded here with the record and table it lands in, so the assertion covers the correction
 #   AND its destination. Two are the same misspelling of "expiration" in two different masters
 #   and both become ``expiration_date`` in their own table, which is why the table has to name
@@ -372,14 +385,14 @@ _UNTARGETED_MISSPELLING: Final[tuple[str, str]] = (
     "merchant_category_code",
 )
 
-# WHY : Assumptions: these are the misspelling fragments the baseline actually contains, and the
+# Assumptions: these are the misspelling fragments the baseline actually contains, and the
 #   assertion that no FOURTH field is renamed is expressed by scanning every registered layout
 #   for them rather than by counting the mapping's entries. A count says the mapping has three
 #   rows; the scan says the baseline has three misspellings, which is the property that matters
 #   -- a fourth misspelled field left uncorrected would satisfy the count and fail the scan.
 _MISSPELLING_FRAGMENTS: Final[tuple[str, ...]] = ("EXPIRAION", "CATAGORY")
 
-# WHY : Assumptions: the wall-clock readers are enumerated as DOTTED CALL names because that is
+# Assumptions: the wall-clock readers are enumerated as DOTTED CALL names because that is
 #   the shape the AST walk below can match exactly. Both spellings of each are listed -- the
 #   bare ``date.today`` a module gets from ``from datetime import date`` and the qualified
 #   ``datetime.date.today`` it gets from ``import datetime`` -- since a module choosing the other
@@ -401,19 +414,15 @@ _WALL_CLOCK_CALLS: Final[frozenset[str]] = frozenset(
     }
 )
 
-# WHY : Assumptions: the allow-list is keyed by MODULE PATH relative to the package root and names
+# Assumptions: the allow-list is keyed by MODULE PATH relative to the package root and names
 #   the exact client each module may import, so a new import site is a failure rather than a silent
 #   widening. It is stated here, in the test, rather than derived from the tree -- deriving it would
 #   make the assertion "the tree imports what the tree imports", which is true of every tree.
-# WHY : Assumptions: `credentials.py` is on this list, and its presence is the correction. The
-#   loader package's own boundary docstring used to claim `aurora` was the distribution's SOLE
-#   psycopg owner while this module imported the driver in two functions, and the earlier version of
-#   the ownership test below inspected only `aurora` and `s3_stage` -- so it passed while the
-#   architecture it asserted was false. The two sites are not duplication: `aurora.connect`
-#   authenticates as a per-schema LOGIN role and verifies which one, whereas `credentials` connects
-#   as the cluster's MASTER user to run `ALTER ROLE`, which is the one principal that role check
-#   exists to refuse.
-# WHY : Assumptions: `config.py` is allowed `boto3` and `botocore` because it is the single place a
+# Assumptions: `credentials.py` is on this list because it imports the database driver in two
+#   functions, and the two psycopg sites are not duplication: `aurora.connect` authenticates as a
+#   per-schema LOGIN role and verifies which one, whereas `credentials` connects as the cluster's
+#   MASTER user to run `ALTER ROLE`, which is the one principal that role check exists to refuse.
+# Assumptions: `config.py` is allowed `boto3` and `botocore` because it is the single place a
 #   client is constructed and an endpoint resolved, which is what lets `s3_stage` take its client as
 #   an argument and import no SDK at all.
 _PERMITTED_SERVICE_CLIENT_IMPORTS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
@@ -427,7 +436,7 @@ _PERMITTED_SERVICE_CLIENT_IMPORTS: Final[Mapping[str, frozenset[str]]] = Mapping
 #: Third-party service clients whose absence from a module's imports is the layering guard.
 _SERVICE_CLIENT_MODULES: Final[frozenset[str]] = frozenset({"boto3", "botocore", "psycopg"})
 
-# WHY : Assumptions: the seven statement kinds the loader must never issue are named here, in this
+# Assumptions: the seven statement kinds the loader must never issue are named here, in this
 #   module, even though the double already carries the patterns that detect them. The detection
 #   vocabulary is the entire strength of the negative privilege assertion below: that assertion
 #   reads ``forbidden_statements() == ()``, which stays true if the vocabulary is ever narrowed,
@@ -448,7 +457,7 @@ _WITHHELD_STATEMENT_KINDS: Final[frozenset[str]] = frozenset(
     }
 )
 
-# WHY : Assumptions: the seeding helper below suppresses retention entirely rather than passing a
+# Assumptions: the seeding helper below suppresses retention entirely rather than passing a
 #   count matched to the generations it writes, and the reason is that retention is scoped to the
 #   FAMILY and not to a business date. A count of one while staging one generation for a second
 #   date therefore scratches the first date's generations, which was measured rather than
@@ -500,7 +509,7 @@ def _connect_as_owning_role(
         Propagated from the double if the translated parameters would not have verified the
         server's certificate.
     """
-    # WHY : Assumptions: the role comes from the published schema-to-role map rather than from an
+    # Assumptions: the role comes from the published schema-to-role map rather than from an
     #   f-string over the schema name. The two agree today, and writing the derivation here would
     #   make this helper pass for a schema whose role the bootstrap never created -- which is the
     #   one mistake a role assertion exists to catch.
@@ -512,7 +521,7 @@ def _connect_as_owning_role(
         password=SYNTHETIC_PASSWORD_FILL,
         ssl_root_cert="/nonexistent/synthetic-test-anchor.pem",
     )
-    # WHY : Assumptions: the parameters are produced by ``as_connection_params`` rather than
+    # Assumptions: the parameters are produced by ``as_connection_params`` rather than
     #   assembled by hand, because the settings attribute is spelled ``database`` and the driver
     #   keyword is ``dbname``. Passing the fields through by name is a mistake only a connect call
     #   catches, and routing every test through this one translation is what keeps it caught.
@@ -547,7 +556,7 @@ def _module_tree(module_path: str) -> ast.Module:
     SyntaxError
         If the source does not parse, which would already have failed at import.
     """
-    # WHY : Trade-offs: the parameter is a PATH STRING rather than the module object, and the reason
+    # Trade-offs: the parameter is a PATH STRING rather than the module object, and the reason
     #   is that the path is the identity the cache should key on -- NOT that a module object cannot
     #   be a key. A module object is perfectly hashable, by identity, which is exactly the problem:
     #   two callers holding different objects for the same file -- the installed distribution and a
@@ -580,17 +589,13 @@ def _docstring_constant_ids(tree: ast.Module) -> frozenset[int]:
     frozenset[int]
         The :func:`id` of each string-constant node occupying the docstring position of the
         module, a class, or a function.
-
-    Raises
-    ------
-    None
     """
     documented: set[int] = set()
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         body = node.body
-        # WHY : Assumptions: a docstring is recognised STRUCTURALLY -- the first statement of a
+        # Assumptions: a docstring is recognised STRUCTURALLY -- the first statement of a
         #   body being a bare string expression -- rather than by matching text. That is exactly
         #   the rule the language itself applies, so this cannot disagree with what Python treats
         #   as a docstring, and it correctly leaves a string used as a value in first position
@@ -621,7 +626,7 @@ def _executable_string_literals(module: Any) -> tuple[str, ...]:  # noqa: ANN401
     OSError
         If the module's source cannot be read.
     """
-    # WHY : Assumptions: docstrings are excluded by NODE IDENTITY rather than by comparing
+    # Assumptions: docstrings are excluded by NODE IDENTITY rather than by comparing
     #   text. Two identical strings can appear both as documentation and as data, and a
     #   text-based exclusion would then drop the data occurrence as well -- silently
     #   narrowing the scan that exists to catch a literal endpoint.
@@ -650,12 +655,8 @@ def _dotted_name(node: ast.expr) -> str | None:
         The dotted spelling, for example ``config.aws_client``, or ``None`` when the expression
         is neither a name nor a chain of attributes over one -- a subscript or a call result, for
         which no static spelling exists.
-
-    Raises
-    ------
-    None
     """
-    # WHY : Trade-offs: an expression with no static spelling reports ``None`` rather than a
+    # Trade-offs: an expression with no static spelling reports ``None`` rather than a
     #   best guess. A call on a subscript or on another call result cannot be named without
     #   evaluating it, and inventing a partial name would put an entry in the call set that
     #   no assertion could interpret -- worse than an acknowledged gap, because it would
@@ -688,7 +689,7 @@ def _called_dotted_names(module: Any) -> frozenset[str]:  # noqa: ANN401 -- any 
     OSError
         If the module's source cannot be read.
     """
-    # WHY : Assumptions: EVERY call in the module is collected, including calls inside a
+    # Assumptions: EVERY call in the module is collected, including calls inside a
     #   function body and inside a nested scope. A walk restricted to module level would
     #   miss precisely the calls that matter here: both loaders defer their client and driver
     #   acquisition into the one function that needs it.
@@ -718,7 +719,7 @@ def _keyword_argument_names(module: Any) -> frozenset[str]:  # noqa: ANN401 -- a
     OSError
         If the module's source cannot be read.
     """
-    # WHY : Assumptions: a ``**`` unpacking is skipped because it carries no static name, and
+    # Assumptions: a ``**`` unpacking is skipped because it carries no static name, and
     #   that limit is stated rather than hidden: a module could in principle pass an endpoint
     #   through an unpacked mapping and this collection would not see it. The companion
     #   literal scan is what covers that case, which is why the endpoint assertion uses both.
@@ -754,7 +755,7 @@ def _imported_module_names(module: Any) -> frozenset[str]:  # noqa: ANN401 -- an
     OSError
         If the module's source cannot be read.
     """
-    # WHY : Assumptions: names are reduced to their TOP-LEVEL distribution and a relative
+    # Assumptions: names are reduced to their TOP-LEVEL distribution and a relative
     #   import is skipped by its non-zero level. Reducing is what makes
     #   ``botocore.exceptions`` answer the question actually being asked -- can this module
     #   reach the AWS SDK -- which a check on the full dotted path would answer only for the
@@ -791,7 +792,7 @@ def _client_operations(module: Any) -> frozenset[str]:  # noqa: ANN401 -- any mo
     OSError
         If the module's source cannot be read.
     """
-    # WHY : Assumptions: the injected client is matched by the PARAMETER NAME ``client``,
+    # Assumptions: the injected client is matched by the PARAMETER NAME ``client``,
     #   which every public function in the staging module uses for it. That is a convention
     #   rather than a language guarantee, and the cost of it being broken is visible rather
     #   than silent: a renamed parameter empties this set, and the assertion comparing it
@@ -821,12 +822,8 @@ def _all_declared_layouts() -> Mapping[str, layouts.RecordSpec]:
     -------
     Mapping[str, carddemo_migration.copybook.layouts.RecordSpec]
         Every module-level record specification, keyed by the constant that declares it.
-
-    Raises
-    ------
-    None
     """
-    # WHY : Assumptions: the layouts are discovered by TYPE from the module's own namespace rather
+    # Assumptions: the layouts are discovered by TYPE from the module's own namespace rather
     #   than listed here by name. A list would go stale the moment a layout is added, and it would
     #   go stale silently -- the scan would keep passing while covering less than it claims, which
     #   is the exact failure mode a completeness check exists to prevent.
@@ -863,12 +860,8 @@ class _StubDataKeys:
         -------
         DataKey
             A fixed plaintext/wrapped pair.
-
-        Raises
-        ------
-        None
         """
-        # WHY : Assumptions: the key material is a FIXED byte range rather than random, because a
+        # Assumptions: the key material is a FIXED byte range rather than random, because a
         #   random key would make the envelope differ between two runs of the same test for a
         #   reason unrelated to what is under test. The envelope still differs between two SEALS
         #   of the same value -- the initialisation vector is drawn per value by the cipher, not
@@ -884,19 +877,17 @@ def _synthetic_user_id(ordinal: int) -> str:
     Parameters
     ----------
     ordinal : int
-        The record's zero-based position in a synthetic batch.
+        The record's zero-based position in a synthetic batch. Ordinals 0 through 998 render as
+        ``SYNTH`` plus a three-digit counter, which is the eight characters SEC-USR-ID declares;
+        a higher ordinal widens the counter and so would exceed the field. Callers stay inside
+        that range because they draw from :data:`_SYNTHETIC_SUBJECT_POOL`, which is far smaller.
 
     Returns
     -------
     str
-        An eight-character identifier of the record's declared width. Ordinal zero is
+        An eight-character identifier at the record's declared width. Ordinal zero is
         :data:`_SYNTHETIC_USER_ID`, so the single-record cases that name that constant keep naming
         the same user as ordinal zero of a batch.
-
-    Raises
-    ------
-    None
-        Formatting an integer cannot fail.
     """
     return f"SYNTH{ordinal + 1:03d}"
 
@@ -914,13 +905,8 @@ def _synthetic_subject(ordinal: int) -> str:
     str
         An identifier in version-4 shape whose final group counts the ordinal. Ordinal zero is
         :data:`_SYNTHETIC_SUBJECT`.
-
-    Raises
-    ------
-    None
-        Formatting an integer cannot fail.
     """
-    # WHY : Assumptions: a subject NAMES a user rather than authenticating one, so nothing is
+    # Assumptions: a subject NAMES a user rather than authenticating one, so nothing is
     #   disclosed by writing a predictable value here, and a derived value is what lets the re-run
     #   comparison be exact across two passes over the same batch.
     return f"00000000-0000-4000-8000-{ordinal + 1:012d}"
@@ -938,8 +924,10 @@ def _load_context() -> aurora.LoadContext:
     Returns
     -------
     aurora.LoadContext
-        A context carrying both ciphers over :class:`_StubDataKeys` and a subject for the one
-        synthetic user identifier :func:`_synthetic_records` produces.
+        A context carrying both ciphers over :class:`_StubDataKeys` and a subject document holding
+        :data:`_SYNTHETIC_SUBJECT_POOL` entries -- one per record ordinal
+        :func:`_synthetic_records` can produce, keyed by :func:`_synthetic_user_id` and valued by
+        :func:`_synthetic_subject`, so every identifier that builder emits resolves.
 
     Raises
     ------
@@ -949,13 +937,20 @@ def _load_context() -> aurora.LoadContext:
     return aurora.LoadContext(
         identifier_cipher=CustomerIdentifierCipher(key_id="synthetic-key", keys=keys),
         verification_value_cipher=CardVerificationValueCipher(key_id="synthetic-key", keys=keys),
-        # WHY : Assumptions: the subject is an all-zero identifier in version-4 shape. A subject
-        #   NAMES a user rather than authenticating one, so nothing is disclosed by writing it,
-        #   and a derived value is what lets the re-run comparison below be exact.
+        # WHY : Assumptions: each subject is DERIVED FROM ITS ORDINAL in version-4 shape, ordinal
+        #   zero giving :data:`_SYNTHETIC_SUBJECT`. A subject NAMES a user rather than
+        #   authenticating one, so nothing is disclosed by writing a predictable value, and
+        #   deriving it is what lets the re-run comparison below be exact across two passes.
         # WHY : Assumptions: a POOL of subjects is published rather than one, because the security
         #   record's key is the user identifier and the batch builder gives each record its own.
         #   Publishing a single subject made every record of that batch the same user, which the
         #   loader now correctly refuses as a delivery presenting one key twice.
+        # WHY : ⚠️ Refactoring Rationale: this comment opened "the subject is an all-zero
+        #   identifier in version-4 shape", singular, describing the one document this helper
+        #   published before the pool replaced it. The two comments then disagreed in the same
+        #   block -- one subject in the first, a pool in the second -- and the singular reading is
+        #   the one a maintainer would have acted on, by adding a second all-zero entry or by
+        #   dropping the pool back to one.
         subjects=MappingProxyType(
             {
                 _synthetic_user_id(ordinal): _synthetic_subject(ordinal)
@@ -989,12 +984,8 @@ def _synthetic_value(field: layouts.FieldSpec, column: str, ordinal: int) -> obj
     object
         A ``Decimal`` at scale two for a signed display field, a canonical 26-character stamp for
         a timestamp column, and a fixed-width string otherwise.
-
-    Raises
-    ------
-    None
     """
-    # WHY : Assumptions: the value is derived from the DESCRIPTOR's kind and width rather than
+    # Assumptions: the value is derived from the DESCRIPTOR's kind and width rather than
     #   typed at a literal length, so a layout change moves these records with it. The alternative
     #   -- a table of literals per record name -- is the same duplication the key-geometry finding
     #   objects to, one layer down: it would keep passing after a width changed underneath it.
@@ -1027,7 +1018,8 @@ def _synthetic_records(record: str, count: int) -> tuple[dict[str, object], ...]
         A registered record name that is also a declared load target.
     count : int
         How many records to build. Each carries a distinct key, so a merge over them conflicts
-        on nothing within the batch.
+        on nothing within the batch. At most :data:`_SYNTHETIC_SUBJECT_POOL`, because that is how
+        many user identifiers :func:`_load_context` publishes a subject for.
 
     Returns
     -------
@@ -1037,9 +1029,28 @@ def _synthetic_records(record: str, count: int) -> tuple[dict[str, object], ...]
 
     Raises
     ------
+    ValueError
+        If ``count`` exceeds :data:`_SYNTHETIC_SUBJECT_POOL`, which would emit a security-user
+        identifier the subject document cannot resolve.
     carddemo_migration.copybook.layouts.LayoutError
         If the record name is not registered.
     """
+    # WHY : Assumptions: the bound is checked for EVERY record rather than only for the security
+    #   record, although only that one consumes the subject document. Two reasons. A caller reads
+    #   one contract for this builder, so a limit that applied to one of eleven targets and not the
+    #   others would be the more surprising rule; and the identifier pool is what the ordinal
+    #   derivation is bounded by, so a batch larger than it is outside this helper's contract
+    #   whichever target it is built for. Alternatives Considered: sizing the document from the
+    #   count instead, by having _load_context take it as an argument. Rejected because the context
+    #   is built once and shared by the parametrised cases while each case chooses its own batch
+    #   size, so the argument would have to be threaded through every call site to remove a bound
+    #   that no case is anywhere near.
+    if count > _SYNTHETIC_SUBJECT_POOL:
+        raise ValueError(
+            f"a synthetic batch of {count} exceeds the {_SYNTHETIC_SUBJECT_POOL} subjects "
+            "_load_context publishes; raise _SYNTHETIC_SUBJECT_POOL to at least that many so "
+            "every _synthetic_user_id ordinal resolves to a subject"
+        )
     target = aurora.TARGETS[record]
     spec = layouts.layout(record)
     by_name = {field.name: field for field in spec.fields}
@@ -1048,7 +1059,7 @@ def _synthetic_records(record: str, count: int) -> tuple[dict[str, object], ...]
         values: dict[str, object] = {}
         for name, column in target.columns.items():
             field = by_name.get(name)
-            # WHY : Assumptions: a mapped name absent from the LAYOUT is skipped rather than
+            # Assumptions: a mapped name absent from the LAYOUT is skipped rather than
             #   filled. Exactly one exists -- the security record's subject column, which is
             #   derived from the published seed-user document and not read from the extract -- and
             #   inventing a value for it here would bypass the derivation under test.
@@ -1111,7 +1122,7 @@ def _money_bearing_records(
             )
         )
     elif record == "TRAN":
-        # WHY : Assumptions: the transaction master's processing stamp is SUBSTITUTED from the
+        # Assumptions: the transaction master's processing stamp is SUBSTITUTED from the
         #   record's own originating stamp, because the committed extract is the pre-posting feed
         #   and carries blanks in that span -- and the column is declared NOT NULL, so the loader
         #   refuses a blank rather than converting it. The substitution is not a workaround: the
@@ -1149,12 +1160,8 @@ def _comparable_positions(target: aurora.TableTarget) -> tuple[int, ...]:
     tuple[int, ...]
         Zero-based positions within a copied row, in column order, of every field the target
         itself reports as comparable.
-
-    Raises
-    ------
-    None
     """
-    # WHY : Assumptions: the comparable set is read from the TARGET rather than filtered here by
+    # Assumptions: the comparable set is read from the TARGET rather than filtered here by
     #   projection, because the target already publishes exactly this distinction for the checksum
     #   verification pass. Re-deriving it would put a second answer to one question in the suite.
     comparable = set(target.comparable_fields())
@@ -1204,7 +1211,7 @@ def _stage_generations(
     carddemo_migration.loaders.s3_stage.DatasetSourceError
         If the extract cannot be staged.
     """
-    # WHY : Assumptions: the generations are written through the staging function itself
+    # Assumptions: the generations are written through the staging function itself
     #   rather than poked into the double as objects, so what the discovery assertions later
     #   read is exactly what staging writes. Arranging the keys by hand would let a test pass
     #   against a prefix shape the loader does not actually produce, which is the one thing
@@ -1246,10 +1253,6 @@ def test_the_eleven_load_targets_are_the_tables_the_migration_declares() -> None
     -------
     None
         Nothing; a difference in either direction is reported as an assertion failure naming it.
-
-    Raises
-    ------
-    None
     """
     expected = {(row.record, row.schema, row.table) for row in _ELEVEN_TARGET_TABLES}
     declared = {
@@ -1263,7 +1266,7 @@ def test_the_eleven_load_targets_are_the_tables_the_migration_declares() -> None
         f"={sorted(expected - declared)}"
     )
     assert len(_ELEVEN_TARGET_TABLES) == 11
-    # WHY : Assumptions: the qualified names are asserted to be DISTINCT as well as complete. Two
+    # Assumptions: the qualified names are asserted to be DISTINCT as well as complete. Two
     #   records mapped to one table would satisfy the set comparison above only if both rows were
     #   also wrong in the same way, but a duplicate table is worth its own check because it is the
     #   shape a copy-paste error takes, and it would silently load one record over another.
@@ -1284,12 +1287,8 @@ def test_the_eleven_targets_span_the_five_schemas_that_own_an_extract() -> None:
     -------
     None
         Nothing; a target in an unexpected schema is reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
-    # WHY : Assumptions: the five are COUNTED from the inventory table rather than written out as
+    # Assumptions: the five are COUNTED from the inventory table rather than written out as
     #   a number here. A figure stated beside a list is the thing that goes stale without the list
     #   changing, which is the same failure mode the generation count guards against, so the
     #   expectation is derived and only the membership is declared.
@@ -1338,17 +1337,12 @@ def test_each_target_loads_as_its_own_schema_s_login_role(
     None
         Nothing; a connection authenticated as the wrong role, one opened with no stated
         expectation, or one carrying an unmasked credential, is reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
-    # WHY : Refactoring Rationale: this test used to call a HELPER in this module that looked the
-    #   role up in ``SCHEMA_ROLES`` and then asserted the helper had looked it up -- a tautology
-    #   dressed as a privilege proof, which would have passed unchanged if the shipped code had
-    #   connected as a superuser for every schema. It now drives ``cli._connect_for``, the one
-    #   function every database command resolves its connection through, and records what
-    #   PRODUCTION asked for.
+    # Assumptions: the case drives ``cli._connect_for`` -- the one function every database
+    #   command resolves its connection through -- rather than a helper in this module that would
+    #   look the role up in ``SCHEMA_ROLES`` and then assert the lookup. Asserting a local helper
+    #   is a tautology dressed as a privilege proof: it would pass unchanged against shipped code
+    #   that connected as a superuser for every schema.
     demanded: list[str | None] = []
 
     def _resolve(schema: str) -> AuroraConnectionSettings:
@@ -1363,10 +1357,6 @@ def test_each_target_loads_as_its_own_schema_s_login_role(
         -------
         AuroraConnectionSettings
             Settings whose user is that schema's login role.
-
-        Raises
-        ------
-        None
         """
         return replace(aurora_settings, user=role_for_schema(schema))
 
@@ -1384,31 +1374,26 @@ def test_each_target_loads_as_its_own_schema_s_login_role(
         -------
         Any
             A recording connection from the double.
-
-        Raises
-        ------
-        None
         """
         demanded.append(expected_role)
-        # WHY : Assumptions: the parameters are produced by ``as_connection_params`` rather than
+        # Assumptions: the parameters are produced by ``as_connection_params`` rather than
         #   assembled by hand, because the settings attribute is spelled ``database`` and the driver
         #   keyword is ``dbname``. Passing the fields through by name is a mistake only a connect
         #   call catches.
         return fake_aurora.connect(**resolved.as_connection_params())
 
     monkeypatch.setattr(cli, "resolve_aurora_settings", _resolve)
-    # WHY : Refactoring Rationale: the connection seam is patched on the OWNING module, not on
-    #   `cli`. The command imports `connect` inside the handler that uses it -- so that
-    #   `list-datasets`, `decode-record` and `stage-dataset` reach neither the loader nor the
-    #   database driver -- which means a re-export on `cli` no longer exists to patch. Patching
-    #   the authority is the better arrangement anyway: every call path reaches the double,
-    #   including the ones that resolve the name themselves, which a re-export never covered.
+    # Assumptions: the connection seam is patched on the OWNING module, not on `cli`. The
+    #   command imports `connect` inside the handler that uses it -- so that `list-datasets`,
+    #   `decode-record` and `stage-dataset` reach neither the loader nor the database driver --
+    #   so `cli` carries no re-export to patch. Patching the authority also reaches every call
+    #   path, including the ones that resolve the name themselves.
     monkeypatch.setattr(aurora, "connect", _connect)
 
     target = aurora.TARGETS[row.record]
     cli._connect_for(target)  # noqa: SLF001 -- the orchestration under test is module-private
 
-    # WHY : Assumptions: the role production DEMANDED is asserted, not merely the role the
+    # Assumptions: the role production DEMANDED is asserted, not merely the role the
     #   connection ended up using. The two differ exactly where it matters: a command that opened
     #   the connection with no expectation would still authenticate as whatever the resolver
     #   returned, so a test reading only the recorded parameters would call that a pass.
@@ -1418,7 +1403,7 @@ def test_each_target_loads_as_its_own_schema_s_login_role(
     recorded = fake_aurora.connection_params[-1]
     assert recorded["user"] == f"carddemo_{row.schema}"
     assert recorded["dbname"] == "carddemo"
-    # WHY : Assumptions: the credential is asserted PRESENT and REDACTED rather than absent. The
+    # Assumptions: the credential is asserted PRESENT and REDACTED rather than absent. The
     #   double masks a non-empty password and leaves an empty one alone, so this distinguishes "a
     #   credential was supplied and cannot be printed" from "no credential was supplied at all" --
     #   and the second is a real defect that an assertion on absence would call a pass.
@@ -1451,15 +1436,10 @@ def test_a_credential_for_the_wrong_role_is_refused_before_the_driver_is_reached
     -------
     None
         Nothing; an accepted mismatch is reported as an assertion failure.
-
-    Raises
-    ------
-    None
-        The provoked refusal is caught by :func:`pytest.raises`.
     """
     target = aurora.TARGETS[row.record]
     expected = role_for_schema(target.schema)
-    # WHY : Assumptions: the wrong role is another schema's REAL login role rather than a nonsense
+    # Assumptions: the wrong role is another schema's REAL login role rather than a nonsense
     #   string, because that is the realistic fault -- a per-schema secret path resolving to the
     #   neighbouring context's secret. A nonsense value would also be refused by any check that
     #   merely required a ``carddemo_`` prefix, which is not the check being asserted.
@@ -1472,7 +1452,7 @@ def test_a_credential_for_the_wrong_role_is_refused_before_the_driver_is_reached
     message = str(refused.value)
     assert expected in message
     assert wrong in message
-    # WHY : Assumptions: the refusal names no credential. The settings object carries a password,
+    # Assumptions: the refusal names no credential. The settings object carries a password,
     #   and a message rendering the whole object -- the obvious way to write this diagnostic --
     #   would put it in an operator's log.
     assert SYNTHETIC_PASSWORD_FILL not in message
@@ -1492,21 +1472,17 @@ def test_every_qualified_table_name_quotes_both_identifiers() -> None:
     -------
     None
         Nothing; an unquoted identifier is reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
     for record in aurora.target_names():
         target = aurora.TARGETS[record]
         assert target.qualified_name == f'"{target.schema}"."{target.table}"'
-        # WHY : Refactoring Rationale: the qualified name is asserted on the STAGING and MERGE
-        #   statements, which is where it now appears. The COPY names the session-temporary
-        #   staging table -- a single unqualified identifier -- so asserting the schema-qualified
-        #   form on the COPY would now be asserting a rendering the loader no longer produces.
+        # Assumptions: the qualified name is asserted on the STAGING and MERGE statements,
+        #   which are the statements that carry it. The COPY names the session-temporary staging
+        #   table -- a single unqualified identifier -- so asserting the schema-qualified form on
+        #   the COPY would assert a rendering the loader does not produce.
         assert target.stage_statement().endswith(f"FROM {target.qualified_name} WITH NO DATA")
         assert target.merge_statement().startswith(f"INSERT INTO {target.qualified_name} (")
-        # WHY : Assumptions: the column list is checked for quoting too, not just the table. A
+        # Assumptions: the column list is checked for quoting too, not just the table. A
         #   column named after a reserved word would break exactly the same way, and the two are
         #   rendered by different code paths.
         for column in target.copy_columns():
@@ -1529,12 +1505,8 @@ def test_a_target_in_the_reserved_word_schema_is_quoted_by_the_same_path() -> No
     None
         Nothing; an unquoted reserved word, or a schema the role map cannot resolve, is reported
         as an assertion failure.
-
-    Raises
-    ------
-    None
     """
-    # WHY : Assumptions: ``authorization`` is a reserved word in PostgreSQL, so an unquoted
+    # Assumptions: ``authorization`` is a reserved word in PostgreSQL, so an unquoted
     #   reference to it is a syntax error rather than a name resolution failure -- the statement
     #   would not parse, and the error would name the token rather than the schema. Constructing a
     #   target here rather than asserting on a declared one is deliberate: the authorization
@@ -1547,7 +1519,7 @@ def test_a_target_in_the_reserved_word_schema_is_quoted_by_the_same_path() -> No
     )
 
     assert reserved.qualified_name == '"authorization"."pending_auth_summary"'
-    # WHY : Refactoring Rationale: the rendering asserted here is the STAGING statement, because
+    # Assumptions: the rendering asserted here is the STAGING statement, because
     #   that is the one statement a target bound to no record can produce -- the merge needs the
     #   record descriptor's key window, and no extract loads into this schema, so there is no
     #   record to bind. The staging statement carries the schema-qualified name, so it exercises
@@ -1559,7 +1531,7 @@ def test_a_target_in_the_reserved_word_schema_is_quoted_by_the_same_path() -> No
     assert reserved.stage_copy_statement() == (
         'COPY "carddemo_stage_pending_auth_summary" ("account_id") FROM STDIN'
     )
-    # WHY : Assumptions: the rendering is also compared against the accessor the configuration
+    # Assumptions: the rendering is also compared against the accessor the configuration
     #   module publishes for this purpose, not only against a literal. The two spell the quoting
     #   convention independently -- the target builds its own qualified name, while every
     #   connection-time schema reference goes through the accessor -- so a change to one and not
@@ -1594,16 +1566,12 @@ def test_one_dataset_loads_inside_exactly_one_transaction(
     None
         Nothing; more than one commit, any rollback, or a row count disagreeing with the extract
         is reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
     target = aurora.TARGETS["ACCOUNT"]
     connection = _connect_as_owning_role(fake_aurora, target.schema)
     extract = fixture_corpus.path("provisioning/happy_path", "acctdata.txt")
     expected_rows = len(fixture_corpus.records("provisioning/happy_path", "acctdata.txt"))
-    # WHY : Assumptions: the affected-row count is arranged, because the double holds no rows and
+    # Assumptions: the affected-row count is arranged, because the double holds no rows and
     #   therefore reports none affected by the merge. Arranging it to the extract's own count is
     #   what a server reports for a merge into a table holding none of these keys, which is the
     #   state a first load meets.
@@ -1616,17 +1584,17 @@ def test_one_dataset_loads_inside_exactly_one_transaction(
     assert outcome.skipped == 0
     assert fake_aurora.commits == 1, "a dataset must commit exactly once, not per row or per chunk"
     assert fake_aurora.rollbacks == 0
-    # WHY : Assumptions: a single COPY statement is asserted as well as a single commit. One
+    # Assumptions: a single COPY statement is asserted as well as a single commit. One
     #   commit around many statements would still be one unit of work, but the load is documented
     #   as streaming every row through ONE server-side COPY, and a per-row INSERT loop wrapped in
     #   one transaction would satisfy the commit count while abandoning that contract entirely.
     assert len(fake_aurora.copy_statements) == 1
     assert len(fake_aurora.copied_rows) == expected_rows
-    # WHY : Assumptions: the four statements are asserted in ORDER, not merely counted. A merge
+    # Assumptions: the four statements are asserted in ORDER, not merely counted. A merge
     #   issued before the COPY would insert nothing into the target and still commit, reporting a
     #   successful load of an empty table -- and the arranged affected-row count would make that
     #   outcome indistinguishable from this one on the counts alone.
-    # WHY : Assumptions: the content-conflict probe sits between the COPY and the merge, and its
+    # Assumptions: the content-conflict probe sits between the COPY and the merge, and its
     #   POSITION is the property rather than its presence. After the merge the disagreeing rows have
     #   already been skipped and counted as duplicates, so a probe issued there would report the
     #   conflict having let the load succeed -- which is the defect it exists to close.
@@ -1685,17 +1653,12 @@ def test_the_money_surface_is_nine_columns_across_five_targets() -> None:
     None
         Nothing; a money column outside the declared surface, or a declared surface that has
         shrunk, is reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
-    # WHY : Refactoring Rationale: the surface is measured from the DESCRIPTORS and compared
-    #   against a stated total, where the earlier revision asserted money on one target and
-    #   described it as "every monetary field". Five targets carry money and nine columns hold it:
-    #   the disclosure rate, the account's five balances and limits, the daily feed's amount, the
-    #   transaction master's amount, and the category balance. Naming the total here is what makes
-    #   the omission of four of them a failure rather than an absence.
+    # Assumptions: the surface is measured from the DESCRIPTORS and compared against a stated
+    #   total rather than asserted on one target. Five targets carry money and nine columns hold
+    #   it: the disclosure rate, the account's five balances and limits, the daily feed's amount,
+    #   the transaction master's amount, and the category balance. Naming the total is what makes
+    #   the omission of any of them a failure rather than an absence.
     measured = {record: _money_columns_of(record) for record in aurora.target_names()}
     bearing = {record: columns for record, columns in measured.items() if columns}
     assert set(bearing) == set(_MONEY_BEARING_RECORDS), (
@@ -1703,10 +1666,10 @@ def test_the_money_surface_is_nine_columns_across_five_targets() -> None:
         f" {sorted(set(bearing) ^ set(_MONEY_BEARING_RECORDS))}"
     )
     assert sum(len(columns) for columns in bearing.values()) == 9
-    # WHY : Assumptions: the ACCOUNT count is stated explicitly because it is the one that was
-    #   previously miscounted. The account record maps FIVE signed display fields -- the current
-    #   balance, the credit limit, the cash credit limit, and the two cycle totals -- and a
-    #   docstring claiming six was what let the other four targets go uncovered unnoticed.
+    # Assumptions: the ACCOUNT count is stated explicitly because it is the largest and the
+    #   easiest to state loosely. The account record maps FIVE signed display fields -- the
+    #   current balance, the credit limit, the cash credit limit, and the two cycle totals -- and
+    #   a count stated here disagreeing with the descriptor fails this case.
     assert len(bearing["ACCOUNT"]) == 5
 
 
@@ -1742,10 +1705,6 @@ def test_money_reaches_its_numeric_column_as_an_exact_decimal(
     None
         Nothing; a monetary column carrying anything other than an exact two-place ``Decimal`` is
         reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
     target = aurora.TARGETS[record]
     connection = _connect_as_owning_role(fake_aurora, target.schema)
@@ -1753,7 +1712,7 @@ def test_money_reaches_its_numeric_column_as_an_exact_decimal(
 
     aurora.load_records(connection, target, records, _load_context())
 
-    # WHY : Assumptions: which columns hold money is read from the record descriptor's zoned
+    # Assumptions: which columns hold money is read from the record descriptor's zoned
     #   fields rather than from a list of column names written here. The descriptor is where the
     #   PICTURE clause's scale lives, so a field changing kind moves this assertion with it
     #   instead of leaving a stale name behind that no longer names a monetary column.
@@ -1771,7 +1730,7 @@ def test_money_reaches_its_numeric_column_as_an_exact_decimal(
                 " money must stay exact fixed point"
             )
             assert not isinstance(value, float)
-            # WHY : Assumptions: the scale is asserted at exactly two places, matching the
+            # Assumptions: the scale is asserted at exactly two places, matching the
             #   ``NUMERIC(p,2)`` the migration declares. A Decimal of the right value but the
             #   wrong scale renders differently -- 158 rather than 158.00 -- and the golden
             #   comparisons the parity oracle performs are byte comparisons.
@@ -1802,10 +1761,6 @@ def test_a_money_value_survives_the_reader_to_copy_boundary_unrounded(
     None
         Nothing; a staged value differing from the decoded value is reported as an assertion
         failure.
-
-    Raises
-    ------
-    None
     """
     target = aurora.TARGETS["ACCOUNT"]
     extract = fixture_corpus.path("interest/happy_path", "acctdata.txt")
@@ -1820,7 +1775,7 @@ def test_a_money_value_survives_the_reader_to_copy_boundary_unrounded(
     for (_statement, row), source in zip(fake_aurora.copied_rows, decoded, strict=True):
         for column in _money_columns_of("ACCOUNT"):
             staged = row[columns.index(column)]
-            # WHY : Assumptions: the comparison is ``==`` on Decimal, which compares NUMERIC value
+            # Assumptions: the comparison is ``==`` on Decimal, which compares NUMERIC value
             #   rather than representation, and the scale is asserted separately above. A staged
             #   value that had been rounded to whole units would compare unequal here even though
             #   it would still be a Decimal of the right type, which is the failure this closes.
@@ -1854,10 +1809,6 @@ def test_filler_is_dropped_at_the_load_boundary_and_kept_in_the_descriptor(recor
     None
         Nothing; a padding field reaching a column, or vanishing from the descriptor, is reported
         as an assertion failure.
-
-    Raises
-    ------
-    None
     """
     target = aurora.TARGETS[record]
     layout = layouts.layout(record)
@@ -1869,7 +1820,7 @@ def test_filler_is_dropped_at_the_load_boundary_and_kept_in_the_descriptor(recor
             f" {target.qualified_name}; padding is not data"
         )
 
-    # WHY : Assumptions: the contiguity property is re-asserted here rather than taken on trust
+    # Assumptions: the contiguity property is re-asserted here rather than taken on trust
     #   from the descriptor tests, because it is the reason dropping FILLER at this boundary is
     #   safe. The fields must still tile the record exactly, which is what lets a reader slice by
     #   offset; if padding were removed from the descriptor instead, the sum would fall short of
@@ -1879,7 +1830,7 @@ def test_filler_is_dropped_at_the_load_boundary_and_kept_in_the_descriptor(recor
         f"{record} declares {covered} bytes of fields against a record length of {layout.reclen}"
     )
 
-    # WHY : Assumptions: every field is accounted for as exactly one of three things -- mapped to
+    # Assumptions: every field is accounted for as exactly one of three things -- mapped to
     #   a column, padding, or suppressed by the disclosure policy -- so this closes the projection
     #   rather than only checking the padding half. A field silently absent from all three would
     #   be data the migration dropped without deciding to, which no assertion about FILLER alone
@@ -1921,10 +1872,6 @@ def test_the_password_field_never_reaches_the_user_table(
     None
         Nothing; a password column in the projection, or a password value in the streamed row, is
         reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
     target = aurora.TARGETS["SECUSER"]
     layout = layouts.layout("SECUSER")
@@ -1946,7 +1893,7 @@ def test_the_password_field_never_reaches_the_user_table(
         user_type="A",
     )
     decoded = usrsec.decode_ebcdic_security_user(raw)
-    # WHY : Assumptions: the identity-provider subject is supplied through the load context
+    # Assumptions: the identity-provider subject is supplied through the load context
     #   because ``auth.users`` declares that column NOT NULL and derives it from the published
     #   seed-user document rather than from the extract. The value is an all-zero identifier in
     #   version-4 shape and is not a credential: a subject NAMES a user, it does not authenticate
@@ -1993,10 +1940,6 @@ def test_a_documented_misspelling_is_corrected_on_its_target_column(
     None
         Nothing; a misspelling that survives, or a correction landing on the wrong table, is
         reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
     layout = layouts.layout(record)
     target = aurora.TARGETS[record]
@@ -2007,7 +1950,7 @@ def test_a_documented_misspelling_is_corrected_on_its_target_column(
     )
     assert target.columns[field_name] == column
     assert layouts.MISSPELLED_FIELDS[field_name] == column
-    # WHY : Assumptions: the corrected spelling is asserted absent from the SOURCE field names as
+    # Assumptions: the corrected spelling is asserted absent from the SOURCE field names as
     #   well as present on the column. The correction is a rename at this boundary only -- the
     #   copybook keeps its misspelling because ``app/**`` is reference-only -- so a layout that had
     #   acquired the corrected spelling would mean the baseline had been edited.
@@ -2029,10 +1972,6 @@ def test_no_field_beyond_the_three_documented_ones_is_renamed() -> None:
     None
         Nothing; a registry entry with no misspelled field behind it, or a misspelled field with
         no entry, is reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
     assert dict(layouts.MISSPELLED_FIELDS) == {
         "ACCT-EXPIRAION-DATE": "expiration_date",
@@ -2040,13 +1979,13 @@ def test_no_field_beyond_the_three_documented_ones_is_renamed() -> None:
         _UNTARGETED_MISSPELLING[0]: _UNTARGETED_MISSPELLING[1],
     }
 
-    # WHY : Assumptions: completeness is established by SCANNING every declared layout for the two
+    # Assumptions: completeness is established by SCANNING every declared layout for the two
     #   misspelling fragments the baseline actually contains, rather than by counting the registry's
     #   rows. A count says the registry has three entries; the scan says the baseline has no
     #   misspelling the registry does not account for, and only the second detects a fourth
     #   misspelled field that nobody registered -- which would reach its column with the defect
     #   intact. The scan covers every declared record, not only the fourteen the reader registry
-    #   dispatches on, because two of the three corrections belong to records outside it.
+    #   dispatches on, because two of the three renames belong to records outside it.
     misspelled = {
         field.name
         for spec in _all_declared_layouts().values()
@@ -2059,7 +1998,7 @@ def test_no_field_beyond_the_three_documented_ones_is_renamed() -> None:
         f" {sorted(registered - misspelled)}"
     )
 
-    # WHY : Assumptions: the export payload re-declares two of the three misspellings under an
+    # Assumptions: the export payload re-declares two of the three misspellings under an
     #   ``EXP-`` prefix, and they are accounted for as ECHOES of a registered spelling rather than
     #   admitted as two more corrections. That distinction is the point: the export record is a
     #   500-byte wire image that round-trips through the baseline's own export and import pair, so
@@ -2076,7 +2015,7 @@ def test_no_field_beyond_the_three_documented_ones_is_renamed() -> None:
         f" {sorted(unaccounted)}"
     )
 
-    # WHY : Assumptions: the load boundary is closed separately, because it is where a rename has
+    # Assumptions: the load boundary is closed separately, because it is where a rename has
     #   an observable effect. Every mapped field carrying a misspelling must be one the registry
     #   corrects, and must land on the column the registry names. The check is deliberately narrow
     #   -- it does not try to derive a column from a field name -- because the transformation is
@@ -2115,14 +2054,8 @@ def test_a_load_diagnostic_names_the_field_and_never_its_value(
     -------
     None
         Nothing; a diagnostic carrying a sensitive value is reported as an assertion failure.
-
-    Raises
-    ------
-    None
-        The failure this test provokes is caught by :func:`pytest.raises`, which verifies
-        :class:`carddemo_migration.loaders.aurora.AuroraLoadError`.
     """
-    # WHY : Assumptions: the sensitive values are SYNTHETIC and each is unmistakable in a
+    # Assumptions: the sensitive values are SYNTHETIC and each is unmistakable in a
     #   message, which is what makes a substring search over the diagnostic a sound assertion.
     #   Reading real values out of the corpus was the alternative and was rejected: a corpus value
     #   can legitimately coincide with a fragment of a column name or a byte count, so a false
@@ -2160,7 +2093,7 @@ def test_a_load_diagnostic_names_the_field_and_never_its_value(
     assert fake_aurora.rollbacks == 1
     assert fake_aurora.commits == 0
 
-    # WHY : Assumptions: the card path is exercised as well, because the primary account number is
+    # Assumptions: the card path is exercised as well, because the primary account number is
     #   the value with the strictest disclosure rule in this system and it lives in a different
     #   record with a different projection -- the card's verification value is enciphered, so its
     #   refusal takes another branch of the same function.
@@ -2198,33 +2131,28 @@ def test_the_conflict_target_is_derived_by_the_production_key_function(record: s
     None
         Nothing; a key that is not the descriptor's key window, or a merge statement that
         conflicts on something else, is reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
-    # WHY : Refactoring Rationale: this test used to compute the window with a helper of its OWN
-    #   and compare the answer against a tuple the loader declared by hand. That construction was
-    #   the wrong shape twice over: it left the geometry written down in two places, and it could
-    #   only ever report a disagreement between them -- so a loader and a test that drifted the
-    #   same way would agree with each other while both disagreed with the index the table is
-    #   declared on. The derivation now lives in production and this test EXERCISES it.
+    # Assumptions: the window derivation lives in production and this case EXERCISES it rather
+    #   than recomputing it here and comparing two answers. A local computation would leave the
+    #   geometry written down in two places and could only report a disagreement between them, so
+    #   a loader and a test that drifted the same way would agree with each other while both
+    #   disagreed with the index the table is declared on.
     target = aurora.TARGETS[record]
     spec = layouts.layout(record)
 
-    # WHY : Assumptions: the key window is asserted non-empty and non-negative before anything is
+    # Assumptions: the key window is asserted non-empty and non-negative before anything is
     #   derived from it, because a record with no key would make every comparison below vacuous.
     assert spec.key_length > 0
     assert spec.key_offset >= 0
     assert target.key_columns, f"{record} yields no key column from key_offset/key_length"
 
-    # WHY : Assumptions: the production function is called DIRECTLY as well as being observed
+    # Assumptions: the production function is called DIRECTLY as well as being observed
     #   through the target, so a target that cached a stale tuple at construction would fail here.
     #   The two calls are the same computation over the same inputs, which is the point: there is
     #   one derivation, and both the loader and this test reach it.
     assert aurora.key_columns_of(record, target.columns) == target.key_columns
 
-    # WHY : Assumptions: the expectation is stated INDEPENDENTLY of the production function as
+    # Assumptions: the expectation is stated INDEPENDENTLY of the production function as
     #   well -- as the fields whose byte span falls inside the window, translated through the
     #   target's own mapping -- so this test would still fail if the production derivation were
     #   replaced by something that returned a plausible but wrong tuple. Restating the window
@@ -2247,7 +2175,7 @@ def test_the_conflict_target_is_derived_by_the_production_key_function(record: s
     if target.strategy is aurora.LoadStrategy.KEYED_MERGE:
         assert f"ON CONFLICT ({quoted}) DO NOTHING" in target.merge_statement()
     else:
-        # WHY : Assumptions: the one whole-row target is asserted to name NO conflict target,
+        # Assumptions: the one whole-row target is asserted to name NO conflict target,
         #   because its table's key is not unique -- the daily feed's transaction identifier
         #   repeats across business dates -- and PostgreSQL refuses an ``ON CONFLICT`` whose
         #   columns carry no unique constraint. The key is still derived for it, because the
@@ -2270,23 +2198,76 @@ def test_the_key_derivation_refuses_a_window_it_cannot_translate() -> None:
     -------
     None
         Nothing; a silent answer where a refusal is required is reported as an assertion failure.
-
-    Raises
-    ------
-    None
-        Both provoked refusals are caught by :func:`pytest.raises`.
     """
     with pytest.raises(ValueError) as unregistered:
         aurora.key_columns_of("NOSUCHRECORD", {"WHATEVER": "column"})
     assert "NOSUCHRECORD" in str(unregistered.value)
 
-    # WHY : Assumptions: TRANCAT is chosen because its key window spans TWO fields, so a mapping
+    # Assumptions: TRANCAT is chosen because its key window spans TWO fields, so a mapping
     #   naming only the first is a partial cover rather than an empty one. That is the realistic
     #   mistake: an empty mapping is obviously wrong, whereas a mapping that names the leading key
     #   field looks complete and would produce a merge conflicting on a non-unique prefix.
     with pytest.raises(ValueError) as partial:
         aurora.key_columns_of("TRANCAT", {"TRAN-TYPE-CD": "type_cd"})
     assert "TRAN-CAT-CD" in str(partial.value)
+
+
+def test_the_synthetic_builder_refuses_a_batch_larger_than_the_subject_pool() -> None:
+    """Assert this module's own batch builder is bounded by the subject document it depends on.
+
+    Purpose
+    -------
+    Establish that the coupling between :func:`_synthetic_records` and :func:`_load_context` is
+    enforced rather than remembered. The security record's subject column is resolved through the
+    published seed-user document, so a batch carrying more ordinals than that document has entries
+    for emits a user nothing can resolve. Before the bound was checked, the resulting failure
+    surfaced from the loader inside whichever case had grown and named the subject projection --
+    pointing at production code for a defect in a fixture. This asserts the diagnosis now lands at
+    the builder, and that the pool covers every batch this module actually builds, so the bound is
+    a guard rather than a limit anything here is near.
+
+    Returns
+    -------
+    None
+        Nothing; an unbounded builder or a pool too small for the batches in use is reported as an
+        assertion failure.
+
+    Raises
+    ------
+    None
+        The provoked refusal is caught by :func:`pytest.raises`.
+    """
+    # WHY : Assumptions: SECUSER is the record that consumes the document, and the bound is
+    #   asserted on ACCOUNT as well because the check is deliberately record-independent -- one
+    #   contract for the builder rather than a rule that applies to one of eleven targets.
+    with pytest.raises(ValueError) as refused:
+        _synthetic_records("SECUSER", _SYNTHETIC_SUBJECT_POOL + 1)
+    message = str(refused.value)
+    assert str(_SYNTHETIC_SUBJECT_POOL + 1) in message
+    assert "_SYNTHETIC_SUBJECT_POOL" in message, (
+        "the refusal has to name the constant to raise, or a maintainer learns only that some "
+        "limit exists"
+    )
+
+    with pytest.raises(ValueError):
+        _synthetic_records("ACCOUNT", _SYNTHETIC_SUBJECT_POOL + 1)
+
+    # Assumptions: the pool is asserted to cover the largest batch built anywhere in this module,
+    #   so shrinking it to the exact figure in use fails here rather than at whichever parametrised
+    #   case happens to run first.
+    largest_batch_in_use = 3
+    assert _SYNTHETIC_SUBJECT_POOL >= largest_batch_in_use
+    at_capacity = _synthetic_records("SECUSER", _SYNTHETIC_SUBJECT_POOL)
+    identifiers = [record["SEC-USR-ID"] for record in at_capacity]
+    assert len(set(identifiers)) == _SYNTHETIC_SUBJECT_POOL, (
+        "every ordinal must carry a distinct key, which is the property the pool exists to make "
+        "true"
+    )
+    published = _load_context().subjects
+    assert published is not None
+    assert all(identifier in published for identifier in identifiers), (
+        "a batch at exactly the pool size must resolve entirely, or the bound is off by one"
+    )
 
 
 @pytest.mark.parametrize("record", aurora.target_names())
@@ -2316,18 +2297,12 @@ def test_loading_any_dataset_twice_adds_nothing_and_raises_nothing(
     None
         Nothing; a differing final row set between the two passes, a raised error, or a second
         pass reporting rows gained is reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
-    # WHY : Refactoring Rationale: this test used to load ONE dataset twice -- the disclosure
-    #   groups, the only target that then declared a conflict key -- and the other ten were
-    #   covered by a sibling asserting that a target without a conflict key had no merge at all.
-    #   That pair codified the defect as the contract: seven of the eleven loaded through a direct
-    #   COPY that fails outright on a second pass, and the daily feed's key is not unique, so its
-    #   second pass succeeded and silently doubled the feed. Parametrising over every declared
-    #   target is what makes the property a fact about the loader rather than about one table.
+    # Assumptions: the case is parametrised over EVERY declared target rather than over one
+    #   dataset loaded twice, which is what makes re-runnability a fact about the loader rather
+    #   than about one table. A target loaded through a direct COPY fails outright on a second
+    #   pass, and the daily feed's key is not unique, so a second pass there would succeed and
+    #   silently double the feed -- two outcomes a single-target case cannot see.
     target = aurora.TARGETS[record]
     records = _synthetic_records(record, 3)
     context = _load_context()
@@ -2342,7 +2317,7 @@ def test_loading_any_dataset_twice_adds_nothing_and_raises_nothing(
         for _statement, row in fake_aurora.copied_rows
     )
 
-    # WHY : Assumptions: the second pass arranges ZERO affected rows, which is what a server
+    # Assumptions: the second pass arranges ZERO affected rows, which is what a server
     #   reports for a merge against a table that already holds every staged row -- ``ON CONFLICT
     #   ... DO NOTHING`` for the ten keyed targets and a ``WHERE NOT EXISTS`` anti-join that
     #   matches every row for the daily feed. That is the state a re-run actually meets, and it is
@@ -2360,7 +2335,7 @@ def test_loading_any_dataset_twice_adds_nothing_and_raises_nothing(
     assert first.skipped == 0
     assert second.inserted == 0
     assert second.skipped == len(records)
-    # WHY : Assumptions: the FINAL ROW SET is compared, not just the counts. Idempotency means the
+    # Assumptions: the FINAL ROW SET is compared, not just the counts. Idempotency means the
     #   table ends in the same state, so two passes offering the same keys with different values --
     #   which a non-deterministic decode or a clock-derived stamp would produce -- must fail here
     #   even though both counts would match. The comparison is taken over the target's own
@@ -2369,7 +2344,7 @@ def test_loading_any_dataset_twice_adds_nothing_and_raises_nothing(
     assert second_rows == first_rows
     assert fake_aurora.commits == 2
     assert fake_aurora.rollbacks == 0
-    # WHY : Assumptions: the merge statement is asserted to have been issued on BOTH passes, not
+    # Assumptions: the merge statement is asserted to have been issued on BOTH passes, not
     #   merely once. A loader that staged the rows and skipped the merge on a re-run would report
     #   the same counts as this one and leave the table missing every row a concurrent writer had
     #   deleted between the passes.
@@ -2406,11 +2381,6 @@ def test_a_transaction_master_row_carries_the_stamp_its_column_requires(
     None
         Nothing; a blank stamp reaching the COPY as ``NULL``, or a written stamp being rejected,
         is reported as an assertion failure.
-
-    Raises
-    ------
-    None
-        The provoked refusal is caught by :func:`pytest.raises`.
     """
     target = aurora.TARGETS["TRAN"]
     assert target.projections["TRAN-PROC-TS"] is aurora.Projection.TIMESTAMP_REQUIRED
@@ -2419,7 +2389,7 @@ def test_a_transaction_master_row_carries_the_stamp_its_column_requires(
     unposted = tuple(transaction.read_ascii_transactions(extract))
     assert unposted, "the committed transaction extract is empty, so nothing was checked"
 
-    # WHY : Assumptions: the committed extract is asserted to carry a BLANK processing span before
+    # Assumptions: the committed extract is asserted to carry a BLANK processing span before
     #   the refusal is provoked, so this test cannot pass because the fixture changed underneath
     #   it. The blanks are a fact about the pre-posting feed rather than a defect in the extract:
     #   the posting program is what writes that span.
@@ -2431,13 +2401,13 @@ def test_a_transaction_master_row_carries_the_stamp_its_column_requires(
     message = str(refusal.value)
     assert "proc_ts" in message
     assert "TRAN-PROC-TS" in message
-    # WHY : Assumptions: NOTHING was copied. The refusal is only useful if it precedes the write:
+    # Assumptions: NOTHING was copied. The refusal is only useful if it precedes the write:
     #   a loader that refused the row after streaming the four before it would leave the same
     #   error text behind and a staging table holding a partial dataset.
     assert fake_aurora.copied_rows == []
     assert fake_aurora.commits == 0
 
-    # WHY : Assumptions: the same records with the span WRITTEN load cleanly, which is what proves
+    # Assumptions: the same records with the span WRITTEN load cleanly, which is what proves
     #   the refusal is about the blank rather than about the projection being unusable. The stamp
     #   substituted here is the extract's own originating stamp, so the value is one the reference
     #   compiler produced; it is not derived from the clock, because a load deriving a financial
@@ -2507,18 +2477,13 @@ def test_the_loader_issues_no_statement_its_login_role_does_not_hold(
     None
         Nothing; any forbidden statement is reported as an assertion failure naming the breach and
         the offending SQL.
-
-    Raises
-    ------
-    None
     """
     target = aurora.TARGETS[record]
-    # WHY : Refactoring Rationale: the parametrisation selects on the merge STRATEGY, where it used
-    #   to select on whether the target declared a conflict key. Every target merges now, so the
-    #   old discriminator would have put both parameters on the same path -- and the two paths that
-    #   remain differ in exactly the way that matters here: one closes with ``ON CONFLICT`` and the
-    #   other with an anti-join that reads the target table, which is a SELECT the login role must
-    #   hold and which no earlier revision of this test exercised.
+    # Assumptions: the parametrisation selects on the merge STRATEGY rather than on whether the
+    #   target declares a conflict key. Every target merges, so keying on the conflict key would
+    #   put both parameters on the same path; the two strategies differ in the way that matters
+    #   here, one closing with ``ON CONFLICT`` and the other with an anti-join that reads the
+    #   target table -- a SELECT the login role must hold.
     assert target.strategy is strategy
     connection = _connect_as_owning_role(fake_aurora, target.schema)
     fake_aurora.arrange_affected_rows("INSERT INTO", 1)
@@ -2537,7 +2502,7 @@ def test_the_loader_issues_no_statement_its_login_role_does_not_hold(
     outcome = aurora.load_records(connection, target, records)
 
     assert outcome.staged > 0, "an empty load would prove nothing about the statements issued"
-    # WHY : Assumptions: the detector's vocabulary is pinned before it is trusted. An empty breach
+    # Assumptions: the detector's vocabulary is pinned before it is trusted. An empty breach
     #   tuple means either that no forbidden statement was issued or that nothing was looked for,
     #   and those two readings are indistinguishable from the tuple alone -- so the seven kinds are
     #   compared against the set this module declares, which makes a narrowed detector fail here
@@ -2546,7 +2511,7 @@ def test_the_loader_issues_no_statement_its_login_role_does_not_hold(
         "the double no longer detects every statement kind withheld from the login roles:"
         f" missing {sorted(_WITHHELD_STATEMENT_KINDS - set(FORBIDDEN_LOADER_STATEMENTS))}"
     )
-    # WHY : Assumptions: the breach set comes from the double's recorded log rather than from a
+    # Assumptions: the breach set comes from the double's recorded log rather than from a
     #   text search over the loader's source. Both loaders discuss CREATE INDEX and TRUNCATE at
     #   length in their comments in order to explain why they issue neither, so a source search
     #   reports those explanations; the log reports what was executed.
@@ -2555,7 +2520,7 @@ def test_the_loader_issues_no_statement_its_login_role_does_not_hold(
         f" {fake_aurora.forbidden_statements()}"
     )
 
-    # WHY : Assumptions: index creation is called out separately even though the log check above
+    # Assumptions: index creation is called out separately even though the log check above
     #   already covers it, because it is RETIRED rather than merely unprivileged. The baseline ends
     #   three of its ten load jobs with an ``IDCAMS BLDINDEX`` step -- app/jcl/CARDFILE.jcl:110,
     #   app/jcl/XREFFILE.jcl:100 and app/jcl/TRANFILE.jcl:109 -- because VSAM builds an alternate
@@ -2592,12 +2557,8 @@ def test_an_empty_extract_loads_zero_rows_and_succeeds(
     None
         Nothing; a raised error, an uncommitted transaction, or any copied row is reported as an
         assertion failure.
-
-    Raises
-    ------
-    None
     """
-    # WHY : Assumptions: a COMMITTED zero-byte extract is used rather than a file this test
+    # Assumptions: a COMMITTED zero-byte extract is used rather than a file this test
     #   creates, because the corpus already ships seven of them and they are the same inputs the
     #   reference suite drives its empty-input scenarios with. Writing a fresh empty file would
     #   prove the loader handles a file this test wrote.
@@ -2638,16 +2599,10 @@ def test_a_failure_partway_through_rolls_back_rather_than_half_applying(
     None
         Nothing; a commit, a missing rollback, or an untyped failure is reported as an assertion
         failure.
-
-    Raises
-    ------
-    None
-        The provoked failure is caught by :func:`pytest.raises`, which verifies
-        :class:`carddemo_migration.loaders.aurora.AuroraLoadError`.
     """
     target = aurora.TARGETS["XREF"]
     connection = _connect_as_owning_role(fake_aurora, target.schema)
-    # WHY : Assumptions: the good record's field values are built from the record descriptor's own
+    # Assumptions: the good record's field values are built from the record descriptor's own
     #   widths rather than typed at their literal lengths, so the fixture cannot drift from the
     #   layout, and no value here resembles a real card number or customer identifier.
     layout = layouts.layout("XREF")
@@ -2664,7 +2619,7 @@ def test_a_failure_partway_through_rolls_back_rather_than_half_applying(
 
     assert fake_aurora.rollbacks == 1
     assert fake_aurora.commits == 0, "a refused load must not commit the rows it had already sent"
-    # WHY : Assumptions: the first row IS observed in the copy log, and that is the point rather
+    # Assumptions: the first row IS observed in the copy log, and that is the point rather
     #   than an inconvenience. It proves the failure was genuinely mid-stream, so the rollback is
     #   what makes the partial write unobservable -- a test whose failure arrived before any row
     #   was sent would assert the same rollback while proving nothing about partial application.
@@ -2709,13 +2664,9 @@ class _SyntheticDriverError(RuntimeError):
         -------
         None
             Initialises the exception.
-
-        Raises
-        ------
-        None
         """
         super().__init__(message)
-        # WHY : Assumptions: the attributes are named exactly as psycopg names them -- ``sqlstate``
+        # Assumptions: the attributes are named exactly as psycopg names them -- ``sqlstate``
         #   and ``diag`` -- because the loader reads them by name through ``getattr``. A double
         #   spelling them differently would make the loader's allow-list appear to find nothing,
         #   so this test would pass while proving only that the double was misnamed.
@@ -2764,12 +2715,8 @@ def _value_bearing_driver_error(target: aurora.TableTarget, column: str) -> _Syn
     -------
     _SyntheticDriverError
         An error carrying a value-bearing message and safe structured fields.
-
-    Raises
-    ------
-    None
     """
-    # WHY : Assumptions: the message is built in the DETAIL shape PostgreSQL actually uses --
+    # Assumptions: the message is built in the DETAIL shape PostgreSQL actually uses --
     #   ``Key (col)=(value) already exists`` -- rather than as an arbitrary sentence. That shape is
     #   the reason this finding exists: a unique violation on a card, a customer or a user names
     #   the conflicting value by construction, so any diagnostic echoing the driver's text
@@ -2830,11 +2777,6 @@ def test_a_failure_in_any_phase_rolls_back_and_reports_only_safe_metadata(
     None
         Nothing; a failure that commits, does not roll back, escapes untyped, or quotes a
         regulated value is reported as an assertion failure.
-
-    Raises
-    ------
-    None
-        Each provoked failure is caught by :func:`pytest.raises`.
     """
     target = aurora.TARGETS[record]
     assert target.strategy is strategy
@@ -2856,14 +2798,14 @@ def test_a_failure_in_any_phase_rolls_back_and_reports_only_safe_metadata(
         aurora.load_records(connection, target, records, _load_context())
 
     message = str(refusal.value)
-    # WHY : Assumptions: the transaction is discarded in EVERY phase, including the commit phase.
+    # Assumptions: the transaction is discarded in EVERY phase, including the commit phase.
     #   A commit that failed and was not rolled back leaves the connection holding an aborted
     #   transaction, and a caller returning that connection to a pool hands the next borrower a
     #   session in which every statement fails with "current transaction is aborted" -- a defect
     #   that surfaces somewhere else entirely.
     assert fake_aurora.rollbacks == 1
     assert fake_aurora.commits == 0
-    # WHY : Assumptions: the safe metadata IS present, not merely the values absent. A diagnostic
+    # Assumptions: the safe metadata IS present, not merely the values absent. A diagnostic
     #   that reported nothing would satisfy every disclosure assertion below and leave an operator
     #   with no way to tell a constraint violation from a lost connection.
     assert "rolled back" in message
@@ -2873,7 +2815,7 @@ def test_a_failure_in_any_phase_rolls_back_and_reports_only_safe_metadata(
     assert f"pk_{target.table}" in message
     for label, value in _REGULATED_VALUES.items():
         assert value not in message, f"the diagnostic echoed the {label}"
-    # WHY : Assumptions: the CHAINED CAUSE is asserted absent, which is the half a message
+    # Assumptions: the CHAINED CAUSE is asserted absent, which is the half a message
     #   assertion cannot reach. A wrapped error raised ``from exc`` carries the driver's own text
     #   in ``__cause__``, and anything logging ``exc_info`` -- which is what an unexpected failure
     #   gets logged with -- prints that traceback in full, DETAIL clause included.
@@ -2915,11 +2857,6 @@ def test_a_failed_rollback_is_reported_without_replacing_the_original_diagnostic
     None
         Nothing; a lost original diagnostic, an unreported rollback failure, or a disclosed value
         is reported as an assertion failure.
-
-    Raises
-    ------
-    None
-        The provoked failure is caught by :func:`pytest.raises`.
     """
     target = aurora.TARGETS[record]
     assert target.strategy is strategy
@@ -2934,7 +2871,7 @@ def test_a_failed_rollback_is_reported_without_replacing_the_original_diagnostic
         aurora.load_records(connection, target, _synthetic_records(record, 2), _load_context())
 
     message = str(refusal.value)
-    # WHY : Assumptions: the ORIGINAL failure is asserted still present. The rollback failure is
+    # Assumptions: the ORIGINAL failure is asserted still present. The rollback failure is
     #   additional information, not a replacement: an operator told only that a rollback failed
     #   has learned nothing about why the load did.
     assert "rolled back" in message
@@ -2942,7 +2879,7 @@ def test_a_failed_rollback_is_reported_without_replacing_the_original_diagnostic
     assert "rollback" in message.lower()
     for label, value in _REGULATED_VALUES.items():
         assert value not in message, f"the diagnostic echoed the {label}"
-    # WHY : Assumptions: the rollback WAS attempted, which is what distinguishes a failed rollback
+    # Assumptions: the rollback WAS attempted, which is what distinguishes a failed rollback
     #   from a rollback that was never issued. The double counts the attempt before it raises,
     #   precisely so the two are distinguishable here.
     assert fake_aurora.rollbacks == 1
@@ -2982,15 +2919,11 @@ def test_a_driver_diagnostic_is_redacted_at_the_command_log_boundary(
     -------
     None
         Nothing; a regulated value in any captured log record is reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
     target = aurora.TARGETS["XREF"]
     error = _value_bearing_driver_error(target, target.key_columns[0])
     fake_aurora.arrange_statement_failure("INSERT INTO", error)
-    # WHY : Assumptions: the cross-reference is chosen because its whole record is three fixed
+    # Assumptions: the cross-reference is chosen because its whole record is three fixed
     #   fields, so a valid extract can be written here without reproducing a committed one -- and
     #   the value that WOULD be disclosed, a card number, is the one with the strictest rule.
     layout = layouts.layout("XREF")
@@ -3017,10 +2950,6 @@ def test_a_driver_diagnostic_is_redacted_at_the_command_log_boundary(
         -------
         AuroraConnectionSettings
             Settings whose user is that schema's login role.
-
-        Raises
-        ------
-        None
         """
         return replace(aurora_settings, user=role_for_schema(schema))
 
@@ -3044,7 +2973,7 @@ def test_a_driver_diagnostic_is_redacted_at_the_command_log_boundary(
         AssertionError
             If the command stated no expectation, or stated one the settings do not satisfy.
         """
-        # WHY : Assumptions: the expectation is ASSERTED rather than ignored, because this test is
+        # Assumptions: the expectation is ASSERTED rather than ignored, because this test is
         #   the one place the production orchestration's own role check is observable. A factory
         #   that accepted the keyword and dropped it would let that check be deleted with every
         #   command test still green.
@@ -3053,12 +2982,11 @@ def test_a_driver_diagnostic_is_redacted_at_the_command_log_boundary(
         return fake_aurora.connect(**resolved.as_connection_params())
 
     monkeypatch.setattr(cli, "resolve_aurora_settings", _resolve)
-    # WHY : Refactoring Rationale: the connection seam is patched on the OWNING module, not on
-    #   `cli`. The command imports `connect` inside the handler that uses it -- so that
-    #   `list-datasets`, `decode-record` and `stage-dataset` reach neither the loader nor the
-    #   database driver -- which means a re-export on `cli` no longer exists to patch. Patching
-    #   the authority is the better arrangement anyway: every call path reaches the double,
-    #   including the ones that resolve the name themselves, which a re-export never covered.
+    # Assumptions: the connection seam is patched on the OWNING module, not on `cli`. The
+    #   command imports `connect` inside the handler that uses it -- so that `list-datasets`,
+    #   `decode-record` and `stage-dataset` reach neither the loader nor the database driver --
+    #   so `cli` carries no re-export to patch. Patching the authority also reaches every call
+    #   path, including the ones that resolve the name themselves.
     monkeypatch.setattr(aurora, "connect", _connect)
 
     with caplog.at_level(logging.DEBUG):
@@ -3073,12 +3001,12 @@ def test_a_driver_diagnostic_is_redacted_at_the_command_log_boundary(
     assert logged.strip(), "nothing was logged, so the boundary was not exercised"
     for label, value in _REGULATED_VALUES.items():
         assert value not in logged, f"the command log echoed the {label}"
-    # WHY : Assumptions: the log is asserted to carry the SAFE metadata too, so this test cannot
+    # Assumptions: the log is asserted to carry the SAFE metadata too, so this test cannot
     #   pass because the handler logged nothing at all -- which would satisfy every disclosure
     #   assertion above while leaving an operator unable to diagnose a failed cutover step.
     assert error.sqlstate in logged
     assert target.table in logged
-    # WHY : Assumptions: no captured record carries traceback text. ``logger.exception`` and
+    # Assumptions: no captured record carries traceback text. ``logger.exception`` and
     #   ``exc_info=True`` both attach the formatted traceback, and a traceback of a wrapped driver
     #   error prints the driver's own DETAIL clause in full even when the message above it is
     #   clean.
@@ -3110,17 +3038,13 @@ def test_no_validation_in_a_loader_relies_on_a_bare_assert(module: Any) -> None:
     None
         Nothing; any ``assert`` statement in a loader is reported as an assertion failure naming
         its line.
-
-    Raises
-    ------
-    None
     """
     tree = _module_tree(module.__file__)
     asserts = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Assert)]
 
     assert asserts == [], f"{module.__name__} validates with assert at line(s) {asserts}"
 
-    # WHY : Assumptions: the positive half is asserted too -- that each module raises its OWN typed
+    # Assumptions: the positive half is asserted too -- that each module raises its OWN typed
     #   error -- because a module could satisfy the check above by validating nothing at all.
     raised = {
         node.exc.func.id
@@ -3169,10 +3093,6 @@ def test_the_staged_prefix_is_rendered_by_the_one_canonical_builder(
     -------
     None
         Nothing; a key that is not the builder's own output is reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
     registered = s3_stage.family("dalyrejs")
     extract = seed_corpus.ascii_path("discgrp.txt")
@@ -3188,7 +3108,7 @@ def test_the_staged_prefix_is_rendered_by_the_one_canonical_builder(
         staging_root=extract.parent,
     )
 
-    # WHY : Assumptions: the expectation is the BUILDER's output, not a string composed here. A
+    # Assumptions: the expectation is the BUILDER's output, not a string composed here. A
     #   literal expectation would be a second copy of the layout inside a test that exists to prove
     #   there is only one copy, so the two could agree while both diverged from the convention the
     #   Terraform-provisioned prefixes actually use.
@@ -3199,13 +3119,13 @@ def test_the_staged_prefix_is_rendered_by_the_one_canonical_builder(
     assert staged.prefix == "ledger/dalyrejs/dt=2022-07-18/gen=0007/"
     assert staged.key == f"{expected_prefix}{extract.name}"
     assert fake_object_store.keys() == (staged.key,)
-    # WHY : Assumptions: the trailing separator is part of the prefix and is asserted as such,
+    # Assumptions: the trailing separator is part of the prefix and is asserted as such,
     #   because without it ``gen=0001`` is a string prefix of ``gen=00010`` for anyone listing by
     #   match -- so a listing scoped to one generation would return another's objects too.
     assert staged.prefix.endswith("/")
     assert staged.business_date == _BUSINESS_DATE
     assert staged.generation == 7
-    # WHY : Assumptions: the family's own delegating builder is checked to agree, because a caller
+    # Assumptions: the family's own delegating builder is checked to agree, because a caller
     #   addressing a dataset by family name reaches the prefix through that method instead, and the
     #   two paths have to produce one answer or a writer and a reader can each look correct.
     assert registered.generation_prefix(staging_settings, _BUSINESS_DATE, 7) == expected_prefix
@@ -3239,15 +3159,11 @@ def test_a_binary_ebcdic_extract_is_staged_byte_for_byte(
     None
         Nothing; any difference between the staged body and the source file is reported as an
         assertion failure.
-
-    Raises
-    ------
-    None
     """
     extract = seed_corpus.ebcdic_path(_BINARY_EXTRACT)
     source_bytes = extract.read_bytes()
 
-    # WHY : Assumptions: the extract's measured shape is asserted BEFORE it is staged, so a
+    # Assumptions: the extract's measured shape is asserted BEFORE it is staged, so a
     #   corruption of the committed file itself is reported as such rather than as a staging fault.
     #   ``app/data`` is reference-only and this module reads it in place; the five stray line feeds
     #   and eleven stray carriage returns are the bytes a text write would rewrite, and their
@@ -3273,7 +3189,7 @@ def test_a_binary_ebcdic_extract_is_staged_byte_for_byte(
     assert len(body) == _BINARY_EXTRACT_BYTE_SIZE
     assert body.count(b"\x0a") == _BINARY_EXTRACT_STRAY_LINE_FEEDS
     assert body.count(b"\x0d") == _BINARY_EXTRACT_STRAY_CARRIAGE_RETURNS
-    # WHY : Assumptions: the committed file is re-read AFTER staging and compared again, which is
+    # Assumptions: the committed file is re-read AFTER staging and compared again, which is
     #   what proves the loader read the extract without rewriting it. ``app/data`` is
     #   reference-only,
     #   so a staging step that normalised in place would be a far worse defect than one that
@@ -3309,13 +3225,9 @@ def test_the_byte_size_and_digest_anchors_are_recorded_with_the_object(
     -------
     None
         Nothing; a missing or disagreeing anchor is reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
     extract = seed_corpus.ebcdic_path(_BINARY_EXTRACT)
-    # WHY : Assumptions: the expected digest is computed HERE from the file's own bytes rather than
+    # Assumptions: the expected digest is computed HERE from the file's own bytes rather than
     #   pinned as a literal. A pinned hexadecimal string would have to be re-measured whenever the
     #   corpus changed, and a stale one fails with a message about a digest mismatch when the real
     #   fact is that the extract moved -- which sends a reader to the wrong file.
@@ -3341,7 +3253,7 @@ def test_the_byte_size_and_digest_anchors_are_recorded_with_the_object(
 
     put = fake_object_store.put_calls[-1]
     assert put["ContentLength"] == _BINARY_EXTRACT_BYTE_SIZE
-    # WHY : Assumptions: the service-side checksum parameter is asserted as well as the metadata,
+    # Assumptions: the service-side checksum parameter is asserted as well as the metadata,
     #   because the two are not interchangeable. Metadata is an opaque string the service stores
     #   without reading, so on its own it records a CLAIM that the upload was intact; the checksum
     #   parameter makes the service recompute the digest over the bytes it received and reject the
@@ -3371,10 +3283,6 @@ def test_the_generation_family_enumeration_holds_exactly_ten_entries() -> None:
     None
         Nothing; a count other than ten, or a name in one collection and not the other, is reported
         as an assertion failure.
-
-    Raises
-    ------
-    None
     """
     declared = s3_stage.family_names()
 
@@ -3383,7 +3291,7 @@ def test_the_generation_family_enumeration_holds_exactly_ten_entries() -> None:
     assert set(declared) == {fact.key for fact in _TEN_GENERATION_FAMILIES}
     assert len(set(declared)) == len(declared), "a family is enumerated twice"
 
-    # WHY : Assumptions: the BASE NAMES are asserted too, not only the path segments. The segment is
+    # Assumptions: the BASE NAMES are asserted too, not only the path segments. The segment is
     #   a cloud-side name this migration chose; the base name is the mainframe dataset the family
     #   stands for, and it is what ties a staged prefix back to the job that produced it. A segment
     #   pointing at the wrong base would be invisible in a key.
@@ -3391,7 +3299,7 @@ def test_the_generation_family_enumeration_holds_exactly_ten_entries() -> None:
         fact.base_name for fact in _TEN_GENERATION_FAMILIES
     }
 
-    # WHY : Assumptions: the arithmetic is asserted per defining job, because the failure this test
+    # Assumptions: the arithmetic is asserted per defining job, because the failure this test
     #   guards against is not "the count is wrong" but "one job was read and the other two were
     #   not". Six plus three plus one is the shape of the mistake, so it is the shape of the check.
     from_job: dict[str, int] = {}
@@ -3429,17 +3337,13 @@ def test_each_family_cites_its_defining_job_and_keeps_five_generations(
     None
         Nothing; a missing family, a wrong base name, a wrong citation or a retention limit other
         than five is reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
     registered = s3_stage.family(fact.key)
 
     assert registered.dataset == fact.key
     assert registered.base_name == fact.base_name
     assert registered.defined_in == fact.defined_in
-    # WHY : Assumptions: the citation is matched as the ``<line> NAME`` pair anywhere in the
+    # Assumptions: the citation is matched as the ``<line> NAME`` pair anywhere in the
     #   descriptor's recorded lines rather than as its opening text. Nine of the ten record the NAME
     #   operand first, but ``dalyrejs`` records the DEFINE verb that opens its block at L24 ahead of
     #   its NAME at L25 -- measured, not assumed -- so a prefix match would fail on the one family
@@ -3449,7 +3353,7 @@ def test_each_family_cites_its_defining_job_and_keeps_five_generations(
     assert "LIMIT(5)" in registered.definition_lines
     assert "SCRATCH" in registered.definition_lines
 
-    # WHY : Assumptions: five is asserted against the module's published default as well as
+    # Assumptions: five is asserted against the module's published default as well as
     #   literally, so the two cannot drift apart. The literal is what ties the value to the
     #   baseline's ``LIMIT(5)``; the constant is what the staging path actually applies when a
     #   caller supplies no retention count.
@@ -3488,10 +3392,6 @@ def test_staging_never_creates_a_bucket_or_applies_a_lifecycle(
     None
         Nothing; a provisioning call, or a client operation outside the declared four, is reported
         as an assertion failure.
-
-    Raises
-    ------
-    None
     """
     s3_stage.stage_dataset_file(
         client=fake_object_store,
@@ -3504,7 +3404,7 @@ def test_staging_never_creates_a_bucket_or_applies_a_lifecycle(
         staging_root=seed_corpus.ascii_path("trantype.txt").parent,
     )
 
-    # WHY : Assumptions: the double is asserted to OFFER no provisioning operation, which is a
+    # Assumptions: the double is asserted to OFFER no provisioning operation, which is a
     #   stronger statement than observing that none was called. A double carrying a create-bucket
     #   method would let a loader acquire the behaviour later and still pass a call-log assertion
     #   written today, because the log check only ever sees the calls this one test provoked.
@@ -3518,17 +3418,16 @@ def test_staging_never_creates_a_bucket_or_applies_a_lifecycle(
             f"the object-store double offers {operation}, so a provisioning call could go unnoticed"
         )
 
-    # WHY : Assumptions: the loader's reachable operations are read from its own source, so the
+    # Assumptions: the loader's reachable operations are read from its own source, so the
     #   guarantee covers every code path rather than the one this test walked. The five it calls are
     #   exactly the five its client protocol declares, and none of them can create a bucket or set a
     #   lifecycle rule.
-    # WHY : Refactoring Rationale: the set gained `head_object`, and the addition is the point of
-    #   asserting an exact set rather than a subset. The staging path now PROBES a generation key
-    #   before writing it, so that a retry presenting identical bytes is idempotent and one
-    #   presenting different bytes is refused rather than silently overwriting a catalogued
-    #   generation. `head_object` reads metadata and cannot create, configure or delete anything,
-    #   so the guarantee this test states is unchanged -- but it had to be re-stated deliberately,
-    #   which is exactly what an exact set forces.
+    # Assumptions: the set is asserted EXACTLY rather than as a subset, so every client operation
+    #   the staging path reaches has to be named here deliberately. `head_object` is on it because
+    #   the path PROBES a generation key before writing it, so a retry presenting identical bytes
+    #   is idempotent and one presenting different bytes is refused rather than silently
+    #   overwriting a catalogued generation; it reads metadata and can create, configure and
+    #   delete nothing, so admitting it widens no capability.
     assert _client_operations(s3_stage) == {
         "get_paginator",
         "put_object",
@@ -3574,12 +3473,8 @@ def test_a_new_generation_is_discovered_from_the_highest_existing_prefix(
     None
         Nothing; a next generation that is not one past the highest existing one is reported as an
         assertion failure.
-
-    Raises
-    ------
-    None
     """
-    # WHY : Alternatives Considered: a locally held counter was available and was rejected, and the
+    # Alternatives Considered: a locally held counter was available and was rejected, and the
     #   reason is a collision between two writers to the SAME family and business date. It is not
     #   the state machine's per-dataset Map branches: each branch writes under its own
     #   ``<domain>/<dataset>`` prefix, so two branches with independent counters both start at
@@ -3608,7 +3503,7 @@ def test_a_new_generation_is_discovered_from_the_highest_existing_prefix(
     )
 
     assert following == 3
-    # WHY : Assumptions: a reservation is asserted to agree with the discovery, because a caller
+    # Assumptions: a reservation is asserted to agree with the discovery, because a caller
     #   staging by family with no explicit generation reaches the number through the reservation
     #   path instead. The two must produce one answer or the ``(+1)`` form would depend on which
     #   entry point a step happened to use.
@@ -3621,7 +3516,7 @@ def test_a_new_generation_is_discovered_from_the_highest_existing_prefix(
         "synthetic-execution-token",
     )
     assert reserved == 3
-    # WHY : Assumptions: the discovery is scoped to the TARGET business date, so a generation staged
+    # Assumptions: the discovery is scoped to the TARGET business date, so a generation staged
     #   under a later date does not advance an earlier date's sequence. Without that scoping,
     #   re-running one day after a subsequent day had been staged would skip generation numbers and
     #   leave the two dates' sequences uncomparable.
@@ -3663,10 +3558,6 @@ def test_the_first_generation_of_a_business_date_is_the_documented_minimum(
     None
         Nothing; a first generation other than the published minimum is reported as an assertion
         failure.
-
-    Raises
-    ------
-    None
     """
     registered = s3_stage.family("tcatbalf-bkup")
     assert fake_object_store.keys() == ()
@@ -3681,7 +3572,7 @@ def test_the_first_generation_of_a_business_date_is_the_documented_minimum(
 
     assert first == s3_stage.MIN_GENERATION
     assert first == 1
-    # WHY : Assumptions: the listing is asserted empty as well, so the answer above is known to come
+    # Assumptions: the listing is asserted empty as well, so the answer above is known to come
     #   from a genuine discovery over nothing rather than from a short-circuit that never listed. A
     #   loader that returned the minimum without looking would pass the value check and fail here.
     assert (
@@ -3722,17 +3613,13 @@ def test_the_zero_reference_resolves_to_the_highest_and_refuses_an_empty_family(
     None
         Nothing; a resolved generation that is not the highest, or a fabricated one where none
         exists, is reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
     registered = s3_stage.family("transact-combined")
 
     empty = s3_stage.latest_generation(
         fake_object_store, staging_settings, registered.domain, registered.dataset
     )
-    # WHY : Assumptions: the empty answer is asserted to be an ABSENCE and explicitly not zero. The
+    # Assumptions: the empty answer is asserted to be an ABSENCE and explicitly not zero. The
     #   two are easy to conflate because both are falsey, and the difference matters: zero
     #   renders as ``gen=0000``, which is a well-formed prefix that no write ever creates, so
     #   a caller taking it
@@ -3740,8 +3627,8 @@ def test_the_zero_reference_resolves_to_the_highest_and_refuses_an_empty_family(
     assert empty is None
     assert empty != 0
 
-    # WHY : Refactoring Rationale: the STRICT resolver is exercised on the same empty family, and it
-    #   was added because an absence is the wrong answer for the caller that matters. A consuming
+    # Assumptions: the STRICT resolver is exercised on the same empty family because an absence is
+    #   the wrong answer for the caller that matters. A consuming
     #   batch step asking for ``(0)`` cannot proceed without a generation, and the baseline it
     #   reproduces does not let it: a JCL step referencing ``TRANSACT.BKUP(0)`` against an empty
     #   generation data group fails the step rather than reading nothing. Returning ``None`` to that
@@ -3754,7 +3641,7 @@ def test_the_zero_reference_resolves_to_the_highest_and_refuses_an_empty_family(
     message = str(refused.value)
     assert registered.domain in message
     assert registered.dataset in message
-    # WHY : Assumptions: the typed error is asserted to be the one an operator already handles for
+    # Assumptions: the typed error is asserted to be the one an operator already handles for
     #   the other way discovery yields no usable answer -- an exhausted generation space -- so a
     #   caller catching "the generation I need cannot be determined" catches one class for both.
     assert isinstance(refused.value, s3_stage.GenerationRetentionError)
@@ -3776,7 +3663,7 @@ def test_the_zero_reference_resolves_to_the_highest_and_refuses_an_empty_family(
     assert current.generation == 3
     assert current.business_date == _BUSINESS_DATE
     assert current.prefix.endswith("gen=0003/")
-    # WHY : Assumptions: the two resolvers are asserted to agree once a generation EXISTS, which is
+    # Assumptions: the two resolvers are asserted to agree once a generation EXISTS, which is
     #   what keeps them one contract with two failure behaviours rather than two answers. A strict
     #   resolver that re-derived the newest generation independently could disagree with the query
     #   at a date boundary, and the disagreement would only appear on the first run of a new day.
@@ -3814,12 +3701,6 @@ def test_an_exhausted_generation_space_raises_the_typed_staging_error(
     None
         Nothing; a next generation returned instead of a refusal is reported as an assertion
         failure.
-
-    Raises
-    ------
-    None
-        The refusal is caught by :func:`pytest.raises`, which verifies
-        :class:`carddemo_migration.loaders.s3_stage.GenerationDiscoveryError`.
     """
     registered = s3_stage.family("trantype-bkup")
     _stage_generations(
@@ -3842,7 +3723,7 @@ def test_an_exhausted_generation_space_raises_the_typed_staging_error(
 
     assert "exhausted" in str(exhausted.value)
     assert f"gen={s3_stage.MAX_GENERATION}" in str(exhausted.value)
-    # WHY : Assumptions: the error's PLACE IN THE HIERARCHY is asserted, not only its type. Both
+    # Assumptions: the error's PLACE IN THE HIERARCHY is asserted, not only its type. Both
     #   staging errors descend from one base so a caller that does not care which failed can catch
     #   the base; a type that stopped descending from it would silently escape every such handler
     #   while this test still passed on the class name alone.
@@ -3876,15 +3757,8 @@ def test_the_business_date_is_a_required_parameter(
     -------
     None
         Nothing; a defaulted business date is reported as an assertion failure.
-
-    Raises
-    ------
-    None
-        The refusal is caught by :func:`pytest.raises`, which verifies :class:`TypeError` -- the
-        interpreter's own report of a missing required argument, which is the strongest possible
-        form of the guarantee because no code path can bypass it.
     """
-    # WHY : Assumptions: the baseline injects the business date as a job parameter for exactly this
+    # Assumptions: the baseline injects the business date as a job parameter for exactly this
     #   reason -- ``app/jcl/INTCALC.jcl`` L22 reads ``EXEC PGM=CBACT04C,PARM='2022071800'`` -- so a
     #   re-run reproduces its output rather than producing a new one. Reading the clock instead
     #   would make staged prefixes non-deterministic and a re-run non-idempotent, and it would do so
@@ -3940,12 +3814,8 @@ def test_neither_loader_reads_the_wall_clock(module: Any) -> None:  # noqa: ANN4
     -------
     None
         Nothing; any wall-clock call is reported as an assertion failure naming it.
-
-    Raises
-    ------
-    None
     """
-    # WHY : Assumptions: the check parses CALLS rather than searching the file's text, and that is
+    # Assumptions: the check parses CALLS rather than searching the file's text, and that is
     #   load-bearing here rather than fastidious. Both loaders state in prose that a date is "never
     #   derived from a clock", and the staging module's parameter documentation names the clock
     #   explicitly, so a substring search for ``now`` or ``today`` reports those very promises as
@@ -3982,12 +3852,8 @@ def test_the_generation_is_zero_padded_to_four_digits(
     -------
     None
         Nothing; a segment of the wrong width is reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
-    # WHY : Assumptions: the padded segment is asserted against the module's published digit
+    # Assumptions: the padded segment is asserted against the module's published digit
     #   count as well as against a literal four. The literal ties the width to the
     #   ``gen=NNNN`` convention the infrastructure provisions; the constant is what the
     #   builder actually applies, so a change to one without the other fails here.
@@ -4027,12 +3893,8 @@ def test_zero_padding_makes_a_lexical_listing_sort_numerically(
     None
         Nothing; a newest generation resolved to nine rather than ten is reported as an assertion
         failure.
-
-    Raises
-    ------
-    None
     """
-    # WHY : Assumptions: nine and ten are the specific pair that exposes an unpadded
+    # Assumptions: nine and ten are the specific pair that exposes an unpadded
     #   component, because ``gen=10`` sorts before ``gen=9`` as text while sorting after it as
     #   a number. Any other pair either straddles no boundary or fails for a second reason,
     #   so this is the smallest arrangement that isolates the ordering property.
@@ -4083,16 +3945,12 @@ def test_the_staging_client_is_built_through_the_configuration_module() -> None:
     -------
     None
         Nothing; a locally constructed client is reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
     from carddemo_migration import config
 
     called = _called_dotted_names(s3_stage)
 
-    # WHY : Assumptions: the factory is named through the configuration module's PUBLIC surface.
+    # Assumptions: the factory is named through the configuration module's PUBLIC surface.
     #   This module's suite already asserts that the private spelling the staging loader once
     #   reached for is gone, so a call to it resolves to nothing at run time -- an attribute error
     #   raised from a function no other test exercises, which is the shape of defect a call-graph
@@ -4105,7 +3963,7 @@ def test_the_staging_client_is_built_through_the_configuration_module() -> None:
     assert "aws_client" in config.__all__
     assert "config._aws_client" not in called
 
-    # WHY : Assumptions: every configuration name the staging loader calls is required to EXIST,
+    # Assumptions: every configuration name the staging loader calls is required to EXIST,
     #   which is the invariant a cross-module private reach actually breaks. The loader does still
     #   reach one private helper -- the service-error-code reader its conditional-claim path
     #   needs --
@@ -4145,25 +4003,20 @@ def test_the_staging_module_constructs_no_literal_endpoint(
     None
         Nothing; a literal endpoint, a hard-coded host or a credential-shaped literal is reported as
         an assertion failure.
-
-    Raises
-    ------
-    None
     """
     assert "endpoint_url" not in _keyword_argument_names(s3_stage)
     assert "endpoint_url" not in _keyword_argument_names(aurora)
 
-    # WHY : Assumptions: the literal scan skips docstrings, and here that is the difference between
+    # Assumptions: the literal scan skips docstrings, and here that is the difference between
     #   a meaningful check and a guaranteed failure: the staging module's own rationale explains at
     #   length that it passes no ``endpoint_url``, and the phrase appears in that explanation.
-    # WHY : ⚠️ Refactoring Rationale: the bare object-URI SCHEME is admitted, where every "://"
-    #   was previously refused outright. The staging module now resolves a source location that a
-    #   deployment states as `s3://bucket/prefix`, and it names that scheme in one constant and in
-    #   its diagnostics. That is not the property this case exists to protect: a scheme names no
-    #   host, no region, no account and no credential, and the bucket it precedes is still carried
-    #   on validated settings rather than written here -- which the final assertion below still
-    #   proves. Every OTHER scheme stays refused, so an `https://` endpoint literal, which is what
-    #   would create the second code path this case is about, still fails it.
+    # Trade-offs: the bare object-URI SCHEME is admitted where every other "://" is refused.
+    #   The staging module resolves a source location a deployment states as `s3://bucket/prefix`
+    #   and names that scheme in one constant and in its diagnostics, and a scheme on its own
+    #   names no host, no region, no account and no credential -- the bucket it precedes is
+    #   carried on validated settings, which the final assertion below proves. Admitting it costs
+    #   nothing this case protects: every other scheme stays refused, so an `https://` endpoint
+    #   literal -- the second code path this case exists to prevent -- still fails.
     for module in (aurora, s3_stage):
         for literal in _executable_string_literals(module):
             assert "amazonaws.com" not in literal
@@ -4172,7 +4025,7 @@ def test_the_staging_module_constructs_no_literal_endpoint(
             assert "AWS_ACCESS_KEY" not in literal
             assert "AWS_SECRET" not in literal
 
-    # WHY : Assumptions: the bucket is a PARAMETER carried on validated settings rather than a
+    # Assumptions: the bucket is a PARAMETER carried on validated settings rather than a
     #   literal in the loader, which is what lets one image stage into a development bucket and a
     #   production one without a code change. The fixture's own value is asserted synthetic so that
     #   nothing in this module could be mistaken for a deployed resource name.
@@ -4201,16 +4054,11 @@ def test_every_service_client_import_in_the_distribution_is_declared_and_deferre
         Nothing; a client imported by a module the allow-list does not name, a permitted module
         importing a client it was not allowed, or any client imported at module scope, is reported
         as an assertion failure naming the module and the client.
-
-    Raises
-    ------
-    None
     """
-    # WHY : Refactoring Rationale: this walks every ``.py`` under the package root, where it used to
-    #   inspect two named modules. The narrow version passed while the boundary docstring it was
-    #   checking was false: ``credentials.py`` imports the database driver in two functions, and
-    #   no assertion anywhere reached that file. A layering claim about a distribution has to be
-    #   checked over the distribution.
+    # Assumptions: the walk covers every ``.py`` under the package root rather than a list of
+    #   named modules, because a layering claim about a distribution has to be checked over the
+    #   distribution. A walk narrowed to two modules would leave any third import site -- such as
+    #   the driver import in ``credentials.py`` -- reached by no assertion at all.
     root = Path(aurora.__file__).resolve().parent.parent
     sources = sorted(path for path in root.rglob("*.py") if "__pycache__" not in path.parts)
     assert len(sources) >= 20, f"only {len(sources)} sources were scanned under {root}"
@@ -4230,7 +4078,7 @@ def test_every_service_client_import_in_the_distribution_is_declared_and_deferre
             else:
                 continue
             found |= names & _SERVICE_CLIENT_MODULES
-        # WHY : Assumptions: module scope is read from the tree's own top-level body rather than by
+        # Assumptions: module scope is read from the tree's own top-level body rather than by
         #   walking every node, because that is exactly the distinction under test -- an import
         #   nested inside a function body is deferred and is permitted, and the same statement at
         #   the top of the file is not.
@@ -4252,7 +4100,7 @@ def test_every_service_client_import_in_the_distribution_is_declared_and_deferre
         f" missing {sorted(set(_PERMITTED_SERVICE_CLIENT_IMPORTS) - set(observed))},"
         f" observed { ({name: sorted(clients) for name, clients in sorted(observed.items())}) }"
     )
-    # WHY : Assumptions: NO module scope import is permitted, for any of the three clients, in any
+    # Assumptions: NO module scope import is permitted, for any of the three clients, in any
     #   module -- so this is asserted as an empty mapping rather than against a second allow-list.
     #   Deferring every one of them is what keeps `import carddemo_migration.copybook.layouts`
     #   working on a checkout with no driver and no SDK installed.
@@ -4260,7 +4108,7 @@ def test_every_service_client_import_in_the_distribution_is_declared_and_deferre
         "a service client is imported at module scope, which makes that module unimportable without"
         f" the dependency: { ({name: sorted(clients) for name, clients in module_scope.items()}) }"
     )
-    # WHY : Assumptions: the staging loader importing NO AWS SDK is called out separately because it
+    # Assumptions: the staging loader importing NO AWS SDK is called out separately because it
     #   is the property that makes the in-process double substitutable with nothing mocked, patched
     #   or redirected. It takes its client as an argument and obtains the default from
     #   configuration, so a test supplies its own object at a seam that already exists.
@@ -4282,12 +4130,8 @@ def test_a_record_layout_import_pulls_in_no_service_client() -> None:
     None
         Nothing; a service client present in the child interpreter's module table is reported as an
         assertion failure naming it.
-
-    Raises
-    ------
-    None
     """
-    # WHY : Alternatives Considered: the check runs in a CHILD interpreter rather than inspecting
+    # Alternatives Considered: the check runs in a CHILD interpreter rather than inspecting
     #   this process's module table. In-process inspection was written first and is worthless here:
     #   this module imports both loaders at its top, so ``psycopg`` and the SDK may already be in
     #   ``sys.modules`` before the assertion runs, and the test would pass or fail according to
@@ -4312,7 +4156,7 @@ def test_a_record_layout_import_pulls_in_no_service_client() -> None:
     )
     leaked = completed.stdout.strip()
     assert leaked == "", f"importing the codec layer pulled in {leaked}"
-    # WHY : Assumptions: the readers named in the probe are the ones this module actually loads
+    # Assumptions: the readers named in the probe are the ones this module actually loads
     #   records through, so the probe covers the path these tests take rather than an arbitrary
     #   sample of the package.
     assert xref.__name__.endswith("readers.xref")
@@ -4340,10 +4184,6 @@ def test_connection_settings_never_render_their_credential(
     -------
     None
         Nothing; a credential appearing in any rendering is reported as an assertion failure.
-
-    Raises
-    ------
-    None
     """
     settings = AuroraConnectionSettings(
         host="aurora.carddemo.invalid",
@@ -4357,7 +4197,7 @@ def test_connection_settings_never_render_their_credential(
     assert SYNTHETIC_PASSWORD_FILL not in repr(settings)
     assert SYNTHETIC_PASSWORD_FILL not in str(settings)
     assert REDACTED in repr(settings)
-    # WHY : Assumptions: the credential is asserted to be RETRIEVABLE from the attribute while
+    # Assumptions: the credential is asserted to be RETRIEVABLE from the attribute while
     #   absent from every rendering. The masking is a presentation guarantee, not encryption -- the
     #   connection needs the real value -- so a test that found the attribute masked as well would
     #   be describing a settings object that could not open a connection.
@@ -4370,7 +4210,7 @@ def test_connection_settings_never_render_their_credential(
     assert SYNTHETIC_PASSWORD_FILL not in repr(recorded)
 
 
-# WHY : Assumptions: S3 names its IAM actions after the WIRE operation rather than the SDK method,
+# Assumptions: S3 names its IAM actions after the WIRE operation rather than the SDK method,
 #   so this mapping is a translation and not a rename. `list_object_versions` is authorised by
 #   `s3:ListBucketVersions` against the BUCKET, and a single `delete_objects` call that carries a
 #   VersionId -- which is the only form the retention path issues -- requires BOTH `s3:DeleteObject`
@@ -4384,7 +4224,7 @@ _RETENTION_IAM_ACTIONS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
     }
 )
 
-# WHY : Assumptions: both environment roots are asserted, not one. They are separate files that a
+# Assumptions: both environment roots are asserted, not one. They are separate files that a
 #   change reaches independently, and a grant present in dev and absent in prod fails only in the
 #   environment where the failure costs the most.
 _ENVIRONMENT_ROOTS: Final[tuple[str, ...]] = ("dev", "prod")
@@ -4420,7 +4260,7 @@ def _data_migration_runtime_policy(environment: str) -> str:
     ).read_text(encoding="utf-8")
     opening = 'data "aws_iam_policy_document" "data_migration_runtime" {'
     assert opening in root, f"infra/envs/{environment} declares no data_migration_runtime policy"
-    # WHY : Trade-offs: the block is delimited by the next closing brace in the FIRST column rather
+    # Trade-offs: the block is delimited by the next closing brace in the FIRST column rather
     #   than by counting braces. Terraform formats top-level blocks that way and `terraform fmt
     #   -check` is a CI gate, so the delimiter is enforced elsewhere; a brace counter here would be
     #   a second HCL parser to maintain for no additional certainty.
@@ -4456,7 +4296,7 @@ def test_both_environment_roots_grant_the_retention_path_the_actions_it_calls() 
         action, if the version listing is unconditioned, or if the delete grant reaches beyond the
         dataset prefixes.
     """
-    # WHY : Assumptions: the module's own source is read first, so the expectation cannot outlive
+    # Assumptions: the module's own source is read first, so the expectation cannot outlive
     #   the call. If the retention path were rewritten to stop listing versions, this loop
     #   reports the stale entry rather than leaving a grant asserted for an operation nothing
     #   performs.
@@ -4476,7 +4316,7 @@ def test_both_environment_roots_grant_the_retention_path_the_actions_it_calls() 
                     f" {operation} call requires; the sixth generation fails with AccessDenied"
                 )
 
-        # WHY : Assumptions: the version listing is asserted CONDITIONED, not merely present. It is
+        # Assumptions: the version listing is asserted CONDITIONED, not merely present. It is
         #   granted at the bucket, and a bucket-level listing with no `s3:prefix` condition lets the
         #   migration task enumerate every key in the dataset bucket including the statement
         #   prefixes, which hold rendered customer statements this role has no reason to read.
@@ -4490,7 +4330,7 @@ def test_both_environment_roots_grant_the_retention_path_the_actions_it_calls() 
             " the s3-datasets module's own output, so the two can drift apart silently"
         )
 
-        # WHY : Assumptions: the delete grant is asserted to be PREFIX-scoped and specifically NOT
+        # Assumptions: the delete grant is asserted to be PREFIX-scoped and specifically NOT
         #   bucket-wide. A delete over `${bucket_arn}/*` would let the migration task destroy the
         #   rendered statements and the exported reports, neither of which any part of it produces
         #   -- and it would pass every other assertion in this test.

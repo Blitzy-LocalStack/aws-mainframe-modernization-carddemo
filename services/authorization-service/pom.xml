@@ -273,10 +273,23 @@
       IBM MQ queue named AWS.M2.CARDDEMO.PAUTH.REQUEST and puts replies to
       AWS.M2.CARDDEMO.PAUTH.REPLY, and the migration targets that pair with a
       FIFO queue pair so that per-card ordering survives on the source queue:
-      the message group and correlation identifiers are purpose-scoped opaque
-      HMAC tokens, so the card number never becomes SQS metadata, and the
-      correlation token doubles as the deduplication identifier without placing
-      the raw card/transaction tuple in metadata.
+      MessageGroupId is the card number itself and MessageDeduplicationId the
+      transaction identifier itself, stated in those words by sections 0.4.1.8 and
+      0.7.6 of the technical specification, so equal cards produce one group by
+      construction rather than by agreement on a derivation.
+      Refactoring Rationale: this comment described both identities as
+      purpose-scoped opaque HMAC tokens that kept the card number out of SQS
+      metadata. That derivation is withdrawn, because a group identity orders one
+      card only while EVERY producer computes it identically, and a deduplication
+      identity suppresses a resend only while the REQUESTER can predict it, and a
+      value keyed from this consumer's secret is neither. The exposure the
+      literal values accept is registered as
+      D-AUTHORIZATION-FIFO-IDENTITY-METADATA in
+      docs/architecture/cobol-to-service-traceability.md.
+      (Assumptions: no double hyphen appears in this block. XML forbids one inside
+      a comment, so a dash pair written as an aside makes the POM non-parseable and
+      the module unbuildable; clauses here are separated with commas or full stops
+      for that reason rather than as a style preference.)
       Dead-letter transfer is an explicit quarantine boundary rather than a
       claim of uninterrupted order through poison handling. Two baseline disciplines are carried by the
       listener rather than by configuration alone, so that throughput

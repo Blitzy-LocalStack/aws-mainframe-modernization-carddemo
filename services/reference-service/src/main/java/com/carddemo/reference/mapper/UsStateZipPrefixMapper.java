@@ -27,8 +27,8 @@ import org.springframework.stereotype.Component;
  * deliberately not declared {@code final}, rather than the {@code final} class with a private
  * constructor and static members that the charter fixes for the four entity conversions at its own
  * L213 to L239. The static shape was the alternative and was not taken here. The charter already
- * admits this second shape for {@code DateInquiryReplyMapper} at its L161 to L164, and records at
- * its L238 to L239 that a component is left non-final precisely so that it remains proxyable; both
+ * admits this second shape for the three seeded-lookup conversions, and records that a component is
+ * left non-final precisely so that it remains proxyable; both
  * of those properties are wanted here. This conversion is reached by constructor injection, which is
  * the dependency-injection pattern the Agent Action Plan fixes for this migration in place of the
  * baseline's static linkage, and an injected bean can be substituted in a slice test where a static
@@ -92,9 +92,9 @@ public class UsStateZipPrefixMapper {
      * Renders one stored combination as the shape the contract publishes.
      *
      * <p>Assumptions: the argument is a loaded, non-null row whose single member is present.
-     * {@code V1__reference.sql} declares {@code state_zip_cd CHAR(4) NOT NULL} at its L461 and makes
+     * {@code V1__reference.sql} declares {@code state_zip_cd CHAR(4) NOT NULL} at its L450 and makes
      * that same column the whole of the primary key through {@code pk_us_state_zip_prefixes} at its
-     * L463, so the member has no absent case for this method to substitute a value for. A null in
+     * L452, so the member has no absent case for this method to substitute a value for. A null in
      * that position means the row was never loaded, and reporting it as a blank combination would
      * hide exactly that.</p>
      *
@@ -121,7 +121,7 @@ public class UsStateZipPrefixMapper {
         //       01 US-STATE-ZIPCODE-TO-EDIT, its L1072 declares
         //       02 US-STATE-AND-FIRST-ZIP2 PIC X(4), and its L1073 attaches the condition name
         //       VALID-US-STATE-ZIP-CD2-COMBO to that whole four-character field rather than to
-        //       either half of it. The stored column is CHAR(4) at V1__reference.sql L461, so a
+        //       either half of it. The stored column is CHAR(4) at V1__reference.sql L450, so a
         //       combination fills its declared width exactly and there is nothing to remove.
         // WHY : Assumptions: the edit settles it from the other side, and this is the decisive
         //       evidence rather than an appeal to how the field is declared. app/cbl/COACTUPC.cbl
@@ -137,7 +137,7 @@ public class UsStateZipPrefixMapper {
         //       rejected on the evidence above: two columns can express a pair the baseline has no
         //       way to evaluate, because the only test it performs is an equality against the
         //       concatenation, so the target column is one CHAR(4) primary key at
-        //       V1__reference.sql L461 and L463 and the domain and DTO packages both carry a single
+        //       V1__reference.sql L450 and L452 and the domain and DTO packages both carry a single
         //       member. The corollary is worth stating because a reader comparing this file with
         //       TransactionCategoryMapper will look for it: that mapper composes a nested identity
         //       type for a genuinely composite key, whereas there is no identity object to build

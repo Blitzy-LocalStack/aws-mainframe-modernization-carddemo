@@ -65,7 +65,7 @@ import org.springframework.context.annotation.Configuration;
  * framework's own pooled-datasource configuration back off entirely, and that configuration contributes
  * more than the pool: it also registers the post-processor that lets an externally supplied connection
  * detail override the pool's target, which is how the {@code testcontainers-postgresql} dependency
- * declared at {@code services/account-service/pom.xml} L517 to L519 points a repository test at its own
+ * declared at {@code services/account-service/pom.xml} L508 to L510 points a repository test at its own
  * container. Re-declaring the bean would withdraw that and would additionally require the verified-TLS
  * driver properties at {@code application.yml} L712 and L713 to be re-applied by hand, where omitting
  * one would downgrade an encrypted connection silently. Extending the framework's pool through
@@ -121,7 +121,7 @@ import org.springframework.context.annotation.Configuration;
 //   by autoconfiguration rather than by scan. A handler declared here would give one exception two
 //   mappings and make the answer depend on bean ordering.
 // Assumptions: there is no batch configuration in this package and there must never be one. The batch
-//   starter is version-managed centrally at services/pom.xml L750 but is deliberately NOT declared by
+//   starter is version-managed centrally at services/pom.xml L741 but is deliberately NOT declared by
 //   services/account-service/pom.xml, so the types such a class would reference are absent from this
 //   module's compile classpath and the omission is enforced by the compiler rather than by agreement.
 //   Chunk-oriented jobs, the durable job repository and the one cross-schema unit of work this migration
@@ -285,7 +285,7 @@ public class DataSourceConfig {
         //   before this service can migrate; that is a visible precondition rather than a default that
         //   conceals a missing precondition.
         // Assumptions: the runner works at all only because two artifacts are on the classpath, and the
-        //   second is easy to omit. services/account-service/pom.xml L398 declares the starter that
+        //   second is easy to omit. services/account-service/pom.xml L389 declares the starter that
         //   activates migration -- the framework moved that autoconfiguration into its own module, so
         //   the migration engine alone resolves, compiles and starts while applying nothing. L402
         //   declares the PostgreSQL-specific companion, which the engine has required as a separate

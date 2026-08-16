@@ -131,7 +131,7 @@ import { useId } from 'react';
 import type { CSSProperties, ReactElement } from 'react';
 
 import { APP_ORGANISATION_TITLE_DISPLAY, APP_TITLE_DISPLAY } from '../messages/messages';
-import { BMS_COLOR_TOKENS, TYPOGRAPHY_TOKENS } from '../theme/tokens';
+import { BMS_TEXT_COLOR_TOKENS, TYPOGRAPHY_TOKENS } from '../theme/tokens';
 
 /**
  * The four status-line prompt words the band paints beside its value slots,
@@ -232,6 +232,25 @@ export const HEADER_DATE_FORMAT = 'MM/DD/YY' as const;
  * 8-character reading independently.
  */
 export const HEADER_TIME_FORMAT = 'HH:mm:ss' as const;
+
+/*
+ * WHY : ⚠️ Refactoring Rationale: there is no `ScreenHeaderSurface` type and no `surface` prop here any
+ *       more, and what they were for has been settled one level up. They let a mount site name the
+ *       background behind this band -- `body` or `darkChrome` -- so the band could pick a contrast-safe
+ *       resolution per surface, because `colorPrimary` as text measured 4.49:1 against the design system's
+ *       dark chrome fill and 3.76:1 against the shell's light fill, both under the 4.5:1 WCAG AA minimum
+ *       for normal text. Those measurements are real and they are recorded, in
+ *       `ui/src/theme/tokens.ts` at ACCESSIBLE_TEXT_TOKENS and CONTRAST_REFERENCE_SURFACES.
+ * WHY : Assumptions: the adopted remedy removes the second surface instead of resolving against it. The
+ *       shell now paints ALL THREE of its zones with `SURFACE_TOKENS.screen` -- `colorBgContainer` -- so
+ *       there is exactly one background behind screen text anywhere in the tree, which is what lets
+ *       BMS_TEXT_COLOR_TOKENS be measured once against TEXT_CONTRAST_SURFACE and hold everywhere. With the
+ *       dark chrome gone, a prop naming it would have described a background this band is never painted on,
+ *       and the shell's own `surface="darkChrome"` was stating something false about its rendered fill.
+ * WHY : Trade-offs: a mount site that reintroduced a dark zone would have to re-measure rather than pass a
+ *       flag. That is the intended cost: SURFACE_TOKENS carries the note saying so, and a per-surface prop
+ *       would have let a new background arrive without any measurement at all.
+ */
 
 /**
  * A baseline header slot that this component deliberately does not render.
@@ -451,7 +470,15 @@ export function ScreenHeader(props: ScreenHeaderProps): ReactElement {
   // is intentional.
   const paintedAt = now === undefined ? dayjs() : dayjs(now);
 
-  const promptStyle: CSSProperties = { color: cssVar[BMS_COLOR_TOKENS.BLUE] };
+  // Refactoring Rationale: both text colours below resolve through
+  // BMS_TEXT_COLOR_TOKENS and no longer through BMS_COLOR_TOKENS. The hue mapping is
+  // unchanged - the mapsets paint these six header fields COLOR=BLUE and blue is still
+  // the primary role - but the role's own anchor measures 4.10:1 against the surface the
+  // shell paints and 4.49:1 against the fill the shell used to paint, where WCAG AA asks
+  // 4.5:1 for normal text. The text-grade shade of the same ramp measures 6.16:1, so the
+  // band keeps its measured hue family and becomes readable to the standard. tokens.ts
+  // records the per-role numbers in BMS_TEXT_CONTRAST_AUDIT.
+  const promptStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.BLUE] };
 
   // Assumptions: the value slots are rendered in the code face because the
   // baseline's cell grid aligned them for free and the two right-hand slots are
@@ -459,9 +486,30 @@ export function ScreenHeader(props: ScreenHeaderProps): ReactElement {
   // the digits differ in advance width, so the two rows' colons and slashes
   // stop lining up vertically between row 1 and row 2.
   const valueStyle: CSSProperties = {
-    color: cssVar[BMS_COLOR_TOKENS.BLUE],
+    color: cssVar[BMS_TEXT_COLOR_TOKENS.BLUE],
     fontFamily: cssVar[TYPOGRAPHY_TOKENS.fixedPitchData],
   };
+
+  // Refactoring Rationale: the two centre title lines resolve through
+  // BMS_TEXT_COLOR_TOKENS.YELLOW like every other sentence in this band, where they used to
+  // carry the design system's warning type. The hue mapping is unchanged - COSGN00.bms paints
+  // TITLE01 and TITLE02 COLOR=YELLOW at L38-L39 and L61-L62, and BMS_COLOR_TOKENS still maps
+  // YELLOW to the warning role for fills, borders and icons - but that anchor measured 1.90:1
+  // against the surface the shell paints, the worst pairing on any screen, where WCAG AA asks
+  // 4.5:1 for normal text. The gold ramp publishes no shade that reaches it: its darkest alias
+  // measures 2.867:1, which is why BMS_TEXT_CONTRAST_AUDIT records this role as a SNAP to the
+  // base text token at 16.56:1 rather than as an in-family shade. The snap is the recorded
+  // resolution and this is the consumer that was still bypassing it.
+  // Alternatives Considered: keeping the gold by restoring a dark header fill, which is where
+  // the baseline's yellow got its contrast - the 3270 paints coloured text on a dark display.
+  // Rejected because AppShell paints one surface across all three zones precisely so that one
+  // contrast measurement is the whole answer, and reintroducing a second surface here would
+  // reopen the defect that decision closed.
+  // Trade-offs: the band loses the gold accent. The application title keeps its heading level,
+  // its weight and its position, so the emphasis the source carried through colour is carried
+  // here through size and weight - the same substitution BMS_TEXT_COLOR_TOKENS records for
+  // ATTRB=BRT, which becomes fontWeightStrong rather than a colour.
+  const appTitleStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.YELLOW] };
 
   return (
     // Alternatives Considered: a bare <header> with aria-labelledby, and a
@@ -522,7 +570,9 @@ export function ScreenHeader(props: ScreenHeaderProps): ReactElement {
              * proportional layout the Flex above does the centring and those
              * spaces would only offset it.
              */}
-            <Typography.Text type="warning">{APP_ORGANISATION_TITLE_DISPLAY}</Typography.Text>
+            <Typography.Text style={appTitleStyle}>
+              {APP_ORGANISATION_TITLE_DISPLAY}
+            </Typography.Text>
           </Flex>
         </Col>
         <Col span={24} md={6}>
@@ -553,10 +603,12 @@ export function ScreenHeader(props: ScreenHeaderProps): ReactElement {
              * separately: this is the only heading in the band, and its id names
              * the enclosing region through aria-labelledby, so the region is
              * announced by the application title rather than by its depth.
-             * type="warning" is how COLOR=YELLOW reaches this element - antd
-             * resolves it to the colorWarning token that the bridge maps
-             * YELLOW to - so the mapping travels through a declared component
-             * prop and needs no style of its own.
+             * COLOR=YELLOW reaches this element through the text-grade half of
+             * the bridge, appTitleStyle above, and not through the design
+             * system's warning type. That prop resolved to the warning anchor,
+             * which is the hue map's answer for fills and icons and measures
+             * 1.90:1 as text; the reasoning for the snap is recorded at that
+             * style's declaration.
              * Alternatives Considered: setting fontSize and lineHeight here from
              * the bridge's screenTitleSize and screenTitleLineHeight entries.
              * Rejected because level={4} is already the instruction that makes
@@ -570,7 +622,7 @@ export function ScreenHeader(props: ScreenHeaderProps): ReactElement {
              * would move the component's internal value and leave this override
              * behind, silently.
              */}
-            <Typography.Title level={4} type="warning" id={titleId}>
+            <Typography.Title level={4} id={titleId} style={appTitleStyle}>
               {APP_TITLE_DISPLAY}
             </Typography.Title>
           </Flex>

@@ -200,7 +200,31 @@
  *
  * <p>Assumptions: this context owns no table, no index and no view, and so has no
  * write path at all -- meaning that this module declares none and that the login role
- * it connects as can write none and can read only the seven views. The schema itself
+ * it connects as can write none. What it can READ is stated exactly, because an
+ * approximation here reads as a privilege boundary and is one: the {@code reporting}
+ * schema holds TEN views, ONE table and ONE function, and the login holds
+ * {@code SELECT} on all ten views, {@code EXECUTE} on the one function and no
+ * privilege at all on the table.
+ *
+ * <p>⚠️ Refactoring Rationale: that inventory read "the seven views", which was wrong on
+ * both halves of the sentence and understated the surface by three relations and a
+ * function. {@code data-migration/sql/V1__reporting_views.sql} creates EIGHT views and
+ * grants {@code SELECT} on each, and {@code V3__verification_surfaces.sql} adds two
+ * more -- {@code v_verification_row_counts} and {@code v_verification_money_totals} --
+ * and grants those to the same login. The function is
+ * {@code reporting.resolve_card(character varying)}, which V1 revokes from
+ * {@code PUBLIC} and grants {@code EXECUTE} on to this login alone, and it is the only
+ * executable privilege this context holds. A charter that undercounts a role's reach is
+ * the document a reviewer checks a least-privilege claim against, so the figures are
+ * derivable: count {@code CREATE VIEW reporting.} and {@code GRANT SELECT ON
+ * reporting.} across {@code data-migration/sql/}.
+ *
+ * <p>Assumptions: this package reads EIGHT of those ten, not all ten, and the
+ * distinction is the point rather than a caveat. The eight are the production views,
+ * one per projection in {@code ..reporting.domain}; the two verification relations are
+ * aggregate-only and are read by the migration's own SQL verification passes under this
+ * same role, which is why the grant exists and why no projection here maps them. The
+ * schema itself
  * is not empty of tables: it holds exactly one, {@code card_grouping_key}, created by
  * {@code data-migration/sql/V1__reporting_views.sql}, owned by the no-login role and
  * revoked from this context's login, because it carries the secret that keeps the
@@ -237,10 +261,13 @@
  * cannot come from a service migration either. They belong to a data-migration
  * step ordered AFTER the per-service migrations have created the tables they
  * read. Assumptions: that ordering is REALISED, not merely intended --
- * {@code data-migration/sql/V1__reporting_views.sql} creates all seven views this
+ * {@code data-migration/sql/V1__reporting_views.sql} creates all eight views this
  * package reads, and each per-service migration it depends on exists in the module
  * that owns it. The sequencing constraint above is therefore a rule about where a
- * view may be created, not a note about something absent.
+ * view may be created, not a note about something absent. The other two relations this
+ * login can read arrive one file later, in
+ * {@code data-migration/sql/V3__verification_surfaces.sql}, for the same sequencing
+ * reason applied to aggregates over the eleven base tables.
  *
  * <p>Two consequences follow, and both are to be acted on rather than worked
  * around. Nothing in this package emits a data-definition statement of any kind:

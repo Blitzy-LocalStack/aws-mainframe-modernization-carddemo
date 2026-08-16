@@ -54,12 +54,13 @@
  * from service. The management endpoints -- the three the base exposure list publishes and the whole
  * {@code /actuator} namespace behind them -- are granted by NETWORK POSITION rather than by any
  * authority, so the tokenless collector sidecar can scrape them and nothing off the box can read them.
- * The three token-issuing paths are open, because a caller reaching them holds no token yet. The two
+ * The four session paths are open, because a caller reaching any of them holds no usable token: three
+ * ISSUE one, and the fourth REVOKES one a caller may hold long after its access token expired. The two
  * user-administration patterns require the administrator authority. Everything else is DENIED.</p>
  *
  * <p>Refactoring Rationale: this description replaces a Trade-offs note claiming "the health endpoint is
  * left unauthenticated although every other route is guarded", which was true of neither end of the
- * sentence. Three further paths were open, not one; and the chain ended in {@code authenticated()}, so
+ * sentence. Four further paths were open, not one; and the chain ended in {@code authenticated()}, so
  * whatever no rule matched -- including the {@code env}, {@code configprops} and {@code flyway}
  * endpoints the development profile publishes -- was reachable by any validly signed token, including
  * one carrying no CardDemo group at all. The chain now ends in {@code denyAll()} and matches the

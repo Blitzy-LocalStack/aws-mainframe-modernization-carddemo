@@ -78,10 +78,29 @@
  * <p>A synchronous REST surface contracted by this module's
  * {@code src/main/resources/openapi/reference-api.yaml}, written to OpenAPI
  * 3.1, covering the six tables plus a date-evaluation endpoint and a
- * reference-maintenance endpoint. Alongside it there is exactly one
- * asynchronous entry point, a queue consumer for the date-conversion flow,
- * which is why {@code spring-cloud-aws-starter-sqs} is a dependency of this
- * module and not only of the messaging contexts.</p>
+ * reference-maintenance endpoint. That surface is the WHOLE of what this
+ * context exposes: it consumes no queue and publishes no message, so
+ * {@code spring-cloud-aws-starter-sqs} is not a dependency of this module.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: this context did hold one asynchronous entry point -- a consumer of the
+ * date-and-time inquiry flow of {@code app/app-vsam-mq/cbl/CODATE01.cbl} -- and it has been withdrawn.
+ * The baseline drives BOTH inquiry programs from ONE request destination,
+ * {@code DEFINE QLOCAL('CARDDEMO.REQUEST.QUEUE')} at {@code app/app-vsam-mq/README.md} L53, aliased to
+ * CICS as {@code MQQUEUE(CARDREQ)} at L71, and the migrated topology provisions that one queue rather
+ * than one per consumer. A queue admits exactly one OWNING consumer, because a receive hides the
+ * message from every other consumer rather than delivering a copy to each, so a second consumer here
+ * would take work only the account context can answer and the account context would take work only
+ * this one could. The queue is therefore owned by
+ * {@code com.carddemo.account.service.InquiryMessageListener}, which dispatches on the request's
+ * four-character function code and renders the date answer from
+ * {@code com.carddemo.common.codec.DateInquiryReplyCodec} in the shared kernel -- a clock reading and
+ * a fixed layout, with no reference data involved. What stays here is the date EVALUATION of
+ * {@code app/cbl/CSUTLDTC.cbl}, answered synchronously, which is a different question from the one the
+ * queue asks. Alternatives Considered: keeping the consumer here and making the account context
+ * forward date requests to it. Rejected because the routing decision belongs to whoever receives the
+ * message, so forwarding would add a third pairwise machine-identity signing key with its own rotation
+ * obligation, IAM grants and a network hop on the message path, to obtain the clock formatted two
+ * ways.</p>
  *
  * <p>Assumptions: that surface is <b>delivered</b>, and the count is stated so a reader can check the
  * claim rather than take it. The document declares <b>nineteen</b> operations and seven controllers
@@ -89,19 +108,20 @@
  * lookup, six over the three seeded address allow-lists, one date evaluation and one maintenance batch.
  * {@code ReferenceApiRoutingContractTest} compares the document and the handlers in BOTH directions and
  * asserts that count, so an operation declared without a handler, a handler added without an operation,
- * or a silent narrowing of the surface each fail the build rather than review. The asynchronous entry
- * point is delivered as the single queue listener on
- * {@code com.carddemo.reference.service.DateInquiryMessageListener}, and it is a SEPARATE flow from
- * the synchronous date evaluation rather than a second transport over it: the queue route emits the
- * current system date and time and reads no field of its request, while the synchronous read judges a
- * date a caller submits through
- * {@code com.carddemo.reference.service.DateConversionService}. Refactoring Rationale: this sentence
- * named a second listener type and claimed the two routes shared one evaluation "so the two routes
- * cannot report different verdicts for one input". Neither half held. The type it named carried a
- * competing {@code @SqsListener} on the same request queue, which made the flow's wire behaviour
- * depend on which container polled first, and the queue route has never called that evaluation. The
- * competing consumer has been removed and the two routes are described as the two different questions
- * they answer.</p>
+ * or a silent narrowing of the surface each fail the build rather than review. There is no
+ * asynchronous entry point: the synchronous date evaluation on
+ * {@code com.carddemo.reference.service.DateConversionService} judges a date a caller submits, and the
+ * queue route -- which emits the current system date and time and reads no field of its request -- is
+ * a different question answered by the consumer that owns the shared request queue, in the account
+ * context. Refactoring Rationale: this sentence has been corrected twice, and both corrections are
+ * recorded because they were different errors. It first named a second listener type in this module and
+ * claimed the two routes shared one evaluation "so the two routes cannot report different verdicts for
+ * one input"; neither half held, because that type carried a competing {@code @SqsListener} on the same
+ * request queue -- making the wire behaviour depend on which container polled first -- and the queue
+ * route has never called that evaluation. It then named the surviving consumer as this module's single
+ * asynchronous entry point, which was true until the shared request queue was given its single owner.
+ * The count of asynchronous entry points here is now zero, and
+ * {@code ReferenceServiceStructureTest} asserts that rather than leaving it to prose.</p>
  *
  * <p>Refactoring Rationale: the section above described this surface before any of it existed, and the
  * description was left unrevised while the packages filled in. Stating what is present, with a count a
@@ -153,7 +173,12 @@
  *       reference maintenance program.</li>
  *   <li>{@code app/app-vsam-mq/cbl/CODATE01.cbl}, the queue-driven date
  *       conversion, transaction {@code CDRD}
- *       ({@code app/app-vsam-mq/csd/CRDDEMOM.csd} L27-L28).</li>
+ *       ({@code app/app-vsam-mq/csd/CRDDEMOM.csd} L27-L28) -- answered here on
+ *       the synchronous route only. Assumptions: its QUEUE route is answered by
+ *       the single owner of the shared inquiry request queue, in the account
+ *       context, for the reason recorded above; the lineage entry stays here
+ *       because the migrated date reply's layout and this module's own two date
+ *       pictures are the same body of evidence.</li>
  *   <li>the disclosure-rate lookup semantics of
  *       {@code app/cbl/CBACT04C.cbl}, including the fallback to the group
  *       keyed {@code DEFAULT} when a group key is absent: paragraph

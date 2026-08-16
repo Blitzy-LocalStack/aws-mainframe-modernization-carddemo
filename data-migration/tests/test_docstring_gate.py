@@ -31,12 +31,29 @@ Alternatives Considered:
     artifact to change.
 
 Assumptions:
-    The subject is the source under version control, so both trees are located relative to
+    The subject is the source under version control, so every tree is located relative to
     this file rather than through the imported package. That matters here specifically:
     this package deliberately runs its suite against the INSTALLED distribution and sets no
     ``pythonpath``, and ``tests/`` is not packaged at all, so an installed
     ``carddemo_migration.__file__`` would reach neither this suite nor the source tree a
     reviewer edits. Reading from disk is also what lets the gate cover itself.
+
+Refactoring Rationale:
+    The scope is THREE trees, not two: this package, this suite, and ``config/rule1``, the
+    repository-wide Rule 1 lexical gate. That third tree was reached by no Python
+    documentation gate at all. Ruff runs over it -- ``.github/workflows/services-ci.yml``
+    lints it with this package's own configuration -- but ruff's presence checks are the
+    public-declaration checks described above, and the gate's own source contains a nested
+    helper inside a function body, which is precisely the shape those checks cannot see. A
+    nested declaration there shipped undocumented and passed every wired Python gate,
+    which is the same blind spot this module exists for, in the one file whose job is to
+    stop a documentation rule from decaying. Naming the tree here rather than adding a
+    fourth mechanism keeps one authority for the question. Trade-offs: this suite now
+    fails on a file outside ``data-migration/``, so a breach in the gate's own source is
+    reported by the ETL job. That crossing is accepted because both trees are governed by
+    one Ruff configuration already, and the alternative -- a second, near-identical walker
+    living under ``config/rule1`` -- would be two implementations of one rule, free to
+    disagree.
 
 Trade-offs:
     This gate checks PRESENCE only, and that is the whole of its remit. Ruff's content
@@ -70,10 +87,16 @@ _DATA_MIGRATION_ROOT = Path(__file__).resolve().parents[1]
 _PACKAGE_ROOT = _DATA_MIGRATION_ROOT / "src" / "carddemo_migration"
 _SUITE_ROOT = _DATA_MIGRATION_ROOT / "tests"
 
-# Assumptions: only these two trees are in scope. The repository's own `tests/` tree is the
-#   COBOL parity oracle and is reference-only, so it is deliberately not reachable from
-#   here; naming the two roots explicitly rather than globbing upward is what keeps it out.
-_ROOTS = (_PACKAGE_ROOT, _SUITE_ROOT)
+# Assumptions: the third root is the repository-wide Rule 1 lexical gate, which is Python
+#   that Rule 1 binds and that no other Python presence gate reaches. It is resolved from
+#   the repository root, which is this file's great-grandparent, so the location survives a
+#   checkout at any path.
+_RULE1_GATE_ROOT = _DATA_MIGRATION_ROOT.parent / "config" / "rule1"
+
+# Assumptions: only these three trees are in scope. The repository's own `tests/` tree is
+#   the COBOL parity oracle and is reference-only, so it is deliberately not reachable from
+#   here; naming the roots explicitly rather than globbing upward is what keeps it out.
+_ROOTS = (_PACKAGE_ROOT, _SUITE_ROOT, _RULE1_GATE_ROOT)
 
 
 class Declaration(NamedTuple):
@@ -361,7 +384,7 @@ def _format_undocumented(declarations: list[Declaration]) -> str:
 @pytest.mark.parametrize(
     "root",
     _ROOTS,
-    ids=["package", "suite"],
+    ids=["package", "suite", "rule1-gate"],
 )
 def test_every_declaration_carries_a_docstring(root: Path) -> None:
     """Assert Rule 1 docstring presence on every declaration in a tree.
@@ -369,7 +392,8 @@ def test_every_declaration_carries_a_docstring(root: Path) -> None:
     Parameters
     ----------
     root : Path
-        The package source tree or this suite's own tree, supplied by parametrisation.
+        The package source tree, this suite's own tree, or the repository-wide Rule 1
+        lexical gate's tree, supplied by parametrisation.
 
     Returns
     -------
@@ -381,9 +405,10 @@ def test_every_declaration_carries_a_docstring(root: Path) -> None:
     AssertionError
         Naming every undocumented module, class or function found, one per line.
     """
-    # Trade-offs: both trees are asserted by one parametrised test rather than two bespoke
-    #   ones so that neither can be dropped without the parametrisation visibly shrinking.
-    #   The cost is a less specific test name; the id makes the failing tree explicit.
+    # Trade-offs: all three trees are asserted by one parametrised test rather than three
+    #   bespoke ones so that none can be dropped without the parametrisation visibly
+    #   shrinking. The cost is a less specific test name; the id makes the failing tree
+    #   explicit.
     undocumented = [d for d in _declarations(root) if not d.documented]
     assert not undocumented, (
         f"{len(undocumented)} declaration(s) under {root} carry no docstring, which "
@@ -433,7 +458,7 @@ def _functions_missing_a_return_contract(root: Path) -> list[Declaration]:
 
 
 def test_every_package_function_documents_its_return() -> None:
-    """Assert Rule 1's return-value element on every function in the package source.
+    """Assert Rule 1's return-value element on the package source and the Rule 1 gate.
 
     Returns
     -------
@@ -443,8 +468,8 @@ def test_every_package_function_documents_its_return() -> None:
     Raises
     ------
     AssertionError
-        Naming every package function whose docstring addresses neither a return nor a
-        yield, one per line.
+        Naming every function in either governed tree whose docstring addresses neither a
+        return nor a yield, one per line.
     """
     # Refactoring Rationale: this assertion was added because presence alone let a real
     #   gap through. Three docstrings in `carddemo_migration.loaders.aurora` --
@@ -456,22 +481,34 @@ def test_every_package_function_documents_its_return() -> None:
     #   omission and it reached review instead. Rule 1 names "Return values: Type and
     #   description of what is returned" as its third docstring element, so the element was
     #   unenforced for this language until this test existed.
-    # Trade-offs: the scope is the PACKAGE tree only, and the suite tree is deliberately
-    #   excluded rather than silently included. Measured at the time this test was added:
-    #   487 of 487 functions under `src/carddemo_migration` document a return or a yield,
-    #   and 355 of 609 under `tests/` do not -- pytest cases and fixtures that return
-    #   nothing and say so in prose rather than in a numpydoc section. Extending the
-    #   assertion there would demand a 355-function mechanical sweep of test docstrings as
-    #   the price of enforcing the element on the code that ships, so the element is
-    #   enforced where the shipping code is and remains a review obligation for the suite.
-    #   That limit is stated here, in the gate, rather than left for a reader to infer from
-    #   a passing run -- a gate whose reach is wider in a reader's mind than in its code is
-    #   the failure this whole module exists to prevent.
-    undocumented = _functions_missing_a_return_contract(_PACKAGE_ROOT)
+    # Trade-offs: the scope is the PACKAGE tree and the Rule 1 gate's tree, and the suite
+    #   tree is deliberately excluded rather than silently included. Measured against the
+    #   current trees: 758 of 758 functions under `src/carddemo_migration` and 26 of 26
+    #   under `config/rule1` document a return or a yield, while 583 of 1610 under `tests/`
+    #   do not -- pytest cases and fixtures that return nothing and say so in prose rather
+    #   than in a numpydoc section. Extending the assertion there would demand a
+    #   583-function mechanical sweep of test docstrings as the price of enforcing the
+    #   element on the code that ships and on the gate that governs it, so the element is
+    #   enforced on both of those and remains a review obligation for the suite. That limit
+    #   is stated here, in the gate, rather than left for a reader to infer from a passing
+    #   run -- a gate whose reach is wider in a reader's mind than in its code is the
+    #   failure this whole module exists to prevent.
+    # Refactoring Rationale: `config/rule1` joined this assertion with the presence one
+    #   above rather than being left to presence alone. Its functions are the mechanism the
+    #   whole rule rests on, and a docstring there that omits what the function answers is
+    #   exactly the omission a reader of a gate cannot afford; the measurement above shows
+    #   the tree already conforms, so the assertion locks a property in rather than
+    #   demanding a sweep.
+    governed = (_PACKAGE_ROOT, _RULE1_GATE_ROOT)
+    undocumented = [
+        declaration
+        for root in governed
+        for declaration in _functions_missing_a_return_contract(root)
+    ]
     assert not undocumented, (
-        f"{len(undocumented)} function(s) under {_PACKAGE_ROOT} document neither a "
-        "'Returns' nor a 'Yields' section, which Rule 1 requires as its third docstring "
-        f"element:\n{_format_undocumented(undocumented)}"
+        f"{len(undocumented)} function(s) under {' and '.join(str(r) for r in governed)} "
+        "document neither a 'Returns' nor a 'Yields' section, which Rule 1 requires as its "
+        f"third docstring element:\n{_format_undocumented(undocumented)}"
     )
 
 
@@ -546,6 +583,102 @@ def test_the_return_contract_check_reaches_a_known_omission() -> None:
     assert reported == {"probe.return_undocumented"}, (
         "the return-contract walk must report exactly the function whose docstring omits "
         f"its return section, and it reported {sorted(reported)}"
+    )
+
+
+def test_the_presence_walk_reports_an_undocumented_declaration(tmp_path: Path) -> None:
+    """Assert the presence walk reports the shapes ruff cannot see when they are bare.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        Pytest-supplied directory holding a synthetic tree whose declarations are
+        deliberately undocumented.
+
+    Returns
+    -------
+    None
+        The test exists for its assertions.
+
+    Raises
+    ------
+    AssertionError
+        If any bare declaration goes unreported, or if a documented one is reported.
+    """
+    # Refactoring Rationale: this is the NEGATIVE probe for the presence half, and it was
+    #   missing. `test_the_walker_reaches_every_nesting_and_visibility` proves the walk
+    #   FINDS each shape and classifies its ruff visibility, but every shape in its fixture
+    #   carries a docstring, so a `documented` field wired to a constant `True` would have
+    #   satisfied it, satisfied `test_every_declaration_carries_a_docstring` over every
+    #   governed tree, and reported nothing missing for ever. A gate that cannot be shown
+    #   to fail is not evidence that anything passed.
+    # Assumptions: the four bare shapes below are exactly the ones ruff's D100/D101/D102/
+    #   D103 do not report -- a private module, a private function, a private nested class
+    #   and a function nested in a function body -- so this probe covers the set this module
+    #   is the only enforcement for. The documented public module beside them is the control:
+    #   it proves the walk is discriminating rather than reporting everything it visits.
+    (tmp_path / "_bare_module.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "documented.py").write_text(
+        '"""Module docstring."""\n'
+        "\n"
+        "\n"
+        "def documented_function() -> None:\n"
+        '    """Doc.\n'
+        "\n"
+        "    Returns\n"
+        "    -------\n"
+        "    None\n"
+        "        Nothing.\n"
+        '    """\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "bare_shapes.py").write_text(
+        '"""Module docstring."""\n'
+        "\n"
+        "\n"
+        "def _bare_private_function() -> None:\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "class Holder:\n"
+        '    """Doc."""\n'
+        "\n"
+        "    class _BareNestedPrivateClass:\n"
+        "        pass\n"
+        "\n"
+        "\n"
+        "def documented_outer() -> None:\n"
+        '    """Doc.\n'
+        "\n"
+        "    Returns\n"
+        "    -------\n"
+        "    None\n"
+        "        Nothing.\n"
+        '    """\n'
+        "\n"
+        "    def bare_nested_function() -> None:\n"
+        "        pass\n"
+        "\n"
+        "    return bare_nested_function()\n",
+        encoding="utf-8",
+    )
+
+    declarations = _declarations(tmp_path)
+    reported = {d.qualified_name for d in declarations if not d.documented}
+
+    assert reported == {
+        "_bare_module",
+        "bare_shapes._bare_private_function",
+        "bare_shapes.Holder._BareNestedPrivateClass",
+        "bare_shapes.documented_outer.bare_nested_function",
+    }, (
+        "the presence walk must report exactly the four bare declarations and no documented"
+        f" one, and it reported {sorted(reported)}"
+    )
+    assert all(not d.visible_to_ruff for d in declarations if not d.documented), (
+        "every shape in this probe is one ruff's presence checks cannot see, so a reported"
+        " declaration classified as ruff-visible means the visibility classification has"
+        " drifted from the behaviour measured against the pinned ruff"
     )
 
 

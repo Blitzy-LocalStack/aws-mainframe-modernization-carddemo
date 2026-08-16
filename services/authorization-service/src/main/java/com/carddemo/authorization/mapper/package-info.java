@@ -249,7 +249,7 @@
  *
  * <p>Assumptions: {@code JavadocPackage} audits only a directory that actually holds a processed
  * Java source, and {@code config/checkstyle/checkstyle.xml} narrows the audit to the java extension
- * at its L185. The directories {@code com} and {@code com/carddemo} hold subdirectories and no Java
+ * at its L178. The directories {@code com} and {@code com/carddemo} hold subdirectories and no Java
  * source at all, so they have no package declaration, and the module-entry-point obligation of
  * user-specified Rule 1 (Explainability) L15 attaches to a package declaration. A charter at either
  * level would therefore document a package that has no entry point to document. None is required

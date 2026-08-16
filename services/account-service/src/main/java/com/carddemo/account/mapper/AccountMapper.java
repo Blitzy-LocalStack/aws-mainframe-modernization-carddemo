@@ -89,8 +89,8 @@ import org.springframework.stereotype.Component;
  * its collaborators carry. Rejected because generated members carry no documentation, which
  * {@code docs/CODE_DOCUMENTATION_STANDARD.md} records at lines 461 to 464, and because the rejection here
  * is mechanical rather than only conventional: {@code config/checkstyle/checkstyle.xml} sets
- * {@code allowMissingPropertyJavadoc} to false at line 365 and clears {@code allowedAnnotations} entirely
- * at line 366, so no accessor exemption exists for a generated member to fall through. The gate would have
+ * {@code allowMissingPropertyJavadoc} to false at line 358 and clears {@code allowedAnnotations} entirely
+ * at line 359, so no accessor exemption exists for a generated member to fall through. The gate would have
  * to be weakened to admit the dependency, which inverts the trade: the dependency exists to save typing,
  * and the cost would be the mechanical half of the rule the project is held to.</p>
  *

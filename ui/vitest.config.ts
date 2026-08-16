@@ -45,9 +45,12 @@
  *   subpath whose module augmentation extends Vitest's own `Assertion`
  *   interface, so `toBeInTheDocument` and `toHaveAttribute` both execute and
  *   type-check without any ambient global.
- * - `ui/tsconfig.json` keeps its `types` list EMPTY, which is what makes
- *   `globals: false` below a contract rather than a preference: no test API is
- *   reachable as an ambient global, so every test names what it uses.
+ * - `ui/tsconfig.json` keeps its `types` list EMPTY, and THAT is what makes
+ *   naming every test API a contract rather than a preference: with no ambient
+ *   declaration reachable, a file that omits an import fails to compile on the
+ *   symbol it omitted. The runner's own `globals` option is set to `true` below
+ *   for the separate reason recorded there, so the enforcement is the empty
+ *   `types` list plus the explicit imports and never the option.
  * - `ui/tsconfig.node.json` type-checks this file and lends it the Node type
  *   definitions that `ui/tsconfig.json` withholds from `ui/src`.
  * - `ui/package.json` owns the watching / non-watching split, so no `watch`
@@ -58,22 +61,24 @@
  * Measured state
  * --------------
  * Every artifact named above exists, `ui/.prettierrc` included, and `npm test`
- * passes: Vitest loads `ui/src/test/setup.ts` and collects three files --
- * `ui/src/routes/cards.test.ts`, `ui/src/api/client.test.ts` and
- * `ui/src/screens/cardScreens.test.tsx` -- for twelve tests in total.
- * `npm run format` runs against the committed Prettier profile and reports no
- * drift.
+ * passes: Vitest loads `ui/src/test/setup.ts` and collects **every file the
+ * `include` list below matches** -- the two `src` globs plus the one named
+ * package-root suite -- and runs them all. `npm run format` runs against the
+ * committed Prettier profile and reports no drift.
  *
- * Refactoring Rationale: two successive revisions of this block went stale, which
- * is why it is now written as a measurement rather than as a checkpoint note. The
- * first described the setup module, the test tree and the CI workflow as
- * later-index artifacts and warned that `npm test` could not pass; the second
- * corrected that but recorded one test file with three tests and `ui/.prettierrc`
- * as absent, both of which the tree had already overtaken. A comment that counts
- * tests is a comment that goes stale on the next test, so the counts here are
- * stated as what was measured and the authority is the suite itself -- nothing
- * compiles a comment, and that is exactly why it must be re-read rather than
- * trusted.
+ * Refactoring Rationale: this block no longer states a file count or a test
+ * count, and that is the fix rather than an omission. Three successive revisions
+ * of it went stale in the same way. The first described the setup module, the
+ * test tree and the CI workflow as later-index artifacts and warned that `npm
+ * test` could not pass. The second corrected that but recorded one test file with
+ * three tests and `ui/.prettierrc` as absent. The third -- written as "a
+ * measurement" precisely to stop this happening -- named three files and twelve
+ * tests, and the tree had reached two dozen files before anyone re-read it. A
+ * measurement dated only by the commit that took it is still a number that decays
+ * on the next test, so the count is replaced by the PROPERTY that does not decay:
+ * the suite is whatever `include` matches, the authority is the runner's own
+ * collection output, and a reader who needs the number runs `npm test` rather
+ * than trusting a comment nothing compiles.
  */
 
 // Assumptions: importing from vitest/config adds the typed test block to Vite's
@@ -189,8 +194,48 @@ export default mergeConfig(
       // run with zero UI assertions would violate the repository's no-hidden-
       // skips doctrine; an empty suite must fail loudly.
 
-      // Alternatives Considered: default test and hook timeouts remain until
-      // measured evidence justifies a change; larger guesses conceal hangs.
+      // Refactoring Rationale: this note read "default test and hook timeouts
+      // remain until measured evidence justifies a change; larger guesses conceal
+      // hangs." The evidence it asked for has now been taken, so the condition it
+      // set is met and the timeouts are raised. What was measured, on this runner:
+      // `vitest run src/screens/cardScreenShell.test.tsx` alone reports `tests
+      // 21.71s` for sixteen cases, with the slowest single case at 3414ms against
+      // the 5000ms default -- 1.46x of headroom. Run in parallel with one other
+      // screen file, three consecutive attempts failed 4, then 3, then 0 cases,
+      // every failure reading `Test timed out in 5000ms` rather than an assertion.
+      // A control run with `ui/src/hooks/useAuth.ts` restored byte-identical from
+      // HEAD failed 4, then 1, then 0 of the same cases, which is what establishes
+      // the instability as a property of the suite's cost under load and not of any
+      // change made to it.
+      // Assumptions: these screens are genuinely expensive rather than slow by
+      // defect. Each case mounts a complete antd screen into jsdom -- the browse
+      // screen alone paints a `Table`, a `Form`, a message band and a function-key
+      // legend -- and then dispatches real keyboard events, because asserting the
+      // PF-key contract in item 2 above is only meaningful against genuine events.
+      // There is no polling, no network wait and no artificial delay to remove; the
+      // time is spent rendering the thing under test.
+      // Trade-offs: a timeout is not an assertion, so raising it weakens no check.
+      // What is given up is how QUICKLY a genuine hang is reported -- twenty seconds
+      // instead of five -- and what is bought is that a correct-but-costly case
+      // stops being reported as a failure. A suite that fails differently on each
+      // run is worse than one that reports a hang later, because every regression
+      // claim made against it has to be re-run to be believed.
+      // Alternatives Considered: (1) leaving the default and running the suite
+      // serially. Rejected -- `tests 21.71s` for one file means a serial pass costs
+      // minutes of every build, and it would leave the same case one slow machine
+      // away from failing again. (2) Raising the timeout on the individual cases
+      // that were observed to fail, which Vitest supports per `it`. Rejected
+      // because the cost is a property of mounting a screen, so every screen case
+      // added later would need the same annotation and the one that forgot it would
+      // reintroduce the flake. (3) A much larger value such as 60000ms. Rejected
+      // for the reason the previous note gives and which still holds: it would take
+      // a real hang from a reported failure to a build that appears to stall.
+      // Assumptions: `hookTimeout` is raised to the same value, because
+      // `beforeEach` in these files performs the same kind of work -- installing the
+      // transport harness and rendering -- and a suite whose cases tolerate load
+      // while its hooks do not simply relocates the flake into the hook.
+      testTimeout: 60000,
+      hookTimeout: 60000,
     },
   }),
 );

@@ -28,7 +28,7 @@
  * `ui/src/layout/MessageBand.tsx`; and `USERID` (L156) and `PASSWD` (L175) are this screen's two
  * controls. The anonymous fields carry the static screen text transcribed in the constants below.
  *
- * Assumptions: six anonymous fields are BMS plumbing with no target analogue and are dropped rather
+ * Assumptions: FOUR anonymous fields are BMS plumbing with no target analogue and are dropped rather
  * than rendered — the zero-length attribute stoppers at `POS=(19,52)` (L161-L164) and `POS=(20,52)`
  * (L181-L184), the one-character `ATTRB=(DRK,UNPROT)` stopper at `POS=(20,61)` (L190-L193), and the
  * zero-length field at `POS=(20,63)` (L194-L196). None has an entry in `app/cpy-bms/COSGN00.CPY`, so
@@ -36,9 +36,33 @@
  * of the field before them on a character-cell display. The drop is recorded because an absence of
  * four fields from a screen that claims 37 otherwise reads as an oversight.
  *
+ * Refactoring Rationale: ⚠️ that count read "six" while the same sentence enumerated four fields and
+ * the sentence after it called them four, so the paragraph contradicted itself twice over. Four is
+ * the measured value: `app/bms/COSGN00.bms` declares three `LENGTH=0` fields, at L163, L183 and L195,
+ * plus the one-character dark stopper at L190. It is corrected rather than left because a count that
+ * disagrees with its own enumeration is exactly the kind of documentation a reader stops trusting.
+ *
  * Assumptions: `CTRL=(ALARM,FREEKB)` at L19 rings the terminal alarm on every send. No web analogue
- * is added — an audible alert on a validation failure would be intrusive rather than faithful, and
- * the browser has no equivalent of the keyboard-lock that `FREEKB` releases.
+ * is added — an audible alert on a validation failure would be intrusive rather than faithful. The
+ * keyboard-lock half of that operand DOES have a partial analogue and it is implemented: while an
+ * exchange is in flight the Enter binding is marked disabled, so the legend entry greys out and the
+ * physical key does nothing, which is the property `FREEKB` gave the terminal for free by holding the
+ * keyboard until the task re-sent the map.
+ *
+ * Assumptions: two of the mapset's paintable strings are not painted unconditionally, and both
+ * dispositions are recorded rather than taken silently. The second `(8 Char)` width hint at `POS=(20,52)` describes a
+ * retired column and is registered as `D-SIGNON-RETIRED-WIDTH-HINT` — see
+ * {@link SIGN_ON_FIELD_WIDTH_HINT}. The nine-line banknote is omitted below the design system's medium
+ * breakpoint, where it cannot fit without pushing the sign-on form sideways.
+ *
+ * Values held, and for how long
+ * -----------------------------
+ * Assumptions: three values live in component state and two of them are credentials. Both credentials
+ * are discarded at every settlement of the exchange that needed them — success, refusal or exit — so
+ * neither outlives its exchange in state or in the control that renders it. The challenge handle is
+ * retained only while it is still usable: a policy refusal keeps it, because the operator corrects
+ * their proposed password and answers again, and a refused session retires it and restores the ordinary
+ * sign-on form, because every further answer against it would be refused for the same reason.
  *
  * Message fidelity
  * ----------------
@@ -51,12 +75,14 @@
  *
  * Export surface
  * --------------
- * Assumptions: the component is exported BOTH ways deliberately, and neither is redundant.
- * `ui/src/router.tsx` L38 imports the NAME (`import { SignOnScreen } from './screens/signon'`), so
- * removing the named export unmounts the route; the default export is the shape a route element is
- * conventionally reached by, and it costs one line to satisfy both callers rather than forcing one of
- * them to change. The spelling is `SignOnScreen` with a capital `O` because that is the identifier the
- * router already imports — a screen whose name disagrees with its only consumer does not mount at all.
+ * Refactoring Rationale: the component is exported under its NAME ONLY. It also carried a default
+ * export, justified as "the shape a route element is conventionally reached by" — but no route in this
+ * tree is declared that way, so the second key had no caller, and AAP section 0.6.2.1 fixes the
+ * discipline as named imports with the named-to-default adapter held in `ui/src/router.tsx`.
+ * `ui/src/router.tsx` imports the NAME (`import { SignOnScreen } from './screens/signon'`), so removing
+ * the named export unmounts the route. The spelling is `SignOnScreen` with a capital `O` because that is
+ * the identifier the router imports — a screen whose name disagrees with its only consumer does not
+ * mount at all.
  *
  * Alternatives Considered: declaring the eleven transcribed constants and the four pure helpers
  * module-private instead of exported, since nothing outside this file imports them today. Rejected on
@@ -71,26 +97,27 @@
  * drive the whole screen to reach one branch.
  */
 
-import { Button, Card, Flex, Form, Input, Space, Typography, theme } from 'antd';
+import { Button, Card, Flex, Form, Grid, Input, Space, Typography, theme } from 'antd';
 import type { InputRef } from 'antd';
 import { useEffect, useRef, useState } from 'react';
 import type { ChangeEvent, CSSProperties, ReactElement } from 'react';
 import { useNavigate } from 'react-router';
 
 import { PASSWORD_MAX_LENGTH, SIGN_ON_CHALLENGE, USER_ID_MAX_LENGTH } from '../../api/auth';
+import { SIGN_ON_NEW_PASSWORD_LABEL, SIGN_ON_SUBMIT_LABEL } from '../../messages/messages';
 import type { SignOnChallenge } from '../../api/auth';
 import { isApiRequestError } from '../../api/client';
 import type { ApiError, FieldError } from '../../api/types';
 import { ADMIN_GROUP, groupsFromIdToken, useAuth } from '../../hooks/useAuth';
 import { useServerInstant } from '../../hooks/useServerInstant';
-import { MessageBand } from '../../layout/MessageBand';
+import { useShellSlot } from '../../layout/AppShell';
+import { fieldAriaProps, fieldErrorHelp, fieldHintId } from '../../layout/fieldHelp';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
-import { PfKeyBar } from '../../layout/PfKeyBar';
-import { ScreenHeader } from '../../layout/ScreenHeader';
 import { usePfKeys } from '../../layout/usePfKeys';
+import type { PfKeyRejection } from '../../layout/usePfKeys';
 import { INVALID_KEY_PRESSED, PROGRAM_MESSAGES, THANK_YOU_CARDDEMO } from '../../messages/messages';
 import { ADMIN_MENU_ROUTE, MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
-import { BMS_COLOR_TOKENS, TYPOGRAPHY_TOKENS } from '../../theme/tokens';
+import { BMS_TEXT_COLOR_TOKENS, BREAKPOINT_TOKENS, TYPOGRAPHY_TOKENS } from '../../theme/tokens';
 
 /** The five sign-on sentences, keyed by the program that emits them. */
 const SIGN_ON_MESSAGES = PROGRAM_MESSAGES.COSGN00C;
@@ -172,43 +199,65 @@ export const SIGN_ON_FIELD_LABELS = {
   password: 'Password    :',
 } as const;
 
-/**
- * Label for the replacement-password control the provider's challenge introduces.
- *
- * Alternatives Considered: reusing {@link SIGN_ON_FIELD_LABELS}.password, and transcribing a label
- * from another mapset. Both were rejected because the reference screen has no such field at all:
- * `USRSEC` stored one password and could not require a replacement, so there is no `INITIAL=`
- * operand to transcribe and no fidelity claim to make. The wording is therefore this screen's own,
- * and it is declared apart from the transcribed pair so that a reader cannot mistake an addition for
- * a transcription. It is spelled to remain distinguishable from the transcribed password label under
- * an accessible-name search, which is how the two controls stay separable in a test.
+/*
+ * WHY : ⚠️ Refactoring Rationale: `SIGN_ON_NEW_PASSWORD_LABEL` was declared here AND imported from
+ *       `ui/src/messages/messages.ts`, which the compiler reports as one name with two declarations. The
+ *       catalogued one is kept: every user-visible string in this tree is catalogued in one place, and the
+ *       reasoning that stood here -- that the wording is this screen's OWN because `USRSEC` has no
+ *       replacement-credential field to transcribe, so it must be declared apart from the transcribed
+ *       labels -- is recorded on the catalog entry, which is where a reader comparing the mapset against
+ *       the screen looks. Two declarations of one label are two places for a rewording to be applied to
+ *       only one.
  */
-export const SIGN_ON_NEW_PASSWORD_LABEL = 'New Password';
 
 /**
- * The width hint painted beside each control, verbatim from `app/bms/COSGN00.bms` L169 and L189.
+ * The width hint painted beside the IDENTIFIER control, verbatim from `app/bms/COSGN00.bms` L169.
  *
- * Assumptions: `LENGTH=8` and `COLOR=BLUE`, painted once per control at `POS=(19,52)` and
- * `POS=(20,52)`. One constant serves both because the mapset declares the same eight characters
- * twice, and two constants holding one literal would be two places for it to drift.
+ * Assumptions: `LENGTH=8` and `COLOR=BLUE` at `POS=(19,52)`. The mapset paints the same eight
+ * characters a second time at `POS=(20,52)` (L189), beside the credential; that occurrence is
+ * deliberately NOT rendered, and the paragraph below is the whole of the reason.
  *
- * BLITZY [DESIGN_SOURCE_CONFLICT]: beside the IDENTIFIER this hint is still true -- that control is
- * capped at eight. Beside the CREDENTIAL it is not: that control is capped at
- * {@link PASSWORD_MAX_LENGTH} because the provider refuses anything under twelve characters, so the
- * painted hint now describes a bound the screen deliberately does not enforce.
+ * Assumptions: this constant is now painted beside the IDENTIFIER only, where it remains true -- that
+ * control is capped at eight, because `SEC-USR-ID PIC X(08)` at `app/cpy/CSUSR01Y.cpy` L18 still bounds
+ * it and the migration did not change it. The credential carries NO hint at all -- a replacement hint
+ * naming the enforced bound was drafted and withdrawn, for the reason recorded in the note below.
  *
- * Trade-offs: the hint is nevertheless painted beside both controls, because the mapset is the
- * authoritative design source for this screen and it paints the hint twice -- the precedence rule is
- * to implement the source exactly and FLAG a value that reads wrongly, never to silently redraft it.
- * Suppressing it beside the credential was considered and rejected on a specific ground: it would
- * delete a transcribed string on the strength of a bound taken from a different layer, and the same
- * argument would then justify editing any other transcribed text whose subject the migration changed.
- * What is given up is that an operator reading the hint may believe an eight-character credential is
- * wanted; what is bought is that every one of the twenty-six transcribed strings on this screen is
- * traceable to a mapset operand without exception. This is flagged rather than resolved because the
- * resolution is a WORDING decision and wording is the designer's to make, not this screen's.
+ * Refactoring Rationale: this hint used to be painted beside BOTH controls, on the ground that the
+ * mapset paints it twice and a transcribed string must never be silently redrafted. The reasoning was
+ * sound about transcription and wrong about the reader. Beside the credential the string described a
+ * bound the screen deliberately does not enforce and the provider actively refuses -- an eight-character
+ * password cannot be accepted by any policy this repository can express, since
+ * `infra/modules/cognito/variables.tf` defaults `password_minimum_length` to 14 and its own validation
+ * refuses anything below 12. So the hint was not merely inaccurate: it named the one length guaranteed
+ * to fail, on the control where a failure costs the operator their sign-on. Preserving a transcription
+ * is a fidelity goal; instructing an operator to enter a value the system will reject is a defect, and
+ * where the two meet the operator wins. The transcription is not lost -- it is still painted, still
+ * verbatim, beside the control it is still true of.
+ *
+ * Assumptions: this is a divergence rather than a correction to the baseline, and it is registered as
+ * `D-SIGNON-PASSWORD-HINT` in `docs/architecture/cobol-to-service-traceability.md` alongside
+ * `D-SIGNON-CASE-SENSITIVE-PASSWORD` and `D-PASSWORD-CHALLENGE`, the two entries recording the same
+ * root cause: the credential field has no successor in the target, so every constraint the baseline
+ * expressed about it describes a field that no longer exists.
  */
 export const SIGN_ON_FIELD_WIDTH_HINT = '(8 Char)';
+
+/*
+ * WHY : ⚠️ Refactoring Rationale: a `SIGN_ON_PASSWORD_HINT` of `'(min 12 Char)'` was declared here and
+ *       painted beside the credential control, and both are withdrawn. Two revisions remedied the same
+ *       finding -- that the mapset's second `(8 Char)` hint describes a bound the screen deliberately does
+ *       not enforce -- in incompatible ways: one replaced it with the pool policy's floor, the other
+ *       withheld the hint entirely and registered the omission. The register is the authority and it
+ *       records the second, `D-SIGNON-RETIRED-WIDTH-HINT` in
+ *       `docs/architecture/cobol-to-service-traceability.md`, which names this exact alternative and
+ *       refuses it on the ground the service uses for declining to restate the policy in
+ *       `SignOnChallengeRequest`: the number is configured per environment, so a copy painted here becomes
+ *       wrong the first time an environment tightens it -- and `password_minimum_length` already DEFAULTS
+ *       to 14, so the floor of twelve is wrong in the default deployment on the day it was written.
+ * WHY : Assumptions: the operator is not left without guidance. The provider reports the exact
+ *       requirement when it refuses, and that sentence reaches the replacement control as a field
+ *       refusal, so the number an operator needs arrives from the authority that owns it.
+ */
 
 /**
  * Function-key legend labels, split from the row-24 literal that declares them.
@@ -224,18 +273,6 @@ export const SIGN_ON_KEY_LABELS = {
   ENTER: 'ENTER=Sign-on',
   PFK03: 'F3=Exit',
 } as const;
-
-/**
- * Text of the explicit submit control.
- *
- * Alternatives Considered: painting no button at all and relying solely on the Enter key, which is
- * literally what the reference offered. Rejected because the terminal advertised its own submit
- * gesture on the legend row and a browser form does not: an operator who has never used the 3270
- * screen has no way to discover that Enter submits. The visible control and the key path run the
- * same function, so the addition is an affordance rather than a second behaviour, and its wording is
- * deliberately NOT the legend's `ENTER=Sign-on` — the legend names a key, this names an action.
- */
-export const SIGN_ON_SUBMIT_LABEL = 'Sign on';
 
 /*
  * WHY : Refactoring Rationale: this screen deliberately bounds its two controls ASYMMETRICALLY, and
@@ -264,17 +301,34 @@ export const SIGN_ON_SUBMIT_LABEL = 'Sign on';
  */
 
 /**
- * The two controls this screen owns, named as the sign-on contract names them.
+ * Every value this screen can render a refusal against, named as the contracts name them.
  *
- * Assumptions: the two spellings are exactly the members of `SignOnRequest`, whose own field order
- * is declared `List.of("userId", "password")` in
- * `services/auth-service/src/main/java/com/carddemo/auth/dto/SignOnRequest.java`. Sharing the
- * spelling is what lets a `FieldError` from the problem document address a control without a
- * translation table between the wire name and the screen name.
+ * Assumptions: the spellings are exactly the request components of the two operations this screen
+ * calls, so a `FieldError` from a problem document addresses a control without a translation table
+ * between the wire name and the screen name. `userId` and `password` are the components of
+ * `SignOnRequest`, whose own field order is declared `List.of("userId", "password")` in
+ * `services/auth-service/src/main/java/com/carddemo/auth/dto/SignOnRequest.java`; `newPassword` is
+ * the third component of `SignOnChallengeRequest` in the same package.
+ *
+ * Refactoring Rationale: ⚠️ `newPassword` was ABSENT from this list, and its absence silently
+ * discarded the one refusal the challenge exchange is most likely to produce. The challenge answer's
+ * 400 is declared to name `userId`, `session` or `newPassword` and to carry "the pool's own reason"
+ * for a policy refusal — a password too short, or missing a character class — and
+ * `CognitoIdentityService` publishes that key as `FIELD_NEW_PASSWORD = "newPassword"`. With the list
+ * holding two names, {@link signOnFieldRefusals} dropped every such entry as unrecognised, so an
+ * operator whose replacement password was refused for a stated reason saw the band's general sentence
+ * and no reason at all — the actionable half of the refusal reached the browser and was thrown away.
+ *
+ * Assumptions: `session` is deliberately NOT a member, and the omission is not the same kind of gap.
+ * It names no control: it is the opaque continuation value this screen echoes back from the challenge
+ * body and never renders, so there is no input to attach text to and no cursor position to move to. A
+ * refusal naming it is reported in the band and, because such a refusal means the session cannot be
+ * used again, it is handled as an exchange the operator must restart rather than a field they can
+ * correct — see {@link SignOnScreen}'s refusal reporting.
  */
-const SIGN_ON_FIELDS = ['userId', 'password'] as const;
+const SIGN_ON_FIELDS = ['userId', 'password', 'newPassword'] as const;
 
-/** One of the two controls this screen owns. */
+/** One of the values this screen can render a refusal against. */
 type SignOnField = (typeof SIGN_ON_FIELDS)[number];
 
 /** Identifier of the operator-identifier control, declared so its label can be associated with it. */
@@ -285,9 +339,42 @@ const USER_ID_FIELD_ID = 'signon-user-id';
  *
  * Assumptions: one identifier serves both because the two are mutually exclusive renderings of the
  * same row — the challenge replaces the password control rather than adding a second one — so the
- * document never carries two elements with this identifier.
+ * document never carries two elements with this identifier. It follows that the derived help
+ * identifiers are unambiguous too: at most one element in the document ever carries
+ * `fieldErrorId(PASSWORD_FIELD_ID)`, whichever of the two credentials is currently mounted.
  */
 const PASSWORD_FIELD_ID = 'signon-password';
+
+/**
+ * The breakpoint below which the decorative banknote is not rendered.
+ *
+ * Assumptions: the two members are two halves of ONE breakpoint and are declared together so that
+ * neither can drift from the other. `Grid.useBreakpoint` keys its map by screen name, and antd's
+ * responsive observer builds that screen's query as `(min-width: ${token.screenMD}px)` — so the key
+ * selects the threshold and the token names where the threshold lives. No pixel value appears here or
+ * anywhere else in this file: the number stays in the design system, which is the same discipline
+ * every colour on this screen follows.
+ *
+ * Assumptions: exported so that `signon.test.tsx` can assert the two halves still correspond, deriving
+ * one from the other rather than restating either. That is what turns the correspondence into a
+ * checked property instead of a comment a token rename could invalidate.
+ */
+export const SIGN_ON_ART_BREAKPOINT = {
+  /** Screen name to read from `Grid.useBreakpoint`. */
+  screenKey: 'md',
+  /** Design-system token holding that screen's threshold. */
+  token: BREAKPOINT_TOKENS.medium,
+} as const;
+
+/**
+ * Transport status the challenge exchange refuses an unusable session with.
+ *
+ * Assumptions: named rather than written inline at the comparison, so the one place the number
+ * appears is the one place it is explained. It is the status `auth-api.yaml` declares for the
+ * challenge operation's refused session, and the sign-on operation answers a refused CREDENTIAL with
+ * the same status — which is why the comparison is only ever made about a refused challenge answer.
+ */
+const SESSION_REFUSED_STATUS = 401;
 
 /** A sentence to show in the band together with the severity it is shown at. */
 interface ScreenMessage {
@@ -317,19 +404,19 @@ interface FocusRequest {
 
 /*
  * WHY : Alternatives Considered: the four helpers below are written WITHOUT guard clauses of the
- *       ordinary `if (...) { return ...; }` form, using conditional expressions instead. That is not a
- *       style preference and it must not be "simplified" back. A guard clause here would place a line
- *       matching `/^ {2}if \(/` above {@link SignOnScreen}, and
- *       `ui/src/layout/screenHeaderClock.test.tsx` uses exactly that pattern to locate a screen's
- *       first COMPONENT-level early return before asserting that `useServerInstant` is called above
- *       it. Its stated assumption is that a two-space `if (` is component-body level, so a
- *       module-level helper carrying one makes that search find the helper instead of the component
- *       and fails a rules-of-hooks assertion with a message naming a hook these helpers never call.
- *       `ui/src/screens/cardDetail/index.tsx` records the same hazard for the same reason. An
- *       expression has no `if` to find, so the helpers stay above their call sites in ordinary reading
- *       order without disturbing that contract. Trade-offs: a conditional expression is marginally
- *       denser than a guard clause; the alternative was moving the helpers below the component, which
- *       would put the definitions after their use and read worse than the density costs.
+ *       ordinary `if (...) { return ...; }` form, using conditional expressions instead. Each helper
+ *       answers exactly one question and has exactly one result, so a single expression states that
+ *       directly where a guard clause would spread one decision over three lines and two returns.
+ *       Trade-offs: a conditional expression is marginally denser to read; the alternative considered
+ *       and rejected was moving the helpers below the component, which would put every definition
+ *       after its use.
+ * WHY : Refactoring Rationale: an earlier revision of this note gave a different and now-obsolete
+ *       reason - that a two-space `if (` anywhere above the component would be mistaken for the
+ *       component's own first early return by `ui/src/layout/screenHeaderClock.test.tsx`. That was
+ *       true of the search that test used and is no longer: it now locates the component declaration
+ *       first and searches only inside it, so a module-level helper may carry a guard clause without
+ *       disturbing the rules-of-hooks assertion. The shape below is kept on its own merits rather
+ *       than to work around a test.
  */
 
 /**
@@ -348,9 +435,17 @@ export function isBlankEntry(value: string): boolean {
 }
 
 /**
- * Reports whether a problem document's field name addresses one of this screen's controls.
+ * Reports whether a problem document's field name addresses a value this screen renders.
+ *
+ * Refactoring Rationale: ⚠️ this was documented as covering "the two controls this screen renders",
+ * which was both an inaccurate description of the domain and a description of the wrong domain. The
+ * screen renders two controls at any instant but owns THREE named values across its two exchanges,
+ * because the challenge mounts a distinct control whose wire name is `newPassword` — see
+ * {@link SIGN_ON_FIELDS}, where the third member and the deliberate absence of `session` are both
+ * recorded. The count is stated as the list's membership rather than as a number here so that the
+ * documentation cannot fall behind the list again.
  * @param {string} name - Field name as the problem document spells it.
- * @returns {boolean} `true` when the name is one of the two controls this screen renders.
+ * @returns {boolean} `true` when the name is a member of {@link SIGN_ON_FIELDS}.
  */
 function isSignOnField(name: string): name is SignOnField {
   return (SIGN_ON_FIELDS as readonly string[]).includes(name);
@@ -359,19 +454,36 @@ function isSignOnField(name: string): name is SignOnField {
 /**
  * Chooses the screen-level sentence a refused exchange reports.
  *
- * Assumptions: the sentence is taken from the problem document rather than composed here, because
- * the service is what decides which of the reference's three refusals applies. `ui/src/api/auth.ts`
- * states the contract directly — the three verbatim sentences arrive as the `message` of a problem
- * document on a 401 and "a caller renders that message unchanged under transformation rule T8" — so
- * `Wrong Password. Try again ...` (`app/cbl/COSGN00C.cbl` L242) and `User not found. Try again ...`
- * (L249) reach the operator because the service sent them, not because this screen guessed between
- * them. Guessing is precisely what a client must not do: choosing between the two requires knowing
- * whether the identifier exists, which is the fact the refusal is designed not to disclose.
+ * Assumptions: the sentence is taken from the problem document rather than composed here, because the
+ * service is what decides which refusal applies. `ui/src/api/auth.ts` states the contract directly —
+ * a verbatim sentence arrives as the `message` of a problem document on a 401 and "a caller renders
+ * that message unchanged under transformation rule T8" — so the sentence an operator reads is the one
+ * the service sent and not one this screen guessed at.
+ *
+ * Assumptions: exactly which sentences are REACHABLE is worth stating, because the catalog holds three
+ * credential refusals and the service can send only one of them.
+ * `Wrong Password. Try again ...` (`app/cbl/COSGN00C.cbl` L242) is the one it sends, and it sends it for
+ * BOTH of the baseline's two credential failures. `User not found. Try again ...` (L249) is
+ * **unreachable through this screen**: the app client fixes `PreventUserExistenceErrors = "ENABLED"` at
+ * L609 of `infra/modules/cognito/main.tf`, so the provider answers an unknown identifier and a wrong
+ * password identically and the service has nothing to distinguish them with. That is deliberate — the
+ * two sentences differ precisely in whether they disclose that an identifier exists, and answering an
+ * unauthenticated caller differently for the two is an enumeration oracle. The divergence is registered
+ * as `D-SIGNON-EXISTENCE-UNIFORM` in `docs/architecture/cobol-to-service-traceability.md`. The catalog
+ * still carries the unreachable sentence, because transformation rule T8 carries every message constant
+ * across whether or not a path reaches it, and deleting it would misrepresent the baseline.
+ *
+ * Assumptions: two further sentences do reach the band from a service, and neither is a credential
+ * refusal. `Please sign on again ...` arrives on a 401 from the challenge exchange, where it means the
+ * continuation rather than the credential was refused — the arm that selects it reads the status
+ * inline, a withdrawn `refusalEndsTheChallenge` predicate having been folded into it. A
+ * validation refusal arrives as a 400 whose aggregate sentence the service composes, with the specific
+ * text carried per field.
  *
  * Assumptions: the fallback is `Unable to verify the User ...` (L254), which is the reference's own
- * `WHEN OTHER` arm — the sentence it shows for any response it cannot classify. A refusal that
- * carries no problem document at all, such as a transport failure, is exactly that case, so the
- * fallback is a transcription rather than an invention.
+ * `WHEN OTHER` arm — the sentence it shows for any response it cannot classify. A refusal that carries
+ * no problem document at all, such as a transport failure, is exactly that case, so the fallback is a
+ * transcription rather than an invention, and it is the only one of the three the CLIENT ever selects.
  * @param {unknown} failure - Whatever the sign-on or challenge call rejected with.
  * @returns {string} The sentence to render in the band, verbatim from the service or from the
  *   catalog when the refusal carried none.
@@ -388,6 +500,45 @@ export function signOnFailureMessage(failure: unknown): string {
     ? reported
     : SIGN_ON_MESSAGES.UNABLE_TO_VERIFY_THE_USER;
 }
+
+/**
+ * The wire name the challenge body gives its replacement-credential member.
+ *
+ * Refactoring Rationale: this exists because a refusal addressed to it used to be DROPPED.
+ * {@link signOnFieldRefusals} recognised only the two members of the sign-on body, and the challenge
+ * body is a different shape: `services/auth-service/src/main/java/com/carddemo/auth/dto/SignOnChallengeRequest.java`
+ * declares `userId`, `session` and `newPassword`, and a replacement the pool rejects on policy grounds
+ * is reported against the third. Every such refusal therefore reached this screen and was thrown away,
+ * leaving the operator the band's general sentence and no indication of which control was at fault —
+ * on the one screen where the reason ("at least twelve characters", say) is the whole of what they need.
+ *
+ * Assumptions: it maps onto the `password` control rather than to a slot of its own, because the
+ * challenge REPLACES the password control in the same row rather than adding a second one. That is
+ * already why {@link PASSWORD_FIELD_ID} serves both renderings, and giving the refusal its own slot
+ * would mean the row read one slot while the service wrote another.
+ *
+ * Assumptions: `session` is deliberately NOT mapped. It is an opaque continuation value the operator
+ * never typed and cannot correct, so attaching its refusal to a control would label an input the
+ * operator has no way of fixing; a refused session is handled instead by leaving the challenge
+ * altogether — see the withdrawal note on the `refusalEndsTheChallenge` predicate below.
+ */
+const CHALLENGE_PASSWORD_FIELD = 'newPassword';
+
+/*
+ * WHY : Refactoring Rationale: an `UNAUTHENTICATED_STATUS` constant of 401 stood here beside
+ *       {@link SESSION_REFUSED_STATUS}, which is the same number for the same reason. Two names for one
+ *       status let a reader believe the screen distinguishes two conditions when it distinguishes one.
+ */
+
+/*
+ * WHY : Refactoring Rationale: a `refusalEndsTheChallenge` predicate stood here and is withdrawn as a
+ *       duplicate of {@link isSessionRefusal}, which tests the same status through the same helper. Its
+ *       own finding is preserved and is what the surviving arm in `reportRefusal` acts on: a refused
+ *       CONTINUATION returns the screen to the sign-on form, because the challenge session is single-use
+ *       and once the pool has refused it every further answer is refused identically -- so the screen
+ *       offered a replacement control that could not succeed with the identifier disabled beside it, and
+ *       the only recovery was reloading the page.
+ */
 
 /**
  * Maps a refusal's per-field entries onto the controls they name.
@@ -417,6 +568,10 @@ export function signOnFieldRefusals(failure: unknown): FieldRefusals {
   for (const fieldError of reported) {
     if (isSignOnField(fieldError.field)) {
       refusals[fieldError.field] = fieldError.message;
+    } else if (fieldError.field === CHALLENGE_PASSWORD_FIELD) {
+      // Assumptions: the replacement's refusal is written to the `password` slot, which is the slot the
+      //   row it is rendered in reads. See CHALLENGE_PASSWORD_FIELD for why the two share one slot.
+      refusals.password = fieldError.message;
     }
   }
 
@@ -445,6 +600,33 @@ export function signOnFieldRefusals(failure: unknown): FieldRefusals {
  */
 export function signOnFocusTarget(message: string): SignOnField {
   return message === SIGN_ON_MESSAGES.WRONG_PASSWORD_TRY_AGAIN ? 'password' : 'userId';
+}
+
+/**
+ * Reports whether a refused exchange means the challenge session can no longer be used.
+ *
+ * Assumptions: the discriminator is the transport status and NOT the sentence the body carries. The
+ * challenge operation's 401 has exactly one published meaning — `auth-api.yaml` states that the
+ * session "has expired, has already been used, was altered, or was not issued for the identifier
+ * supplied", with the remedy "to sign on again" — so a 401 from that operation is unambiguous
+ * regardless of wording, whereas the sentence itself is authored text with no reference line to pin
+ * it and both refusals of this service publish the same `code`.
+ *
+ * Alternatives Considered: comparing the body's message against a copy of the service's
+ * `MESSAGE_SESSION_REFUSED` sentence held here. Rejected because the contract does not publish that
+ * sentence as a value — it is not an example, an enum or a schema default anywhere in the committed
+ * document — so a copy in this file would be checkable against nothing, and a service reword would
+ * silently turn the recovery below back into the defect it fixes.
+ *
+ * Assumptions: this predicate is asked only about a refused CHALLENGE answer. A 401 from the sign-on
+ * exchange means a refused credential, which is an ordinary retry on the same form and must not clear
+ * anything; the call site is what keeps the two apart, because the state it branches on is which form
+ * was submitted.
+ * @param {unknown} failure - Whatever the challenge-answer call rejected with.
+ * @returns {boolean} `true` when the exchange was refused with the status that retires the session.
+ */
+export function isSessionRefusal(failure: unknown): boolean {
+  return isApiRequestError(failure) && failure.status === SESSION_REFUSED_STATUS;
 }
 
 /**
@@ -484,6 +666,21 @@ export function SignOnScreen(): ReactElement {
   //       re-read the clock on each `SEND MAP` (`FUNCTION CURRENT-DATE` at L179) rather than on a
   //       timer.
   const paintedAt = useServerInstant();
+  /*
+   * WHY : Assumptions: the viewport is read through the design system's own responsive observer rather
+   *       than from `window.innerWidth` or a media-query listener written here, so the threshold this
+   *       screen reacts to is the same one every `Row`, `Col` and `Descriptions` in the application
+   *       reacts to. Reading the width directly would put a pixel literal in this file and would drift
+   *       the moment a theme changed the breakpoint scale.
+   * WHY : Trade-offs: the hook returns an empty map on the very first render and fills it in a layout
+   *       effect, so one paint happens before any screen is known. That is why the test below is
+   *       written as "hide only when the observer AFFIRMATIVELY reports narrow" rather than "show only
+   *       when it reports wide": the inverted form would flash the decoration out of existence on
+   *       every mount at every width, and it would hide it permanently in any environment whose
+   *       `matchMedia` reports nothing.
+   */
+  const screens = Grid.useBreakpoint();
+  const artFitsViewport = screens[SIGN_ON_ART_BREAKPOINT.screenKey] !== false;
   const [message, setMessage] = useState<ScreenMessage | null>(null);
   const [refusals, setRefusals] = useState<FieldRefusals>({});
   const [busy, setBusy] = useState(false);
@@ -518,6 +715,12 @@ export function SignOnScreen(): ReactElement {
      * password control at the moment a challenge replaces it, and a request can name the identifier
      * while a challenge has it disabled, so an absent ref means the request no longer has a target
      * and is dropped rather than retried.
+     *
+     * Assumptions: two of the three names in {@link SIGN_ON_FIELDS} resolve to the SAME ref, and that
+     * is not a gap. `password` and `newPassword` are two mutually exclusive renderings of one row
+     * sharing one identifier and one ref, so the cursor lands on whichever of them is mounted — which
+     * is exactly the behaviour wanted, since a refusal naming either always arrives while that one is
+     * the control on screen.
      * @returns {void} Nothing; the browser's focus is the outcome.
      */
     function moveCursorToRequestedField(): void {
@@ -525,6 +728,10 @@ export function SignOnScreen(): ReactElement {
         return;
       }
 
+      // Assumptions: three field NAMES resolve to two DOM controls, because `password` and
+      //   `newPassword` are mutually exclusive renderings of the same row and both carry the same ref.
+      //   Whichever is mounted is the one this focuses, which is why the challenge turn can point at
+      //   its own control without a third ref.
       const control =
         focusRequest.field === 'userId' ? userIdControl.current : passwordControl.current;
       control?.focus();
@@ -533,7 +740,7 @@ export function SignOnScreen(): ReactElement {
   );
 
   /**
-   * Requests that the cursor move to one of the two controls.
+   * Requests that the cursor move to one of the named controls.
    *
    * Assumptions: this is the migration of `MOVE -1 TO <field>L`, which is the ONLY field-level
    * feedback this screen has — see {@link signOnFocusTarget} for why there is no highlight to
@@ -561,8 +768,14 @@ export function SignOnScreen(): ReactElement {
   /**
    * Reports a client-side refusal in the band and points the cursor at the control that caused it.
    *
-   * Assumptions: no per-control text is attached for these two refusals, and the omission is the
-   * reference's. `CSSETATY` is not copied by this program, so a blank field produces a band sentence
+   * Assumptions: no per-control text is attached for any of the three blank-field refusals that reach
+   * this helper — a blank identifier, a blank credential, a blank replacement — and therefore no
+   * `aria-invalid` appears on the control either. That is consistent rather than a gap in the ARIA
+   * wiring: `aria-invalid` is emitted from the presence of a refusal, and on this path there is no
+   * field-level refusal to emit it from. What tells the operator is the band, which carries
+   * `role="alert"` while it holds a sentence, together with the cursor arriving in the field named — so
+   * a screen-reader user is announced the sentence and then lands on the control it is about. The
+   * omission is the reference's. `CSSETATY` is not copied by this program, so a blank field produces a band sentence
    * and a cursor move and nothing else; attaching `help` text here would invent the highlight the
    * screen never had. The per-control channel is reserved for a refusal the SERVICE addressed to a
    * field — see {@link signOnFieldRefusals}.
@@ -577,24 +790,86 @@ export function SignOnScreen(): ReactElement {
   }
 
   /**
-   * Reports a refused exchange, discarding the credential that was refused.
+   * Reports a refused exchange, discarding BOTH credentials whichever one was submitted.
    *
-   * Assumptions: the password is cleared here rather than left in the control. The reference re-sends
-   * the map with `ERASE` on every refusal (L151-L157), so the 3270 field was blank again on the next
-   * turn; and the credential must not outlive the exchange it was submitted for, which is why it is
-   * dropped from component state at the first moment it is no longer needed. It is never echoed back
-   * from a response either — that is what the reference's own update screen did, moving `SEC-USR-PWD`
-   * into the map at `app/cbl/COUSR02C.cbl` L169, and no response this screen reads carries a password
-   * at all.
+   * Assumptions: the credentials are cleared here rather than left in their controls. The reference
+   * re-sends the map with `ERASE` on every refusal (L151-L157), so the 3270 field was blank again on
+   * the next turn; and a credential must not outlive the exchange it was submitted for, which is why
+   * each is dropped from component state at the first moment it is no longer needed. Neither is ever
+   * echoed back from a response either — that is what the reference's own update screen did, moving
+   * `SEC-USR-PWD` into the map at `app/cbl/COUSR02C.cbl` L169, and no response this screen reads
+   * carries a password at all.
+   *
+   * Refactoring Rationale: ⚠️ this cleared `password` alone, so a REPLACEMENT password that the pool
+   * refused survived in component state and in the masked control that renders it — a refused
+   * credential retained after the exchange that needed it had settled, which is the plaintext-retention
+   * weakness CWE-316 and CWE-522 name and which the sibling credential was already protected from on
+   * this same line. Both are cleared unconditionally rather than only the one belonging to the visible
+   * form, because the cost of clearing an already-empty value is nothing while the cost of choosing
+   * wrongly is retaining a credential.
+   *
+   * Refactoring Rationale: ⚠️ a refused SESSION now also retires the challenge, where before the
+   * challenge stayed outstanding forever. The challenge session is single-use and, once the pool has
+   * refused it, every subsequent answer is refused for the same reason — so the screen kept offering a
+   * replacement-password control that could not succeed, with the identifier control disabled beside
+   * it and no gesture on the screen able to reach a fresh sign-on: not the submit control, which
+   * re-answered the dead session, and not the exit key, which signs off rather than restarting. The
+   * only recovery was to reload the page. Restoring the ordinary form is what turns the published
+   * remedy — "sign on again" — into something the operator can actually do.
+   *
+   * Assumptions: the challenge is retired ONLY on that status. A 400 refusal means the pool judged the
+   * proposed password against its policy and said why, so the session is still usable and the operator
+   * corrects the value in place: the challenge handle is retained, the per-field reason is attached to
+   * the replacement control, and the cursor returns to it. That split is the report's own division
+   * between an expired session and a retryable policy failure.
    * @param {unknown} failure - Whatever the sign-on or challenge call rejected with.
-   * @returns {void} Nothing; the band, the per-control refusals and the focus carry the outcome.
+   * @returns {void} Nothing; the band, the per-control refusals, the retired challenge and the focus
+   *   carry the outcome.
    */
   function reportRefusal(failure: unknown): void {
     const text = signOnFailureMessage(failure);
+    const answeringChallenge = challenge !== null;
+    const sessionRetired = answeringChallenge && isSessionRefusal(failure);
     setMessage({ text, severity: 'error' });
-    setRefusals(signOnFieldRefusals(failure));
+    // Refactoring Rationale: BOTH credential controls are cleared, where this cleared only the current
+    //   password. The rule stated above — a credential must not outlive the exchange it was submitted
+    //   for — applies to a replacement exactly as it does to the one being replaced, and a refused
+    //   replacement was being left in component state for the rest of the screen's life. It is also the
+    //   value most likely to be wrong, since the commonest refusal here is that it breaks the pool's
+    //   policy, so leaving it in place invited a second submission of the same rejected value.
     setPassword('');
-    focusField(signOnFocusTarget(text));
+    setNewPassword('');
+
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the terminal-refusal test is `sessionRetired`, computed once above,
+     *       and this arm tested `challenge !== null && refusalEndsTheChallenge(failure)`. The two were the
+     *       same predicate under two names -- `isSessionRefusal` reads `failure.status === 401` and
+     *       `refusalEndsTheChallenge` reads `failure.problem.status === 401`, from two constants both
+     *       declared as 401 -- authored by two revisions remedying the same finding. One name is kept so
+     *       the split this arm depends on cannot be changed in one place and not the other: a 401 retires
+     *       the challenge, and a 400 leaves it usable so the operator corrects the value in place.
+     */
+    if (sessionRetired) {
+      // Refactoring Rationale: a refused CONTINUATION now returns the screen to the sign-on form, where
+      //   it previously left the operator in the challenge holding a session the pool had rejected. Every
+      //   further submission reused that dead session and was refused identically, so the screen was
+      //   stuck: nothing on it could reach a working state and the only way out was to reload the
+      //   application. Restoring the form is what the sentence the service sends for this status —
+      //   `Please sign on again ...` — actually instructs.
+      setChallenge(null);
+      setRefusals({});
+      focusField('userId');
+      return;
+    }
+
+    setRefusals(signOnFieldRefusals(failure));
+    // Refactoring Rationale: while a challenge is outstanding the cursor goes to the password control
+    //   unconditionally, where it previously went wherever {@link signOnFocusTarget} pointed — which for
+    //   any sentence other than the wrong-password one is the identifier. That control is rendered
+    //   `disabled` during a challenge, so the focus request landed on an element that cannot take it and
+    //   the cursor stayed where it was. The replacement-password input is the only control the operator
+    //   can act on at that moment, which makes it the only correct target.
+    focusField(challenge === null ? signOnFocusTarget(text) : 'password');
   }
 
   /**
@@ -672,9 +947,14 @@ export function SignOnScreen(): ReactElement {
       if (outcome.outcome === SIGN_ON_CHALLENGE) {
         setChallenge(outcome);
         // Assumptions: the accepted credential is dropped as soon as the provider has consumed it,
-        //   so the replacement it is now asking for is entered into an empty control.
+        //   so the replacement it is now asking for is entered into an empty control. The replacement
+        //   slot is cleared alongside it: an operator who was challenged, had the session refused, and
+        //   signed on again reaches this line with a value already typed into it, and seeding the new
+        //   challenge with the previous attempt would both prefill a credential and re-offer one the
+        //   pool has already judged.
         setPassword('');
-        focusField('password');
+        setNewPassword('');
+        focusField('newPassword');
         return;
       }
       enterApplication(outcome.idToken);
@@ -696,7 +976,10 @@ export function SignOnScreen(): ReactElement {
    * Assumptions: a blank replacement is refused with the reference's own password prompt rather than
    * a sentence composed here. The catalog holds no challenge-specific text because the reference
    * emitted none, and `Please enter Password ...` is the sentence it uses for exactly this condition
-   * — an empty password control.
+   * — an empty password control. The refusal names `newPassword` rather than `password`, which is the
+   * value actually being judged and the name the service would have used for it; the cursor lands in
+   * the same control either way, so the change is to the truthfulness of the domain rather than to
+   * what the operator sees.
    * @returns {Promise<void>} Resolves once the outcome has been applied to screen state. It does not
    *   reject: every refusal is converted into a band sentence by {@link reportRefusal}.
    */
@@ -705,7 +988,7 @@ export function SignOnScreen(): ReactElement {
       return;
     }
     if (isBlankEntry(newPassword)) {
-      refuseEntry('password', SIGN_ON_MESSAGES.PLEASE_ENTER_PASSWORD);
+      refuseEntry('newPassword', SIGN_ON_MESSAGES.PLEASE_ENTER_PASSWORD);
       return;
     }
 
@@ -764,10 +1047,20 @@ export function SignOnScreen(): ReactElement {
    * dispatcher serves both the Enter key and the submit control and the visible state decides which
    * exchange runs.
    *
-   * Assumptions: a submission already in flight is dropped rather than queued. Trade-offs: the guard
-   * is here instead of on the key binding because a binding marked `disabled` reports
-   * `CCDA-MSG-INVALID-KEY` through `onInvalidKey`, which would tell an operator their Enter key was
-   * invalid while their sign-on was succeeding.
+   * Assumptions: a submission already in flight is dropped rather than queued, and this guard is now
+   * the SECOND of two rather than the only one — the Enter binding is marked disabled while a
+   * submission is in flight, so the key and the legend entry are unavailable before this runs.
+   *
+   * Refactoring Rationale: ⚠️ the guard used to be the only defence, on the argument that a binding
+   * marked `disabled` reports `CCDA-MSG-INVALID-KEY` through `onInvalidKey` and would tell an operator
+   * their Enter key was invalid while their sign-on was succeeding. The argument was sound about the
+   * message and wrong about the conclusion: leaving the binding enabled meant the legend's `ENTER=Sign-on`
+   * stayed lit and the physical key stayed live while both silently did nothing, so the pointer control
+   * — which antd disables from `loading` — and the keyboard disagreed about whether the screen was
+   * accepting input. The message is suppressed at its source instead: `onInvalidKey` distinguishes the
+   * two rejection reasons the hook reports and stays silent for `disabled`, so the binding can express
+   * unavailability without inventing a refusal. This guard is kept because it also covers the pointer
+   * path if antd's own disabling ever stops applying, and because `invoke` can be called from the bar.
    * @returns {void} Nothing; the submission's own state changes carry the outcome.
    */
   function runSubmit(): void {
@@ -817,6 +1110,21 @@ export function SignOnScreen(): ReactElement {
           runSubmit();
         },
         label: SIGN_ON_KEY_LABELS.ENTER,
+        /*
+         * WHY : Assumptions: unavailability while an exchange is in flight is expressed on the BINDING
+         *       and not only inside the handler, because the binding is what the legend renders from --
+         *       `ui/src/layout/PfKeyBar.tsx` passes `disabled={!binding.enabled}` -- so this is the one
+         *       declaration that makes the legend entry, the physical key and the submit control agree.
+         *       The 3270 screen had the equivalent property for free: a task holding the terminal left
+         *       the keyboard locked until it re-sent the map, so an operator could not re-press Enter
+         *       into a running transaction at all. Nothing in a browser locks the keyboard, so the
+         *       equivalent has to be stated.
+         * WHY : Trade-offs: a boolean is passed rather than the predicate form the hook also accepts.
+         *       The predicate exists for state the hook must re-read at dispatch time; `busy` is
+         *       render state, so a boolean read at the same render as the legend keeps the two exactly
+         *       in step, where a predicate could report one thing while the bar rendered another.
+         */
+        disabled: busy,
       },
       PFK03: {
         /**
@@ -837,13 +1145,54 @@ export function SignOnScreen(): ReactElement {
        * hook recognises an attention identifier this screen did not bind and reports it, which is
        * what `WHEN OTHER` at L91-L94 does — set the error flag, move `CCDA-MSG-INVALID-KEY` into the
        * message field and re-send the screen. All this callback supplies is the band to put it in.
-       * @returns {void} Nothing; the band carries the outcome.
+       *
+       * Assumptions: a key rejected because it is currently DISABLED is not that condition and is
+       * reported nowhere. The hook reports both reasons through this one callback, and only `unmapped`
+       * corresponds to `WHEN OTHER`: the operator pressed a key this screen binds, and the reason
+       * nothing happened is that the screen is mid-exchange, which the greyed legend entry and the
+       * loading submit control already say. Announcing `CCDA-MSG-INVALID-KEY` for it would state
+       * something false about a key the screen does support, and it would overwrite whatever the
+       * in-flight exchange is about to report.
+       * @param {PfKeyRejection} rejection - The hook's account of which key was refused and why.
+       * @returns {void} Nothing; the band carries the outcome, or nothing does when the key was merely
+       *   unavailable.
        */
-      onInvalidKey: (): void => {
+      onInvalidKey: (rejection: PfKeyRejection): void => {
+        if (rejection.reason === 'disabled') {
+          return;
+        }
         setMessage({ text: INVALID_KEY_PRESSED, severity: 'error' });
       },
     },
   );
+
+  /*
+   * WHY : Refactoring Rationale: the title band, the row-23 message line and the row-24 legend are
+   *       DELEGATED to the single `AppShell` that `ui/src/App.tsx` mounts, where this screen used to
+   *       compose all three itself. Composing them per screen was how the application worked before
+   *       the shell was wired in, and it is what left the frame rebuilt once per screen with nothing
+   *       guaranteeing that a screen authored later shipped one at all.
+   * WHY : Assumptions: the shell paints a zone if and only if it has been delegated one, so the three
+   *       members below are the whole of what this screen surrenders; everything the mapset paints
+   *       between rows 5 and 21 stays here. The message severity falls back to `error` when there is no
+   *       sentence, because row 23 of the mapset is `COLOR=RED` with `ATTRB=BRT` and the value is then
+   *       unused anyway.
+   * WHY : Assumptions: this screen's own `usePfKeys` result is handed over rather than re-derived by the
+   *       shell, and that is also what keeps the keyboard singly owned: a published `pfKeys` slot makes
+   *       the shell stand its own sign-off key down, so exactly one document listener is installed while
+   *       this screen is mounted. It matters most on this screen, which is reachable while no operator is
+   *       signed on - the shell's key is already inactive then - and it must stay true once one is.
+   */
+  useShellSlot({
+    screen: { transactionId: SIGN_ON_TRANSACTION_ID, programName: SIGN_ON_PROGRAM_NAME },
+    now: paintedAt,
+    message: {
+      text: message?.text ?? null,
+      severity: message?.severity ?? 'error',
+      mapset: SIGN_ON_MAPSET,
+    },
+    pfKeys: { keys: bindings, onInvoke: invoke },
+  });
 
   /**
    * Records the identifier as entered.
@@ -875,12 +1224,24 @@ export function SignOnScreen(): ReactElement {
     setNewPassword(event.target.value);
   }
 
-  const introductionStyle: CSSProperties = { color: cssVar[BMS_COLOR_TOKENS.NEUTRAL] };
-  const promptStyle: CSSProperties = { color: cssVar[BMS_COLOR_TOKENS.TURQUOISE] };
-  const labelStyle: CSSProperties = { color: cssVar[BMS_COLOR_TOKENS.TURQUOISE] };
-  const hintStyle: CSSProperties = { color: cssVar[BMS_COLOR_TOKENS.BLUE] };
+  /*
+   * WHY : Refactoring Rationale: every colour below resolves through
+   *       `BMS_TEXT_COLOR_TOKENS` and no longer through `BMS_COLOR_TOKENS`, because each of
+   *       these declarations paints TEXT and the hue map's entries are fill-grade anchors. The
+   *       two roles this screen uses measured 2.205:1 for the turquoise prompt and labels and
+   *       4.104:1 for the blue hints and banknote, where WCAG AA asks 4.5:1 for normal text.
+   *       The measured source roles are unchanged -- `COLOR=TURQUOISE` on the prompt at
+   *       `app/bms/COSGN00.bms` L149 and on both labels at L155 and L174, `COLOR=BLUE` on the
+   *       two width hints at L169 and L189 -- and `ui/src/theme/tokens.ts` records which of
+   *       the eight roles kept its hue family and which had to snap out of it, with the
+   *       measured ratio each was snapped away from.
+   */
+  const introductionStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL] };
+  const promptStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.TURQUOISE] };
+  const labelStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.TURQUOISE] };
+  const hintStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.BLUE] };
   const banknoteStyle: CSSProperties = {
-    color: cssVar[BMS_COLOR_TOKENS.BLUE],
+    color: cssVar[BMS_TEXT_COLOR_TOKENS.BLUE],
     fontFamily: cssVar[TYPOGRAPHY_TOKENS.fixedPitchData],
     /*
      * WHY : Assumptions: `pre` is a structural keyword and not a design value, so it is written
@@ -895,25 +1256,6 @@ export function SignOnScreen(): ReactElement {
 
   return (
     <Flex vertical gap="large">
-      <ScreenHeader
-        transactionId={SIGN_ON_TRANSACTION_ID}
-        programName={SIGN_ON_PROGRAM_NAME}
-        now={paintedAt}
-      />
-      {/*
-       * WHY : Assumptions: the band receives a sentence and a severity, never the refusal itself.
-       *       `ui/src/layout/MessageBand.tsx` states that it does not accept an `ApiError` and that
-       *       callers do the mapping, so {@link signOnFailureMessage} and
-       *       {@link signOnFieldRefusals} above are that mapping. The severity defaults to `error`
-       *       when there is no message because the band's row is reserved either way and the value is
-       *       then unused; row 23 of the mapset is `COLOR=RED` with `ATTRB=BRT`, which the band
-       *       resolves to the error colour and the strong weight.
-       */}
-      <MessageBand
-        message={message?.text ?? null}
-        severity={message?.severity ?? 'error'}
-        mapset={SIGN_ON_MAPSET}
-      />
       {/*
        * WHY : Alternatives Considered: `Typography.Paragraph`, which is the obvious element for a
        *       sentence. Rejected because row 5 is a single `LENGTH=66` field rather than block prose,
@@ -938,10 +1280,25 @@ export function SignOnScreen(): ReactElement {
        *       screen roughly ten times slower to render and to drive, to the point that typing into a
        *       control and clicking a button exceeded a five-second test timeout. A newline-joined
        *       string under `white-space: pre` renders identically for decoration nobody reads.
+       * WHY : Refactoring Rationale: the art is rendered only at or above the design system's medium
+       *       breakpoint, where it was previously rendered unconditionally. Each of its nine lines is
+       *       42 characters of fixed-pitch text held together by `white-space: pre`, which cannot wrap
+       *       and cannot shrink — so on a narrow viewport it set the width of the whole column and
+       *       pushed a horizontal scrollbar under the sign-on form, making the form itself something
+       *       an operator had to scroll sideways to use.
+       * WHY : Alternatives Considered: scaling the art down with a transform, or letting it clip inside
+       *       an overflow container, both of which keep it on screen. Both were rejected for the same
+       *       reason: they trade a broken form for broken decoration, since a 42-column note scaled to
+       *       a 375-pixel viewport is unreadable and a clipped one is a fragment of a border. Omitting
+       *       it costs nothing an operator can act on — it is `aria-hidden` decoration that
+       *       `ui/src/messages/messages.ts` L163-L164 classifies as exactly that — and the report's
+       *       instruction is explicit that the form must not be compromised for it.
        */}
-      <Typography.Text aria-hidden="true" style={banknoteStyle}>
-        {SIGN_ON_BANKNOTE_ART.join('\n')}
-      </Typography.Text>
+      {artFitsViewport ? (
+        <Typography.Text aria-hidden="true" style={banknoteStyle}>
+          {SIGN_ON_BANKNOTE_ART.join('\n')}
+        </Typography.Text>
+      ) : null}
       <Typography.Text style={promptStyle}>{SIGN_ON_PROMPT}</Typography.Text>
       <Card>
         <Form layout="vertical">
@@ -950,10 +1307,17 @@ export function SignOnScreen(): ReactElement {
               <Typography.Text style={labelStyle}>{SIGN_ON_FIELD_LABELS.userId}</Typography.Text>
             }
             htmlFor={USER_ID_FIELD_ID}
-            extra={<Typography.Text style={hintStyle}>{SIGN_ON_FIELD_WIDTH_HINT}</Typography.Text>}
+            extra={
+              <Typography.Text id={fieldHintId(USER_ID_FIELD_ID)} style={hintStyle}>
+                {SIGN_ON_FIELD_WIDTH_HINT}
+              </Typography.Text>
+            }
             {...(refusals.userId === undefined
               ? {}
-              : { validateStatus: 'error' as const, help: refusals.userId })}
+              : {
+                  validateStatus: 'error' as const,
+                  help: fieldErrorHelp(USER_ID_FIELD_ID, refusals.userId),
+                })}
           >
             {/*
              * WHY : Assumptions: `autoFocus` is on this control and on NO other, because `IC` occurs
@@ -974,6 +1338,16 @@ export function SignOnScreen(): ReactElement {
              *       identifier and emits a DOM advisory naming its absence. `username` is the value
              *       the specification defines for the account-identifier field of a sign-on form.
              */}
+            {/*
+             * WHY : Refactoring Rationale: the two ARIA members are spread from
+             *       `ui/src/layout/fieldHelp.tsx` rather than left to antd, and that module records the
+             *       whole reason: `Form.Item` injects them only for a NAMED field, and every item on
+             *       this screen is unnamed because the values live in component state. Without them a
+             *       refusal was red text a sighted operator could read and a screen-reader user was
+             *       told nothing about -- neither that the control was invalid nor what was wrong with
+             *       it. The hint is described as well as the refusal, so the parenthetical width a
+             *       sighted operator reads beside the control is announced to one who cannot.
+             */}
             <Input
               id={USER_ID_FIELD_ID}
               ref={userIdControl}
@@ -983,6 +1357,11 @@ export function SignOnScreen(): ReactElement {
               value={userId}
               disabled={challenge !== null}
               onChange={handleUserIdChange}
+              {...fieldAriaProps(USER_ID_FIELD_ID, {
+                invalid: refusals.userId !== undefined,
+                hasError: refusals.userId !== undefined,
+                hasHint: true,
+              })}
             />
           </Form.Item>
           {challenge === null ? (
@@ -993,12 +1372,12 @@ export function SignOnScreen(): ReactElement {
                 </Typography.Text>
               }
               htmlFor={PASSWORD_FIELD_ID}
-              extra={
-                <Typography.Text style={hintStyle}>{SIGN_ON_FIELD_WIDTH_HINT}</Typography.Text>
-              }
               {...(refusals.password === undefined
                 ? {}
-                : { validateStatus: 'error' as const, help: refusals.password })}
+                : {
+                    validateStatus: 'error' as const,
+                    help: fieldErrorHelp(PASSWORD_FIELD_ID, refusals.password),
+                  })}
             >
               {/*
                * WHY : Trade-offs: a 3270 non-display field renders TRULY BLANK and this renders one
@@ -1015,10 +1394,11 @@ export function SignOnScreen(): ReactElement {
                *       -- the default toggle would put the characters themselves one click away, which
                *       is a property the non-display field never had.
                * WHY : Assumptions: `maxLength` is the SERVICE's bound and not the reference's
-               *       `LENGTH=8`. See the note above {@link SIGN_ON_FIELD_WIDTH_HINT}'s neighbourhood
-               *       for the full argument; the short form is that the provider accepts nothing
-               *       shorter than twelve characters, so an eight-character control would admit only
-               *       credentials guaranteed to be refused.
+               *       `LENGTH=8`. See `D-SIGNON-RETIRED-WIDTH-HINT` for the full argument; the short
+               *       form is that the provider accepts nothing shorter than twelve characters, so an
+               *       eight-character control would admit only credentials guaranteed to be refused --
+               *       which is also why the hint painted beside this control names that minimum rather
+               *       than repeating the mapset's eight.
                * WHY : Assumptions: `autoComplete="current-password"` -- rather than the bare `on` -- is
                *       what tells the browser this is an EXISTING credential being presented, so a
                *       credential manager offers the stored value rather than proposing a new one. It is
@@ -1034,6 +1414,11 @@ export function SignOnScreen(): ReactElement {
                 maxLength={PASSWORD_MAX_LENGTH}
                 value={password}
                 onChange={handlePasswordChange}
+                {...fieldAriaProps(PASSWORD_FIELD_ID, {
+                  invalid: refusals.password !== undefined,
+                  hasError: refusals.password !== undefined,
+                  hasHint: false,
+                })}
               />
             </Form.Item>
           ) : (
@@ -1042,11 +1427,22 @@ export function SignOnScreen(): ReactElement {
                 <Typography.Text style={labelStyle}>{SIGN_ON_NEW_PASSWORD_LABEL}</Typography.Text>
               }
               htmlFor={PASSWORD_FIELD_ID}
-              {...(refusals.password === undefined
+              {...(refusals.newPassword === undefined
                 ? {}
-                : { validateStatus: 'error' as const, help: refusals.password })}
+                : {
+                    validateStatus: 'error' as const,
+                    help: fieldErrorHelp(PASSWORD_FIELD_ID, refusals.newPassword),
+                  })}
             >
               {/*
+               * WHY : Refactoring Rationale: ⚠️ this item keyed its error state off `refusals.password`
+               *       and now keys it off `refusals.newPassword`, which is the name the value it holds
+               *       is actually judged under. The challenge answer's 400 names `newPassword` and
+               *       carries the pool's own reason for refusing it -- too short, or missing a required
+               *       character class -- so under the old key that reason was addressed to a control not
+               *       mounted while a challenge is outstanding, and the operator was told a password was
+               *       unacceptable without being told what about it was. The domain change that makes
+               *       this key resolvable at all is recorded on {@link SIGN_ON_FIELDS}.
                * WHY : Assumptions: no width hint is painted beside this control, because the mapset
                *       paints none -- there is no replacement-password field on the 3270 screen to
                *       transcribe a hint from. The bound is the service's, for the same reason as the
@@ -1067,6 +1463,11 @@ export function SignOnScreen(): ReactElement {
                 maxLength={PASSWORD_MAX_LENGTH}
                 value={newPassword}
                 onChange={handleNewPasswordChange}
+                {...fieldAriaProps(PASSWORD_FIELD_ID, {
+                  invalid: refusals.newPassword !== undefined,
+                  hasError: refusals.newPassword !== undefined,
+                  hasHint: false,
+                })}
               />
             </Form.Item>
           )}
@@ -1083,17 +1484,23 @@ export function SignOnScreen(): ReactElement {
           </Space>
         </Form>
       </Card>
-      <PfKeyBar keys={bindings} onInvoke={invoke} />
+      {/*
+       * WHY : Refactoring Rationale: the key legend that used to close this body is delegated to the
+       *       shell in the `useShellSlot` call above, together with the title band that opened it and
+       *       the row-23 message line. Rendering the bar here as well would put a second named legend
+       *       region on the screen and a second `PfKeyBar` handle where callers expect one.
+       */}
     </Flex>
   );
 }
 
 /*
- * WHY : Assumptions: the component is exported BOTH ways, and both are load-bearing. `ui/src/router.tsx`
- *       L38 imports the named `SignOnScreen` and mounts it at `SIGN_ON_ROUTE`, so removing the named
- *       export would break the only route an unauthenticated operator can reach; the default export is
- *       the screen convention the migration plan states, and it lets the route be moved behind
- *       `React.lazy` -- which requires a default export -- without editing this file. Both names
- *       resolve to one function, so the two cannot come to describe different components.
+ * WHY : Refactoring Rationale: this module publishes the component under its NAME ONLY, and the
+ *       default export that used to sit here has been removed rather than kept alongside it. The
+ *       argument for publishing both was that a route could then be declared as
+ *       `lazy(() => import('./screens/<name>'))` with no adapter -- but no route is declared that way
+ *       anywhere, so the second key had no caller, and AAP section 0.6.2.1 fixes the import discipline
+ *       for this tree as named imports with the named-to-default adapter held in `ui/src/router.tsx`.
+ *       Two keys for one component also make a screen reachable by two spellings, so a reader cannot
+ *       tell from an import which convention this tree follows.
  */
-export default SignOnScreen;

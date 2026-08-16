@@ -3,6 +3,7 @@ package com.carddemo.transaction.api;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
 import com.carddemo.transaction.dto.TransactionAddRequest;
+import com.carddemo.transaction.dto.CopyLastRequest;
 import com.carddemo.transaction.dto.TransactionAddOutcome;
 import com.carddemo.transaction.dto.TransactionAddPreview;
 import com.carddemo.transaction.dto.TransactionAddResponse;
@@ -662,13 +663,16 @@ public class TransactionController {
      * ordinary capture screen, available to whoever may capture a transaction at all, so requiring more
      * here would refuse an operator the baseline admits.</p>
      *
-     * <p>Assumptions: the eleven data members of the submission are OVERWRITTEN from the copied record
-     * rather than merged with it, because lines 482 to 492 move the record's own columns over them
-     * unconditionally. They stay required by the request shape because line 473 validates the key fields
-     * against the same screen the operator was already on, so the submission is a full one either way.
-     * </p>
+     * <p>⚠️ Refactoring Rationale: the body is {@link CopyLastRequest} and no longer the capture request,
+     * and the note this replaces reasoned that the eleven data members "stay required by the request shape
+     * because line 473 validates the key fields against the same screen the operator was already on, so
+     * the submission is a full one either way". The second half does not follow from the first: line 473
+     * validates the KEY fields and only those, and lines 481 to 492 then fill the eleven data fields --
+     * they are this action's output. Requiring them on the way in made the action reachable only from a
+     * screen that was already filled in, which is the opposite of what an operator presses the key for.
+     * The shape's own class comment carries the two rejected alternatives.</p>
      *
-     * @param request the submission whose key members select the account or card and whose confirmation
+     * @param request the submission whose key member selects the account or card and whose confirmation
      *     decides whether the copied capture is written; validated against its declared constraints
      *     before this method is entered, and never {@code null}
      * @return a 201 response carrying the {@link TransactionAddResponse} for a written transaction with a
@@ -688,7 +692,7 @@ public class TransactionController {
      */
     @PostMapping(path = COPY_LAST_PATH, consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<TransactionAddOutcome> copyLastTransaction(
-            @Valid @RequestBody TransactionAddRequest request) {
+            @Valid @RequestBody CopyLastRequest request) {
         return answer(this.addService.copyLastTransactionData(request));
     }
 

@@ -51,7 +51,7 @@
 #   - `route_keys` empty, an entry that is not a method or `ANY`, a single
 #     space, then a path beginning `/`, a `/batch` prefix, or a duplicate;
 #   - `route_authorization_scopes` empty, or holding a blank entry;
-#   - `public_route_keys` differing from the exact three pre-token POST
+#   - `public_route_keys` differing from the exact four unauthenticated POST
 #     operations, or overlapping a protected route key. An EMPTY list is
 #     accepted here, unlike `route_keys`, because publishing no unauthenticated
 #     route at all is a coherent choice while publishing no route at all is not;
@@ -129,24 +129,28 @@
 #   transaction was entered from a menu the operator could not reach until that
 #   program had run. `public_route_keys` carries that pre-identification entry
 #   point forward and admits nothing beyond the token-issuance surface, which is
-#   why its validations refuse any prefix but `/auth`. Its default holds THREE
+#   why its validations refuse any prefix but `/auth`. Its default holds FOUR
 #   keys where the baseline had one door, and the difference is a property of
 #   token-based identity rather than a widening of the surface: CC00 collected
 #   credentials and established the session in a single turn, whereas an access
 #   token has to be issued (`/auth/signon`), can be interrupted by a forced
-#   credential change that must complete before issuance (`/auth/challenge`), and
+#   credential change that must complete before issuance (`/auth/challenge`),
 #   expires and must be renewed by a caller who by definition holds no usable
-#   access token (`/auth/refresh`). The three are one act of identifying oneself,
-#   split across the turns a token lifecycle requires. The JWT authorizer stands
-#   where the menu gate stood, not where CC00 stood. That file is REFERENCE-ONLY:
-#   it is cited by line here and never modified.
+#   access token (`/auth/refresh`), and must be REVOCABLE by a caller whose access
+#   token has already expired (`/auth/signout`) -- CC00's counterpart to that last
+#   one was the terminal disconnecting, which needed no route because it needed no
+#   request. The four are the one act of identifying oneself and the one act of
+#   ceasing to, split across the turns a token lifecycle requires. The JWT
+#   authorizer stands where the menu gate stood, not where CC00 stood. That file is
+#   REFERENCE-ONLY: it is cited by line here and never modified.
 #   Refactoring Rationale: this paragraph read "its default holds one key" and
 #   "the baseline had exactly one unauthenticated door too, and the migration
-#   neither adds a second nor closes the one that must stay open". The default has
-#   held three keys throughout, so the claim understated the delivered public
+#   neither adds a second nor closes the one that must stay open". The default held
+#   three keys throughout that period, so the claim understated the delivered public
 #   surface in the one place a reader comes to learn how wide it is -- and it did
 #   so while sounding like a parity guarantee, which is the worst form for a
-#   wrong count to take.
+#   wrong count to take. It now holds four, the fourth being the revocation route
+#   added with the sign-out operation.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -602,7 +606,7 @@ variable "route_keys" {
   #       the token the authorizer demands, so requiring a token on it makes the
   #       token unobtainable and every route behind the authorizer permanently
   #       unreachable. The exposure is now enumerated in one input, validated down
-  #       to the exact three pre-token methods and paths, and published as an
+  #       to the exact four unauthenticated methods and paths, and published as an
   #       output, rather than being denied here and discovered at the first sign-on
   #       attempt.
   #       (4) Refactoring Rationale: `/batch` was previously published here and
@@ -793,14 +797,28 @@ variable "route_keys" {
 #       requiring one there would make an expired session unrecoverable except by
 #       re-entering credentials, which is the behaviour the refresh token exists to
 #       avoid.
+#       (1a) Assumptions: the FOURTH key inverts that argument rather than
+#       extending it. `/auth/signout` issues nothing; it asks the pool to revoke the
+#       refresh token a session renews from. It is unauthenticated because the
+#       provider's revocation call accepts the token and this service's own client
+#       credentials and no user name at all -- so possession of the token IS the
+#       authority, and a caller that cannot produce it revokes nothing. Attaching
+#       the authorizer would refuse the revocation in the one state that most needs
+#       it: an access token already expired, which is what every session an operator
+#       abandons rather than closes looks like, and which would leave a thirty-day
+#       refresh token able to mint access tokens. Trade-offs: the widening is one
+#       POST on one literal path whose only effect is to invalidate a credential the
+#       caller already holds, which is the request an attacker holding a stolen token
+#       has no reason to make.
 #       Refactoring Rationale: the description of this input formerly said it
 #       "defaults to the single sign-on route" while the default held three keys
 #       and the validation admitted three. That is worse than an undercount: the
 #       description is the text terraform-docs renders into the module README, so
 #       the module's own published documentation understated its unauthenticated
 #       surface by two routes -- the one number a reviewer of an edge module reads
-#       first. The count is now stated as three in the description, in this
-#       rationale and in the README generated from them.
+#       first. The count is stated as four in the description, in this rationale and
+#       in the README generated from them, four being what the default holds since
+#       the revocation route was added.
 #       (2) Assumptions: the browser never speaks to the user pool, which is what
 #       makes the exception unavoidable rather than a shortcut. The app client
 #       infra/modules/cognito provisions is CONFIDENTIAL -- it is created with a
@@ -813,7 +831,7 @@ variable "route_keys" {
 #       server-side control of the three verbatim sign-on replies the baseline
 #       program at app/cbl/COSGN00C.cbl produces at its L242, L243, L249 and L254.
 #       (3) Trade-offs: each exception is one METHOD on one exact PATH, never a
-#       prefix and never a subtree. The three POST paths above are
+#       prefix and never a subtree. The four POST paths above are
 #       unauthenticated; every other path under `/api/v1/auth` stays on the JWT
 #       route because the greedy key in var.route_keys covers it. An HTTP API
 #       selects the MOST SPECIFIC matching route, and a greedy `{proxy+}` key is
@@ -824,18 +842,18 @@ variable "route_keys" {
 #       INSIDE this subtree, at `/api/v1/auth/users` and
 #       `/api/v1/auth/users/{userId}`, so the greedy authorized key is what
 #       reaches them, and they stay behind the authorizer for exactly one reason
-#       -- neither path is one of the three literals this input admits, and the
-#       validation below refuses a fourth. Their protection is therefore a
+#       -- neither path is one of the four literals this input admits, and the
+#       validation below refuses a fifth. Their protection is therefore a
 #       property of a closed public list plus specificity ordering, not of living
 #       at some address this list cannot name.
-#       What is given up is three internet-reachable paths with no credential
+#       What is given up is four internet-reachable paths with no credential
 #       check at the edge; what is bought is a system that can be signed in to,
-#       that can complete a forced credential change, and that can renew a
-#       session. The residual is bounded three ways: the validation below refuses
-#       any key that is not one of those exact three paths, each route is given
-#       its own tighter throttle rather than inheriting the account-level
-#       allowance, and auth-service itself is what decides whether the
-#       credentials are good.
+#       that can complete a forced credential change, that can renew a session, and
+#       that can END one at the pool rather than only in a browser. The residual is
+#       bounded three ways: the validation below refuses any key that is not one of
+#       those exact four paths, each route is given its own tighter throttle rather
+#       than inheriting the account-level allowance, and auth-service itself is what
+#       decides whether the credentials are good.
 #       Refactoring Rationale: this passage formerly said those endpoints were
 #       NOT among the paths the reasoning has to cover, on the ground that they
 #       sit at a top-level `/api/v1/users` no key here touches. That was the
@@ -857,18 +875,18 @@ variable "route_keys" {
 #       none, and an empty list is the honest way to say so -- unlike a sentinel
 #       value, it creates nothing.
 #       (6) Alternatives Considered: narrowing this default to the single sign-on
-#       key, on the reasoning that the other two publish routes nothing describes.
+#       key, on the reasoning that the others publish routes nothing describes.
 #       Rejected, and now measurable rather than argued: auth-api.yaml contracts
-#       eight operations, and all THREE of these keys are among them, each declaring
+#       nine operations, and all FOUR of these keys are among them, each declaring
 #       an empty `security` requirement and `x-required-authority: none`. The same
-#       three are the `permitAll` list in that service's SecurityConfig, and its
-#       operation census asserts the split is exactly three open and five
-#       administrative. Trimming this list to one would therefore close two
-#       operations the service's own contract publishes as pre-token, in the one
-#       place where the cost of being wrong is an operation that cannot answer at
-#       all -- a caller answering a pool challenge, or renewing an expired access
-#       token, would be refused by the edge before reaching a service that would
-#       have served it.
+#       four are the `permitAll` list in that service's SecurityConfig, and its
+#       operation census asserts the split is exactly four open and five
+#       administrative. Trimming this list to one would therefore close three
+#       operations the service's own contract publishes as reachable without a
+#       token, in the one place where the cost of being wrong is an operation that
+#       cannot answer at all -- a caller answering a pool challenge, renewing an
+#       expired access token, or revoking one after it expired, would be refused by
+#       the edge before reaching a service that would have served it.
 #       Refactoring Rationale: this rationale itself formerly argued the opposite
 #       premise -- that auth-api.yaml contracted six operations and that the
 #       challenge and renewal routes were deliberately held outside it. That was
@@ -878,32 +896,39 @@ variable "route_keys" {
 #       which statement to trust, and because the earlier version reached the right
 #       CONCLUSION from a premise that has since changed -- exactly the shape of
 #       rationale that survives review while going quietly false.
-#       Assumptions: the three keys are pre-token operations, not a general public
-#       surface. Each is a POST that a caller reaches precisely because it has no
-#       usable access token yet -- to obtain one, to answer a challenge raised
-#       while obtaining one, or to renew one -- and the validation below pins the
-#       exact method and path of all three so a fourth cannot be added by editing
-#       a value.
+#       Assumptions: the four keys are token-lifecycle operations, not a general
+#       public surface. Each is a POST that a caller reaches precisely because it has
+#       no usable access token -- to obtain one, to answer a challenge raised while
+#       obtaining one, to renew one, or to revoke the credential the renewal draws
+#       on -- and the validation below pins the exact method and path of all four so
+#       a fifth cannot be added by editing a value.
 variable "public_route_keys" {
-  description = "Route keys created WITHOUT the JWT authorizer, for paths that must be reachable before a usable token exists. Defaults to the THREE pre-token operations of auth-service -- POST /api/v1/auth/signon, POST /api/v1/auth/challenge and POST /api/v1/auth/refresh -- because a caller cannot present the token these operations exist to issue or renew. All three are contracted as public operations in services/auth-service/src/main/resources/openapi/auth-api.yaml -- each declares an empty security requirement and x-required-authority none -- and the same three are the chain's open list in that service's SecurityConfig, which its contract test asserts equals the contract's own public set. The three lists are therefore the same three keys in all three places, and a route published here that is not open in both of the others would be reachable at the edge and refused by the service. The validation below admits those three keys and nothing else. Set to an empty list to publish no unauthenticated route. Every other route on this API comes from var.route_keys and carries the authorizer."
+  description = "Route keys created WITHOUT the JWT authorizer, for paths a caller must reach when it holds no usable access token. Defaults to the FOUR token-lifecycle operations of auth-service -- POST /api/v1/auth/signon, POST /api/v1/auth/challenge, POST /api/v1/auth/refresh and POST /api/v1/auth/signout -- because a caller cannot present the token the first three exist to issue or renew, and the fourth is authorised by the very refresh token it revokes. All four are contracted as public operations in services/auth-service/src/main/resources/openapi/auth-api.yaml -- each declares an empty security requirement and x-required-authority none -- and the same four are the chain's open list in that service's SecurityConfig, which its contract test asserts equals the contract's own public set. The three lists are therefore the same four keys in all three places, and a route published here that is not open in both of the others would be reachable at the edge and refused by the service. The validation below admits those four keys and nothing else. Set to an empty list to publish no unauthenticated route. Every other route on this API comes from var.route_keys and carries the authorizer."
   type        = list(string)
   nullable    = false
   default = [
     "POST /api/v1/auth/signon",
     "POST /api/v1/auth/challenge",
     "POST /api/v1/auth/refresh",
+    "POST /api/v1/auth/signout",
   ]
 
-  # WHY : Assumptions: the condition enumerates the THREE acceptable values rather
+  # WHY : Assumptions: the condition enumerates the FOUR acceptable values rather
   #       than checking a shape, and the asymmetry with var.route_keys is
   #       deliberate. There is no general category of "routes that may be public"
-  #       in this architecture -- there are exactly three that have to be, for the
-  #       reason stated above -- so a shape check such as "any POST under /auth"
+  #       in this architecture -- there are exactly four that have to be, for the
+  #       reasons stated above -- so a shape check such as "any POST under /auth"
   #       would license a set of routes nothing asked for, and it would keep
   #       licensing them as auth-service published more operations under that
-  #       prefix. Pinning each exact method and path means adding a fourth public
+  #       prefix. Pinning each exact method and path means adding a fifth public
   #       route requires editing this condition, which is a visible, reviewable act
   #       rather than a value change in a tfvars file.
+  #       Refactoring Rationale: the list held three keys and this condition
+  #       admitted three; the sign-out key is the fourth, and it was added HERE
+  #       rather than by relaxing the check into a shape, which is the discipline
+  #       the paragraph above describes. It is the first key to be added since the
+  #       condition was written, so the mechanism has now been exercised once as
+  #       intended.
   #       Trade-offs: a root cannot publish a different unauthenticated path
   #       without editing the module. Accepted, and it is the point: the module's
   #       other inputs are open because widening them costs nothing, whereas
@@ -916,9 +941,10 @@ variable "public_route_keys" {
         "POST /api/v1/auth/signon",
         "POST /api/v1/auth/challenge",
         "POST /api/v1/auth/refresh",
+        "POST /api/v1/auth/signout",
       ], key)
     ])
-    error_message = "public_route_keys may hold only the exact keys \"POST /api/v1/auth/signon\", \"POST /api/v1/auth/challenge\" and \"POST /api/v1/auth/refresh\": those three are the operations that must answer before a usable access token exists, and every other route on this API carries the JWT authorizer through var.route_keys."
+    error_message = "public_route_keys may hold only the exact keys \"POST /api/v1/auth/signon\", \"POST /api/v1/auth/challenge\", \"POST /api/v1/auth/refresh\" and \"POST /api/v1/auth/signout\": the first three must answer before a usable access token exists and the fourth revokes the refresh token a caller presents to it, and every other route on this API carries the JWT authorizer through var.route_keys."
   }
 
   # WHY : Assumptions: the two lists must be disjoint, because a key present in
@@ -1018,12 +1044,12 @@ variable "public_route_throttling_burst_limit" {
 
   # WHY : Assumptions: the floor is 1 rather than 0. A burst of 0 rejects every
   #       request including the first, and the override applies to every key in
-  #       `public_route_keys`, so it would close all three pre-token routes as
+  #       `public_route_keys`, so it would close all four unauthenticated routes as
   #       completely as having no route at all -- the very defect this input's
   #       neighbour was added to fix -- while looking like a tuning value.
   validation {
     condition     = var.public_route_throttling_burst_limit >= 1 && floor(var.public_route_throttling_burst_limit) == var.public_route_throttling_burst_limit
-    error_message = "public_route_throttling_burst_limit must be a whole number of at least 1. A burst of 0 rejects every request to all three pre-token routes, closing interactive sign-on, forced credential change and token renewal exactly as absent routes would."
+    error_message = "public_route_throttling_burst_limit must be a whole number of at least 1. A burst of 0 rejects every request to all four unauthenticated routes, closing interactive sign-on, forced credential change, token renewal and session revocation exactly as absent routes would."
   }
 
   validation {
@@ -1218,7 +1244,7 @@ variable "cors_allow_methods" {
 variable "cors_allow_headers" {
   description = "Request headers a browser may send cross-origin. Becomes `cors_configuration.allow_headers`; every header the SPA sets on an authenticated JSON request has to appear here or the browser withholds the request after the preflight."
   type        = list(string)
-  default     = ["authorization", "content-type", "x-correlation-id"]
+  default     = ["authorization", "content-type", "idempotency-key", "if-match", "x-correlation-id"]
   nullable    = false
 
   # WHY : (1) Assumptions: `authorization` is not optional. The SPA
@@ -1237,6 +1263,28 @@ variable "cors_allow_headers" {
   #       so a trace begins at the edge and the client's own identifier never
   #       joins it -- the request is still served, which is what makes the
   #       omission easy to miss.
+  # WHY : Refactoring Rationale: `if-match` and `idempotency-key` were ABSENT
+  #       from this default, and their absence blocked two candidate flows
+  #       outright rather than degrading them. The account-update screen submits
+  #       its optimistic-concurrency precondition in `If-Match` --
+  #       `PRECONDITION_HEADER` in `ui/src/api/accounts.ts` -- and the account
+  #       contract declares that precondition REQUIRED on the update operation,
+  #       so a browser that withholds the header cannot perform an update at
+  #       all; the report-submission client sends `Idempotency-Key` --
+  #       `IDEMPOTENCY_KEY_HEADER` in `ui/src/api/reporting.ts` -- so a withheld
+  #       header turns a retried submission into a second execution. Neither
+  #       failure is visible from the service side: the request never arrives,
+  #       because the browser abandons it after the preflight.
+  #       Assumptions: they are added to the module DEFAULT rather than to each
+  #       environment root. Neither `infra/envs/dev` nor `infra/envs/prod`
+  #       overrides this variable, so the default IS the deployed value in both,
+  #       and fixing it once here keeps the two roots from drifting apart on a
+  #       value that is a property of the client rather than of an environment.
+  #       Trade-offs: the list is ordered alphabetically after `authorization`
+  #       and `content-type` rather than appended, so a reader diffing it
+  #       against the client's header inventory walks one order instead of two.
+  #       The cost is that the diff introducing these two entries touches the
+  #       whole line.
   validation {
     condition     = length(var.cors_allow_headers) > 0
     error_message = "The cors_allow_headers list must hold at least one header; it has to include the authorization header for any authenticated browser request to be sent."
@@ -1327,10 +1375,29 @@ variable "cors_max_age_seconds" {
 }
 
 variable "cors_expose_headers" {
-  description = "Response headers a browser is permitted to READ cross-origin. Becomes `cors_configuration.expose_headers`. Defaults to the correlation identifier common-lib's CorrelationIdFilter writes on every response and the location header a report submission returns; without an entry here a header is present on the wire and unreadable from script."
+  description = "Response headers a browser is permitted to READ cross-origin. Becomes `cors_configuration.expose_headers`. Defaults to the correlation identifier common-lib's CorrelationIdFilter writes on every response, the entity tag the account view returns as an update precondition, and the location header a report submission returns; without an entry here a header is present on the wire and unreadable from script."
   type        = list(string)
-  default     = ["x-correlation-id", "location"]
+  default     = ["etag", "location", "x-correlation-id"]
   nullable    = false
+
+  # WHY : Refactoring Rationale: `etag` was ABSENT from this default, and its
+  #       absence broke the account-update flow in the browser and nowhere else.
+  #       The account view answers with an entity tag, `ui/src/api/accounts.ts`
+  #       reads it through `REVISION_HEADER`, and the update operation requires
+  #       it back in `If-Match` -- so with the tag unreadable the screen holds no
+  #       precondition to submit and every deployed browser update is refused
+  #       before it starts. The failure mode is the one this variable's own
+  #       rationale describes and is easy to misread as a service fault: the
+  #       header IS on the wire and the network panel shows it, while
+  #       `response.headers.get('etag')` returns null.
+  #       Assumptions: exposure is a separate permission from sending. `etag` is
+  #       NOT added to var.cors_allow_headers, because the client never sends
+  #       that header -- it sends the tag back in `if-match`, which is listed
+  #       there instead. Conflating the two directions would grant a permission
+  #       no client uses.
+  #       Trade-offs: the list is ordered alphabetically so it can be diffed
+  #       against the client's own read inventory in one pass, at the cost of
+  #       moving `x-correlation-id` from first to last.
 
   # WHY : (1) Assumptions: a cross-origin response exposes only the CORS-safelisted
   #       response headers to script, and neither header below is on that list.

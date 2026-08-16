@@ -127,12 +127,12 @@ class PendingAuthDetailRepositoryIT {
     /** The schema name as a BARE identifier, for the migration engine's own two settings. */
     private static final String SCHEMA_NAME = "authorization";
 
-    // WHY : Assumptions: the same word appears twice in this file in two forms that are not
-    //       interchangeable. In SQL TEXT it must be quoted, because `authorization` is a reserved
-    //       word and an unquoted occurrence is a syntax error; in a migration-engine PROPERTY it must
-    //       be bare, because that engine quotes an identifier itself and a value carrying quote
-    //       characters would name a schema whose name contains them. Both forms are declared so that
-    //       neither site has to reason about the distinction at the point of use.
+    // Assumptions: the same word appears twice in this file in two forms that are not
+    // interchangeable. In SQL TEXT it must be quoted, because `authorization` is a reserved
+    // word and an unquoted occurrence is a syntax error; in a migration-engine PROPERTY it must
+    // be bare, because that engine quotes an identifier itself and a value carrying quote
+    // characters would name a schema whose name contains them. Both forms are declared so that
+    // neither site has to reason about the distinction at the point of use.
     /** The schema name as a QUOTED identifier, for interpolation into SQL text. */
     private static final String SCHEMA = "\"" + SCHEMA_NAME + "\"";
 
@@ -226,12 +226,12 @@ class PendingAuthDetailRepositoryIT {
     /** The unload form that carries the bare segment and nothing else. */
     private static final String GSAM_UNLOAD = "fixtures/unload-gsam-detail-200.bin";
 
-    // WHY : Assumptions: every method below uses its OWN account identifier, so no method depends on
-    //       a row another inserted and none has to run after another. The charter requires distinct
-    //       key values per method; distinct ACCOUNTS is the strongest form of that, because the
-    //       account is the leading key column, so two methods cannot collide even if they reuse a
-    //       date and time. The two identifiers that are not free to choose are named separately
-    //       below, because a recorded image fixes them.
+    // Assumptions: every method below uses its OWN account identifier, so no method depends on
+    // a row another inserted and none has to run after another. The charter requires distinct
+    // key values per method; distinct ACCOUNTS is the strongest form of that, because the
+    // account is the leading key column, so two methods cannot collide even if they reuse a
+    // date and time. The two identifiers that are not free to choose are named separately
+    // below, because a recorded image fixes them.
     /** Account used by the column-by-column assertions over the reference record. */
     private static final long CANONICAL_ACCOUNT = 10_000_000_201L;
 
@@ -269,18 +269,18 @@ class PendingAuthDetailRepositoryIT {
      * single account and are asserting a COLUMN's stored value or a walk's ORDER, not a page boundary,
      * so they need the whole set back in one answer. A generous limit says that directly.
      *
-     * <p>Refactoring Rationale: these four reads called an unpaged overload of the same query, which has
-     * been removed along with the last production caller that took every child of an account in one
-     * unbounded answer. Naming a limit here is what keeps those assertions on the surviving signature
-     * rather than keeping a production method alive for tests -- the direction this repository's own
-     * paging rationale already argues for.
+     * <p>Assumptions: the repository exposes only the bounded signature, so the four reads that want the
+     * whole child set name a limit wide enough to hold it rather than asking for an unbounded answer. A
+     * test-only unpaged overload would keep a production method alive for tests alone, against the
+     * direction this repository's own paging rationale argues for; 100 is far above the four rows any
+     * case here seeds, so the limit never truncates what is being asserted.
      */
     private static final Limit WHOLE_CHILD_SET = Limit.of(100);
 
-    // WHY : Assumptions: this identifier is NOT free to choose. It is the account the recorded
-    //       parent summary image carries, and the year-boundary children are documented as pairing
-    //       with that parent, so the pairing is read out of the image rather than restated as a
-    //       literal -- which is what makes the pairing itself assertable.
+    // Assumptions: this identifier is NOT free to choose. It is the account the recorded
+    // parent summary image carries, and the year-boundary children are documented as pairing
+    // with that parent, so the pairing is read out of the image rather than restated as a
+    // literal -- which is what makes the pairing itself assertable.
     /** The account of the idempotency-lookup case, holding one authorization. */
     private static final long IDEMPOTENCY_ACCOUNT = 10_000_000_211L;
 
@@ -314,33 +314,33 @@ class PendingAuthDetailRepositoryIT {
      */
     private static final PostgreSQLContainer POSTGRES;
 
-    // WHY : Alternatives Considered: the container is started HERE, in a static initialiser, rather
-    //       than through the container library's JUnit integration. That integration starts a
-    //       container from its own before-all callback, and the Spring test extension builds the
-    //       application context from a before-all callback of its own; the relative order of two
-    //       extensions' callbacks is not something this class can state, so the data source bean
-    //       could be asked to connect to a container that has not started. A static initialiser runs
-    //       at class load, which is strictly before either callback, so the ordering question does
-    //       not arise. The accepted cost is that the container is not stopped by the library's
-    //       lifecycle and is reaped by its resource-reaper container instead.
-    // WHY : Assumptions: the migration is applied here too, in the same initialiser and before the
-    //       context exists, because the entity metadata is mapped to tables this migration creates
-    //       and nothing else creates them.
+    // Alternatives Considered: the container is started HERE, in a static initialiser, rather
+    // than through the container library's JUnit integration. That integration starts a
+    // container from its own before-all callback, and the Spring test extension builds the
+    // application context from a before-all callback of its own; the relative order of two
+    // extensions' callbacks is not something this class can state, so the data source bean
+    // could be asked to connect to a container that has not started. A static initialiser runs
+    // at class load, which is strictly before either callback, so the ordering question does
+    // not arise. The accepted cost is that the container is not stopped by the library's
+    // lifecycle and is reaped by its resource-reaper container instead.
+    // Assumptions: the migration is applied here too, in the same initialiser and before the
+    // context exists, because the entity metadata is mapped to tables this migration creates
+    // and nothing else creates them.
     static {
         POSTGRES = new PostgreSQLContainer(POSTGRES_IMAGE);
         POSTGRES.start();
 
-        // WHY : Assumptions: Flyway is TWO artifacts here and not one. The parent build pins
-        //       flyway-core and flyway-database-postgresql to a single version, and the companion is
-        //       not redundant beside the core: from Flyway 10 onward the engine support moved out of
-        //       core, so core alone resolves and compiles and then fails at RUN time on the first
-        //       migration. The failure appears only once a container is already up, which is why the
-        //       pairing is worth a note at the one place that triggers it.
-        // WHY : Assumptions: schema creation is enabled and the schema name is BARE in these two
-        //       settings, matching the test profile. Flyway quotes an identifier itself, so a value
-        //       carrying quote characters would name a schema whose name contains them; the opposite
-        //       requirement applies to the search-path statement below, which is SQL text in which
-        //       the word must stay quoted because it is reserved.
+        // Assumptions: Flyway is TWO artifacts here and not one. The parent build pins
+        // flyway-core and flyway-database-postgresql to a single version, and the companion is
+        // not redundant beside the core: from Flyway 10 onward the engine support moved out of
+        // core, so core alone resolves and compiles and then fails at RUN time on the first
+        // migration. The failure appears only once a container is already up, which is why the
+        // pairing is worth a note at the one place that triggers it.
+        // Assumptions: schema creation is enabled and the schema name is BARE in these two
+        // settings, matching the test profile. Flyway quotes an identifier itself, so a value
+        // carrying quote characters would name a schema whose name contains them; the opposite
+        // requirement applies to the search-path statement below, which is SQL text in which
+        // the word must stay quoted because it is reserved.
         Flyway.configure()
                 .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
                 .schemas(SCHEMA_NAME)
@@ -395,9 +395,9 @@ class PendingAuthDetailRepositoryIT {
             pool.setPassword(POSTGRES.getPassword());
             pool.setConnectionInitSql("SET search_path TO " + SCHEMA);
 
-            // WHY : Trade-offs: a small pool, because this class runs one statement at a time and a
-            //       larger one would only hold idle connections open against a container that is
-            //       discarded at the end of the run.
+            // Trade-offs: a small pool, because this class runs one statement at a time and a
+            // larger one would only hold idle connections open against a container that is
+            // discarded at the end of the run.
             pool.setMaximumPoolSize(4);
             return pool;
         }
@@ -1117,11 +1117,11 @@ class PendingAuthDetailRepositoryIT {
             long accountId = unpackAccount(prefix);
             accounts.add(accountId);
 
-            // WHY : Assumptions: the parent is seeded once per DISTINCT account, tracked explicitly
-            //       rather than inferred from whether children already exist. The two derivations
-            //       agree on this image and would diverge on any image whose first record for an
-            //       account were not its only one, so the explicit set is what keeps the seeding
-            //       correct independently of record order.
+            // Assumptions: the parent is seeded once per DISTINCT account, tracked explicitly
+            // rather than inferred from whether children already exist. The two derivations
+            // agree on this image and would diverge on any image whose first record for an
+            // account were not its only one, so the explicit set is what keeps the seeding
+            // correct independently of record order.
             if (seededParents.add(accountId)) {
                 insertParent(accountId);
             }
@@ -1465,25 +1465,22 @@ class PendingAuthDetailRepositoryIT {
     /**
      * Paging backward from a cursor returns strictly newer rows, oldest first, and never the cursor row.
      *
-     * <p>Purpose: this is the backward half of the browse, and it was the one custom read on this
-     * repository with no live coverage at all. Its ordering is the REVERSE of the forward read's --
-     * ascending, so that the rows nearest the cursor arrive first and the caller reverses the retained
-     * window -- and a query that returned the newest rows of the account instead would still return
-     * newer rows and still be strictly bounded, so the ordering has to be asserted rather than assumed.
+     * <p>Purpose: this is the backward half of the browse. Its ordering is the REVERSE of the forward
+     * read's -- ascending, so that the rows nearest the cursor arrive first and the caller reverses the
+     * retained window -- and a query that returned the newest rows of the account instead would still
+     * return newer rows and still be strictly bounded, so the ordering is asserted rather than assumed.
      *
-     * <p>Refactoring Rationale: this case and the three below are additions. Before them the class
-     * covered the forward read, its look-ahead and its exhaustion, while the backward read, the
-     * idempotency lookup and the batched presence probe were exercised only against mocks -- and a mock
-     * answers whatever it was told to, so a predicate that admitted the cursor row, an ordering that ran
-     * the wrong way and a probe that answered rows it was never asked about were all invisible.
+     * <p>Assumptions: this case and the three below drive a real engine rather than a mock, because a
+     * mock answers whatever it was told to. Against one, a predicate that admitted the cursor row, an
+     * ordering that ran the wrong way and a presence probe that answered rows it was never asked about
+     * would all pass unseen; the backward read, the idempotency lookup and the batched probe are
+     * therefore covered here and not at the unit level.
      *
      * <p>Assumptions: the four seeded rows share one Julian date, so the strictness this asserts is
      * strictness on the TIME component of the composite. The equal-date-different-time boundary is the
      * one the query's second disjunct exists for, and it is where an implementation written with
      * {@code >=} instead of {@code >} shows itself; the equal-date-EQUAL-time case is the cursor row and
      * is asserted absent in the same reading.
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("paging backward from a cursor returns strictly newer rows, oldest of them first")
@@ -1516,8 +1513,6 @@ class PendingAuthDetailRepositoryIT {
      * <p>Assumptions: exhaustion is an EMPTY result rather than a refusal, which is what lets the caller
      * report the boundary on the screen. The reference program does the same: it sets its end-of-data
      * condition and shows a message rather than abandoning the screen.
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the backward read honours its limit and answers nothing at the newest row")
@@ -1548,8 +1543,6 @@ class PendingAuthDetailRepositoryIT {
      *
      * <p>Assumptions: the two negative readings vary ONE component each from a pair that is known to
      * match. Varying both at once would leave a query that ignored one of them still passing.
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the idempotency lookup qualifies on the card and the transaction together")
@@ -1589,8 +1582,6 @@ class PendingAuthDetailRepositoryIT {
      *
      * <p>Assumptions: the absent key differs from the stored one in its TIME component alone, so the
      * probe is shown to compare the whole composite rather than the account it shares.
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the batched presence probe answers only the keys that exist")
@@ -2016,12 +2007,12 @@ class PendingAuthDetailRepositoryIT {
         List<String> reasons = List.of("0000", "3100", "4100", "4200", "4300", "5100", "5200",
                 "9000");
 
-        // WHY : Assumptions: the eight keys step by ONE MINUTE, which is 100000 in this column's
-        //       hour-minute-second-millisecond encoding, and the step size is load-bearing rather than
-        //       arbitrary. Stepping by a whole hour-position digit instead would carry the minute
-        //       component past 59 by the eighth row, and the domain check would then refuse a row this
-        //       assertion expects to be accepted -- so the test would fail on the key rather than on
-        //       the reason code it is about.
+        // Assumptions: the eight keys step by ONE MINUTE, which is 100000 in this column's
+        // hour-minute-second-millisecond encoding, and the step size is load-bearing rather than
+        // arbitrary. Stepping by a whole hour-position digit instead would carry the minute
+        // component past 59 by the eighth row, and the domain check would then refuse a row this
+        // assertion expects to be accepted -- so the test would fail on the key rather than on
+        // the reason code it is about.
         int firstTime = 100_000_000;
         int oneMinute = 100_000;
         for (int index = 0; index < reasons.size(); index++) {

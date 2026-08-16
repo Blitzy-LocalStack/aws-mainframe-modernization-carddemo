@@ -1,0 +1,37 @@
+# =============================================================================
+# services/common-lib/src/test/resources/carddemo-profile-harness-devcheck.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   The PROFILE fixture document for ProfileConfigurationTest, activated as
+#   profile `devcheck`. It exercises the two behaviours a raw YAML parse cannot
+#   see: that a profile document takes precedence over the base document, and
+#   that a block-sequence list binds as indexed properties.
+#
+#   Assumptions: the profile is named `devcheck` rather than `dev`, so activating
+#   it here cannot be mistaken for -- or interact with -- the real `dev` profile
+#   the services declare. The harness's behaviour is identical either way; the
+#   name only decides which documents are selected.
+# =============================================================================
+carddemo:
+  harness:
+    # Assumptions: this is the OVERRIDE under test. A profile document sits above
+    # the base document in precedence, so both the value and the winning source
+    # name are assertable -- and the source name is the half a value comparison
+    # cannot establish when the two documents happen to agree.
+    overridden: profile-value
+
+    # Assumptions: a BLOCK SEQUENCE, which binds as `...block-list[0]` and so on
+    # rather than as a single scalar. A test asserting on a list's members must
+    # not have to know which shape the document used, which is why list() reads
+    # both.
+    block-list:
+      - first
+      - second
+      - third
+
+logging:
+  level:
+    # Assumptions: a level added by the profile, alongside the base document's
+    # own. Both must appear, because the two documents contribute to one map and
+    # a profile that REPLACED the map would drop the base category silently.
+    com.carddemo.harness.profile: DEBUG

@@ -563,9 +563,16 @@ what an operator has to be able to state afterwards.
 - **The registry form**, above. Given no `--manifest`, the gate covers the whole
   seed-dataset registry minus the layouts that ship no committed extract — ten of the
   eleven records, every one except `TRAN`. It takes no `--dataset`, so it **cannot** be
-  narrowed. This is the form the nightly chain's `VerifyMigration` state runs, so an
-  operator reproducing a chain failure by hand issues exactly what the failing state
-  issued. `--source-root` is named here and omitted in the deployment, where the task
+  narrowed. This is the **cutover** gate rather than a nightly one, and the distinction
+  matters when reproducing a failure. The nightly chain no longer runs `verify-all`: it
+  verifies **per dataset**, inside each `StageSeedDatasets` branch, where
+  `refresh-dataset` runs the same three passes over the one dataset it just loaded. So an
+  operator reproducing a *chain* failure narrows to the dataset the failing branch names,
+  whereas this whole-corpus form is what proves a cutover before the first nightly run.
+  Assumptions: a whole-corpus gate belongs here and not mid-chain because its two
+  committed queries compare **across** datasets, and the chain refreshes datasets
+  independently and concurrently — a cross-dataset assertion inside the `Map` would
+  depend on branch ordering. `--source-root` is named here and omitted in the deployment, where the task
   definition already carries `CARDDEMO_DATASET_STAGING_ROOT`; pointing it at the
   checked-out corpus is what lets a source-tree operator run the gate at all, and the
   extracts it reads are the EBCDIC images, because those are the ones whose names the

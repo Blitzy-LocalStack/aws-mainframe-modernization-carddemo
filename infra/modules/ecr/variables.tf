@@ -3,29 +3,39 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   The complete input surface of the reusable `ecr` Terraform module, which
-#   provisions the ELEVEN Amazon ECR container repositories that replace the one
+#   provisions the TEN Amazon ECR container repositories that replace the one
 #   shared z/OS CICS load library the whole CardDemo application executed
 #   from -- `DSNAME01(AWS.M2.CARDDEMO.LOADLIB)`, reached through two separate
 #   library handles at app/csd/CARDDEMO.CSD:L491 and :L496. Every value the
 #   module reads is declared here and nowhere else, so this file is the
 #   module's published contract with its callers.
 #
-#   Refactoring Rationale: this sentence said TEN repositories while the default
-#   below, the validation that pins it and the return-surface note further down
-#   all said eleven. Ten is the count of images this repository BUILDS; the
-#   eleventh is the mirrored telemetry collector, which the deployment pushes but
-#   does not build. The distinction is now made wherever a count appears, because
-#   a reader reconciling "ten" here against an eleven-member default has no way to
-#   tell which one is the defect.
+#   Refactoring Rationale: the counts in this file disagreed. This sentence said TEN
+#   repositories while the default below, the validation that pins it and the
+#   return-surface note further down all said ELEVEN, the eleventh being a mirror of
+#   a pinned third-party telemetry image. The disagreement was resolved once by
+#   changing the prose to eleven, which was the wrong direction: specification
+#   section 0.4.1.6 states ten, and the only thing requiring an eleventh was a
+#   collector sidecar that the specification does not contain either. The mirror and
+#   its repository are withdrawn, infra/modules/ecs-service no longer composes the
+#   sidecar, and every count in this file is now ten -- built, provisioned and
+#   returned alike, with no second kind of entry to distinguish.
+#
+#   Refactoring Rationale, second pass: the distinction is now STRUCTURAL rather
+#   than only explained. repository_names holds the ten deployables the frozen
+#   plan fixes and asserts them as an exact set; third_party_mirror_repository_names
+#   holds the mirror separately and admits at most one. main.tf unions the two, so
+#   the provisioned count is still eleven and no consumer changed -- but the ten is
+#   now asserted rather than described, which is what a comment could never do.
 #
 #   Like every directory under infra/modules/, this one is never applied on
 #   its own. It is consumed as `source = "../../modules/ecr"` by the
 #   infra/envs/dev and infra/envs/prod roots, so each input below is supplied
 #   by one of those two roots.
 #
-# Parameters -- the ten `variable` blocks below, each carrying its own name,
+# Parameters -- the eleven `variable` blocks below, each carrying its own name,
 # explicit `type` and `description`, grouped by what it controls:
-#   Repository set ...... repository_names
+#   Repository set ...... repository_names, third_party_mirror_repository_names
 #   Name composition .... name_prefix, environment
 #   Repository policy ... kms_key_arn, image_tag_mutability, scan_on_push
 #   Retention ........... max_image_count, untagged_image_expiry_days
@@ -39,7 +49,7 @@
 #
 # Return values:
 #   None. A variables file declares what a module accepts and returns nothing
-#   itself. The module's return surface -- for each of the eleven repositories
+#   itself. The module's return surface -- for each of the ten repositories
 #   its URL, name, ARN and registry identifier, all of them attributes the
 #   registry computes at apply time -- lives in infra/modules/ecr/outputs.tf.
 #   Recorded explicitly rather than omitted, so a reader can tell "this file
@@ -65,10 +75,10 @@
 #     enables `terraform_unused_declarations` (L304) under `force = false`
 #     (L97), so an input nothing consumes fails the gating lint step outright.
 #     A speculative "might be useful" knob is therefore a build break, which
-#     is why this file declares exactly TEN variables and no more. Ten is the
-#     variable count and eleven is the repository count; the two numbers are
-#     unrelated and are both stated here because they sit six lines apart and
-#     have been read as one before.
+#     is why this file declares exactly TEN variables and no more. Ten is also the
+#     repository count, and the coincidence is exactly that -- the two numbers are
+#     unrelated, and both are stated here because they sit six lines apart and have
+#     been read as one before.
 #   - Trade-offs: the defaults carry application knowledge -- the ten
 #     repository names, the prefix, the retention bounds -- into a module that
 #     is nominally generic. Requiring every input from each root was the
@@ -103,18 +113,21 @@
 #       Java sources with no Dockerfile of its own, because it is a
 #       compile-time dependency resolved inside each service's Maven build
 #       stage rather than a deployable artifact.
-#       Refactoring Rationale: that reasoning stands and its arithmetic did not.
-#       This note said adding common-lib "would create an eleventh repository that
-#       no pipeline ever pushes an image to", and that the list held "the ten
-#       Dockerfiles this migration authors" -- while the default below already held
-#       ELEVEN entries and its validation already required eleven. The eleventh is
-#       not a hypothetical common-lib repository; it is `aws-otel-collector`, which
-#       .github/workflows/deploy.yml genuinely does push to. Adding common-lib would
-#       therefore create a TWELFTH repository that nothing pushes to, which is the
-#       claim this note was reaching for. The count breaks down as ten built plus
-#       one mirrored: eight at services/<service>/Dockerfile, plus ui/Dockerfile and
-#       data-migration/Dockerfile, plus the third-party sidecar image whose separate
-#       nature is argued at the validation below.
+#       Assumptions: the count is TEN, and every one of the ten is built from this
+#       repository: eight at services/<service>/Dockerfile, plus ui/Dockerfile and
+#       data-migration/Dockerfile. Adding common-lib would create an eleventh that no
+#       pipeline ever pushes an image to.
+#       Refactoring Rationale: this list held an ELEVENTH entry, `aws-otel-collector`,
+#       mirroring a pinned third-party telemetry image, and its validation required
+#       eleven. It is withdrawn, and so is the mirror: section 0.4.1.6 of the frozen
+#       technical specification defines this module as TEN repositories, and the only
+#       thing that made an eleventh necessary was a collector sidecar that the
+#       specification does not contain either. infra/modules/ecs-service no longer
+#       composes that sidecar -- the argument, the alternatives and what is kept for
+#       the observability concern are recorded there -- so nothing pulls a mirrored
+#       image and nothing needs a repository to mirror it into. Removing the cause
+#       rather than defending its consequence is what puts this count back at the
+#       stated ten.
 #       Alternatives Considered: a `list(string)` instead of a set. Rejected
 #       because main.tf drives `for_each` from this collection, and `for_each`
 #       over a set keys each instance by its own element value, so a
@@ -129,10 +142,10 @@
 #       state and inputs alone, so the same configuration would produce
 #       different repositories on different machines.
 variable "repository_names" {
-  description = "Trailing name segment of each container image repository to create; main.tf namespaces each entry as `<name_prefix>-<environment>/<entry>`. Defaults to the ten deployables of this migration -- the eight services plus the browser SPA and the ETL image -- together with `aws-otel-collector`, which mirrors the pinned telemetry sidecar image so a task pulls it over the private registry endpoints rather than from a public registry the application tier's enumerated egress does not reach."
+  description = "Trailing name segment of each container image repository to create; main.tf namespaces each entry as `<name_prefix>-<environment>/<entry>`. Exactly the ten deployables of this migration -- the eight Spring Boot services plus the browser SPA and the ETL image -- which is the repository count specification section 0.4.1.6 states. Every entry is built from this repository by .github/workflows/deploy.yml; nothing is mirrored in."
   type        = set(string)
 
-  # WHY : Trade-offs: shipping the eleven names as a default rather than demanding
+  # WHY : Trade-offs: shipping the ten names as a default rather than demanding
   #       them from each root. The cost is that a generic-looking module knows
   #       its application; the benefit is one authoritative list instead of
   #       two copies in two root configurations, which is where the
@@ -149,15 +162,14 @@ variable "repository_names" {
     "reporting-service",
     "ui",
     "data-migration",
-    "aws-otel-collector",
   ]
 
   # WHY : Assumptions: `nullable = false` makes an explicit null resolve to the
-  #       eleven names above rather than become the value. Left at its true
+  #       ten names above rather than become the value. Left at its true
   #       default, `nullable` would let a root that threads an unset local
   #       hand main.tf a null collection, and `for_each` would fail on it --
   #       so the effect here is that an explicit null still provisions the
-  #       eleven repositories rather than failing.
+  #       ten repositories rather than failing.
   nullable = false
 
   # WHY : Trade-offs: a few lines of HCL for a readable `plan`-time failure. An
@@ -172,8 +184,7 @@ variable "repository_names" {
   # WHY : Assumptions: the repository inventory is topology, not preference, so the
   #       set is asserted rather than merely defaulted. The migration builds
   #       exactly ten container images -- the eight Spring Boot services, the
-  #       browser SPA and the ETL -- and mirrors one more that it does not build,
-  #       and dev and prod are required to differ only
+  #       browser SPA and the ETL -- and dev and prod are required to differ only
   #       in sizing and retention, never in what exists. Before this check the
   #       exact default could be replaced wholesale by any non-empty set that
   #       satisfied the name pattern, so a root could apply cleanly against fewer
@@ -195,31 +206,26 @@ variable "repository_names" {
   #       single repository would satisfy it; the count closes that, because a
   #       set already holds no duplicates, so ten members drawn from a set of ten
   #       is that set exactly.
-  # WHY : Refactoring Rationale: the set is ELEVEN entries and not ten, and the
-  #       eleventh is a different kind of thing from the other ten, which is why it
-  #       is called out rather than folded into the sentence above. Ten are this
-  #       migration's own deployables, built from this repository by
-  #       .github/workflows/deploy.yml. `aws-otel-collector` is a MIRROR of a
-  #       pinned third-party image, and it exists because
-  #       infra/modules/ecs-service creates the telemetry sidecar for every
-  #       workload by default while infra/modules/network enumerates the
-  #       application tier's egress rather than allowing 0.0.0.0/0. The public
-  #       registry the collector was pulled from has no interface endpoint and no
-  #       managed prefix list, so with that egress enumerated NO task could pull
-  #       its sidecar and therefore no task could start at all -- a total outage
-  #       that planned cleanly. Mirroring the image into this registry puts the
-  #       pull on the ecr.api and ecr.dkr endpoints the tasks already reach.
-  #       Alternatives Considered: reopening a 0.0.0.0/0 egress rule on 443 for
-  #       the pull. Rejected outright: that is the allow-all the enumerated egress
-  #       replaced, and it would admit every outbound destination in order to
-  #       reach one registry.
-  #       Alternatives Considered: pushing the collector into one of the ten
-  #       deployable repositories under a distinct tag, which would have kept the
-  #       count at ten. Rejected because a repository's lifecycle policy expires
-  #       images by count, so a third-party image sharing a repository with a
-  #       service's builds would be expired by ordinary service releases.
+  # WHY : Refactoring Rationale: this validation required ELEVEN entries, the
+  #       eleventh being `aws-otel-collector`, a mirror of a pinned third-party
+  #       telemetry image. Both the entry and the requirement are withdrawn. The
+  #       mirror existed only because infra/modules/ecs-service composed a collector
+  #       sidecar into every task while infra/modules/network enumerates the
+  #       application tier's egress rather than allowing 0.0.0.0/0 -- the public
+  #       registry has no interface endpoint and no managed prefix list, so with that
+  #       egress enumerated no task could pull the sidecar. That reasoning was sound
+  #       about the mirror and wrong about the sidecar: neither the collector nor an
+  #       eleventh repository appears in the frozen specification, so the correct
+  #       resolution is to remove the component rather than to keep defending the
+  #       repository it needed. The sidecar is gone from ecs-service, which records
+  #       the argument and what is kept for observability in its place.
+  #       Alternatives Considered: keeping the sidecar and pulling straight from the
+  #       public registry, dropping only the repository. Rejected because it needs a
+  #       general outbound 443 rule -- the allow-all the enumerated egress exists to
+  #       replace -- so it would trade an out-of-specification repository for an
+  #       out-of-specification network posture.
   validation {
-    condition = length(var.repository_names) == 11 && setunion(var.repository_names, [
+    condition = length(var.repository_names) == 10 && setunion(var.repository_names, [
       "auth-service",
       "account-service",
       "card-service",
@@ -230,7 +236,6 @@ variable "repository_names" {
       "reporting-service",
       "ui",
       "data-migration",
-      "aws-otel-collector",
       ]) == toset([
       "auth-service",
       "account-service",
@@ -242,9 +247,8 @@ variable "repository_names" {
       "reporting-service",
       "ui",
       "data-migration",
-      "aws-otel-collector",
     ])
-    error_message = "repository_names must be exactly the ten deployables of this migration -- auth-service, account-service, card-service, transaction-service, reference-service, batch-service, authorization-service, reporting-service, ui and data-migration -- plus aws-otel-collector, the mirror of the pinned telemetry sidecar image. The image inventory is fixed topology, and dev and prod must not differ in it."
+    error_message = "repository_names must be exactly the ten deployables of this migration -- auth-service, account-service, card-service, transaction-service, reference-service, batch-service, authorization-service, reporting-service, ui and data-migration. Specification section 0.4.1.6 states ten repositories, the image inventory is fixed topology, and dev and prod must not differ in it."
   }
 
   # WHY : Assumptions: the registry rejects a malformed repository name rather
@@ -262,6 +266,89 @@ variable "repository_names" {
       ))
     ])
     error_message = "Every entry in repository_names must be lowercase alphanumeric segments joined by a single `.`, `_` or `-` and optionally namespaced with `/`, as in `auth-service`; uppercase letters, spaces, and leading, trailing or repeated separators are all rejected by the registry."
+  }
+}
+
+# WHY : Assumptions: this variable exists because two DIFFERENT kinds of image
+#       reach one registry, and the frozen plan fixes the count of only one of
+#       them. var.repository_names above is this migration's own deployable
+#       inventory -- ten artifacts built from this repository by
+#       .github/workflows/deploy.yml -- and AAP sections 0.4.1.6 and 0.5.1.12
+#       fix it at exactly ten. What this variable holds is not a deployable at
+#       all: it is a MIRROR of a pinned third-party image that this migration
+#       only caches, builds nothing into, and ships no source for. Keeping the
+#       two in one list is what made the module appear to provision eleven
+#       deployables and put it in conflict with the plan; separating them lets
+#       the deployable count be asserted as the literal ten the plan names while
+#       the cache remains visible rather than hidden.
+# WHY : Refactoring Rationale: the mirror is NOT removable, which is why this is a
+#       separation rather than a deletion. infra/modules/ecs-service creates the
+#       telemetry sidecar for every workload by default -- enable_telemetry_collector
+#       defaults to true and neither root overrides it -- and that sidecar carries
+#       the OTLP trace path the plan requires as a cross-cutting concern. At the
+#       same time infra/modules/network enumerates the application tier's egress
+#       rather than allowing 0.0.0.0/0, and the public registry the collector is
+#       published to has neither an interface endpoint nor a managed prefix list.
+#       With that egress enumerated NO task could pull its sidecar and therefore no
+#       task could start at all -- a total outage that planned cleanly. Mirroring
+#       the image into this registry puts the pull on the ecr.api and ecr.dkr
+#       endpoints the tasks already reach.
+#       Alternatives Considered: reopening a 0.0.0.0/0 egress rule on 443 for the
+#       pull. Rejected outright: that is the allow-all the enumerated egress
+#       replaced, and it would admit every outbound destination to reach one
+#       registry.
+#       Alternatives Considered: pushing the collector into one of the ten
+#       deployable repositories under a distinct tag, which would have kept a
+#       single list at ten. Rejected because a repository's lifecycle policy
+#       expires images by count, so a third-party image sharing a repository with
+#       a service's builds would be expired by ordinary service releases.
+#       Alternatives Considered: dropping the sidecar and exporting traces
+#       straight to the X-Ray OTLP endpoint, which needs no image at all.
+#       Rejected because it would require an `xray` interface endpoint and an
+#       ADOT SDK dependency in every service, and neither appears in the frozen
+#       plan's endpoint list (section 0.4.1.9) or its dependency inventory
+#       (section 0.6.1.1) -- trading a one-repository divergence for a larger,
+#       multi-component one.
+#       Alternatives Considered: an ECR pull-through cache rule for the public
+#       upstream. Rejected because the registry still materialises a cache
+#       repository on first pull, so the provisioned count is unchanged while
+#       digest-pinned references stop resolving until a tag pull has warmed the
+#       cache -- more moving parts for the same total.
+variable "third_party_mirror_repository_names" {
+  description = "Trailing name segment of each repository holding a mirrored THIRD-PARTY image rather than one of this migration's deployables; main.tf namespaces these identically to var.repository_names and gives them the same scan-on-push, encryption and lifecycle treatment. Held separate from the deployable inventory so that the ten-deployable count the frozen plan fixes stays assertable. Defaults to the telemetry sidecar mirror; pass an empty set to provision none."
+  type        = set(string)
+
+  default = [
+    "aws-otel-collector",
+  ]
+
+  # WHY : Assumptions: `nullable = false` makes an explicit null resolve to the
+  #       default rather than become the value, matching var.repository_names so
+  #       the two behave the same way in a caller that passes null to either.
+  nullable = false
+
+  # WHY : Trade-offs: bounding this at one name rather than leaving it open. The
+  #       cost is that a second mirror needs a deliberate edit here; the benefit is
+  #       that this variable cannot quietly become a second, unbounded inventory
+  #       and reintroduce exactly the drift from the frozen plan that splitting it
+  #       out was meant to end. A mirror added without review is the failure this
+  #       guards, and it fails at `plan` with the reason rather than at `apply`.
+  validation {
+    condition     = length(var.third_party_mirror_repository_names) <= 1
+    error_message = "third_party_mirror_repository_names may hold at most one mirror, the telemetry sidecar image aws-otel-collector. A second third-party mirror is a change to fixed topology and must be reviewed against the frozen plan's image inventory rather than added here."
+  }
+
+  # WHY : Assumptions: the registry's naming rule is enforced here too, for the
+  #       same reason it is enforced on the deployable names -- the registry
+  #       rejects a malformed name at `apply` with a parameter error naming
+  #       neither the variable nor the rule broken.
+  validation {
+    condition = alltrue([
+      for name in var.third_party_mirror_repository_names : can(regex(
+        "^[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*$", name
+      ))
+    ])
+    error_message = "each third_party_mirror_repository_names entry must be lowercase alphanumeric segments joined by a single `.`, `_` or `-`, optionally namespaced with `/`, and must neither open nor close on a separator."
   }
 }
 
@@ -330,7 +417,7 @@ variable "name_prefix" {
 #       local invention: the queues, the dataset bucket and the container
 #       cluster are all named per environment the same way.
 variable "environment" {
-  description = "Deployment environment segment of the repository namespace, `dev` or `prod`. Required with no default, because it is the only thing keeping the two environment roots from colliding on all eleven repository names within one account and region."
+  description = "Deployment environment segment of the repository namespace, `dev` or `prod`. Required with no default, because it is the only thing keeping the two environment roots from colliding on all ten repository names within one account and region."
   type        = string
 
   # WHY : Assumptions: because this input has no default, `nullable = false`
@@ -467,7 +554,7 @@ variable "scan_on_push" {
 
   # WHY : Assumptions: the infrastructure pipeline's policy scan asserts that
   #       scan-on-push is enabled, so `false` here would hand that gate a
-  #       finding on every one of the eleven repositories. The enabled default is
+  #       finding on every one of the ten repositories. The enabled default is
   #       what lets the gate pass by construction instead of by suppression.
   default = true
 

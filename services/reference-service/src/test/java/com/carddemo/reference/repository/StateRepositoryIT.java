@@ -50,8 +50,8 @@
 //  (6) Assumptions: services/reference-service/src/main/resources/db/migration/
 //      V1__reference.sql is the SOLE source of this table's column names, since
 //      no baseline table exists for it -- the baseline holds the domain as a
-//      condition name over a working-storage field, not as a file. Its L424 to
-//      L441 declare exactly one column, state_cd CHAR(2) NOT NULL, and make it
+//      condition name over a working-storage field, not as a file. Its L413 to
+//      L430 declare exactly one column, state_cd CHAR(2) NOT NULL, and make it
 //      the whole of pk_us_states. There is therefore NO further NOT NULL column
 //      for this file to prove a refusal for, and that absence is recorded as a
 //      verified reading of V1 rather than left silent, because an unstated
@@ -90,10 +90,13 @@ import org.springframework.transaction.annotation.Transactional;
  * and the engine; a stand-in would answer whatever it was told and every assertion would pass while
  * proving nothing.
  *
- * <p>Assumptions: the reads below go through {@code UsStateRepository}, which is the interface the main
- * tree declares over {@code reference.us_states}, and the writes go through the persistence context so
+ * <p>Assumptions: the reads below go through {@code StateRepository}, which is the interface the main
+ * tree declares over {@code reference.us_states} -- it was authored as {@code UsStateRepository} and
+ * renamed, and this class's own name already matched the assigned one. The writes go through the
+ * persistence context so
  * that an insert is issued rather than merged. The sibling coverage of the ordering and of the two
- * bounded walks is not repeated here, nor are the seed totals owned by other classes in this package:
+ * bounded walks is not repeated here and lives in {@code StateRepositoryWalkIT}, nor are the seed totals
+ * owned by other classes in this package:
  * the grand total across the schema belongs to {@code TransactionTypeRepositoryIT} and the area-code
  * subtotals to the two area-code classes.
  *
@@ -135,10 +138,10 @@ class StateRepositoryIT extends ReferencePersistenceBase {
     /** The six codes in the domain that are not states, from CSLKPCDY.cpy L1064 to L1069. */
     private static final List<String> NON_STATE_CODES = List.of("DC", "AS", "GU", "MP", "PR", "VI");
 
-    /** The declared width of the key column, from V1__reference.sql L438. */
+    /** The declared width of the key column, from V1__reference.sql L427. */
     private static final int DECLARED_KEY_WIDTH = 2;
 
-    /** The constraint a refused duplicate must name, declared at V1__reference.sql L440. */
+    /** The constraint a refused duplicate must name, declared at V1__reference.sql L429. */
     private static final String PRIMARY_KEY_CONSTRAINT = "pk_us_states";
 
     /** The state PostgreSQL reports when a unique or primary-key constraint refuses a row. */
@@ -149,7 +152,7 @@ class StateRepositoryIT extends ReferencePersistenceBase {
 
     /** The repository under test. */
     @Autowired
-    private UsStateRepository states;
+    private StateRepository states;
 
     // WHY : Refactoring Rationale: the duplicate case below writes through the persistence context
     //       rather than through the repository, and the reason is a measured property of this entity
@@ -179,7 +182,7 @@ class StateRepositoryIT extends ReferencePersistenceBase {
         // WHY : Assumptions: this counts SEEDED ROWS to establish a data-cardinality property, and it
         //       is deliberately not the total-count-for-pagination this package rules out. No page is
         //       being sized here and no offset is being derived; the walks that do page this table use
-        //       keyset bounds and are covered by the sibling class. A later reader should not mistake
+        //       keyset bounds and are covered by StateRepositoryWalkIT. A later reader should not mistake
         //       one for the other and remove it.
         List<String> codes = seededCodes();
 

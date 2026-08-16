@@ -629,13 +629,16 @@ baseline or the parity oracle.
 
 ## 10. What drives this corpus, and what reads it
 
-This corpus is a **driven input**. `PostTransactionsJobParityIT` resolves each scenario under
-`/fixtures/posting/`, seeds the masters from it, launches the posting job and compares the resulting
-transaction master, category balances, account master and reject stream against
-`tests/golden/posting/reject_103_expired` -- so an edit to these bytes changes what the parity run asserts.
-`BatchFixtureContractTest` additionally holds every file here to its declared geometry and to the
-values that make the scenario discriminating, so a layout mistake is caught in this module rather
-than surfacing later as a comparison failure.
+This corpus is a **driven input**, and **three** classes read it. `PostTransactionsJobParityIT`
+resolves each scenario under `/fixtures/posting/`, seeds the masters from it, launches the posting
+job and compares the resulting transaction master, category balances, account master and reject
+stream against `tests/golden/posting/reject_103_expired`. `PostTransactionsJobTest` resolves the same
+scenario under `fixtures/posting/` at the unit tier and seeds all four relations from the same
+bytes, so both tiers read this folder -- an edit to these bytes changes what BOTH runs assert.
+`BatchFixtureContractTest` additionally holds every file here to its declared geometry, to the
+values that make the scenario discriminating and to its committed SHA-256 per master section 11.5,
+so a layout mistake or an unintended byte change is caught in this module rather than surfacing
+later as a comparison failure.
 
 **The distinction above is the most expensive thing in this document to get wrong.** A reader who
 believes these bytes drive nothing will edit them expecting no consequence, and the consequence is a
@@ -656,16 +659,40 @@ a mention inside a sentence saying the category does not apply is indistinguisha
 The header of this file enumerates exactly the three labels it uses, and that enumeration is meant to be
 verifiable by the same search.
 
-Assumptions: the sibling `preflight/**` and `interest/**` families are still mirrors -- no test
-declares either as a seed root -- so the tree serves two different purposes and only this one changes
-what a run asserts.
+Assumptions: this section exists because two record files sitting in the same tree can differ in
+whether a job opens them, and the difference is invisible from the layout. Master section 1.5 holds the
+measurement, taken from the resource root each consuming class declares rather than from prose: all four
+files in every one of the NINE `posting/**` scenarios are opened -- by `PostTransactionsJobTest` under
+the classpath prefix `fixtures/posting/` and by `PostTransactionsJobParityIT` under `/fixtures/posting/`
+-- all four files in every one of the THREE `interest/**` scenarios are opened by
+`CalculateInterestJobTest` under `fixtures/interest/`, and `PreflightDailyTransactionsJobTest` opens the
+three `preflight/**` feed files plus `preflight/unmatched_card/acctdata.txt` under
+`fixtures/preflight/`. **53 of the 62 record files in this tree are live job input**; master section 1.5
+names the nine that are not.
+
+Assumptions: this paragraph previously said the sibling `preflight/**` and `interest/**` families were
+mirrors that no test in this module read, and that `CalculateInterestJobTest` resolved its inputs from
+the repository-root `tests/fixtures/interest/` tree. Both claims were false. That class declares
+`FIXTURE_INTEREST_ROOT` as the classpath prefix `fixtures/interest/` and loads through
+`getClassLoader().getResourceAsStream(...)`, so it reads this tree; it DISCUSSES the reference oracle
+tree in its prose, and the two were conflated -- a path named in a docstring is not a path being opened.
+The correction matters in exactly the direction the paragraph was warning about: a reader told that a
+sibling directory was inert would carry that belief into it and edit a live job input believing the
+change was free.
 
 ---
 
 *This README is the mandatory Explainability carrier for the four record files in this directory,
-required by master section 10 and by user-specified Rule 1. `config/rule1/rule1_gate.py` decides the
-form of every rationale label above, repository-wide and including Markdown, which is why they are
-written plain rather than emphasised -- it judges form only. `config/checkstyle/checkstyle.xml` limits
-its audit set to `java`, so nothing mechanical reads this prose for meaning. Whether each rationale
+required by master section 10 and by user-specified Rule 1. **No gate reads this prose.**
+`config/checkstyle/checkstyle.xml` limits its audit set to `java`, and `config/rule1/rule1_gate.py`
+excludes every path containing `/src/test/resources/fixtures/` in its `_is_governed` check, which is
+this path -- so neither its `labels` check nor its `what` check ever opens this file. Refactoring
+Rationale: this paragraph previously credited `config/rule1/rule1_gate.py` with deciding the form of
+the rationale labels above "repository-wide and including Markdown". The gate does run
+repository-wide, which is what made the claim plausible, but this path is explicitly outside its
+remit, so the sentence let a green build be read as evidence about a document the gate never opens.
+The canonical label form is used here regardless, because `docs/CODE_DOCUMENTATION_STANDARD.md` fixes
+one written form repository-wide and a Rule 1 audit finds a rationale by literal string search;
+compliance in this path is therefore **review-based** rather than mechanical. Whether each rationale
 names a real consequence, and whether every number and line citation is true, are review obligations no
 lexical gate can decide.*

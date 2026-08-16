@@ -169,7 +169,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl} L1624 opens
  * {@code 9800-DELETE-PROCESSING.}, its L1628 issues the delete and its L1638 tests
  * {@code WHEN SQLCODE = -532} to build the message its L1641 begins. The migrated constraint is
- * carried at {@code src/main/resources/db/migration/V1__reference.sql} L268, where PostgreSQL raises
+ * carried at {@code src/main/resources/db/migration/V1__reference.sql} L257, where PostgreSQL raises
  * {@code SQLSTATE} 23503, which the framework translates to a data-integrity violation and the shared
  * advice renders as 409. No type in this module declares a second
  * {@code @RestControllerAdvice}: a duplicate would give one refusal two renderings, shadowing the
@@ -181,7 +181,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * {@code dto/DisclosureGroupRateResponse} declares its {@code interestRate} component as the shared
  * {@code com.carddemo.common.money.Money} type, the column behind it is
  * {@code interest_rate NUMERIC(6,2) NOT NULL} at
- * {@code src/main/resources/db/migration/V1__reference.sql} L337, and that column is transcribed from
+ * {@code src/main/resources/db/migration/V1__reference.sql} L326, and that column is transcribed from
  * {@code app/cpy/CVTRA02Y.cpy} L9, which declares {@code DIS-INT-RATE PIC S9(04)V99} inside the
  * fifty-byte disclosure-group record its L2 names. The rate is not merely displayed: it is an operand.
  * {@code app/cbl/CBACT04C.cbl} L462 opens {@code 1300-COMPUTE-INTEREST.} and its L464 to L465 compute
@@ -231,7 +231,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * container health check poll it and neither can present a token. The fifth is a batch configuration,
  * and this subtree has none: {@code app/app-transaction-type-db2/cbl/COBTUPDT.cbl} is migrated as the
  * ordinary service method {@code service/ReferenceBatchUpdateService} rather than as a Spring Batch
- * job, this module's {@code pom.xml} explains at its L423 that the batch starter is absent by design,
+ * job, this module's {@code pom.xml} explains at its L414 that the batch starter is absent by design,
  * and {@code application.yml} carries no {@code spring.batch} key at all, so a job type here would
  * not compile.</p>
  *

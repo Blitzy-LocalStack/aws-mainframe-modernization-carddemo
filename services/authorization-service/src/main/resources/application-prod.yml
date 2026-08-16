@@ -46,7 +46,7 @@
 #   The four category labels appear in the one permitted plural form.
 #
 # WHY : Assumptions: NO MECHANICAL GATE READS THIS FILE. config/checkstyle/
-#       checkstyle.xml narrows its Checker to fileExtensions="java" at L185, and
+#       checkstyle.xml narrows its Checker to fileExtensions="java" at L178, and
 #       no linter in this repository parses YAML comments, so no rationale missing
 #       below would fail a build. The discipline is applied at the rigour it is
 #       applied where a build would fail without it, because the sentence this

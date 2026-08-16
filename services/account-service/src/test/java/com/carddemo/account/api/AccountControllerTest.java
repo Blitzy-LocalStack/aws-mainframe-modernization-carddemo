@@ -54,11 +54,14 @@ import org.springframework.web.context.support.AnnotationConfigWebApplicationCon
 import org.springframework.web.servlet.config.annotation.EnableWebMvc;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -164,6 +167,14 @@ class AccountControllerTest {
     private static final String ACCOUNT_KEY = "12345678901";
 
     /**
+     * The member name the account selector travels under, as the published schema spells it.
+     *
+     * <p>Assumptions: named once rather than repeated inline, because two field-error assertions key on it
+     * and a rename reaching only one of them would leave the pair disagreeing about the same member.
+     */
+    private static final String ACCOUNT_ID_MEMBER = "accountId";
+
+    /**
      * The revision the read path publishes and an update must return.
      *
      * <p>Assumptions: an opaque token rather than a number, because the controller only ever renders it
@@ -225,6 +236,12 @@ class AccountControllerTest {
      */
     private static final String UPDATE_PATH =
             AccountController.BASE_PATH + AccountController.UPDATE_PATH;
+
+    /**
+     * The dispatcher path of the no-write validation turn.
+     */
+    private static final String UPDATE_VALIDATE_PATH =
+            AccountController.BASE_PATH + AccountController.UPDATE_VALIDATE_PATH;
 
     /**
      * The dispatcher path of the by-account cross-reference walk.
@@ -542,6 +559,36 @@ class AccountControllerTest {
     }
 
     /**
+     * A partial view carries NO entity tag at all, rather than one naming nothing.
+     *
+     * <p>Purpose: the read answers HTTP 200 with a null customer for an account the customer master holds
+     * no row for, which is the state {@code app/cbl/COACTVWC.cbl} paints -- its account region is filled
+     * under the disjunction at L471 with L472 while its customer region at L493 is suppressed. That arm
+     * has no revision, because a precondition cannot be formed from rows that were not both read.</p>
+     *
+     * <p>Assumptions: the header is asserted ABSENT rather than empty, and the distinction is the whole
+     * case. Formatting a null through the weak tag publishes the literal {@code W/"null"}, which is a
+     * syntactically valid entity tag: a caller would store it, echo it on {@code If-Match}, and be told
+     * its precondition was stale by a comparison against a real token -- when what it should be told is
+     * that this representation carries no precondition. An absent header says exactly that, and it is the
+     * only rendering a caller cannot mistake for a token.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a view with no customer half publishes no entity tag")
+    void aPartialViewPublishesNoEntityTag() throws Exception {
+        when(reads.accountFilterFieldErrors(ACCOUNT_KEY)).thenReturn(List.of());
+        when(reads.readAccountView(ACCOUNT_ID)).thenReturn(partialView());
+
+        this.mockMvc.perform(readView())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.customer").value(nullValue()))
+                .andExpect(jsonPath("$.account.currentBalance").value("-193.00"))
+                .andExpect(header().doesNotExist(HttpHeaders.ETAG));
+    }
+
+    /**
      * The body and the entity tag come from ONE service call on both published routes.
      *
      * <p>Purpose: this is the case that keeps the two-transaction pattern from returning. Both routes used
@@ -599,6 +646,145 @@ class AccountControllerTest {
         assertThat(publicMethodNamesOf(AccountViewService.class))
                 .as("the read service publishes its revision with its body, never on its own")
                 .noneMatch(name -> name.startsWith("currentRevision"));
+    }
+
+    /**
+     * The validation turn reports a refusal as a 200 verdict and writes nothing.
+     *
+     * <p>Assumptions: the STATUS is asserted as 200 alongside the refusal in the body, because that pairing
+     * is the operation's whole contract and the one a caller is most likely to get wrong. A refused value
+     * here is the successful answer to the question asked, not a failed request.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a refused value is a 200 verdict on the validation turn, not a 400")
+    void aRefusedValueIsATwoHundredVerdict() throws Exception {
+        when(writes.editAccountKey(ACCOUNT_KEY))
+                .thenReturn(AccountUpdateService.EditOutcome.acceptable());
+        when(writes.validateOnly(eq(ACCOUNT_ID), any(AccountUpdateRequest.class)))
+                .thenReturn(new AccountUpdateService.EditVerdict(
+                        List.of(new ApiError.FieldError("creditLimit", FieldValidationFlag.NOT_OK,
+                                "Credit Limit is not valid")),
+                        "Credit Limit is not valid", true, false));
+
+        this.mockMvc.perform(validate(submission()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.inputError").value(true))
+                .andExpect(jsonPath("$.noChangesFound").value(false))
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("creditLimit"));
+
+        verify(writes).validateOnly(eq(ACCOUNT_ID), any(AccountUpdateRequest.class));
+        verify(writes, never()).update(anyLong(), any(AccountUpdateRequest.class), anyString());
+    }
+
+    /**
+     * An accepted submission reports a confirmable verdict and still writes nothing.
+     *
+     * <p>Assumptions: the case asserts that the write service's update method is NEVER reached, which is
+     * the property that makes the first turn safe. Asserting only the body would pass for an
+     * implementation that validated by writing and rolling back.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("an accepted submission validates without writing")
+    void anAcceptedSubmissionValidatesWithoutWriting() throws Exception {
+        when(writes.editAccountKey(ACCOUNT_KEY))
+                .thenReturn(AccountUpdateService.EditOutcome.acceptable());
+        when(writes.validateOnly(eq(ACCOUNT_ID), any(AccountUpdateRequest.class)))
+                .thenReturn(new AccountUpdateService.EditVerdict(List.of(), null, false, false));
+
+        this.mockMvc.perform(validate(submission()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.inputError").value(false))
+                .andExpect(jsonPath("$.noChangesFound").value(false))
+                .andExpect(jsonPath("$.fieldErrors").isEmpty());
+
+        verify(writes, never()).update(anyLong(), any(AccountUpdateRequest.class), anyString());
+    }
+
+    /**
+     * An unchanged submission is reported as a distinct verdict rather than as a refusal.
+     *
+     * <p>Assumptions: the two flags are asserted SEPARATELY because the reference treats them as two
+     * different reasons not to advance and shows a different sentence for each -- so a verdict that
+     * collapsed them would lose which sentence to show.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("an unchanged submission is a no-change verdict, not an input error")
+    void anUnchangedSubmissionIsANoChangeVerdict() throws Exception {
+        when(writes.editAccountKey(ACCOUNT_KEY))
+                .thenReturn(AccountUpdateService.EditOutcome.acceptable());
+        when(writes.validateOnly(eq(ACCOUNT_ID), any(AccountUpdateRequest.class)))
+                .thenReturn(new AccountUpdateService.EditVerdict(List.of(),
+                        "No change detected. Press F3 to exit", false, true));
+
+        this.mockMvc.perform(validate(submission()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.inputError").value(false))
+                .andExpect(jsonPath("$.noChangesFound").value(true));
+    }
+
+    /**
+     * The validation turn requires no precondition header.
+     *
+     * <p>Assumptions: this is asserted because the sibling write REQUIRES one, so the absence here is a
+     * deliberate difference rather than an omission. A verdict changes nothing, so there is no state a
+     * precondition would protect.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("the validation turn needs no If-Match precondition")
+    void theValidationTurnNeedsNoPrecondition() throws Exception {
+        when(writes.editAccountKey(ACCOUNT_KEY))
+                .thenReturn(AccountUpdateService.EditOutcome.acceptable());
+        when(writes.validateOnly(eq(ACCOUNT_ID), any(AccountUpdateRequest.class)))
+                .thenReturn(new AccountUpdateService.EditVerdict(List.of(), null, false, false));
+
+        this.mockMvc.perform(validate(submission()))
+                .andExpect(status().isOk());
+    }
+
+    /**
+     * An unusable account identifier is refused before any validation is attempted.
+     *
+     * <p>Assumptions: the key edit is applied by the same helper the write uses, so an identifier a body
+     * can express but the reference's key edit would refuse produces a 400 here as it does there. This is
+     * the one input problem on this route that IS a failed request rather than a verdict.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("an unusable identifier is a 400 on the validation turn")
+    void anUnusableIdentifierIsRefused() throws Exception {
+        when(writes.editAccountKey(ACCOUNT_KEY))
+                .thenReturn(AccountUpdateService.EditOutcome.notAcceptable(
+                        "Account Filter must be a non-zero 11 digit number"));
+
+        this.mockMvc.perform(validate(submission()))
+                .andExpect(status().isBadRequest());
+
+        verify(writes, never()).validateOnly(anyLong(), any(AccountUpdateRequest.class));
+    }
+
+    /**
+     * Builds a request to the validation turn from the production record.
+     *
+     * <p>Assumptions: no precondition header is set, which is the point of the route.</p>
+     *
+     * @param body the submission to judge; must not be {@code null}
+     * @return the request builder, never {@code null}
+     * @throws Exception if the body cannot be serialised
+     */
+    private MockHttpServletRequestBuilder validate(AccountUpdateRequest body) throws Exception {
+        return post(UPDATE_VALIDATE_PATH)
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.APPLICATION_JSON)
+                .content(this.jsonMapper.writeValueAsString(body));
     }
 
     /**
@@ -1427,6 +1613,30 @@ class AccountControllerTest {
     }
 
     /**
+     * Builds the partial view the read answers when the customer master holds no matching row.
+     *
+     * <p>Assumptions: the ACCOUNT half is the complete one from {@link #viewResponse()} rather than a
+     * second fixture, so the case built on this helper differs from its complete sibling in exactly one
+     * member and the difference it asserts cannot be produced by anything else. The message channel carries
+     * the reference's own sentence for the miss, transcribed from the condition declared at L133 with L134
+     * of {@code app/cbl/COACTVWC.cbl}, and the revision is {@code null} because no precondition can be
+     * formed from rows that were not both read.</p>
+     *
+     * @return the account half with a null customer and no revision, never {@code null}
+     */
+    private static AccountViewService.RevisionedAccountView partialView() {
+        AccountViewResponse complete = viewResponse();
+        return new AccountViewService.RevisionedAccountView(
+                new AccountViewResponse(
+                        complete.accountId(),
+                        complete.account(),
+                        null,
+                        complete.informationMessage(),
+                        "Did not find associated customer in master file"),
+                null);
+    }
+
+    /**
      * Builds a submission whose amount members are the plain scale-two form.
      *
      * @return a fully populated submission, never {@code null}
@@ -1610,8 +1820,18 @@ class AccountControllerTest {
      * interceptor, which would need a window state, a parameter source and a container. What the reflective
      * form gives up is proof that the interceptor honours the annotation, and that is already proven where
      * it belongs -- {@code OnlineWriteGateInterceptorTest} in the shared kernel asserts it against doubles.
-     * What it buys is that THIS module's own three operations are pinned to the correct side of the
+     * What it buys is that THIS module's own operations are pinned to the correct side of the
      * classification, which no test in the kernel can know.</p>
+     *
+     * <p>Refactoring Rationale: the non-writing side of the list gained a THIRD member. The edit check at
+     * {@code /api/v1/accounts/update/validate} loads the two rows, runs every edit against them and
+     * returns without writing, so it belongs with the reads; it is a {@code POST} only because it carries
+     * the whole forty-three-value submission in a body. Leaving it out would have let it be added without
+     * an exemption and refused for the duration of every batch window, withholding a check the baseline's
+     * quiesce kept available -- {@code app/jcl/CLOSEFIL.jcl} closes the files to WRITERS, and the
+     * baseline's validation turn performs no file write. This paragraph is also why the count is not
+     * written into the prose above any more: a figure stated there is a second place for it to be wrong,
+     * and the list below is the authority.</p>
      *
      * @throws NoSuchMethodException if a handler this case names has moved, which is itself the defect
      */
@@ -1621,10 +1841,11 @@ class AccountControllerTest {
         Method view = AccountController.class.getMethod("readView", AccountLookupRequest.class);
         Method walk = AccountController.class.getMethod("listCardCrossReferences",
                 AccountLookupRequest.class, String.class, String.class, Principal.class);
+        Method check = AccountController.class.getMethod("validateUpdate", AccountUpdateRequest.class);
         Method update = AccountController.class.getMethod("update", String.class,
                 AccountUpdateRequest.class);
 
-        for (Method read : List.of(view, walk)) {
+        for (Method read : List.of(view, walk, check)) {
             OnlineWriteGateExempt exemption = read.getAnnotation(OnlineWriteGateExempt.class);
             assertThat(exemption)
                     .as("%s is a read expressed as a POST and must declare itself one", read.getName())
@@ -1644,6 +1865,77 @@ class AccountControllerTest {
     }
 
     /**
+     * The account selector is admitted at EXACTLY eleven digits and refused at ten and at twelve.
+     *
+     * <p>Purpose: the reference edits this field in an eleven-character alphanumeric container --
+     * {@code CC-ACCT-ID PIC X(11)} at L34 of {@code app/cpy/CVCRD01Y.cpy}, redefined numeric at its L36 --
+     * and tests it with {@code IS NOT NUMERIC}, at {@code app/cbl/COACTUPC.cbl} L1802 in
+     * {@code 1210-EDIT-ACCOUNT} and on the same terms in {@code COACTVWC}'s {@code 2210-EDIT-ACCOUNT}. A
+     * value shorter than eleven leaves trailing SPACES in that container, so the numeric test fails it:
+     * the baseline refuses a short form, it does not pad one. This case pins that width at the boundary
+     * that publishes it.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the pattern on this member was {@code ^[0-9]{1,11}$}, and NO case
+     * anywhere exercised a width at all -- so the loosest account selector in the whole migration sat on
+     * the route a browser calls first, and nothing would have reported it either way. Every other contract
+     * already spelt the field {@code ^[0-9]{11}$}. This case is what keeps the widths from drifting apart
+     * again, and it is why the helper comment below no longer says the contract admits a short form.</p>
+     *
+     * <p>Assumptions: BOTH refusals are asserted alongside the admission, because a case asserting only
+     * the ten-digit refusal would also pass against a pattern requiring some minimum above ten, and a case
+     * asserting only the admission would pass against no pattern at all. The trio locates the boundary
+     * rather than merely finding a boundary.</p>
+     *
+     * <p>Assumptions: the read collaborator is asserted untouched for both refusals. A binding-layer
+     * refusal happens before any handler runs, so a service reached on a malformed width would mean the
+     * pattern was not enforcing at all -- which the status alone cannot distinguish from enforcement.</p>
+     *
+     * @throws Exception if any request cannot be performed
+     */
+    @Test
+    @DisplayName("the account selector is admitted at eleven digits and refused at ten and twelve")
+    void theAccountSelectorRequiresExactlyElevenDigits() throws Exception {
+        this.mockMvc.perform(readViewOf("1234567890"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors[*].field", hasItem(ACCOUNT_ID_MEMBER)));
+
+        this.mockMvc.perform(readViewOf("123456789012"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors[*].field", hasItem(ACCOUNT_ID_MEMBER)));
+
+        verifyNoInteractions(reads);
+
+        when(reads.accountFilterFieldErrors(ACCOUNT_KEY)).thenReturn(List.of());
+        when(reads.readAccountView(ACCOUNT_ID)).thenReturn(revisionedView(REVISION));
+
+        this.mockMvc.perform(readViewOf(ACCOUNT_KEY))
+                .andExpect(status().isOk());
+
+        assertThat(AccountLookupRequest.ACCOUNT_ID_PATTERN)
+                .as("the declared pattern is the one the cases above locate")
+                .isEqualTo("^[0-9]{11}$");
+        assertThat(ACCOUNT_KEY).hasSize(11);
+    }
+
+    /**
+     * Builds an account-view request naming one selector exactly as supplied.
+     *
+     * <p>Assumptions: the selector is written into the body as TEXT rather than through
+     * {@code AccountLookupRequest}, because a width case has to be able to send a value the record's own
+     * constraint refuses. Serialising the record would make the subject under test the source of its own
+     * input, and a refused width could not be composed at all.</p>
+     *
+     * @param accountId the exact characters to send as the selector; must not be {@code null}
+     * @return a request builder ready to be performed, never {@code null}
+     */
+    private MockHttpServletRequestBuilder readViewOf(String accountId) {
+        return post(VIEW_PATH)
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.APPLICATION_JSON)
+                .content("{\"accountId\":\"" + accountId + "\"}");
+    }
+
+    /**
      * Builds the account-view request, whose selector travels in a body.
      *
      * <p>Assumptions: every case that reads the view goes through this helper rather than composing the
@@ -1655,10 +1947,10 @@ class AccountControllerTest {
      */
     private MockHttpServletRequestBuilder readView() {
         // WHY : Refactoring Rationale: the body is built from ACCOUNT_KEY rather than from ACCOUNT_ID
-        //       because the published schema declares this member as digits-only TEXT at the
-        //       eleven-character width, not as an integer. Passing the number would no longer compile,
-        //       and passing its unpadded rendering would exercise a width the contract admits but this
-        //       class's stubs are not keyed on.
+        //       because the published schema declares this member as digits-only TEXT at EXACTLY the
+        //       eleven-character width, not as an integer. Passing the number would no longer compile, and
+        //       passing its unpadded rendering is now refused by the contract itself rather than merely
+        //       unkeyed by this class's stubs -- theAccountSelectorRequiresExactlyElevenDigits pins that.
         return post(VIEW_PATH)
                 .contentType(MediaType.APPLICATION_JSON)
                 .accept(MediaType.APPLICATION_JSON)

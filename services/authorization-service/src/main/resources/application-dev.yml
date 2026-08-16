@@ -61,7 +61,7 @@
 # rationale at all is the second sentence of the validation gate at line 43 of
 # the project's single user-specified rule, Rule 1 "Explainability".
 # Assumptions: nothing mechanical reads this file. The Checker in
-# config/checkstyle/checkstyle.xml is narrowed to fileExtensions="java" at L185,
+# config/checkstyle/checkstyle.xml is narrowed to fileExtensions="java" at L178,
 # no linter in this repository parses YAML comments, and no workflow step
 # validates them, so review is the only reader these notes have. They are written
 # at the rigour applied where a build would fail without them, because the
@@ -136,7 +136,7 @@ spring:
     #       rationale at all is the second sentence of the validation gate at line 43 of
     #       the project's single user-specified rule, Rule 1 "Explainability".
     #       Assumptions: nothing mechanical reads this file. The Checker in
-    #       config/checkstyle/checkstyle.xml is narrowed to fileExtensions="java" at L185,
+    #       config/checkstyle/checkstyle.xml is narrowed to fileExtensions="java" at L178,
     #       no linter in this repository parses YAML comments, and no workflow step
     #       validates them, so review is the only reader these notes have. They are written
     #       at the rigour applied where a build would fail without them, because the

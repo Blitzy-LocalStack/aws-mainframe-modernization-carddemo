@@ -251,10 +251,14 @@
  * machine at eleven states and names the job each one replaces; this purge is not among
  * them, and the reference has no job-control driver for it either. It is an operationally
  * scheduled job in its own right, which is why it is a task entry point rather than a
- * state of that machine. Assumptions: the ordinal is deliberately not given. An earlier form
- * of this sentence called it "a twelfth state", which was unambiguous while the chain held the
- * plan's eleven and is now misleading: the chain as delivered has TWELVE states -- a
- * VerifyMigration state follows staging -- so "twelfth" now names ResumeOnlineWrites.</p>
+ * state of that machine. Assumptions: the ordinal is deliberately not given, even though the
+ * delivered chain does hold the plan's eleven states. An earlier form of this sentence called
+ * this purge "a twelfth state", which was accurate about it being outside the chain but invited
+ * a reader to count -- and for a while the count was genuinely ambiguous, because a revision of
+ * that machine published the whole-migration verification gate as a twelfth top-level state.
+ * The gate now runs inside the staging state, so "twelfth" would once again be unoccupied; the
+ * ordinal stays out regardless, because what matters here is that the purge is not a state of
+ * that machine at all, not where it would sit if it were.</p>
  *
  * <p>No {@code module-info.java} exists in this source tree. The three online services are
  * called by {@code PendingAuthController} and {@code FraudController} under

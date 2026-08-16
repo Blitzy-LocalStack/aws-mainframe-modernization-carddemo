@@ -57,11 +57,11 @@ import jakarta.validation.constraints.Pattern;
  * that obliges each consumer to convert obliges each of them to convert correctly, and the character form
  * removes the obligation instead of restating it.</p>
  *
- * <p>Assumptions: the change is one of REPRESENTATION and not of domain. One to eleven digits spell
- * exactly the zero-through-eleven-nines range {@link #ACCOUNT_ID_MIN} and {@link #ACCOUNT_ID_MAX} state,
- * so nothing acceptable became unacceptable and nothing refused became admissible. What it adds is that
- * the width is expressible at all: a screen field is eleven characters wide and a caller may legitimately
- * send {@code 00000000011}, which no numeric binding can carry.</p>
+ * <p>Assumptions: the change from a numeric binding was one of REPRESENTATION rather than of domain --
+ * it made the width expressible at all, because a screen field is eleven characters wide and a caller may
+ * legitimately send {@code 00000000011}, which no numeric binding can carry. The subsequent narrowing
+ * from one-to-eleven digits to EXACTLY eleven is a change of domain, and it is the reference's, not this
+ * record's; the paragraph on {@link #ACCOUNT_ID_PATTERN} carries the evidence.</p>
  *
  * <p>Assumptions: the row is still addressed by a number, and {@link #accountIdNumber()} is the single
  * place the digits become one. The stored key is {@code BIGINT} because section 0.4.1.3 maps a
@@ -69,16 +69,16 @@ import jakarta.validation.constraints.Pattern;
  * here, after validation, is what keeps every caller free of it -- and it is the same direction the
  * neighbouring update route already takes, which edits the submitted characters and parses them once.</p>
  *
- * <p>Trade-offs: a pattern replaces the numeric bounds, so a refusal now reports a value that is not one
- * to eleven digits rather than a value out of range. The wording differs and the outcome does not: both
- * are answered HTTP 400 naming {@code accountId} by the framework's own binding layer, before any handler
- * runs and before any file is read.</p>
+ * <p>Trade-offs: a pattern replaces the numeric bounds, so a refusal now reports a value that is not
+ * eleven digits rather than a value out of range. The wording differs and the outcome does not: both are
+ * answered HTTP 400 naming {@code accountId} by the framework's own binding layer, before any handler runs
+ * and before any file is read.</p>
  *
  * <p>Alternatives Considered: Lombok for the accessor. Rejected across this migration because generated
  * accessors cannot carry the documentation the Explainability rule requires; a record gives the same
  * brevity with every member visible in the declaration.</p>
  *
- * @param accountId the account to read, as one to eleven decimal digits; must satisfy
+ * @param accountId the account to read, as exactly eleven decimal digits; must satisfy
  *     {@link #ACCOUNT_ID_PATTERN}
  */
 public record AccountLookupRequest(
@@ -87,20 +87,57 @@ public record AccountLookupRequest(
         String accountId) {
 
     /**
-     * The written form an account identifier is accepted in: one to eleven decimal digits.
+     * The written form an account identifier is accepted in: exactly eleven decimal digits.
      *
-     * <p>Assumptions: the width is the contract and the pattern states it exactly -- at least one digit,
-     * because an empty body member names no account, and at most eleven, because
-     * {@code XREF-ACCT-ID PIC 9(11)} at L7 of {@code app/cpy/CVACT03Y.cpy} is the declared width and a
-     * wider value cannot match a stored row. A short value is admitted rather than refused, since it
-     * resolves to the same account as its zero-padded form; refusing it would refuse what an operator
-     * typed into a left-blank screen field.</p>
+     * <p>Assumptions: the width is the contract and the pattern states it exactly.
+     * {@code XREF-ACCT-ID PIC 9(11)} at L7 of {@code app/cpy/CVACT03Y.cpy} declares eleven, and
+     * {@code ACCT-ID PIC 9(11)} at L5 of {@code app/cpy/CVACT01Y.cpy} agrees, so a value of any other
+     * width cannot match a stored row.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this was {@code ^[0-9]{1,11}$}, and every short form it admitted is one
+     * the reference programs refuse. {@code app/cbl/COACTUPC.cbl} edits the field at its paragraph
+     * {@code 1210-EDIT-ACCOUNT}, lines 1783 to 1817, whose own comments at 1798 and 1799 read
+     * "Not numeric" and "Not 11 characters"; because {@code CC-ACCT-ID} is declared
+     * {@code PIC X(11)} at L34 of {@code app/cpy/CVCRD01Y.cpy} with a {@code PIC 9(11)} redefinition at
+     * its L36, a value shorter than eleven leaves trailing spaces in the character field and the
+     * {@code IS NOT NUMERIC} test at line 1802 fails it -- the width rule is enforced BY the numeric test
+     * rather than beside it, which is why the comment naming it sits above that same test.
+     * {@code app/cbl/COACTVWC.cbl} edits the same field at {@code 2210-EDIT-ACCOUNT} on the same
+     * terms. So eleven-or-refused is the reference's rule on BOTH the screen this route serves and the one
+     * beside it. Every other context in this migration already spelt the field {@code ^[0-9]{11}$} -- the
+     * card, authorization and transaction contracts all do -- and this record was the ONLY one admitting a
+     * short form, so one field carried two widths across one system and the loosest of them sat on the
+     * route a browser calls first.</p>
+     *
+     * <p>Assumptions: NO reference sentence is adopted for this refusal, and the omission is deliberate.
+     * The two programs emit DIFFERENT sentences for the same width rule -- {@code COACTUPC} assembles
+     * {@code 'Account Number if supplied must be a 11 digit Non-Zero Number'} from the two literals at its
+     * lines 1806 and 1807, while {@code COACTVWC} moves
+     * {@code 'Account Filter must  be a non-zero 11 digit number'} at its line 672, two consecutive spaces
+     * and a hyphen included -- and each already reaches a caller from the service that migrates that
+     * screen, {@code AccountUpdateService} and {@code AccountViewService} respectively. A refusal HERE is
+     * raised by the framework's binding layer before any handler runs, so it belongs to neither screen;
+     * attaching either sentence to it would put one screen's wording on the other's path, and inventing a
+     * third would put text on a screen the reference never produced.</p>
+     *
+     * <p>Alternatives Considered: keeping the short form and zero-padding it on the way in, on the
+     * reasoning that {@code 11} and {@code 00000000011} name the same row. Rejected because it is not the
+     * reference's reasoning: the baseline does not pad, it REFUSES, and it refuses with a sentence that
+     * tells the operator the width. Padding would accept input the authoritative program rejects and would
+     * silently make this service more permissive than the screen it migrates -- the exact class of
+     * divergence transformation rule T9 forbids shipping undocumented.</p>
+     *
+     * <p>Trade-offs: an operator who types {@code 11} into a left-blank field is now refused rather than
+     * served. That is the reference's behaviour and it is also the more useful one at an API boundary: a
+     * padded lookup that found nothing would answer 404, which a caller must read as "no such account"
+     * rather than as "you did not fill the field".</p>
      *
      * <p>Assumptions: no sign, no space, no decimal point and no separator, because the reference field is
      * unsigned display. Each of those would parse into some number under a lenient reading, so excluding
      * them at the binding layer is what stops a value that names no account from reaching a lookup.</p>
      */
-    public static final String ACCOUNT_ID_PATTERN = "^[0-9]{1,11}$";
+    public static final String ACCOUNT_ID_PATTERN = "^[0-9]{11}$";
+
 
     /**
      * The lowest value the reference layout admits for an account identifier.

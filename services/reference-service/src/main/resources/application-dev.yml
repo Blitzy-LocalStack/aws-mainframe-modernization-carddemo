@@ -31,21 +31,28 @@
 #   overlay on it, never a replacement, so everything the base settles continues
 #   to hold here unrestated: the datasource kind and driver, the owned schema
 #   and the pool statement that pins it, the migration locations, the listener
-#   port, the queue family and its message format, and the resource-server
-#   configuration. What this file varies is size and verbosity, and nothing
-#   else.
+#   port, and the resource-server configuration. What this file varies is size
+#   and verbosity, and nothing else.
+#   Refactoring Rationale: this sentence also named "the queue family and its
+#   message format" among the base settlements. The base settles no queue at all
+#   now -- this module consumes none, because the single shared inquiry request
+#   queue of app/app-vsam-mq/README.md L53 has exactly one owning consumer, in the
+#   account context -- so the phrase named a contract that is no longer there.
 #
 #   The behaviour being sized belongs to programs that are REFERENCE ONLY and
 #   are never modified: app/app-transaction-type-db2/cbl/COTRTLIC.cbl and
 #   COTRTUPC.cbl (the transaction-type screens), COBTUPDT.cbl (the sequential
 #   reference update, which migrates to a reference-maintenance service method
-#   rather than to a batch job), and app/app-vsam-mq/cbl/CODATE01.cbl (the
-#   queue-driven date conversion). The date-edit rules are not configured here
+#   rather than to a batch job). The date-edit rules are not configured here
 #   at all: they live in common-lib as
 #   com.carddemo.common.validation.DateEditValidator, transcribed from
-#   app/cbl/CSUTLDTC.cbl. Two baseline citations below are load-bearing and were
-#   read from disk rather than recalled: CODATE01.cbl L286, and
-#   app/cbl/CBACT04C.cbl L436-L439, L455, L458 and L628-L632.
+#   app/cbl/CSUTLDTC.cbl. One baseline citation below is load-bearing and was
+#   read from disk rather than recalled: app/cbl/CBACT04C.cbl L436-L439, L455,
+#   L458 and L628-L632.
+#   Refactoring Rationale: app/app-vsam-mq/cbl/CODATE01.cbl was listed here as a
+#   fourth sized program, and its L286 wait as a load-bearing citation. Neither
+#   applies: its QUEUE route is answered by the owner of the shared request queue
+#   in the account context, and this profile no longer sizes a consumer.
 #
 # Parameters:
 #   SPRING_PROFILES_ACTIVE
@@ -62,21 +69,22 @@
 #     rather than defaulting to something reachable.
 #
 # Effect:
-#   Eleven values along four lines. The connection pool is resized and
-#   re-ordered for a cluster that is permitted to release ALL of its capacity
-#   while idle; the two queue-consumer bounds are brought under the pool size;
-#   the health endpoint's detail is widened from withheld to authorized-only;
-#   and two loggers are raised. Nothing here changes what the service does --
-#   only how much of it runs at once and how much of it is written down.
+#   Nine values along three lines. The connection pool is resized and re-ordered
+#   for a cluster that is permitted to release ALL of its capacity while idle; the
+#   health endpoint's detail is widened from withheld to authorized-only; and two
+#   loggers are raised. Nothing here changes what the service does -- only how much
+#   of it runs at once and how much of it is written down.
+#   Refactoring Rationale: this read eleven values along four lines and counted a
+#   pair of queue-consumer bounds among them. Those two keys are withdrawn with the
+#   module's consumer, so the count is re-measured against what the file holds.
 #
 # Failure modes:
-#   No override here can abort startup on its own. Two of them PREVENT a failure
-#   the base values would produce in this environment and in no other, and each
-#   is recorded at its own key: a pool holding idle connections stops the
-#   cluster ever reaching its auto-pause threshold, and a queue-consumer bound
-#   set above the pool size turns a capacity decision into message redeliveries.
-#   One pair must move together or the task does not start at all, which is
-#   recorded on the queue-consumer block.
+#   No override here can abort startup on its own. One of them PREVENTS a failure
+#   the base values would produce in this environment and in no other, and it is
+#   recorded at its own key: a pool holding idle connections stops the cluster ever
+#   reaching its auto-pause threshold. Refactoring Rationale: a second such
+#   override, and a pair that had to move together or the task would not start,
+#   both belonged to the withdrawn queue-consumer block and are gone with it.
 #
 # Label form:
 #   The four rationale labels used below are written plural, unparenthesised,
@@ -98,8 +106,8 @@
 #   - Refactoring Rationale: this file and application-prod.yml differ from each
 #     other, and from the base, ONLY in sizing and verbosity. Neither varies
 #     topology: not the datasource kind, not the driver, not the owned schema,
-#     not the migration locations, not the listener port, not the queue family
-#     or its message format, and not the identity mechanism. The failure mode
+#     not the migration locations, not the listener port, and not the identity
+#     mechanism. The failure mode
 #     that constraint exists to prevent is specific rather than stylistic: once
 #     two environments differ in SHAPE rather than in SIZE, a dev pass stops
 #     being evidence about prod, and every defect dev cannot reproduce is first
@@ -170,9 +178,12 @@ spring:
       #       concurrent database operations queues for a connection rather than
       #       opening a fifth. That is accepted because the workload is reference
       #       lookups against six small tables which hold a connection for
-      #       milliseconds, and because the two queue-consumer bounds below are
-      #       deliberately held UNDER this number, so the listener cannot be the
-      #       source of such a burst.
+      #       milliseconds. Refactoring Rationale: this reason also cited two
+      #       queue-consumer bounds held UNDER this number as a second guarantee
+      #       against such a burst. Those keys are withdrawn with the module's
+      #       queue consumer, so the only competitors for a connection are the
+      #       HTTP handlers, and the burst bound is the listener's own thread
+      #       ceiling rather than a consumer's.
       maximum-pool-size: 4
 
       # WHY : (1) Trade-offs: zero, which the base file names as the development
@@ -252,41 +263,6 @@ spring:
       #       and reports it as an application defect.
       max-lifetime: 240000
 
-  cloud:
-    aws:
-      sqs:
-        listener:
-
-          # WHY : (1) Assumptions: these two are lowered TOGETHER because the
-          #       listener container refuses to start otherwise. Spring Cloud AWS
-          #       validates that max-messages-per-poll is less than or equal to
-          #       max-concurrent-messages and rejects the pair with
-          #       "maxMessagesPerPoll should be less than or equal to
-          #       maxConcurrentMessages" -- so lowering concurrency alone and
-          #       inheriting the base's ten messages per poll above it does not
-          #       produce a smaller consumer, it produces a task that never
-          #       starts. This is the one place in the file where inheriting half
-          #       of a pair is worse than inheriting neither.
-          #       (2) Assumptions: two rather than the base's ten because the
-          #       bound that matters is maximum-pool-size above. Every
-          #       date-conversion handler holds a pooled connection while it
-          #       resolves its request, so a consumer admitting ten concurrent
-          #       handlers against a pool of four oversubscribes the pool by more
-          #       than two to one; the six that cannot obtain a connection wait
-          #       out connection-timeout and fail, the queue redelivers them, and
-          #       a pool-sizing decision has become an apparent messaging fault.
-          #       At two, no handler ever waits for a connection at all.
-          #       (3) Assumptions: the long-poll wait is NOT varied here and is
-          #       inherited from the base at five seconds. It is not an
-          #       environment-sized value. app/app-vsam-mq/cbl/CODATE01.cbl L286
-          #       is MOVE 5000 TO MQGMO-WAITINTERVAL -- five seconds -- as the
-          #       wait on the baseline get, and the comment above it at L285 says
-          #       so in the source. Shortening it in dev would make dev poll
-          #       differently from both prod and the program being migrated, so
-          #       the one number in this block that came from the baseline is the
-          #       one number no profile may touch.
-          max-concurrent-messages: 2
-          max-messages-per-poll: 2
 
 management:
   endpoint:

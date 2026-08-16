@@ -168,7 +168,7 @@ class TransactionTypeRepositoryIT extends ReferencePersistenceBase {
 
     /** The state repository, counted by the seed audit. */
     @Autowired
-    private UsStateRepository states;
+    private StateRepository states;
 
     /** The state-and-postal-prefix repository, counted by the seed audit. */
     @Autowired
@@ -485,7 +485,7 @@ class TransactionTypeRepositoryIT extends ReferencePersistenceBase {
      * <p>Purpose: this is the load-bearing assertion of the whole package and it is proven at no other
      * level. {@code app/app-transaction-type-db2/ddl/TRNTYCAT.ddl} declares the constraint across L6 and
      * L7 as a foreign key on the category table's type column referencing the type table with the
-     * restrict action, and {@code db/migration/V1__reference.sql} reproduces it at L266 to L268 as
+     * restrict action, and {@code db/migration/V1__reference.sql} reproduces it at L255 to L257 as
      * {@code fk_transaction_categories_type}. The refusal then travels a fixed chain: the reference
      * platform answers a referential-constraint failure, the target answers PostgreSQL SQLSTATE
      * {@code 23503}, the framework translates that into a data-integrity exception, and
@@ -667,7 +667,7 @@ class TransactionTypeRepositoryIT extends ReferencePersistenceBase {
      *
      * <p>Purpose: {@code TR_DESCRIPTION} is declared {@code NOT NULL} at
      * {@code app/app-transaction-type-db2/ddl/TRNTYPE.ddl} L3 and {@code V1__reference.sql} reproduces
-     * that at its L117. What is asserted is that the ENGINE holds the column, so that the declaration
+     * that at its L110. What is asserted is that the ENGINE holds the column, so that the declaration
      * remains a guarantee for every writer of the schema and not only for callers who happen to arrive
      * through this application.</p>
      *

@@ -122,12 +122,24 @@
  *       {@code ORGANIZATION IS SEQUENTIAL}, ending in a return code rather than in a
  *       restartable chunk, so it migrates to a service method that the API and the batch
  *       chain both invoke. Job ownership belongs to {@code batch-service}.</li>
- *   <li>No SQS configuration class. Assumptions: {@code application.yml} already declares
- *       the {@code spring.cloud.aws.sqs} properties, among them a five second receive wait
- *       answering the baseline's own {@code MQGMO-WAITINTERVAL} of 5000 at
- *       {@code app/app-vsam-mq/cbl/CODATE01.cbl} L286, and Spring Cloud AWS
- *       auto-configures the listener infrastructure from them. Whatever configuration the
- *       module needs lives in the sibling config package.</li>
+ *   <li>No queue consumer, and consequently no SQS configuration class or messaging property.
+ *       ⚠️ Refactoring Rationale: this entry previously deferred a queue CLIENT to the sibling config
+ *       package while this package held the consumer that used it. Both are withdrawn. The baseline
+ *       drives BOTH inquiry programs from ONE request destination,
+ *       {@code DEFINE QLOCAL('CARDDEMO.REQUEST.QUEUE')} at {@code app/app-vsam-mq/README.md} L53,
+ *       aliased to CICS as {@code MQQUEUE(CARDREQ)} at L71, and the migrated topology provisions that
+ *       one queue rather than one per consumer -- a queue admits exactly one owning consumer, because a
+ *       receive hides the message from every other consumer rather than delivering a copy to each. The
+ *       owner is {@code com.carddemo.account.service.InquiryMessageListener}, which dispatches on the
+ *       request's four-character function code and renders the date answer from
+ *       {@code com.carddemo.common.codec.DateInquiryReplyCodec}. Assumptions: what stays in this
+ *       package is the date EVALUATION on {@code DateConversionService}, reached from the synchronous
+ *       endpoint, which answers a different question -- it judges a date a caller submits, where the
+ *       queue route emits the current system date and time and reads no field of its request. The
+ *       baseline keeps them apart too: a search for {@code CSUTLDTC} across all 524 lines of
+ *       {@code app/app-vsam-mq/cbl/CODATE01.cbl} returns zero occurrences.
+ *       {@code ReferenceServiceStructureTest} asserts this package declares no queue binding, so the
+ *       absence is measured rather than described.</li>
  *   <li>No second exception handling advice, per Contract 1.</li>
  *   <li>The date edit rules are not restated here. They live in
  *       {@code com.carddemo.common.validation.DateEditValidator} and

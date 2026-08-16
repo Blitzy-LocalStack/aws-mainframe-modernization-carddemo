@@ -55,8 +55,8 @@
  * {@code package-info.java} charter is the only place its Javadoc can live, which is what makes this
  * file rule-mandated rather than a convention this package happens to follow.
  * {@code docs/CODE_DOCUMENTATION_STANDARD.md} L326 names the same artefact in the same terms, and
- * {@code config/checkstyle/checkstyle.xml} binds it twice over: {@code JavadocPackage} at L245 asserts
- * that the file exists and {@code MissingJavadocPackage} at L378 asserts that it carries Javadoc, so
+ * {@code config/checkstyle/checkstyle.xml} binds it twice over: {@code JavadocPackage} at L238 asserts
+ * that the file exists and {@code MissingJavadocPackage} at L371 asserts that it carries Javadoc, so
  * an empty file would satisfy the first and fail the second.</p>
  *
  * <p>Assumptions: of the four docstring elements the rule enumerates, only Purpose at L18 has content
@@ -104,15 +104,15 @@
  * illustration, so that a reviewer auditing the tree by literal search finds only labels that are
  * actually in use. The two forms are never mixed inside one file.</p>
  *
- * <h2>The seven mappers, and why three of them are static</h2>
+ * <h2>The six mappers, and why three of them are static</h2>
  *
- * <p>Assumptions: seven mappers are landed as compilation units beside this charter, and the closed
- * set of this package is those seven plus this file. Nothing is outstanding, so a reader who cannot
- * open one of the seven has found a gap rather than the expected state. The count is measured against
+ * <p>Assumptions: six mappers are landed as compilation units beside this charter, and the closed
+ * set of this package is those six plus this file. Nothing is outstanding, so a reader who cannot
+ * open one of the six has found a gap rather than the expected state. The count is measured against
  * the directory on every build:</p>
  *
  * <pre>
- * this directory: 8 java files = 7 classes + 1 charter
+ * this directory: 7 java files = 6 classes + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: this section said five, and enumerated five, while
@@ -154,6 +154,23 @@
  * paged route needs -- so the static class would have had to grow one back, arriving at the beans by a
  * longer path.</p>
  *
+ * <p>⚠️ Refactoring Rationale: the count moved down a second time, from seven to six, when
+ * {@code DateInquiryReplyMapper} left this package for
+ * {@code com.carddemo.common.codec.DateInquiryReplyCodec}. It was not deleted and its behaviour did
+ * not change; it MOVED, and the reason is a topology fact rather than a preference. Both inquiry
+ * flows arrive on the ONE request queue the baseline defines at
+ * {@code app/app-vsam-mq/README.md} L53, aliased to CICS as {@code MQQUEUE(CARDREQ)} at L71, and a
+ * queue admits exactly one owning consumer because a receive hides the message from every other
+ * consumer. The owning consumer is the account context, so the renderer had to be reachable from
+ * there; the shared kernel is where it is reachable from both, beside the request codec that already
+ * single-sources the same one-thousand-character wire, which is what transformation rule T2 requires.
+ * Alternatives Considered: keeping it here and having the owning consumer call this context per
+ * message. Rejected because it would buy a pairwise machine-identity signing key, its rotation
+ * obligation, its IAM grants and a network hop on the message path, all to obtain the clock formatted
+ * two ways. Assumptions: what remains here of that flow is the citation on
+ * {@code com.carddemo.reference.api.DateConversionController}, which needs the reply widths in order
+ * to explain that its own two date pictures are NOT that picture.</p>
+ *
  * <dl>
  *   <dt>{@code TransactionTypeMapper}</dt>
  *   <dd>Converts {@code TransactionType} to {@code TransactionTypeResponse} and builds a new entity
@@ -170,10 +187,6 @@
  *       caller asked for and the group that supplied the rate so that a fallback is visible in the
  *       reply. Outbound only.</dd>
  *
- *   <dt>{@code DateInquiryReplyMapper}</dt>
- *   <dd>Renders the date-conversion reply line of the message-driven inquiry flow, transcribed from
- *       {@code app/app-vsam-mq/cbl/CODATE01.cbl}, and frames it to the declared message length. It
- *       converts no entity, because this reply has none.</dd>
  *
  *   <dt>{@code UsPhoneAreaCodeMapper}</dt>
  *   <dd>Renders one seeded area-code row, with the sub-list it belongs to, as
@@ -215,36 +228,38 @@
  *       symmetrical, for the reason the entry above gives.</dd>
  * </dl>
  *
- * <p>Alternatives Considered: three of the seven -- {@code TransactionTypeMapper},
+ * <p>Alternatives Considered: three of the six -- {@code TransactionTypeMapper},
  * {@code TransactionCategoryMapper} and {@code DisclosureGroupMapper} -- are {@code final} classes with
- * a private constructor and static members, while the other four are Spring {@code @Component}s with
+ * a private constructor and static members, while the other three are Spring {@code @Component}s with
  * instance members. A uniform set of injected instance components was the alternative, and the split is
  * deliberate rather than residue. Each of the three is a total function of its argument: it has no
  * collaborator, no configuration and no state, so a static call site states that honestly and leaves no
  * constructor through which a dependency could later be introduced without anyone noticing the class had
- * stopped being a pure conversion. The four beans are not that shape, for two different reasons.
- * {@code DateInquiryReplyMapper} delegates framing to
- * {@code com.carddemo.common.codec.InquiryRequestCodec} and is
- * consumed by the message listener in {@code com.carddemo.reference.service}, where being a bean is
- * what allows a listener test to supply a substitute without the listener changing.
- * {@code UsPhoneAreaCodeMapper}, {@code UsStateMapper} and {@code UsStateZipPrefixMapper} are beans
- * because each was authored for constructor injection into a per-entity lookup route, and each one's own
- * header records that choice. ⚠️ Refactoring Rationale: this paragraph used to name only the first two
+ * stopped being a pure conversion. The three beans are not that shape for a single reason:
+ * {@code UsPhoneAreaCodeMapper}, {@code UsStateMapper} and {@code UsStateZipPrefixMapper} were each
+ * authored for constructor injection into a per-entity lookup route, and each one's own header records
+ * that choice. Refactoring Rationale: this paragraph named a fourth bean,
+ * {@code DateInquiryReplyMapper}, and gave its reason as being substitutable by a listener test in
+ * {@code com.carddemo.reference.service}. Both halves went with the class: it now sits in the shared
+ * kernel as a static holder, and the listener it served is not in this module at all. ⚠️ Refactoring Rationale: this paragraph used to name only the first two
  * of that trio and to describe them as "the two members of this package whose shape is justified by a
  * consumer that does not reach them". Both halves of that sentence were wrong. It omitted
  * {@code UsStateZipPrefixMapper}, which is the same case and had its own enumerated entry a hundred
  * lines below, so the paragraph and the roster disagreed about how many beans this package holds; and
  * the consumer it said did not reach them is now {@code AddressLookupService}, which injects all three.
  * Assumptions: the static/bean split therefore does not divide pure conversions from impure ones -- all
- * four beans are as pure as the three static classes -- it divides classes a call site injects from
- * classes a call site names.</p>
+ * three beans are as pure as the three static classes -- it divides classes a call site injects from
+ * classes a call site names. Assumptions: with the fourth bean withdrawn the split is also simpler
+ * than it was -- the three beans are exactly the three seeded-lookup conversions and the three static
+ * classes are exactly the three record conversions, so the shape now follows the roster rather than
+ * cutting across it.</p>
  *
  * <p>Trade-offs: the three static classes are declared {@code final} with private constructors, so
  * nothing can subclass or proxy them, and a later cross-cutting concern that needed to wrap a
  * conversion would first have to convert them to instance members. A static member also cannot be
  * replaced in a slice test the way an injected bean can. Both costs are accepted on the same ground:
  * a conversion with no collaborator has no behaviour worth substituting, so a test asserts its output
- * directly and gains nothing from indirection. The four beans are correspondingly not declared
+ * directly and gains nothing from indirection. The three beans are correspondingly not declared
  * {@code final}, precisely so that they remain proxyable.</p>
  *
  * <p>Alternatives Considered: discrete mappers rather than one consolidated
@@ -261,9 +276,10 @@
  * which is the cost accepted for keeping one implementation of the rule. Every other mapper calls
  * it not at all: {@code UsPhoneAreaCodeMapper}, {@code UsStateMapper},
  * {@code UsStateZipPrefixMapper} and {@code DisclosureGroupMapper} convert records that carry no
- * description, {@code DateInquiryReplyMapper} converts no record, so the trim boundary below never
- * reaches any of them and every value they publish is
- * verbatim.</p>
+ * description, so the trim boundary below never reaches any of them and every value they publish is
+ * verbatim. Refactoring Rationale: this sentence also named {@code DateInquiryReplyMapper} as a
+ * converter of no record; that class has moved to the shared kernel and is no longer one of the
+ * classes this boundary has to account for.</p>
  *
  * <h2>Why the conversion is written rather than generated</h2>
  *
@@ -333,9 +349,9 @@
  *
  * <p>Assumptions: a {@code PIC X(n)} used as a key or a fixed code becomes {@code CHAR(n)}, because
  * its declared width is part of the contract. That covers {@code type_cd CHAR(2)} at
- * {@code V1__reference.sql} L106 and L178, {@code cat_cd CHAR(4)} at L203, and
+ * {@code V1__reference.sql} L99 and L167, {@code cat_cd CHAR(4)} at L192, and
  * {@code acct_group_id CHAR(10)}, {@code tran_type_cd CHAR(2)} and {@code tran_cat_cd CHAR(4)} at
- * L311, L313 and L319. No key is ever trimmed in a way that could change its value, in either
+ * L300, L302 and L308. No key is ever trimmed in a way that could change its value, in either
  * direction. A {@code PIC X(n)} used descriptively becomes {@code VARCHAR(n)}, because there the
  * trailing blanks are padding rather than content. That covers {@code description VARCHAR(50)} at
  * L117 and L209, and it alone is normalised: trailing blanks are removed on the inbound path before
@@ -433,7 +449,7 @@
  * {@code 10 DIS-TRAN-CAT-CD PIC 9(04)}, both of which read as numeric. What decides it is the
  * consequence rather than the count of authorities: an integer column would render {@code 0001} as
  * {@code 1}, so only the character reading preserves the value a consumer of the baseline can observe
- * today. {@code V1__reference.sql} L203 records the same contradiction at the column itself, so the
+ * today. {@code V1__reference.sql} L192 records the same contradiction at the column itself, so the
  * schema and this charter are not two independent claims.</p>
  *
  * <p>Assumptions: this is a ruling about type, not about naming. No field is renamed anywhere in this
@@ -442,7 +458,7 @@
  * <h2>The rate never leaves fixed point</h2>
  *
  * <p>Assumptions: the disclosure-group interest rate is exact at every hop. It is
- * {@code NUMERIC(6,2)} in the schema at {@code V1__reference.sql} L337, derived from
+ * {@code NUMERIC(6,2)} in the schema at {@code V1__reference.sql} L326, derived from
  * {@code app/cpy/CVTRA02Y.cpy} L9 {@code DIS-INT-RATE PIC S9(04)V99}; it is a
  * {@code java.math.BigDecimal} at scale two on the entity; it is a
  * {@code com.carddemo.common.money.Money} on the response; and it reaches the wire as a JSON string,
@@ -518,10 +534,12 @@
  *   <li>Assumptions: there is no mapper for the synchronous date-conversion request and response pair.
  *       Those two shapes have no domain entity behind them, and the service layer builds the response
  *       directly from what {@code com.carddemo.common.validation.DateEditValidator} returns, so a
- *       mapper would have nothing on the entity side to convert.
- *       {@code DateInquiryReplyMapper} is not that missing class and should not be mistaken for it: it
- *       serves the message-driven inquiry flow and renders a fixed-width reply line, which is a
- *       different artefact answering a different caller.</li>
+ *       mapper would have nothing on the entity side to convert. Assumptions: neither is there a
+ *       renderer for the message-driven inquiry reply. {@code DateInquiryReplyMapper} used to stand
+ *       here and be easy to mistake for the missing synchronous mapper; it now sits in the shared
+ *       kernel as {@code com.carddemo.common.codec.DateInquiryReplyCodec}, beside the request codec of
+ *       the same wire, and is reached by the consumer that owns the shared request queue rather than
+ *       by anything in this module.</li>
  *   <li>Assumptions: the three lookup mappers and {@code DisclosureGroupMapper} carry no inbound
  *       member. The three lookup tables and the disclosure groups are seeded reference data, so the DTO
  *       package publishes no create or update shape for them and there is nothing for an inbound
@@ -575,7 +593,7 @@
  * <p>Assumptions: the referential rule that relates the two transaction-reference records is named
  * here only as context for why they are converted by two mappers that share a helper.
  * {@code app/app-transaction-type-db2/ddl/TRNTYCAT.ddl} L6 to L7 restricts deletion of a type that
- * categories still reference, which becomes the foreign key at {@code V1__reference.sql} L266 to L268
+ * categories still reference, which becomes the foreign key at {@code V1__reference.sql} L255 to L257
  * and surfaces to a caller as HTTP 409. Enforcing it is the database's work and reporting it is the
  * service layer's; no mapper participates.</p>
  *

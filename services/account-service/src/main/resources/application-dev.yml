@@ -220,6 +220,17 @@ spring:
       sqs:
         listener:
 
+          # WHY : Refactoring Rationale: this number is now IN FORCE, and it
+          #       previously was not. The listener's @SqsListener annotation
+          #       carried maxConcurrentMessages, maxMessagesPerPoll and
+          #       pollTimeoutSeconds of its own, and a non-null annotation
+          #       attribute is applied over the container factory these keys
+          #       configure - so the pair below was parsed and then overridden by
+          #       the annotation's ten and ten. The annotation attributes are
+          #       withdrawn, leaving this block the single sizing authority, which
+          #       is what makes the reasoning below describe the deployed system
+          #       rather than an intention.
+          #
           # WHY : Trade-offs: two concurrent messages against the base's ten.
           #       Dev carries none of production's message volume, so the
           #       ceiling is reduced to keep this listener from competing with
@@ -280,6 +291,36 @@ spring:
           #       dead-letter queue; an application-side key of that name would
           #       be silently ignored and would leave a reader believing this
           #       file governs redelivery when it does not.
+
+carddemo:
+  account:
+    inquiry:
+
+      # WHY : (1) Refactoring Rationale: this pair is what actually narrows the
+      #       account-inquiry consumer, and its absence is why the
+      #       spring.cloud.aws.sqs.listener pair above had no effect. The consumer's
+      #       @SqsListener attributes read
+      #       carddemo.account.inquiry.max-concurrent-messages and
+      #       max-messages-per-poll, and an annotation attribute takes precedence over
+      #       the container factory's own setting -- so while those attributes carried
+      #       an inline fallback of ten, this profile lowered the factory default to
+      #       two and the listener continued to run at ten. The whole of the pool
+      #       argument recorded above was correct and unenforced. The fallbacks are
+      #       gone, the properties are declared in the base document, and this is
+      #       where the smaller values now take hold.
+      #       (2) Assumptions: the values are the SAME two the block above sets, and
+      #       both blocks are kept rather than one. They govern different scopes -- the
+      #       factory default applies to any container this service ever adds, this
+      #       pair applies to the one annotated consumer it has -- so setting only the
+      #       listener pair would leave a future second consumer inheriting ten
+      #       against the same connection pool, and setting only the factory pair is
+      #       precisely the ineffective arrangement being corrected.
+      #       (3) Assumptions: poll-timeout-seconds is NOT varied here, for the reason
+      #       already recorded above about the base document owning the transcribed
+      #       five-second wait. The pair here is a sizing decision; that value is a
+      #       preserved behavioural contract.
+      max-concurrent-messages: 2
+      max-messages-per-poll: 2
 
 logging:
   level:

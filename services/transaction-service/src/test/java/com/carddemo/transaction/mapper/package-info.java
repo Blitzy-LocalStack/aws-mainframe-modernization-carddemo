@@ -28,7 +28,7 @@
  * <p>Assumptions: inventing those at-clauses would do more than add noise.
  * Javadoc has no parameter, result or exception concept for a package, and
  * {@code NonEmptyAtclauseDescription} is enabled in
- * {@code config/checkstyle/checkstyle.xml} at its line 470, so a fabricated
+ * {@code config/checkstyle/checkstyle.xml} at its line 463, so a fabricated
  * at-clause would either be discarded by the tool or reported as an empty
  * description. The rule enumerates four docstring elements at its lines 18 to
  * 21, exactly one of the four has a subject in this compilation unit, and the
@@ -58,7 +58,7 @@
  *
  * <p>Assumptions: the build's half of the mandate is a paired interlock, and
  * the two halves are not redundant. {@code JavadocPackage} sits at the top
- * level of {@code config/checkstyle/checkstyle.xml}, at its line 245, which
+ * level of {@code config/checkstyle/checkstyle.xml}, at its line 238, which
  * makes it a file-set check demanding that a charter FILE EXIST in any
  * directory holding a source file the audit processed.
  * {@code MissingJavadocPackage} sits inside the syntax-tree container, at line
@@ -294,7 +294,7 @@
  * suppression cannot be smuggled in as a local annotation or a marker comment.
  * None of the three comment-driven or annotation-driven suppression filters is
  * enabled in {@code config/checkstyle/checkstyle.xml} -- the file records their
- * absence deliberately at its lines 588 and 589 -- so neither a marker comment
+ * absence deliberately at its lines 581 and 582 -- so neither a marker comment
  * nor an annotation suppresses anything anywhere in this tree. A suppression
  * would have to be a durable entry in the companion file, and the companion
  * file's own charter refuses one for the test tree as a whole. Relaxing the

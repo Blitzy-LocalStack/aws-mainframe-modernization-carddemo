@@ -12,17 +12,18 @@
  * reviewable module instead of by discipline spread across 21 screen
  * implementations.
  *
- * The other half - the static text PAINTED BY THE BMS MAPS - is deliberately not
- * here. That boundary is drawn by the migration plan itself, which gives this
- * module a different source list from the one it gives the screen and layout
- * components: this module is transcribed from `app/cpy/CSMSG01Y.cpy`,
- * `app/cpy/CSMSG02Y.cpy`, `app/cpy/COTTL01Y.cpy` and the online programs, whereas
- * `app/bms/*.bms` is the source for `ui/src/screens/**`, `ScreenHeader` and
- * `PfKeyBar`. See "Not in this catalog" below for what that leaves out, how large
- * it is, and which module owns it instead. The body of this file already applies
- * the same boundary in the one place it is easy to mistake - see the note above
- * {@link ACCOUNT_UPDATE_FIELD_LABELS}, which is catalogued precisely BECAUSE those
- * entries are program literals rather than map-painted labels.
+ * The static text PAINTED BY THE BMS MAPS is the other half, and this module holds
+ * it for every screen that imports its strings from here. AAP section 0.2.1.5 states
+ * the rule for `ui/src/screens/**` - "every user-visible string from the message
+ * catalog" - so a screen's headings, field labels and per-screen legend text belong
+ * here beside the copybook constants and program literals, transcribed from the
+ * mapset and carrying the mapset line each was read from. See "Not in this catalog"
+ * below for what remains outside it, how large that group is, and which module owns
+ * it instead. Two groups make the two halves easy to tell apart: the note above
+ * {@link ACCOUNT_UPDATE_FIELD_LABELS} records that those entries are program
+ * literals rather than painted labels, while
+ * {@link ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS} and its three companions are painted
+ * labels, cited to `app/bms/COACTVW.bms` line by line.
  *
  * Provenance
  * ----------
@@ -127,9 +128,11 @@
  * models all of them; do not assume a single number.
  * Not in this catalog
  * -------------------
- * The static text a BMS map paints onto a screen is NOT catalogued here, and no
- * entry below is sourced from a `.bms` file. That group is real and it is large,
- * so it is measured rather than waved at. Method, reproducible with one command:
+ * This catalog holds the painted text of the mapsets whose screen imports its strings
+ * from here - `app/bms/COACTVW.bms` and `app/bms/COMEN01.bms` in the delivered tree -
+ * and the rest of the painted text is held by the module that renders it. That
+ * remainder is real and it is large, so it is measured rather than waved at. The
+ * measurement has two halves. The BMS half is one command:
  *
  * ```text
  * grep -ho "INITIAL='[^']*'" $(find app -name '*.bms')
@@ -138,16 +141,35 @@
  * Across the 21 mapsets (17 base under `app/bms` plus 4 extension mapsets) that
  * yields 665 occurrences of 213 distinct literals. 194 of the 213 contain at least
  * one alphanumeric character; the remaining 19 are blank or pure punctuation used
- * to rule a line. Of those 194, exactly 31 already appear as substrings of this
- * catalog - they are the title-band, menu-option and message text this module owns
- * and the map merely re-paints - which leaves **163 distinct literals, 344
- * occurrences, that this module does not hold**. The command above deliberately
+ * to rule a line. The containment half then tests each of those 194 against this
+ * module's CODE - its exported values, with this file's own doc comments excluded -
+ * and finds 55: the title-band, menu-option and message text this module already owned
+ * and the map merely re-paints, plus the account-view and main-menu strings it now owns
+ * outright. That leaves **139 distinct literals, 301 occurrences, that this module does
+ * not hold**.
+ *
+ * Refactoring Rationale: the containment half excludes this file's comments, and stating
+ * it that precisely is not pedantry. A whole-file substring test is shorter to describe
+ * and is wrong here for a definite reason: the four kinds listed below QUOTE the very
+ * literals they describe as absent, so `ENTER=Continue  F3=Exit` and its two companions
+ * counted as held purely because this paragraph names them, and the list below therefore
+ * contradicted the figure above it. Excluding comments makes the figure and the examples
+ * agree, and all three legends are outside the 55.
+ *
+ * Refactoring Rationale: the three figures read 31, 163 and 344 and were re-measured
+ * rather than adjusted, because three independent things had moved since they were
+ * written: entries were added to this catalog by later work; the account-view group below
+ * moved 26 literals in and the main-menu group moved 3 (`Main Menu`,
+ * `Please select an option :` and `F3=Exit`); and the containment test changed as just
+ * described. Re-running the command and the containment test is the whole method, so a
+ * reader who doubts a figure can settle it in one step instead of reconciling three
+ * edits. The command above deliberately
  * matches only a literal that opens and closes on one physical line, which is why
  * its output is exact and repeatable; it therefore cannot see the further **18
  * literals that BMS continues across a line boundary** with a non-blank in column
  * 72 (for example `app/bms/COSGN00.bms` line 149, `app/bms/COTRN02.bms` line 279
  * and `app/bms/COUSR02.bms` line 163). None of those 18 is in this catalog either,
- * so the true size of the group is at least 181 distinct literals. Four kinds
+ * so the true size of the group is at least 157 distinct literals. Four kinds
  * account for all of them:
  *
  * - Static field labels, one per input or display field: `User ID     :`,
@@ -163,40 +185,44 @@
  * - Pure decoration with no counterpart in a browser, chiefly the eight-line
  *   ASCII-art dollar note on `app/bms/COSGN00.bms`.
  *
- * Their single source of truth is the module that renders them, each of which the
- * migration plan sources from the mapsets directly: a screen's own field labels
- * belong to that screen under `ui/src/screens/**`; the four status-line prompts
- * belong to `ui/src/layout/ScreenHeader.tsx`; and the function-key legends belong
- * to `ui/src/layout/PfKeyBar.tsx`, which derives its key semantics from
- * `app/cpy/CSSTRPFY.cpy` rather than from the painted legend text.
+ * Two of those four kinds have a single source of truth that is NOT this module,
+ * and both are shared rather than per-screen: the four status-line prompts belong to
+ * `ui/src/layout/ScreenHeader.tsx`, and the function-key legends whose wording is
+ * uniform across mapsets belong to `ui/src/layout/PfKeyBar.tsx`, which derives its
+ * key semantics from `app/cpy/CSSTRPFY.cpy` rather than from the painted legend
+ * text. The decoration has no target at all. A screen's own headings, field labels
+ * and per-screen legend text belong HERE, which is what
+ * {@link ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS} and its three companions deliver for the
+ * account-view mapset and {@link MAIN_MENU_HEADINGS} and its companion deliver for the
+ * main-menu mapset.
  *
  * Assumptions: this is a description of the delivered tree, not a plan for it.
- * `ui/src/layout/ScreenHeader.tsx` declares the four status-line prompts,
- * `ui/src/layout/PfKeyBar.tsx` declares the three legend labels whose wording is
- * uniform across the mapsets that use them, and each screen under
- * `ui/src/screens/**` declares its own title, field labels and per-screen legend
- * parts beside the controls they name. The ownership rule below is what those
- * modules implement rather than something they supersede, so screens authored later
- * add their own mapset text the same way and a string absent from this catalog is
- * still evidence that a `.bms` file holds it rather than evidence of a gap.
+ * `ui/src/layout/ScreenHeader.tsx` declares the four status-line prompts and
+ * `ui/src/layout/PfKeyBar.tsx` declares the three uniform legend labels; the
+ * account-view and main-menu groups below hold every painted string of their two
+ * mapsets, and the two screens that render those mapsets take them from here rather
+ * than declaring copies - which their own suites assert, by comparing what is rendered
+ * against these entries rather than against a literal typed into the test; and the
+ * screens authored before that rule was applied still declare their own painted
+ * labels beside the controls they name. A string absent from this catalog is
+ * therefore evidence that a `.bms` file holds it and that its renderer has not been
+ * brought under this rule yet - it is not evidence that no module owns it.
  *
- * Alternatives Considered: the boundary is drawn here rather than by absorbing the
- * BMS text into this module. Absorbing it was the obvious alternative and
- * would make one module literally total. It was rejected on three grounds. First,
- * a field label is positional - it is meaningless apart from the field it sits
- * beside - so cataloguing it centrally separates it from the only thing that gives
- * it meaning and invites the label and the input to drift apart. Second, the
- * decoration has no target at all: an eight-line ASCII-art bank note exists
- * because a 24x80 character cell canvas had space to fill, and AAP gap G1 already
- * records that absolute character positioning is not reproduced, so transcribing
- * it would create catalog entries no component may render. Third, a legend such as
- * `ENTER=Sign-on  F3=Exit` is a RENDERING of the key bindings, not their
- * definition; the definition is `app/cpy/CSSTRPFY.cpy`, and duplicating the
- * rendered form here would create a second place for the two to disagree.
- * Trade-offs: no single module is total, and that split is accepted rather than
- * argued away, so "which module owns this string?" has to be answered by asking
- * where the baseline holds it - a copybook constant or program literal here, a
- * `.bms` `INITIAL=` value in the renderer.
+ * Alternatives Considered: leaving every painted label in its screen, which is where
+ * the delivered tree began. It was rejected because AAP section 0.2.1.5 assigns the
+ * strings a screen renders to this catalog, and because the byte-exactness invariant
+ * below is reviewed HERE - a label transcribed in a screen is a value nobody
+ * re-checks against the mapset. The positional objection is real and is answered
+ * rather than dismissed: a field label is meaningless apart from the field it sits
+ * beside, so {@link ACCOUNT_VIEW_PAINTED_TEXT_SOURCES} carries the mapset line of
+ * every entry and the group order is the mapset's declaration order, which keeps the
+ * label one lookup from its field instead of one file.
+ * Trade-offs: two kinds of painted text stay outside this module, and that split is
+ * accepted rather than argued away - a status-line prompt and a uniform legend are
+ * SHARED text whose renderer is shared too, so cataloguing them per screen would
+ * create 21 copies of one string. "Which module owns this string?" is therefore
+ * answered by asking whether it is a screen's own text (here) or shell text (the
+ * shell component).
  *
  * Invariant
  * ---------
@@ -1223,6 +1249,210 @@ export const ACCOUNT_UPDATE_FIELD_LABEL_SOURCES = {
   SSN_LAST_4_CHARS: [2481],
 } as const satisfies Record<keyof typeof ACCOUNT_UPDATE_FIELD_LABELS, readonly number[]>;
 
+/** Mapset file the account-view screen's painted text is transcribed from. */
+export const ACCOUNT_VIEW_MAPSET_SOURCE_FILE = 'app/bms/COACTVW.bms';
+
+/** Mapset file the main-menu screen's painted text is transcribed from. */
+export const MAIN_MENU_MAPSET_SOURCE_FILE = 'app/bms/COMEN01.bms';
+
+/**
+ * The two headings `app/bms/COMEN01.bms` paints on the main-menu screen, verbatim.
+ *
+ * Assumptions: the option NAMES are not here - they are {@link MAIN_MENU_OPTIONS}, read
+ * from `app/cpy/COMEN02Y.cpy`, because the mapset paints each option row as
+ * `INITIAL=' '` and the program fills it at run time from that copybook. Only the two
+ * literals the map itself carries are transcribed here.
+ */
+export const MAIN_MENU_HEADINGS = {
+  /** Row-4 screen heading, `LENGTH=9` at `POS=(4,35)`, `COLOR=NEUTRAL` with `BRT`. */
+  SCREEN: 'Main Menu',
+  /** Row-20 prompt beside the option field, `LENGTH=25` at `POS=(20,15)`. */
+  OPTION_PROMPT: 'Please select an option :',
+} as const;
+
+/**
+ * The two key legends `app/bms/COMEN01.bms` paints, split at the run of spaces.
+ *
+ * Assumptions: the mapset paints ONE literal, `ENTER=Continue  F3=Exit` at `LENGTH=23`
+ * in `COLOR=YELLOW`, and it is stored here as its two entries because
+ * `ui/src/layout/PfKeyBar.tsx` renders one control per key. The arithmetic confirms the
+ * split against the declared width: 14 + 2 + 7 = 23, the two spaces being the
+ * separator rather than part of either label.
+ */
+export const MAIN_MENU_KEY_LABELS = {
+  ENTER: 'ENTER=Continue',
+  PFK03: 'F3=Exit',
+} as const;
+
+/** The mapset line each main-menu painted string is transcribed from. */
+export const MAIN_MENU_PAINTED_TEXT_SOURCES = {
+  headings: {
+    SCREEN: 79,
+    OPTION_PROMPT: 144,
+  },
+  keyLabels: {
+    ENTER: 162,
+    PFK03: 162,
+  },
+} as const satisfies {
+  readonly headings: Record<keyof typeof MAIN_MENU_HEADINGS, number>;
+  readonly keyLabels: Record<keyof typeof MAIN_MENU_KEY_LABELS, number>;
+};
+
+/**
+ * The two headings `app/bms/COACTVW.bms` paints on the account-view screen, verbatim.
+ *
+ * Assumptions: both are `INITIAL=` literals on unnamed `DFHMDF` definitions, so neither has
+ * a symbolic-map field and neither can ever arrive in a response - they are painted text, and
+ * the screen renders them from here rather than declaring them beside its controls.
+ *
+ * Refactoring Rationale: this group, {@link ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS},
+ * {@link ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS} and {@link ACCOUNT_VIEW_KEY_LABELS} were
+ * declared inside `ui/src/screens/accountView/index.tsx` on the ground that a map-painted
+ * label is positional and belongs beside the field it names. AAP section 0.2.1.5 settles it
+ * the other way for `ui/src/screens/**` - every user-visible string a screen renders is
+ * imported from this catalog - so the 31 strings moved here and the screen imports them. The
+ * positional argument is answered rather than dismissed: each entry below carries the mapset
+ * line its literal sits on, so the field a label names is still one lookup away, and the
+ * byte-exactness guarantee now covers these strings in the one module that is reviewed for it.
+ */
+export const ACCOUNT_VIEW_HEADINGS = {
+  /** Row-4 screen heading, `LENGTH=12` at `POS=(4,33)`, `COLOR=NEUTRAL`. */
+  ACCOUNT: 'View Account',
+  /** Row-11 block heading, `LENGTH=16` at `POS=(11,32)`, `COLOR=NEUTRAL`. */
+  CUSTOMER: 'Customer Details',
+} as const;
+
+/**
+ * The eleven account-block field labels `app/bms/COACTVW.bms` paints, in declaration order.
+ *
+ * Assumptions: the interior runs of spaces and the trailing spaces are part of the value and
+ * are not formatting. The mapset pads each label to a fixed cell width so the colons line up
+ * down the column - `Credit Limit        :` and `Current Cycle Debit :` are both `LENGTH=21` -
+ * and the transcription rule for this catalog is byte-exact. A renderer may collapse the runs
+ * visually; nothing may discard them.
+ */
+export const ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS = {
+  /** Label of the account filter, the block's only unprotected field. */
+  ACCOUNT_NUMBER: 'Account Number :',
+  ACTIVE_STATUS: 'Active Y/N: ',
+  OPEN_DATE: 'Opened:',
+  CREDIT_LIMIT: 'Credit Limit        :',
+  EXPIRATION_DATE: 'Expiry:',
+  CASH_CREDIT_LIMIT: 'Cash credit Limit   :',
+  REISSUE_DATE: 'Reissue:',
+  CURRENT_BALANCE: 'Current Balance     :',
+  CURRENT_CYCLE_CREDIT: 'Current Cycle Credit:',
+  GROUP_ID: 'Account Group:',
+  CURRENT_CYCLE_DEBIT: 'Current Cycle Debit :',
+} as const;
+
+/**
+ * The eighteen customer-block field labels `app/bms/COACTVW.bms` paints, in declaration order.
+ *
+ * Assumptions: `ADDRESS_LINE_2` is the empty string because the mapset paints NO label for
+ * `ACSADL2`. That field sits at `POS=(17,10)`, directly beneath `ACSADL1` at `POS=(16,10)`, and
+ * the only label on either row is the single `Address:` at `POS=(16,1)`; the second line was
+ * identified to a terminal operator by sitting under the first. That positional identification
+ * is exactly what AAP gap G1 gives up, and inventing a label - or repeating `Address:` - would
+ * claim the mapset paints text it does not. The empty value is therefore recorded deliberately
+ * so a reader does not read it as an omission, and it is the one entry with no source line.
+ */
+export const ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS = {
+  CUSTOMER_ID: 'Customer id  :',
+  SSN: 'SSN:',
+  DATE_OF_BIRTH: 'Date of birth:',
+  FICO_CREDIT_SCORE: 'FICO Score:',
+  FIRST_NAME: 'First Name',
+  MIDDLE_NAME: 'Middle Name: ',
+  LAST_NAME: 'Last Name : ',
+  ADDRESS_LINE_1: 'Address:',
+  STATE_CODE: 'State ',
+  /** No label is painted; see the note on this group. */
+  ADDRESS_LINE_2: '',
+  ZIP_CODE: 'Zip',
+  CITY: 'City ',
+  COUNTRY_CODE: 'Country',
+  PHONE_NUMBER_1: 'Phone 1:',
+  GOVERNMENT_ISSUED_ID: 'Government Issued Id Ref    : ',
+  PHONE_NUMBER_2: 'Phone 2:',
+  EFT_ACCOUNT_ID: 'EFT Account Id: ',
+  PRIMARY_CARD_HOLDER_INDICATOR: 'Primary Card Holder Y/N:',
+} as const;
+
+/**
+ * The single row-24 legend label `app/bms/COACTVW.bms` paints, verbatim.
+ *
+ * Assumptions: the mapset paints exactly `'  F3=Exit '` - two leading spaces and one trailing
+ * space, ten characters inside a `LENGTH=60` `COLOR=TURQUOISE` field - and that is the whole
+ * legend. ENTER is deliberately NOT advertised even though `app/cbl/COACTVWC.cbl` L307-L308
+ * admits it, so binding a label to ENTER would paint a key the terminal did not. This is why
+ * the uniform legend labels `ui/src/layout/PfKeyBar.tsx` exports are not used on that screen:
+ * none of PF4, PF7 or PF8 is bound there, and ENTER's wording is not uniform across the
+ * mapsets in any case.
+ */
+export const ACCOUNT_VIEW_KEY_LABELS = {
+  /** Legend for the one attention identifier this mapset paints. */
+  PFK03: '  F3=Exit ',
+} as const;
+
+/**
+ * The mapset line each account-view painted string is transcribed from.
+ *
+ * Trade-offs: provenance is structured data keyed by the same names, rather than a comment
+ * above each entry, for the reason {@link SourceRef} records - with 31 entries a comment per
+ * entry would restate the values, which the project's explainability rule forbids, and as data
+ * the citation is machine-checkable. Each number is the line carrying the `INITIAL=` clause
+ * itself, not the line the `DFHMDF` opens on, because the clause is where the bytes are.
+ */
+export const ACCOUNT_VIEW_PAINTED_TEXT_SOURCES = {
+  headings: {
+    ACCOUNT: 78,
+    CUSTOMER: 202,
+  },
+  accountFields: {
+    ACCOUNT_NUMBER: 83,
+    ACTIVE_STATUS: 96,
+    OPEN_DATE: 106,
+    CREDIT_LIMIT: 116,
+    EXPIRATION_DATE: 127,
+    CASH_CREDIT_LIMIT: 137,
+    REISSUE_DATE: 148,
+    CURRENT_BALANCE: 158,
+    CURRENT_CYCLE_CREDIT: 170,
+    GROUP_ID: 181,
+    CURRENT_CYCLE_DEBIT: 191,
+  },
+  customerFields: {
+    CUSTOMER_ID: 206,
+    SSN: 215,
+    DATE_OF_BIRTH: 224,
+    FICO_CREDIT_SCORE: 233,
+    FIRST_NAME: 242,
+    MIDDLE_NAME: 246,
+    LAST_NAME: 250,
+    ADDRESS_LINE_1: 267,
+    STATE_CODE: 276,
+    ADDRESS_LINE_2: null,
+    ZIP_CODE: 290,
+    CITY: 300,
+    COUNTRY_CODE: 309,
+    PHONE_NUMBER_1: 318,
+    GOVERNMENT_ISSUED_ID: 325,
+    PHONE_NUMBER_2: 334,
+    EFT_ACCOUNT_ID: 341,
+    PRIMARY_CARD_HOLDER_INDICATOR: 350,
+  },
+  keyLabels: {
+    PFK03: 373,
+  },
+} as const satisfies {
+  readonly headings: Record<keyof typeof ACCOUNT_VIEW_HEADINGS, number>;
+  readonly accountFields: Record<keyof typeof ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS, number>;
+  readonly customerFields: Record<keyof typeof ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS, number | null>;
+  readonly keyLabels: Record<keyof typeof ACCOUNT_VIEW_KEY_LABELS, number>;
+};
+
 /**
  * Messages emitted by exactly one program, grouped under that program's name.
  *
@@ -1289,11 +1519,19 @@ export const PROGRAM_MESSAGES = {
   /** main menu - `app/cbl/COMEN01C.cbl` (1 message). */
   COMEN01C: {
     /**
-     * Assumptions: the trailing space is part of the value. The COBOL literal ends with
-     * a space, and `router.tsx` compares against this constant when it blocks a
-     * non-administrator, so the byte is load bearing. Alternatives Considered: trimming
-     * it reads as tidier and silently breaks that comparison and the screen test that
-     * asserts the rendered text.
+     * Assumptions: the trailing space is part of the value, because the COBOL literal at
+     * `app/cbl/COMEN01C.cbl` L140 ends with one. Two places render this constant and
+     * neither trims it: `ui/src/routes/guards.tsx` shows it when `RequireAdmin` refuses
+     * an authenticated non-administrator a route, and `ui/src/screens/menu/index.tsx`
+     * shows it when the main menu refuses a non-administrator an admin-only OPTION --
+     * which is the arm the baseline itself wrote it for.
+     *
+     * Refactoring Rationale: an earlier note said `router.tsx` "compares against" this
+     * constant. Nothing compares against it anywhere; it is rendered. The distinction
+     * matters, because a reader who believed a comparison existed could reasonably trim
+     * the byte here and "fix" the comparison at its imagined call site, leaving two
+     * rendered surfaces silently changed instead. Alternatives Considered: trimming reads
+     * as tidier and breaks the two screen tests that assert the rendered text.
      */
     NO_ACCESS_ADMIN_ONLY_OPTION: 'No access - Admin Only option... ',
   },
@@ -1611,6 +1849,16 @@ export const PROGRAM_MESSAGE_SOURCES = {
  * oracle these strings are compared against, so a tidier spelling would diverge from
  * it.
  */
+/**
+ * The copybook that holds the date edits, cited by the date suffixes' provenance entries.
+ *
+ * Assumptions: it is a copybook and not a program, so it cannot be named through
+ * {@link PROGRAM_SOURCE_FILES} -- that index maps ONLINE PROGRAM names to their files and a
+ * copybook has no transaction behind it. The date edits are procedure-division code the four
+ * date fields share, so citing the copybook is what lets one entry serve all four call sites.
+ */
+const DATE_EDIT_COPYBOOK = 'app/cpy/CSUTLDPY.cpy';
+
 export const FIELD_VALIDATION_SUFFIXES = {
   MUST_BE_SUPPLIED: ' must be supplied.',
   MUST_BE_Y_OR_N: ' must be Y or N.',
@@ -1634,6 +1882,30 @@ export const FIELD_VALIDATION_SUFFIXES = {
   IS_NOT_A_VALID_STATE_CODE: ': is not a valid state code',
   SHOULD_BE_BETWEEN_300_AND_850: ': should be between 300 and 850',
   MUST_BE_NUMERIC: ' must be numeric.',
+  /*
+   * WHY : Assumptions: the eleven date suffixes below come from `app/cpy/CSUTLDPY.cpy` rather
+   *       than from a program, because the date edits are a copybook of PROCEDURE code that
+   *       `COACTUPC` performs for each of its four dates -- so one transcription serves all
+   *       four, exactly as one copybook serves all four in the baseline.
+   *       Assumptions: their punctuation is wildly inconsistent and every inconsistency is
+   *       transcribed. Three carry a space before the colon, two carry none, the day sentence
+   *       spells `day` in lower case where its siblings capitalise, and the future-date
+   *       sentence ends in a trailing space. Each reads as a typing slip and none is one to
+   *       repair here, for the reason the group note above gives: `app/**` is the oracle these
+   *       strings are compared against.
+   */
+  YEAR_MUST_BE_SUPPLIED: ' : Year must be supplied.',
+  MUST_BE_4_DIGIT_NUMBER: ' must be 4 digit number.',
+  CENTURY_IS_NOT_VALID: ' : Century is not valid.',
+  MONTH_MUST_BE_SUPPLIED: ' : Month must be supplied.',
+  MONTH_MUST_BE_A_NUMBER_BETWEEN_1_AND_12: ': Month must be a number between 1 and 12.',
+  DAY_MUST_BE_SUPPLIED: ' : Day must be supplied.',
+  DAY_MUST_BE_A_NUMBER_BETWEEN_1_AND_31: ':day must be a number between 1 and 31.',
+  CANNOT_HAVE_31_DAYS_IN_THIS_MONTH: ':Cannot have 31 days in this month.',
+  CANNOT_HAVE_30_DAYS_IN_THIS_MONTH: ':Cannot have 30 days in this month.',
+  NOT_A_LEAP_YEAR_CANNOT_HAVE_29_DAYS_IN_THIS_MONTH:
+    ':Not a leap year.Cannot have 29 days in this month.',
+  CANNOT_BE_IN_THE_FUTURE: ':cannot be in the future ',
 } as const;
 
 /** Baseline sites of each {@link FIELD_VALIDATION_SUFFIXES} entry. */
@@ -1679,6 +1951,17 @@ export const FIELD_VALIDATION_SUFFIX_SOURCES = {
   IS_NOT_A_VALID_STATE_CODE: [{ file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2503] }],
   SHOULD_BE_BETWEEN_300_AND_850: [{ file: PROGRAM_SOURCE_FILES.COACTUPC, lines: [2523] }],
   MUST_BE_NUMERIC: [{ file: PROGRAM_SOURCE_FILES.COTRTUPC, lines: [943] }],
+  YEAR_MUST_BE_SUPPLIED: [{ file: DATE_EDIT_COPYBOOK, lines: [33] }],
+  MUST_BE_4_DIGIT_NUMBER: [{ file: DATE_EDIT_COPYBOOK, lines: [49] }],
+  CENTURY_IS_NOT_VALID: [{ file: DATE_EDIT_COPYBOOK, lines: [73] }],
+  MONTH_MUST_BE_SUPPLIED: [{ file: DATE_EDIT_COPYBOOK, lines: [92] }],
+  MONTH_MUST_BE_A_NUMBER_BETWEEN_1_AND_12: [{ file: DATE_EDIT_COPYBOOK, lines: [108, 136] }],
+  DAY_MUST_BE_SUPPLIED: [{ file: DATE_EDIT_COPYBOOK, lines: [155] }],
+  DAY_MUST_BE_A_NUMBER_BETWEEN_1_AND_31: [{ file: DATE_EDIT_COPYBOOK, lines: [174, 188] }],
+  CANNOT_HAVE_31_DAYS_IN_THIS_MONTH: [{ file: DATE_EDIT_COPYBOOK, lines: [212] }],
+  CANNOT_HAVE_30_DAYS_IN_THIS_MONTH: [{ file: DATE_EDIT_COPYBOOK, lines: [226] }],
+  NOT_A_LEAP_YEAR_CANNOT_HAVE_29_DAYS_IN_THIS_MONTH: [{ file: DATE_EDIT_COPYBOOK, lines: [253] }],
+  CANNOT_BE_IN_THE_FUTURE: [{ file: DATE_EDIT_COPYBOOK, lines: [354] }],
 } as const satisfies Record<keyof typeof FIELD_VALIDATION_SUFFIXES, readonly SourceRef[]>;
 
 /**
@@ -3432,6 +3715,35 @@ export const INVALID_KEY_PRESSED = COMMON_MESSAGES.INVALID_KEY.text;
 export const ACCESS_DENIED_ADMIN_ONLY = PROGRAM_MESSAGES.COMEN01C.NO_ACCESS_ADMIN_ONLY_OPTION;
 
 /**
+ * Headline the route guard's refusal surface renders above {@link ACCESS_DENIED_ADMIN_ONLY}.
+ *
+ * Purpose
+ * -------
+ * `ui/src/routes/guards.tsx` refuses an authenticated non-administrator an administrative route with
+ * a full-surface result rather than a one-line message, because there is no screen behind the refusal
+ * to carry a message band. A result surface needs a heading as well as an explanation, and the
+ * baseline has no heading to transcribe: `app/cbl/COMEN01C.cbl` L140 refuses the same caller by moving
+ * one sentence into the row-23 message field of the menu that stays on screen, so the sentence IS the
+ * whole refusal there.
+ *
+ * Refactoring Rationale: ⚠️ this string is AUTHORED, and it is catalogued here rather than written at
+ * the guard's call site where a review found it as a literal and named it a Transformation Rule T8
+ * violation. It is authored for the same reason {@link NOT_FOUND_MESSAGES} is -- the surface it labels
+ * has no 3270 counterpart -- and it is deliberately declared beside the transcribed sentence it
+ * introduces, so a reader comparing the two can see at a glance which of the pair the baseline supplied
+ * and which this migration had to write.
+ *
+ * Assumptions: no {@link SourceRef}, for the reason {@link NOT_FOUND_MESSAGES} records: every
+ * transcribed entry in this module cites a file and a line, and inventing a citation for a string that
+ * has none would be worse than omitting one. The omission is what marks it as authored.
+ *
+ * Assumptions: the heading states the OUTCOME and the sentence beneath it states the reason, so the two
+ * do not repeat each other. Repeating "Admin Only" in the heading would show one fact twice on a
+ * surface whose whole content is two lines.
+ */
+export const ACCESS_DENIED_HEADING = 'Access denied';
+
+/**
  * Headline for the abend surface, rendered by the application error boundary.
  *
  * Aliased because the error boundary is not associated with any one program even
@@ -3441,3 +3753,170 @@ export const UNEXPECTED_ABEND_OCCURRED = SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURR
 
 /** Headline for the unexpected-data surface, also rendered by the error boundary. */
 export const UNEXPECTED_DATA_SCENARIO = SHARED_MESSAGES.UNEXPECTED_DATA_SCENARIO;
+
+/*
+ * ---------------------------------------------------------------------------
+ * Additive shell text: strings this delivery needs that no baseline field carries
+ * ---------------------------------------------------------------------------
+ *
+ * Assumptions: the entries below are the ONLY strings in this catalogue that are not
+ * transcribed from a copybook literal or a program's `MOVE`, and they are grouped and
+ * labelled so that the distinction survives. Transformation rule T8 governs baseline
+ * text: it is carried across character for character and every entry above cites the
+ * field it came from. These strings have no such origin, because the surfaces that need
+ * them have no 3270 counterpart at all -- a terminal had no address bar to mistype, no
+ * sign-off control that was not a function key, and no notion of a screen that exists in
+ * a later delivery.
+ *
+ * Assumptions: they live in this catalogue rather than at their point of use for the
+ * reason every other entry does. `ui/src/router.tsx` and `ui/src/layout/AppShell.tsx`
+ * previously spelled them inline, which put user-visible text in two kinds of place and
+ * left a reader auditing the catalogue for completeness unable to tell whether a missing
+ * string was additive or forgotten. One home, one audit.
+ *
+ * Alternatives Considered: composing them from nearby baseline text so that every string
+ * in the file had a citation. Rejected as worse than an honest additive group -- it would
+ * have put words in the baseline's mouth, and a reader checking a citation would have
+ * found a field that says something else.
+ */
+
+/**
+ * Heading of the surface shown when a browser path names no delivered screen.
+ *
+ * Assumptions: it says the SCREEN is unavailable rather than that the address is wrong,
+ * because both causes reach it -- a mistyped path and a navigation to one of the eleven
+ * screens the migration plan lists that this delivery does not yet author -- and the
+ * operator can act on neither by being told which one it was. The rejected path is
+ * deliberately not echoed: reflecting request text into a rendered surface is the shape
+ * of a reflected-injection defect, and it tells an operator nothing they did not type.
+ */
+export const SCREEN_NOT_AVAILABLE_TITLE = 'Screen not available';
+
+/**
+ * Explanation beneath {@link SCREEN_NOT_AVAILABLE_TITLE}.
+ *
+ * Assumptions: it names the delivery boundary explicitly rather than implying a fault,
+ * because the commonest way to arrive here is a function key transferring to a menu the
+ * reference application has and this delivery has not. An operator who reads "not
+ * available" as "broken" raises a defect; one who reads it as "not in this build" does
+ * not.
+ */
+export const SCREEN_NOT_AVAILABLE_DETAIL =
+  'The requested CardDemo screen is not part of this delivery. Use a listed screen below.';
+
+/** Label of the control on the not-available surface that returns to the card browse. */
+export const OPEN_CARD_BROWSE_LABEL = 'Open card browse';
+
+/**
+ * Label of the shell's visible sign-off control.
+ *
+ * Assumptions: the label names the ACTION and not a function key, because this control is
+ * not a function key. The baseline ended a session with PF12 from a menu screen; this
+ * shell offers a button instead, for the reason recorded at the control itself -- a
+ * document-level PF12 binding in the shell would fire alongside the same key's `cancel`
+ * binding on the three update screens. The key legend a screen publishes still shows
+ * whatever that screen binds, so nothing about the baseline's key contract is hidden.
+ */
+export const SIGN_OFF_CONTROL_LABEL = 'Sign off';
+
+/**
+ * Label of the sign-on screen's replacement-credential control.
+ *
+ * Assumptions: additive rather than transcribed. `app/bms/COSGN00.bms` declares two input
+ * fields and no third, because the baseline had no credential-replacement turn at all --
+ * the security record held the password in plain text and `app/cbl/COSGN00C.cbl` compared
+ * it directly, so there was nothing to replace and no screen state to replace it in. The
+ * turn exists here because the user pool can answer a sign-on with a challenge, which is
+ * the mechanism that removed the plaintext field, so the label names a control the
+ * baseline could not have had rather than diverging from one it did.
+ *
+ * Assumptions: spelled distinguishably from the transcribed password label, so an
+ * accessible-name search separates the two controls in a test rather than matching both.
+ */
+export const SIGN_ON_NEW_PASSWORD_LABEL = 'New Password';
+
+/**
+ * Label of the sign-on screen's submit control.
+ *
+ * Assumptions: additive, and deliberately NOT the function-key legend's `ENTER=Sign-on`.
+ * The legend names a key and this names an action, which is the distinction that lets the
+ * screen offer a pointer affordance without implying a second behaviour: the control and
+ * the key run the same function. The baseline needed no such control because a 3270
+ * operator knows Enter submits, which a browser visitor has no way to discover.
+ */
+export const SIGN_ON_SUBMIT_LABEL = 'Sign on';
+
+/**
+ * Label of the card detail screen's control that opens the update screen for the card on display.
+ *
+ * Assumptions: additive rather than transcribed. `app/bms/COCRDSL.bms` paints no such key
+ * -- its legend field at L147-L152 carries exactly `ENTER=Search Cards  F3=Exit` -- because
+ * the baseline reached the update program by typing `U` beside a row on the list screen
+ * rather than from the detail screen at all. The control is offered because removing it
+ * would leave an operator looking at a card unable to edit it without returning to the
+ * list, which is a step the baseline did not impose either.
+ *
+ * Refactoring Rationale: it lives here rather than beside the control. It was declared in
+ * `ui/src/screens/cardDetail/index.tsx` on the catalogue's own exclusion -- the catalogue
+ * "excludes strings that no COBOL source holds" -- but that exclusion is about `INITIAL=`
+ * field LABELS, which are positional and meaningless apart from the control they sit
+ * beside. This is a control's accessible name, not a positional label, and a reader
+ * auditing the catalogue for completeness could not tell a missing additive string from a
+ * forgotten one while it lived at its point of use.
+ */
+export const CARD_DETAIL_EDIT_CONTROL_LABEL = 'Edit';
+
+/**
+ * Guidance shown on the card detail screen when the address it was reached by names no card.
+ *
+ * Assumptions: additive, because the selector is a target construct -- see **D-CARD-SELECTOR**
+ * in the divergence register -- and the baseline has no sentence about a value it never had.
+ * The sentence beside it IS the baseline's: `app/cbl/COCRDSLC.cbl` L143 declares
+ * `No input received` for a turn that carried no usable search key, and an unusable selector
+ * is exactly that turn.
+ *
+ * Assumptions: it names the browse screen rather than telling the operator to correct the
+ * address, because the address holds an opaque selector a card response published and an
+ * operator has no way to compose one. Returning to the browse and selecting the record again
+ * is the only action available, so it is the only action offered.
+ */
+export const CARD_DETAIL_INVALID_LINK_GUIDANCE =
+  'Return to the card list and select the record again.';
+
+/**
+ * The three strings the router's not-found surface renders, as one group.
+ *
+ * Purpose
+ * -------
+ * A browser can be asked for an address no screen answers -- a bookmark to a withdrawn path, a typed
+ * URL, a stale link -- and the reference application had no equivalent state to transcribe: a 3270
+ * operator chose from a menu and could not name a screen that did not exist. These strings are
+ * therefore AUTHORED rather than transcribed, and each states that absence of provenance where it is
+ * declared above rather than carrying a {@link SourceRef} nobody could cite.
+ *
+ * Refactoring Rationale: ⚠️ this group is COMPOSED from the three individual exports above rather than
+ * restating their text. Two shapes for these strings were authored independently -- a group for the
+ * surface that renders all three together, and individual constants for the router's own imports and
+ * for the tests that assert one sentence at a time -- and both have callers. Duplicating the literals
+ * would have satisfied both while creating the defect this catalogue exists to prevent: two copies of
+ * one operator-visible sentence, which drift the first time one is corrected. Composition keeps a
+ * single literal per string and leaves both call shapes working.
+ *
+ * Assumptions: the wording deliberately does NOT echo the rejected path, and the constants are phrased
+ * so that a caller cannot. A path arrives from the address bar, so echoing it would paint text the
+ * operator's browser supplied -- an account identifier or a card number mistyped into a URL would be
+ * rendered straight back onto the screen and into any screenshot of it.
+ */
+export const NOT_FOUND_MESSAGES = {
+  /** Headline of the surface. Authored: the baseline has no not-found state to transcribe. */
+  TITLE: SCREEN_NOT_AVAILABLE_TITLE,
+  /** Explanation beneath the headline. Authored, in the baseline's own vocabulary. */
+  EXPLANATION: SCREEN_NOT_AVAILABLE_DETAIL,
+  /**
+   * Label of the single control. Authored.
+   *
+   * Assumptions: it names the destination the control actually reaches, and the two must agree -- a
+   * label reading "Open cards" above a control that returns to the menu is worse than either.
+   */
+  RETURN_CONTROL: OPEN_CARD_BROWSE_LABEL,
+} as const;

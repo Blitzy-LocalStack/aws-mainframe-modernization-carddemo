@@ -106,7 +106,7 @@ import org.springframework.data.jpa.repository.Query;
  * {@code com.carddemo.common.web.PageResponse} and is never re-declared -- and rejects offset paging
  * outright in the paragraph beginning at its line 223. The service charter at
  * {@code com.carddemo.transaction.service.package-info} carries the heading "Pagination compares
- * keys and never counts rows" at line 149 and states at lines 177 to 180 that no ordinal-position
+ * keys and never counts rows" at line 112 and states at lines 137 to 141 that no ordinal-position
  * vocabulary appears anywhere in that package, naming four positions it covers: parameter, field,
  * response component and method name. The request-response charter at
  * {@code com.carddemo.transaction.dto.package-info} states at lines 478 to 481 that no ordinal
@@ -194,8 +194,8 @@ class KeysetPaginationGateProofTest {
      *
      * <p>Assumptions: this package is in scope because its own charter puts it there, not because
      * widening a gate is generally desirable. The heading at
-     * {@code com.carddemo.transaction.service.package-info} line 149 reads "Pagination compares keys
-     * and never counts rows", and the paragraph at lines 177 to 180 states that no ordinal-position
+     * {@code com.carddemo.transaction.service.package-info} line 112 reads "Pagination compares keys
+     * and never counts rows", and the paragraph at lines 137 to 141 states that no ordinal-position
      * vocabulary appears anywhere in the package and names four positions it covers -- parameter,
      * field, response component and method name. A gate that read the repository package alone would
      * leave three of those four positions undecided in the package that declares them.</p>

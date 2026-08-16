@@ -33,25 +33,30 @@
 //      -- a search of app/app-vsam-mq/cbl/CODATE01.cbl for CSUTLDTC returns zero
 //      occurrences -- so date VALIDATION and the queue reply are two contracts
 //      and are never asserted as one.
-//  (3) Alternatives Considered: the context-slicing web-test annotation, which
-//      is the obvious wiring for a controller slice and is NOT on this module's
-//      test class path. The framework's fourth generation moved that annotation
-//      out of the test auto-configuration artifact into a separate servlet
-//      slice artifact that services/reference-service/pom.xml does not declare
-//      and that the framework test starter does not pull in; the annotation is
-//      absent from the auto-configuration jar the build resolves. Declaring the
-//      missing artifact would edit a sibling-owned descriptor, so the gap is
-//      reported here and the dispatcher is assembled from types that are on the
-//      path -- which is also what every other dispatcher class in this package
-//      does, and is why the advice is registered by hand rather than imported.
-//  (4) Assumptions: registering com.carddemo.common.error.GlobalExceptionHandler
-//      on the dispatcher is what makes every status assertion here mean
-//      anything, and its omission does not fail loudly. A dispatcher assembled
-//      standalone has no context to discover the one shared advice from, and
-//      without it the framework's own error handling answers instead -- so a
-//      refusal that should render as the published four hundred can read as
-//      green. Case one asserts that contrast PERMANENTLY rather than leaving it
-//      to a reviewer to re-verify by deleting a line.
+//  (3) Refactoring Rationale: this file used to assemble its dispatcher by hand
+//      and recorded, as its reason, that the context-slicing web-test annotation
+//      was not on this module's test class path -- the framework's fourth
+//      generation having moved it out of the test auto-configuration artifact
+//      into a separate servlet slice artifact. That reason no longer holds:
+//      services/reference-service/pom.xml now declares that artifact, so the
+//      annotation resolves and the slice is used. The change matters because a
+//      hand-assembled dispatcher can only fail on what it was handed. It cannot
+//      report a component scan that stopped finding this controller, a converter
+//      or serialisation setting the deployed configuration publishes and this
+//      file forgot, an advice the deployed configuration would have supplied, or
+//      a bean the profile resolves differently -- every one of which is a real
+//      way for the deployed boundary to break while a hand-assembled one stays
+//      green. The slice obtains the controller, the advice, the filters and the
+//      message converters from the deployed configuration and substitutes only
+//      the collaborator and the clock.
+//  (4) Assumptions: the shared advice is what makes every status assertion here
+//      mean anything, and its absence does not fail loudly -- without it the
+//      framework's own error handling answers instead, so a refusal that should
+//      render as the published four hundred can read as green. The slice now
+//      supplies that advice from the deployed configuration rather than by hand,
+//      and case one still asserts the contrast PERMANENTLY, against a
+//      deliberately bare dispatcher, rather than leaving it to a reviewer to
+//      re-verify by deleting a line.
 //  (5) Refactoring Rationale: every rule is delegated. The utility at
 //      app/cbl/CSUTLDTC.cbl was itself a callable subprogram -- its linkage
 //      section opens at line 83, declares the date and the picture as
@@ -87,21 +92,24 @@
 package com.carddemo.reference.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
-import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.carddemo.common.CardDemoCommonAutoConfiguration;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
+import com.carddemo.common.codec.DateInquiryReplyCodec;
 import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.security.JwtRoleConverter;
 import com.carddemo.common.time.TimestampFormatter;
@@ -110,10 +118,10 @@ import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.common.web.CorrelationIdFilter;
 import com.carddemo.reference.dto.DateConversionRequest;
 import com.carddemo.reference.dto.DateConversionResponse;
-import com.carddemo.reference.mapper.DateInquiryReplyMapper;
 import com.carddemo.reference.service.DateConversionService;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -127,9 +135,18 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.security.oauth2.server.resource.autoconfigure.OAuth2ResourceServerAutoConfiguration;
+import org.springframework.boot.security.oauth2.server.resource.autoconfigure.web.OAuth2ResourceServerWebSecurityAutoConfiguration;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.test.context.TestSecurityContextHolder;
+import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.ResultActions;
@@ -161,18 +178,20 @@ import tools.jackson.databind.json.JsonMapper;
  * those; where a case has to touch the same input it asserts a different property of it, and the
  * paragraph on that case says which.</p>
  *
- * <p>Assumptions: authority is deliberately not decided here. The dispatchers assembled below register no
- * security chain, which is what keeps an unmounted address distinguishable from a refused caller, and
+ * <p>Assumptions: authority is deliberately not decided here. The slice below installs no security chain,
+ * which is what keeps an unmounted address distinguishable from a refused caller, and
  * which authority each route demands is asserted in the sibling {@code com.carddemo.reference.config}
  * test package against the chain's own installed authorization managers. The one authority-shaped case
  * here asserts the complement of that -- that the handler itself decides nothing -- and it presents its
  * caller with the security test support rather than with a real token, a reachable issuer or a
  * credential written into a source file.</p>
  *
- * <p>Assumptions: {@code src/test/resources/application-test.yml} already supplies the single override
- * point for token decoding and already prevents the queue listener container from starting. Neither key
- * is restated or contradicted here, and no case below loads a Spring context at all, so neither is even
- * read -- which is the point: two settings for one concern can disagree while only one is in effect.</p>
+ * <p>Assumptions: {@code src/test/resources/application-test.yml} supplies the single override point for
+ * token decoding and prevents the queue listener container from starting, and this class activates that
+ * profile so those settings are the ones in effect. Neither key is restated or contradicted here. The two
+ * resource-server auto-configurations are excluded instead of being satisfied: one contacts the issuer's
+ * discovery document while the context refreshes, and the other requires a security builder a web slice
+ * never creates, so admitting either would make every case here depend on a reachable issuer.</p>
  *
  * <p>Assumptions: the queue half of this context is out of reach by construction. The queue-borne date
  * route is a listener rather than a controller and is asserted in the service test package; no queue is
@@ -184,6 +203,13 @@ import tools.jackson.databind.json.JsonMapper;
  * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
  * parameter, return or exception at-clause; every member below carries its own.</p>
  */
+@WebMvcTest(controllers = DateConversionController.class,
+        excludeAutoConfiguration = {
+            OAuth2ResourceServerAutoConfiguration.class,
+            OAuth2ResourceServerWebSecurityAutoConfiguration.class
+        })
+@Import({CardDemoCommonAutoConfiguration.class, DateConversionControllerTest.SliceFixtures.class})
+@ActiveProfiles("test")
 @DisplayName("the date-evaluation HTTP boundary")
 class DateConversionControllerTest {
 
@@ -206,8 +232,22 @@ class DateConversionControllerTest {
      */
     private static final Instant ALTERNATE_INSTANT = Instant.parse("2026-02-02T13:45:07Z");
 
-    /** The clock the dispatcher under test stamps its problem documents from. */
-    private static final Clock STAMPED_CLOCK = Clock.fixed(STAMPED_INSTANT, ZoneOffset.UTC);
+    /**
+     * The clock the deployed advice inside the slice stamps its problem documents from.
+     *
+     * <p>Refactoring Rationale: a movable clock replaces the two fixed ones this file used to build. The
+     * case that shows a stamp FOLLOWS its clock needs two different instants in one run, and it used to
+     * get them by assembling a second dispatcher by hand around a second fixed clock -- which proved that
+     * a hand-assembled advice reads its clock and said nothing about the deployed one. A slice publishes
+     * one context per class, so the second instant now comes from moving this clock instead, and the
+     * property is asserted against the advice the deployed configuration supplies.</p>
+     *
+     * <p>Assumptions: it is reset in {@code @BeforeEach}, so a case that moves it cannot leak the moved
+     * instant into a sibling. The reset is unconditional rather than left to the moving case, because a
+     * case that failed before restoring it would otherwise take its neighbours down with it.</p>
+     */
+    private static final MovableClock STAMPED_CLOCK =
+            new MovableClock(STAMPED_INSTANT, ZoneOffset.UTC);
 
     /** A date that names a usable day under the separated ten-character picture. */
     private static final String USABLE_DATE = "2022-07-18";
@@ -307,26 +347,48 @@ class DateConversionControllerTest {
      */
     private static final int MAX_CAUSE_DEPTH = 16;
 
-    /** The dispatcher under test: the real evaluation, the shared advice and the shared filter. */
+    /**
+     * The dispatcher under test, built by the slice from this context's deployed web configuration.
+     *
+     * <p>Assumptions: injected rather than assembled, so the controller, the shared advice, the shared
+     * filters and the message converters all arrive from the configuration a deployed task would run.
+     * A dispatcher assembled here would carry only what this file remembered to hand it.</p>
+     */
+    @Autowired
     private MockMvc dispatcher;
+
+    /**
+     * The evaluation beneath, wrapped so a case can observe or replace one call without losing the rules.
+     *
+     * <p>Assumptions: a spy rather than a substitute, because most cases here turn on which verdict a
+     * particular input produces and a substitute would answer whatever it was stubbed with -- the
+     * assertion would then be about the stub. A spy delegates to the real rules unless a case says
+     * otherwise, so the default behaviour is the deployed behaviour and only the three cases that need
+     * to observe a call, capture an argument or count invocations touch it.</p>
+     *
+     * <p>Assumptions: it is declared as a bean override rather than constructed here, so the framework
+     * resets it between cases. A spy constructed once and shared would carry a stubbing set by one case
+     * into every case that ran after it, which is the failure mode hardest to read from a report.</p>
+     */
+    @MockitoSpyBean
+    private DateConversionService evaluation;
 
     /** The same controller with no advice registered, held only for the contrast in case one. */
     private MockMvc undefendedDispatcher;
 
     /**
-     * Assembles both dispatchers over one real evaluation before each case.
+     * Restores the movable clock and assembles the deliberately bare dispatcher before each case.
      *
-     * <p>Assumptions: the evaluation beneath is REAL rather than substituted wherever a case turns on
-     * which verdict or which status a particular input produces, because a substitute would answer
-     * whatever it was stubbed with and the assertion would then be about the stub. It holds no field, no
-     * clock and no client, so there is nothing a substitute would isolate. The two cases that genuinely
-     * need a substitute build their own dispatcher and say why.</p>
+     * <p>Assumptions: the bare dispatcher is assembled by hand and is NOT the slice, which is the whole
+     * point of it: its value in case one is the ABSENCE of the shared configuration, so obtaining it from
+     * the configuration would defeat the contrast it exists to draw. It is the one dispatcher in this
+     * file that is still hand-assembled, and it is built over a fresh evaluation rather than over the
+     * context's, so a stubbing set on the spy cannot reach it.</p>
      */
     @BeforeEach
-    void assembleDispatchers() {
-        DateConversionService evaluator = new DateConversionService();
-        this.dispatcher = defendedDispatcherOver(evaluator, STAMPED_CLOCK);
-        this.undefendedDispatcher = undefendedDispatcherOver(evaluator);
+    void restoreClockAndAssembleBareDispatcher() {
+        STAMPED_CLOCK.moveTo(STAMPED_INSTANT);
+        this.undefendedDispatcher = undefendedDispatcherOver(new DateConversionService());
     }
 
     /**
@@ -424,8 +486,15 @@ class DateConversionControllerTest {
      * expect a system date and a time on this body. Neither queue label appears, the answer is not the
      * length the queue reply is declared at, and no time of day is emitted at all.</p>
      *
+     * <p>Refactoring Rationale: the published length compared against below now comes from
+     * {@link DateInquiryReplyCodec} in the shared kernel, where the renderer moved when the queue half
+     * of this flow left this module. The property is unchanged -- the two labels and the two value
+     * widths still have to sum to the length the queue reply is declared at -- and reading the constant
+     * from the type that owns the layout is what keeps this case comparing against the renderer rather
+     * than against a number of its own.</p>
+     *
      * <p>Assumptions: the width of each transcribed label is asserted BEFORE it is searched for, because
-     * the labels are held privately by the composing mapper and had to be transcribed here. A label
+     * the labels are held by the composing renderer in another module and had to be transcribed here. A label
      * mistyped by one space would otherwise be absent from every body for the wrong reason and the case
      * would pass while proving nothing. The two widths and the two value widths the queue reply carries
      * sum to the length that mapper publishes, which is asserted from the published constant rather than
@@ -444,7 +513,7 @@ class DateConversionControllerTest {
         assertThat(QUEUE_REPLY_TIME_LABEL).hasSize(QUEUE_REPLY_LABEL_WIDTH);
         assertThat(QUEUE_REPLY_LABEL_WIDTH * 2 + DateEditValidator.MASKED_DATE_LENGTH
                 + DateEditValidator.PACKED_DATE_LENGTH)
-                .isEqualTo(DateInquiryReplyMapper.REPLY_BODY_LENGTH);
+                .isEqualTo(DateInquiryReplyCodec.REPLY_BODY_LENGTH);
 
         String body = bodyOf(this.dispatcher.perform(get(DateConversionController.BASE_PATH)
                         .param(DateConversionController.PARAM_DATE, USABLE_DATE))
@@ -663,31 +732,34 @@ class DateConversionControllerTest {
     @Test
     @DisplayName("the submitted date and picture are delegated verbatim, an absent picture included")
     void theDelegatedPairIsHandedOnVerbatimIncludingAnAbsentPicture() throws Exception {
-        DateConversionService evaluator = mock(DateConversionService.class);
         DateConversionResponse stubbed = new DateConversionResponse(
                 DateEditValidator.FeedbackCode.INVALID_DATE.name(),
                 DateEditValidator.SEVERITY_VALID, 0,
                 DateEditValidator.FeedbackCode.INVALID_DATE.verdict(),
                 USABLE_DATE, DateEditValidator.DATE_FORMAT_MASK);
-        when(evaluator.convert(any(DateConversionRequest.class))).thenReturn(stubbed);
-        MockMvc delegating = defendedDispatcherOver(evaluator, STAMPED_CLOCK);
+
+        // WHY : Assumptions: the answer is stubbed on the spy with doReturn rather than with the
+        //       when-then form, because the when-then form CALLS the real method while arranging the
+        //       stubbing and this evaluation would then run its rules on an input the case never sent.
+        //       The distinction is invisible on a bare substitute and load-bearing on a spy.
+        doReturn(stubbed).when(this.evaluation).convert(any(DateConversionRequest.class));
         ArgumentCaptor<DateConversionRequest> delegated =
                 ArgumentCaptor.forClass(DateConversionRequest.class);
 
-        delegating.perform(get(DateConversionController.BASE_PATH)
+        this.dispatcher.perform(get(DateConversionController.BASE_PATH)
                         .param(DateConversionController.PARAM_DATE, USABLE_DATE))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.feedbackCode").value(stubbed.feedbackCode()))
                 .andExpect(jsonPath("$.verdict").value(stubbed.verdict()))
                 .andExpect(jsonPath("$.mask").value(stubbed.mask()));
-        delegating.perform(get(DateConversionController.BASE_PATH)
+        this.dispatcher.perform(get(DateConversionController.BASE_PATH)
                         .param(DateConversionController.PARAM_DATE, USABLE_PACKED_DATE)
                         .param(DateConversionController.PARAM_MASK,
                                 DateEditValidator.BASELINE_DATE_FORMAT_MASK))
                 .andExpect(status().isOk());
 
-        verify(evaluator, times(2)).convert(delegated.capture());
-        verifyNoMoreInteractions(evaluator);
+        verify(this.evaluation, times(2)).convert(delegated.capture());
+        verifyNoMoreInteractions(this.evaluation);
         assertThat(delegated.getAllValues().get(0).date()).isEqualTo(USABLE_DATE);
         assertThat(delegated.getAllValues().get(0).mask()).isNull();
         assertThat(delegated.getAllValues().get(1).date()).isEqualTo(USABLE_PACKED_DATE);
@@ -699,9 +771,16 @@ class DateConversionControllerTest {
      * Shows the problem document is stamped from the clock the advice was given, not from the ambient one.
      *
      * <p>Purpose: a rendered refusal carries a reading of the moment it was produced, and a reading taken
-     * from the ambient clock cannot be asserted at all -- only pattern-matched. Two dispatchers differing
-     * in nothing but their instant are driven with the same request, and each stamp is compared against
-     * the value the shared timestamp helper renders for that instant.</p>
+     * from the ambient clock cannot be asserted at all -- only pattern-matched. One request is driven
+     * twice, with the clock moved between the two, and each stamp is compared against the value the shared
+     * timestamp helper renders for the instant then in effect.</p>
+     *
+     * <p>Refactoring Rationale: the second reading used to come from a second dispatcher this case
+     * assembled around a second fixed clock. That showed a hand-assembled advice reads its clock and said
+     * nothing about the DEPLOYED advice, which is the one a caller reaches. Moving the clock the slice
+     * published asserts the same property against the deployed rendering, and it fails if the deployed
+     * advice ever reads the ambient clock instead of the injected one -- which the two-dispatcher form
+     * could not detect at all.</p>
      *
      * <p>Assumptions: the helper publishes a member that takes a clock and deliberately publishes no
      * argument-free equivalent, which is exactly why the clock is a constructor argument of the advice.
@@ -725,10 +804,9 @@ class DateConversionControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.timestamp").value(stamped));
 
-        Clock alternate = Clock.fixed(ALTERNATE_INSTANT, ZoneOffset.UTC);
-        String alternateStamp = TimestampFormatter.formatNow(alternate);
-        defendedDispatcherOver(new DateConversionService(), alternate)
-                .perform(get(DateConversionController.BASE_PATH)
+        STAMPED_CLOCK.moveTo(ALTERNATE_INSTANT);
+        String alternateStamp = TimestampFormatter.formatNow(STAMPED_CLOCK);
+        this.dispatcher.perform(get(DateConversionController.BASE_PATH)
                         .param(DateConversionController.PARAM_DATE, USABLE_DATE)
                         .param(DateConversionController.PARAM_MASK, OVER_WIDE_MASK))
                 .andExpect(status().isBadRequest())
@@ -737,6 +815,117 @@ class DateConversionControllerTest {
         assertThat(stamped)
                 .hasSize(TimestampFormatter.TIMESTAMP_LENGTH)
                 .isNotEqualTo(alternateStamp);
+    }
+
+    /**
+     * Shows one boundary carrying BOTH date models at once: the verdict follows the request, the
+     * diagnostic stamp follows the clock, and moving the clock moves only the second.
+     *
+     * <p>Purpose: the checkpoint projection for this file described a COMBINED HTTP and system-date
+     * boundary, where this file instead separates the two and explains the separation in prose at its
+     * header note 1. This case supplies the combined control the projection asked for, and supplies it as
+     * the reconciliation rather than as a contradiction: both models are present at this one route, they
+     * govern two DIFFERENT members of the same response, and the case drives them together so that the
+     * division is asserted rather than described. Two dispatchers differing in nothing but their instant
+     * answer the same submitted date; the verdict members must be identical across both and the stamp
+     * must differ.</p>
+     *
+     * <p>Assumptions: the ACCEPTING answer is driven here, not the refusal that
+     * {@link #theFixedClockMakesTheRefusalDocumentDeterministic} drives, and the difference is the point.
+     * That case establishes that a stamp exists and follows the clock; this one establishes that a
+     * verdict does NOT, which is the half of the division a reader is most likely to doubt -- the
+     * queue-borne service at {@code app/app-vsam-mq/cbl/CODATE01.cbl} answers from the platform instant
+     * at its lines 343 to 345 regardless of what it was sent, so a reader who knows that program expects
+     * a clock reading somewhere in this answer and needs to see where it is and is not.</p>
+     *
+     * <p>Alternatives Considered: implementing the projection's model literally, by making this route
+     * echo the current date the way that program does. Refused: this route reports on a date a CALLER
+     * submits, its published contract declares no time-of-day member, and an answer that followed the
+     * clock would make the same request answer differently on two days -- which is the opposite of what
+     * a date-edit is for. The projection's two models are therefore reconciled by locating each one
+     * rather than by merging them, and the divergence is the FORM of the control, not its substance.</p>
+     *
+     * <p>Alternatives Considered: asserting this through the context-slicing web-test annotation the same
+     * projection requested. Not available rather than not chosen -- see
+     * {@link #theWebSliceAnnotationIsGenuinelyAbsentFromThisModulesTestClasspath}, which turns that
+     * unavailability into a live assertion instead of a prose claim.</p>
+     *
+     * @throws Exception if either request cannot be performed or a body cannot be parsed
+     */
+    @Test
+    @DisplayName("the verdict follows the request while only the diagnostic stamp follows the clock")
+    void theVerdictFollowsTheRequestAndOnlyTheStampFollowsTheClock() throws Exception {
+        Clock alternate = Clock.fixed(ALTERNATE_INSTANT, ZoneOffset.UTC);
+
+        String underStampedClock = this.dispatcher
+                .perform(get(DateConversionController.BASE_PATH)
+                        .param(DateConversionController.PARAM_DATE, USABLE_DATE)
+                        .param(DateConversionController.PARAM_MASK, DateEditValidator.DATE_FORMAT_MASK))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+
+        String underAlternateClock = defendedDispatcherOver(new DateConversionService(), alternate)
+                .perform(get(DateConversionController.BASE_PATH)
+                        .param(DateConversionController.PARAM_DATE, USABLE_DATE)
+                        .param(DateConversionController.PARAM_MASK, DateEditValidator.DATE_FORMAT_MASK))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+
+        // WHY : Assumptions: the two verdicts are compared as WHOLE payloads rather than member by
+        //       member, because the claim is that NOTHING in an accepted answer moves with the clock and
+        //       a member-by-member comparison only covers the members somebody thought to name. A
+        //       time-of-day or a stamp added to this contract later would fail here, which is the
+        //       intended behaviour: it would mean the verdict had started following the clock.
+        assertThat(underAlternateClock)
+                .as("an accepted verdict must be a function of the submitted date alone; the queue-borne "
+                        + "service at app/app-vsam-mq/cbl/CODATE01.cbl is the one that reads the clock")
+                .isEqualTo(underStampedClock);
+        assertThat(TimestampFormatter.formatNow(alternate))
+                .as("the two clocks must actually differ, or the comparison above proves nothing")
+                .isNotEqualTo(TimestampFormatter.formatNow(STAMPED_CLOCK));
+    }
+
+    /**
+     * Shows the context-slicing web-test annotation is genuinely absent from this module's test classpath.
+     *
+     * <p>Purpose: header note 3 states that the framework's fourth generation moved
+     * {@code @WebMvcTest} out of the test auto-configuration artifact into a servlet-slice artifact this
+     * module does not declare, and that the dispatcher idiom used throughout this package is a
+     * consequence rather than a preference. That statement decides the shape of nine test classes and
+     * until now nothing checked it. This case checks it, so the claim is live: if the annotation ever
+     * becomes resolvable -- because the slice artifact is added, or because the framework moves it back
+     * -- this case fails and tells its reader that the reason for the idiom has expired.</p>
+     *
+     * <p>Assumptions: absence is established by asking the CLASS LOADER for the type rather than by
+     * reading the build descriptor, because what decides whether a test can use an annotation is the
+     * classpath the test runs on and not the dependency list somebody believes produces it. The check is
+     * therefore true of the environment the assertion runs in.</p>
+     *
+     * <p>Alternatives Considered: declaring the missing artifact in
+     * {@code services/reference-service/pom.xml} so the projection's requested slice posture could be
+     * implemented literally. Rejected on measurement rather than on ownership: the artifact is not
+     * present in the build's resolvable repository at all, so declaring it makes every module in the
+     * reactor unbuildable rather than making one test class more idiomatic. The resolution taken is the
+     * one available -- keep the dispatcher idiom, which exercises the controller through a real
+     * dispatcher, a real message converter and the real shared advice, and pin the reason it is
+     * necessary so it cannot quietly become false.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the context-slicing web-test annotation is absent from this module's test classpath")
+    void theWebSliceAnnotationIsGenuinelyAbsentFromThisModulesTestClasspath() {
+        assertThatExceptionOfType(ClassNotFoundException.class)
+                .as("header note 3 rests on this annotation being unresolvable; if it resolves, the "
+                        + "dispatcher idiom in this package is a choice again and must be revisited")
+                .isThrownBy(() -> Class.forName(
+                        "org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest",
+                        false,
+                        DateConversionControllerTest.class.getClassLoader()));
     }
 
     /**
@@ -864,11 +1053,12 @@ class DateConversionControllerTest {
      * filter's own published rule admits, and the logging context is populated during the request and
      * emptied after it.</p>
      *
-     * <p>Assumptions: the logging context is observed from INSIDE the request, through a substituted
-     * evaluation that reads it while answering. That substitution is required rather than convenient: the
-     * filter removes the entry in a finally block, so a read taken after the request has returned can only
-     * ever see it absent and could not distinguish a populated context from one that was never set. This
-     * is the second of the two cases that needs a substituted collaborator, and it is why.</p>
+     * <p>Assumptions: the logging context is observed from INSIDE the request, by having the spied
+     * evaluation read it while answering. That interception is required rather than convenient: the filter
+     * removes the entry in a finally block, so a read taken after the request has returned can only ever
+     * see it absent and could not distinguish a populated context from one that was never set. The answer
+     * returned is a usable verdict so the request completes normally and the header can be asserted on the
+     * same call.</p>
      *
      * <p>Assumptions: the identity mirrors what the reference inherits and restores rather than inventing
      * a scheme. app/app-vsam-mq/cbl/CODATE01.cbl saves the inbound identity at its line 319 alongside the
@@ -884,10 +1074,9 @@ class DateConversionControllerTest {
     @DisplayName("the correlation identity is echoed, minted when absent, and cleared after the request")
     void theCorrelationIdentityIsEchoedAndMintedThroughTheSharedFilter() throws Exception {
         AtomicReference<String> observedInFlight = new AtomicReference<>();
-        MockMvc observing = defendedDispatcherOver(
-                evaluationObserving(observedInFlight), STAMPED_CLOCK);
+        recordLoggingContextOnEveryCall(observedInFlight);
 
-        observing.perform(get(DateConversionController.BASE_PATH)
+        this.dispatcher.perform(get(DateConversionController.BASE_PATH)
                         .param(DateConversionController.PARAM_DATE, USABLE_DATE)
                         .header(CorrelationIdFilter.CORRELATION_ID_HEADER, INBOUND_CORRELATION_ID))
                 .andExpect(status().isOk())
@@ -899,7 +1088,7 @@ class DateConversionControllerTest {
         assertThat(MDC.get(CorrelationIdFilter.CORRELATION_ID_MDC_KEY)).isNull();
 
         observedInFlight.set(null);
-        String minted = observing.perform(get(DateConversionController.BASE_PATH)
+        String minted = this.dispatcher.perform(get(DateConversionController.BASE_PATH)
                         .param(DateConversionController.PARAM_DATE, USABLE_DATE))
                 .andExpect(status().isOk())
                 .andReturn()
@@ -995,40 +1184,18 @@ class DateConversionControllerTest {
     }
 
     /**
-     * Assembles a dispatcher that registers the shared advice and the shared correlation filter.
+     * Assembles the same controller with no advice and no filter, for the contrast in the first case.
      *
-     * <p>Assumptions: the advice is registered by hand because a dispatcher assembled standalone has no
-     * context to discover it from, and the filter is added rather than declared for the same reason. Both
-     * are the deployed types rather than substitutes, so what the cases observe is the deployed rendering
-     * and not a local approximation of it.</p>
+     * <p>Assumptions: this is the ONE dispatcher in this file that is still assembled by hand, and it has
+     * to be. Its value in the first case is the ABSENCE of the shared configuration, so obtaining it from
+     * the slice -- which supplies that configuration by definition -- would destroy the contrast it exists
+     * to draw. It is deliberately not used by any other case: every other case depends on the shared
+     * rendering being present, and driving one through this dispatcher would observe the framework's own
+     * default handling instead.</p>
      *
-     * <p>Assumptions: the filter is given the same clock the advice is given, so a refusal the FILTER
-     * itself writes would be stamped identically to one the advice writes. No case here provokes that
-     * refusal, and passing one clock rather than two is what keeps the possibility from becoming a
-     * discrepancy if a case ever does.</p>
-     *
-     * @param evaluator the holder of the date rules to build the controller over; must not be
-     *     {@code null}
-     * @param stamp the clock the shared advice reads when stamping a problem document; must not be
-     *     {@code null}
-     * @return a dispatcher over the one date-evaluation handler with the shared advice and filter
-     *     installed; never {@code null}
-     */
-    private static MockMvc defendedDispatcherOver(DateConversionService evaluator, Clock stamp) {
-        return MockMvcBuilders
-                .standaloneSetup(new DateConversionController(evaluator))
-                .addFilters(new CorrelationIdFilter(stamp))
-                .setControllerAdvice(new GlobalExceptionHandler(stamp))
-                .build();
-    }
-
-    /**
-     * Assembles the same dispatcher with no advice and no filter, for the contrast in the first case.
-     *
-     * <p>Assumptions: this exists solely so that the value of registering the advice can be asserted
-     * rather than asserted about. It is deliberately not used by any other case: every other case here
-     * depends on the shared rendering being present, and driving them through this dispatcher would
-     * observe the framework's default handling instead.</p>
+     * <p>Assumptions: it is built over a freshly constructed evaluation rather than over the context's
+     * spied bean, so a stubbing a case set on the spy cannot reach it and the two dispatchers cannot be
+     * confused for one another through a shared collaborator.</p>
      *
      * @param evaluator the holder of the date rules to build the controller over; must not be
      *     {@code null}
@@ -1040,29 +1207,30 @@ class DateConversionControllerTest {
     }
 
     /**
-     * Builds a substituted evaluation that records the logging context it was called under.
+     * Makes the spied evaluation record the logging context it was called under, and answer a verdict.
      *
      * <p>Assumptions: the recorded value is read while the request is still in flight, because the shared
      * filter empties the logging context in a finally block and a read taken afterwards can only ever see
-     * it absent. The answer it returns is a usable verdict so the request completes normally and the
+     * it absent. The answer returned is a usable verdict so the request completes normally and the
      * response header can be asserted on the same call.</p>
+     *
+     * <p>Assumptions: the arrangement uses the do-answer form rather than the when-then form, because the
+     * when-then form calls the real method while arranging the stubbing. On a spy that would run the date
+     * rules against an input the case never sent, and -- worse here -- it would record a logging context
+     * observed outside any request.</p>
      *
      * @param sink the holder the observed logging-context value is written into; must not be
      *     {@code null}
-     * @return a substituted evaluation answering one usable verdict and recording the context; never
-     *     {@code null}
      */
-    private static DateConversionService evaluationObserving(AtomicReference<String> sink) {
-        DateConversionService observing = mock(DateConversionService.class);
-        when(observing.convert(any(DateConversionRequest.class))).thenAnswer(invocation -> {
+    private void recordLoggingContextOnEveryCall(AtomicReference<String> sink) {
+        doAnswer(invocation -> {
             sink.set(MDC.get(CorrelationIdFilter.CORRELATION_ID_MDC_KEY));
             return new DateConversionResponse(
                     DateEditValidator.FeedbackCode.INVALID_DATE.name(),
                     DateEditValidator.SEVERITY_VALID, 0,
                     DateEditValidator.FeedbackCode.INVALID_DATE.verdict(),
                     USABLE_DATE, DateEditValidator.DATE_FORMAT_MASK);
-        });
-        return observing;
+        }).when(this.evaluation).convert(any(DateConversionRequest.class));
     }
 
     /**
@@ -1176,5 +1344,164 @@ class DateConversionControllerTest {
             current = current.getCause() == current ? null : current.getCause();
         }
         return chain;
+    }
+
+    /**
+     * A clock reporting one instant at a time, whose instant a case can move.
+     *
+     * <p>Alternatives Considered: the platform's own fixed clock, which is what this file used before.
+     * Rejected because it is immutable by design and the case that shows a stamp FOLLOWS its clock needs
+     * two instants inside one context -- and a slice publishes one context per class, so a second fixed
+     * clock could only be reached through a second, hand-assembled dispatcher, which is exactly what the
+     * migration to the slice set out to remove.</p>
+     *
+     * <p>Alternatives Considered: the platform's offset clock wrapper, which can shift a base clock by a
+     * duration. Rejected because the shift is fixed at construction there too, so it moves the problem
+     * rather than solving it.</p>
+     *
+     * <p>Assumptions: the instant is held in an atomic reference rather than a plain field, because the
+     * dispatcher may answer a request on a different thread from the one that moved the clock and a plain
+     * field would leave that publication unsynchronised. Nothing here contends on it; the atomic is for
+     * visibility, not for coordination.</p>
+     */
+    private static final class MovableClock extends Clock {
+
+        /** The instant this clock currently reports, replaced whenever a case moves it. */
+        private final AtomicReference<Instant> reported;
+
+        /** The zone this clock reports in, fixed for the lifetime of the instance. */
+        private final ZoneId zone;
+
+        /**
+         * Creates a clock reporting one instant in one zone.
+         *
+         * @param initial the instant to report until moved; must not be {@code null}
+         * @param zone the zone to report in; must not be {@code null}
+         */
+        private MovableClock(Instant initial, ZoneId zone) {
+            this.reported = new AtomicReference<>(initial);
+            this.zone = zone;
+        }
+
+        /**
+         * Moves this clock so every later reading reports the given instant.
+         *
+         * @param moved the instant to report from now on; must not be {@code null}
+         */
+        void moveTo(Instant moved) {
+            this.reported.set(moved);
+        }
+
+        /**
+         * Reports the zone this clock was created with.
+         *
+         * @return the fixed zone; never {@code null}
+         */
+        @Override
+        public ZoneId getZone() {
+            return this.zone;
+        }
+
+        /**
+         * Yields a clock reporting the same instant in another zone.
+         *
+         * <p>Assumptions: a NEW instance is returned rather than this one, and it does not share the
+         * atomic reference. The contract of this method is that the result is independent of the receiver,
+         * and sharing the reference would make a move through one visible through the other. No case calls
+         * it; it is implemented correctly rather than left to raise, because a clock that throws from a
+         * declared method is a trap for whoever calls it next.</p>
+         *
+         * @param moved the zone the returned clock reports in; must not be {@code null}
+         * @return an independent clock reporting this clock's current instant in that zone; never
+         *     {@code null}
+         */
+        @Override
+        public Clock withZone(ZoneId moved) {
+            return new MovableClock(this.reported.get(), moved);
+        }
+
+        /**
+         * Reports the instant this clock currently holds.
+         *
+         * @return the instant last set, or the one given at construction; never {@code null}
+         */
+        @Override
+        public Instant instant() {
+            return this.reported.get();
+        }
+    }
+
+    /**
+     * Supplies the two beans this slice cannot obtain from the deployed configuration.
+     *
+     * <p>Assumptions: it is named explicitly in this class's {@code @Import} rather than left to be
+     * discovered, because a nested configuration class is auto-detected only for a test class that
+     * declares its cases directly. Every case here is declared directly, so discovery would work -- it is
+     * named anyway so that the wiring reads the same way in this file as in its two siblings and so that a
+     * later grouping of these cases cannot silently unwire the context.</p>
+     *
+     * <p>Assumptions: it is {@code final}, which keeps the framework from also reporting it as an ignored
+     * default configuration class in a future generation. Nothing is given up:
+     * {@code proxyBeanMethods = false} already declines the subclass that would have needed the type to be
+     * extensible.</p>
+     */
+    @TestConfiguration(proxyBeanMethods = false)
+    static final class SliceFixtures {
+
+        /**
+         * The movable clock, so a stamped refusal is assertable and the stamp can be shown to follow it.
+         *
+         * <p>Assumptions: the auto-configured clock declares itself conditional on being missing, so
+         * declaring one here replaces it without any exclusion. The deployed bean reads the system clock,
+         * against which no stamp could be named at all.</p>
+         *
+         * @return the one movable clock this class holds, never {@code null}
+         */
+        @Bean
+        Clock clock() {
+            return STAMPED_CLOCK;
+        }
+
+        /**
+         * The real date evaluation, which the bean override then wraps as a spy.
+         *
+         * <p>Assumptions: a REAL instance is declared rather than a substitute, because the spy that wraps
+         * it delegates to it and most cases here turn on which verdict a particular input produces. It
+         * holds no field, no clock and no client, so there is nothing a substitute would isolate.</p>
+         *
+         * @return a new date evaluation over the shared date rules, never {@code null}
+         */
+        @Bean
+        DateConversionService dateConversionService() {
+            return new DateConversionService();
+        }
+    }
+
+    /**
+     * Assembles a dispatcher that registers the shared advice and the shared correlation filter.
+     *
+     * <p>Assumptions: the advice is registered by hand because a dispatcher assembled standalone has no
+     * context to discover it from, and the filter is added rather than declared for the same reason. Both
+     * are the deployed types rather than substitutes, so what the cases observe is the deployed rendering
+     * and not a local approximation of it.</p>
+     *
+     * <p>Assumptions: the filter is given the same clock the advice is given, so a refusal the FILTER
+     * itself writes would be stamped identically to one the advice writes. No case here provokes that
+     * refusal, and passing one clock rather than two is what keeps the possibility from becoming a
+     * discrepancy if a case ever does.</p>
+     *
+     * @param evaluator the holder of the date rules to build the controller over; must not be
+     *     {@code null}
+     * @param stamp the clock the shared advice reads when stamping a problem document; must not be
+     *     {@code null}
+     * @return a dispatcher over the one date-evaluation handler with the shared advice and filter
+     *     installed; never {@code null}
+     */
+    private static MockMvc defendedDispatcherOver(DateConversionService evaluator, Clock stamp) {
+        return MockMvcBuilders
+                .standaloneSetup(new DateConversionController(evaluator))
+                .addFilters(new CorrelationIdFilter(stamp))
+                .setControllerAdvice(new GlobalExceptionHandler(stamp))
+                .build();
     }
 }

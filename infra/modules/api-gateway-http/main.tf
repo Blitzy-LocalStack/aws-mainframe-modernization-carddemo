@@ -21,14 +21,19 @@
 #   listener over TLS; the ALB's per-service rules dispatch to the owning
 #   service, which validates the same token again independently.
 #
-#   Exactly three paths are reached WITHOUT a token, and all three are paths
-#   that issue one: `POST /api/v1/auth/signon`, the sign-on exchange;
+#   Exactly four paths are reached WITHOUT a token. Three of them ISSUE one:
+#   `POST /api/v1/auth/signon`, the sign-on exchange;
 #   `POST /api/v1/auth/challenge`, which completes a forced credential change;
 #   and `POST /api/v1/auth/refresh`, which renews a token set for a caller whose
 #   access token has expired and who therefore holds no usable token to present.
+#   The fourth, `POST /api/v1/auth/signout`, REVOKES one: it asks the pool to
+#   invalidate the refresh token a session renews from, and possession of that
+#   token is the only authority a caller could present for revoking it, so
+#   demanding a live access token as well would refuse the revocation exactly
+#   when the session it ends has been abandoned rather than closed.
 #   Each is published by its own route resource with
 #   `authorization_type = "NONE"`, from its own input (`var.public_route_keys`)
-#   that is validated to those three exact methods and paths under `/auth`,
+#   that is validated to those four exact methods and paths under `/auth`,
 #   refuses `ANY` and every greedy matcher, and must be disjoint from
 #   `var.route_keys`. Each carries a throttle an order of magnitude tighter than
 #   the authorized default. Everything else on this stage requires a valid
@@ -115,7 +120,7 @@
 #     `aws_apigatewayv2_route.public`, with its reason on the same line. The
 #     exception cannot spread: the public routes live in a separate resource, so
 #     no authorized key can lose its authorizer by accident; the keys come from
-#     an input validated down to the exact three pre-token POST operations, with
+#     an input validated down to the exact four unauthenticated POST operations, with
 #     `ANY` and greedy matchers refused at plan time; and a disjointness check
 #     against `var.route_keys` prevents one key from being both. The exposure is
 #     published in `outputs.tf` so it is auditable from a plan rather than only
@@ -887,7 +892,7 @@ resource "aws_apigatewayv2_stage" "this" {
   #       including keys added later. Enumerating per route would let a newly
   #       published route arrive with no limit at all. The cost accepted is that
   #       tightening one route takes an explicit override, and the overrides that
-  #       exist are exactly one per public route key below -- the three pre-token
+  #       exist are exactly one per public route key below -- the four unauthenticated
   #       operations, which are the only routes an anonymous caller can reach and
   #       therefore the only ones whose budget cannot be attributed to a
   #       credential. Both limits are inputs because they are

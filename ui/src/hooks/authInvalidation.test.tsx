@@ -4,9 +4,9 @@
  *
  * Purpose
  * -------
- * Assert that a 401 answered to a request which CARRIED a bearer token clears every stored identity
- * key and returns the operator to sign-on. `ui/src/api/client.ts` signals re-authentication rather
- * than performing it, and the signal is only worth anything if something subscribes: before the
+ * Assert that a 401 answered to a request which CARRIED a bearer token discards the whole session and
+ * returns the operator to sign-on. `ui/src/api/client.ts` signals re-authentication rather than
+ * performing it, and the signal is only worth anything if something subscribes: before the
  * subscription in `useAuth` existed, the interceptor discarded the access token alone, leaving the
  * identity token, the refresh token and the retained identifier in place — so the guards, which read
  * `signedOn` from the identity token, kept rendering protected screens for a session every service
@@ -24,48 +24,35 @@
 
 // Assumptions: every test API is imported rather than taken from an ambient global, because
 // ui/vitest.config.ts sets `globals: false` and records that as a contract.
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { AxiosError } from 'axios';
-import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios';
+import type { AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import type { ReactElement } from 'react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { getApiClient, resetApiClient } from '../api/client';
+import { useAuth } from './useAuth';
+import { WITHOUT_STORED_SESSION, getApiClient } from '../api/client';
 import { RequireSignOn } from '../routes/guards';
-
-const API_BASE_URL = 'https://api.carddemo.example';
-
-const CORRELATION_HEADER = 'X-Correlation-Id';
+import { installApiHarness, removeApiHarness } from '../test/apiHarness';
+import { endAnySession, establishSession } from '../test/sessionHarness';
 
 const UNAUTHORIZED_STATUS = 401;
 
-/**
- * Every session-storage key an established session writes, so the assertion can name all of them.
- *
- * Assumptions: the list is exhaustive rather than a sample, and that is the whole point of the case.
- * The defect was a PARTIAL clear, so an assertion covering only the key that was already being cleared
- * would have passed against the defect.
- */
-const SESSION_KEYS = [
-  'carddemo.access-token',
-  'carddemo.id-token',
-  'carddemo.user-id',
-  'carddemo.refresh-token',
-] as const;
+const OK_STATUS = 200;
 
-/**
- * Builds an identity token carrying the supplied group names.
- *
- * Assumptions: only the claim segment has to decode, because the hook never verifies the signature —
- * every service does that independently — so a three-segment token with placeholder header and
- * signature is exactly what the decoder is written against.
- * @param {readonly string[]} groups - Group names to place in the claim.
- * @returns {string} A three-segment token whose claim segment decodes to those groups.
+/*
+ * WHY : ⚠️ Refactoring Rationale: this file used to enumerate FOUR session-storage keys and require
+ *       each of them to be absent, because the defect it was written against was a PARTIAL clear and an
+ *       assertion covering only the key already being cleared would have passed against it. Those keys
+ *       are gone: a review found every credential sitting in script-readable Web Storage, and the four
+ *       independent values were replaced by ONE frozen in-memory record. A partial clear is therefore no
+ *       longer expressible -- the record is either held or it is `null` -- so the totality is asserted
+ *       where it is now observable instead: the hook publishes no identifier and no authority, the guard
+ *       renders sign-on, the transport attaches no bearer, and a sign-out finds no renewal token to
+ *       revoke. Those four observations cover the same four values the keys did, one each.
  */
-function idTokenFor(groups: readonly string[]): string {
-  return `header.${btoa(JSON.stringify({ 'cognito:groups': groups }))}.signature`;
-}
 
 /**
  * Answers one request with 401 and no body, without reaching a network.
@@ -101,12 +88,60 @@ function unauthorizedAdapter(config: InternalAxiosRequestConfig): Promise<never>
 }
 
 /**
+ * Publishes the hook's reading and offers the sign-out action, alongside the guarded route.
+ *
+ * Assumptions: the identifier and the authority are rendered rather than read from the module, because
+ * they are what a screen sees. A record cleared without listeners being notified would leave every
+ * mounted screen still describing a session no service accepts, which is the same class of defect this
+ * file was written for.
+ * @returns {ReactElement} The probe.
+ */
+function SessionProbe(): ReactElement {
+  const { userId, groups, signOut } = useAuth();
+  return (
+    <div>
+      <span data-testid="user-id">{userId ?? 'none'}</span>
+      <span data-testid="groups">{groups.length === 0 ? 'none' : groups.join(',')}</span>
+      <button type="button" onClick={signOut}>
+        Sign off
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Builds the thunk `act` runs to await a dispatch that must be refused.
+ *
+ * Assumptions: a factory returning a NAMED function expression rather than an inline arrow, because
+ * `ui/eslint.config.js` configures `jsdoc/require-jsdoc` with `publicOnly: false` and selects a function
+ * in every position — and a block comment attached to an inline argument is moved by Prettier onto the
+ * preceding expression, which detaches it from what it documents.
+ *
+ * Assumptions: the request is DISPATCHED by the caller and its promise handed over, because a rejection
+ * left unattached for even one turn is an unhandled rejection. Passing the promise means the attachment
+ * happens at the call site, in the same expression that created it.
+ * @param {Promise<unknown>} dispatched - The in-flight request, which must reject.
+ * @returns {() => Promise<void>} A thunk that resolves once the refusal has settled and the resulting
+ *   renders have been flushed.
+ */
+function refusalThunk(dispatched: Promise<unknown>): () => Promise<void> {
+  /**
+   * Awaits the refusal inside the act scope.
+   * @returns {Promise<void>} Resolves once the request has been rejected.
+   */
+  return async function awaitTheRefusal(): Promise<void> {
+    await expect(dispatched).rejects.toBeDefined();
+  };
+}
+
+/**
  * Renders a guarded screen at `/protected`, with sign-on reachable at its own route.
  * @returns {ReactElement} The composed tree under test.
  */
 function renderGuardedScreen(): ReactElement {
   return (
     <MemoryRouter initialEntries={['/protected']}>
+      <SessionProbe />
       <Routes>
         <Route
           path="/protected"
@@ -123,85 +158,154 @@ function renderGuardedScreen(): ReactElement {
 }
 
 /**
- * Writes the four keys an established session holds for this tab.
- * @returns {void} Nothing; storage is populated in place.
+ * Establishes an ordinary operator's session by performing a real sign-on exchange.
+ *
+ * Refactoring Rationale: ⚠️ this used to write four session-storage keys. Arranging a session now
+ * requires an exchange, because the one installer that can hold one validates the whole token set — so
+ * the caller each case refuses is a caller the application could actually produce, rather than a token
+ * set assembled by the test and never checked.
+ * @returns {Promise<void>} Resolves once the session is held.
  */
-function establishSession(): void {
-  sessionStorage.setItem('carddemo.access-token', 'an-accepted-access-token');
-  sessionStorage.setItem('carddemo.id-token', idTokenFor(['carddemo-user']));
-  sessionStorage.setItem('carddemo.user-id', 'USER0001');
-  sessionStorage.setItem('carddemo.refresh-token', 'a-refresh-token');
+async function establishAnOrdinarySession(): Promise<void> {
+  await establishSession({ groups: ['carddemo-user'] });
 }
 
-/** Supplies the build-time configuration the client validates before it is constructed. */
-function stubBuildConfiguration(): void {
-  sessionStorage.clear();
-  resetApiClient();
-  vi.stubEnv('VITE_API_BASE_URL', API_BASE_URL);
-  vi.stubEnv('VITE_CORRELATION_ID_HEADER', CORRELATION_HEADER);
+/**
+ * Installs the shared request harness, which supplies the client's configuration and answers the
+ * arrangement's own exchange.
+ *
+ * Refactoring Rationale: ⚠️ this file used to stub the two build-time variables itself and reset the
+ * client by hand. The shared harness does exactly that and additionally answers a request without a
+ * network, which the arrangement above now needs — two mechanisms doing the same job would be two
+ * definitions of the client's configuration in one file.
+ * @returns {void} Nothing; no session is held and the harness is installed.
+ */
+function installTheHarness(): void {
+  endAnySession();
+  installApiHarness();
 }
 
-/** Restores the environment and the storage so no later file inherits this file's state. */
-function restoreBuildConfiguration(): void {
-  vi.unstubAllEnvs();
-  sessionStorage.clear();
-  resetApiClient();
+/**
+ * Removes the harness and discards any session, so no later file inherits either.
+ * @returns {void} Nothing; the harness is removed and no session is held.
+ */
+function removeTheHarness(): void {
+  removeApiHarness();
+  endAnySession();
 }
 
 /**
  * Dispatches one authenticated request that is refused, and waits for the refusal to be delivered.
- * @returns {Promise<void>} Resolves once the request has been rejected by the client.
+ *
+ * Assumptions: the dispatch is wrapped in `act`, because the refusal reaches the hook through a
+ * microtask-delivered signal and the discard that follows re-renders every mounted subscriber. Awaiting
+ * the rejection alone leaves those renders outside any act scope, which React reports on every case in
+ * this file — noise that would bury a real warning rather than telling anyone anything.
+ * @returns {Promise<void>} Resolves once the request has been rejected and the resulting renders have
+ *   been flushed.
  */
 async function dispatchARefusedAuthenticatedRequest(): Promise<void> {
   const client = getApiClient();
   client.defaults.adapter = unauthorizedAdapter;
-  await expect(client.get('/api/v1/cards')).rejects.toBeDefined();
+  await act(refusalThunk(client.get('/api/v1/cards')));
 }
 
 /**
- * Asserts the last key an invalidation removes is gone.
+ * Asserts the hook has stopped publishing an identifier, which is the observable the clear produces.
  *
  * Assumptions: a HOISTED named function rather than an inline arrow inside `waitFor`, because
  * ui/eslint.config.js selects `* > ArrowFunctionExpression` for `jsdoc/require-jsdoc`, and a block
  * comment on an inline argument is moved by Prettier onto the preceding expression.
  * @returns {void} Nothing; the assertion carries the outcome and `waitFor` retries it.
  */
-function refreshTokenHasBeenRemoved(): void {
-  expect(sessionStorage.getItem('carddemo.refresh-token')).toBeNull();
+function theIdentifierHasBeenDiscarded(): void {
+  expect(screen.getByTestId('user-id').textContent).toBe('none');
 }
 
 /**
- * A bearer-authenticated 401 clears every stored identity key, not only the access token.
- * @returns {Promise<void>} Resolves once every key has been asserted absent.
+ * A bearer-authenticated 401 discards the whole session, not only the bearer.
+ *
+ * Assumptions: all four values the session consisted of are covered, one observation each: the
+ * identifier and the authority from the hook's published reading, the bearer from the header the next
+ * request carries, and the renewal token from a sign-out finding nothing to revoke. The enumeration
+ * matters for the same reason the four-key list used to: the defect this case exists for was a PARTIAL
+ * clear, so an assertion covering one value would pass against it.
+ * @returns {Promise<void>} Resolves once every observation holds.
  */
 async function clearsEveryStoredIdentityKeyOnAnAuthenticatedRefusal(): Promise<void> {
-  establishSession();
+  await establishAnOrdinarySession();
   render(renderGuardedScreen());
   expect(screen.getByText('PROTECTED')).toBeInTheDocument();
 
   await dispatchARefusedAuthenticatedRequest();
 
-  // Assumptions: the wait is on the LAST key to be removed rather than on a fixed delay, because the
+  // Assumptions: the wait is on an observable outcome rather than on a fixed delay, because the
   //   interceptor notifies its listeners in a microtask so that a listener cannot replace the failure
-  //   the caller is awaiting. Polling for the observable outcome is what makes this case independent
-  //   of that scheduling decision.
-  await waitFor(refreshTokenHasBeenRemoved);
-  for (const key of SESSION_KEYS) {
-    expect(sessionStorage.getItem(key)).toBeNull();
+  //   the caller is awaiting. Polling is what makes this case independent of that scheduling decision.
+  await waitFor(theIdentifierHasBeenDiscarded);
+  expect(screen.getByTestId('groups').textContent, 'no authority may survive the refusal').toBe(
+    'none',
+  );
+
+  getApiClient().defaults.adapter = recordingAdapter;
+  recorded.length = 0;
+  await getApiClient().get('/api/v1/cards');
+  expect(
+    recorded[0]?.authorization,
+    'a request dispatched after the refusal must carry no bearer',
+  ).toBeUndefined();
+
+  recorded.length = 0;
+  await userEvent.click(screen.getByRole('button', { name: 'Sign off' }));
+  expect(
+    recorded,
+    'the renewal token must be gone, so a sign-out has nothing to revoke and dispatches nothing',
+  ).toHaveLength(0);
+}
+
+/** What each request dispatched through {@link recordingAdapter} carried. */
+const recorded: { readonly url: string; readonly authorization: string | undefined }[] = [];
+
+/**
+ * Answers one request successfully, recording its target and whatever bearer the interceptor attached.
+ *
+ * Assumptions: this replaces the refusing adapter once a case has finished with the refusal, because the
+ * observations that follow it are about what the client SENDS and a refusing adapter would reject them
+ * before they could be read.
+ * @param {AxiosRequestConfig} config - The request configuration after the client's interceptors ran.
+ * @returns {Promise<AxiosResponse>} An empty success.
+ */
+async function recordingAdapter(config: AxiosRequestConfig): Promise<AxiosResponse> {
+  let authorization: string | undefined;
+  const headers: unknown = config.headers;
+  if (typeof headers === 'object' && headers !== null) {
+    for (const [name, value] of Object.entries(headers as Record<string, unknown>)) {
+      if (name.toLowerCase() === 'authorization' && typeof value === 'string') {
+        authorization = value;
+      }
+    }
   }
+  recorded.push({ url: config.url ?? '', authorization });
+  return Promise.resolve({
+    data: {},
+    status: OK_STATUS,
+    statusText: '',
+    headers: {},
+    config,
+  } as AxiosResponse);
 }
 
 /**
  * The guard sends the operator back to sign-on once the refused session has been discarded.
  *
- * Assumptions: the rendered route is asserted as well as the storage, because clearing storage is only
- * half of what was broken. The hook holds its state per instance in `useState`, so a clear that did
- * not also reset that state would leave the guard rendering the protected screen from a stale value
- * until something unrelated re-rendered it.
+ * Assumptions: the rendered ROUTE is asserted as well as the reading, because discarding the session is
+ * only half of what was broken. The record is module state published through `useSyncExternalStore`, so
+ * a discard that did not notify would leave the guard rendering the protected screen from a reading it
+ * had already taken, until something unrelated re-rendered it.
  * @returns {Promise<void>} Resolves once the redirect has been observed.
  */
 async function returnsTheOperatorToSignOnAfterAnAuthenticatedRefusal(): Promise<void> {
-  establishSession();
+  await establishAnOrdinarySession();
   render(renderGuardedScreen());
   expect(screen.getByText('PROTECTED')).toBeInTheDocument();
 
@@ -219,29 +323,31 @@ async function returnsTheOperatorToSignOnAfterAnAuthenticatedRefusal(): Promise<
  * wrong password and an unknown identifier — so clearing on every 401 would report "signed out" to an
  * operator mistyping a password, and would discard a session that request never used.
  *
- * Assumptions: the no-bearer condition is produced by removing the stored ACCESS token rather than by
- * suppressing the header on one request, because the request interceptor sets that header from storage
- * unconditionally whenever a token is there and would overwrite a per-request override. Removing it is
- * also the more faithful model: an absent access token is exactly why a sign-on request carries no
- * bearer, and the three keys asserted below are the ones that must survive a rejected credential.
+ * Assumptions: ⚠️ Refactoring Rationale: the no-bearer condition is produced by the request's own
+ * `carddemoOmitStoredSession` flag, where it used to be produced by REMOVING the stored access token. The flag
+ * is the more faithful model as well as the only one still available: it is exactly what
+ * `ui/src/api/auth.ts` sets on the sign-on call, and a request that carries no bearer BECAUSE IT DECLARED
+ * ITSELF UNAUTHENTICATED is the real condition — a session that merely happened to hold no bearer is a
+ * different state, and one no exchange can now produce, since the installer accepts a token set only as
+ * a whole.
  * @returns {Promise<void>} Resolves once the surviving keys have been asserted.
  */
 async function leavesTheSessionIntactWhenTheRefusedRequestCarriedNoToken(): Promise<void> {
-  establishSession();
-  sessionStorage.removeItem('carddemo.access-token');
+  await establishAnOrdinarySession();
   render(renderGuardedScreen());
 
   const client = getApiClient();
   client.defaults.adapter = unauthorizedAdapter;
-  await expect(client.get('/api/v1/auth/signon')).rejects.toBeDefined();
+  await act(refusalThunk(client.get('/api/v1/auth/signon', WITHOUT_STORED_SESSION)));
 
   // Assumptions: a settled microtask queue is awaited before asserting, so this case would observe an
   //   over-eager clear rather than racing it. Asserting immediately would pass even if the interceptor
   //   had scheduled one, because the signal is delivered in a microtask.
   await Promise.resolve();
-  for (const key of ['carddemo.id-token', 'carddemo.user-id', 'carddemo.refresh-token']) {
-    expect(sessionStorage.getItem(key)).not.toBeNull();
-  }
+  expect(screen.getByTestId('user-id').textContent, 'the identifier must survive').toBe('USER0001');
+  expect(screen.getByTestId('groups').textContent, 'the authority must survive').toBe(
+    'carddemo-user',
+  );
   expect(screen.getByText('PROTECTED')).toBeInTheDocument();
 }
 
@@ -250,8 +356,8 @@ async function leavesTheSessionIntactWhenTheRefusedRequestCarriedNoToken(): Prom
  * @returns {void} Nothing; the cases are registered as a side effect.
  */
 function reAuthenticationCases(): void {
-  beforeEach(stubBuildConfiguration);
-  afterEach(restoreBuildConfiguration);
+  beforeEach(installTheHarness);
+  afterEach(removeTheHarness);
   it(
     'clears every stored identity key on an authenticated refusal',
     clearsEveryStoredIdentityKeyOnAnAuthenticatedRefusal,

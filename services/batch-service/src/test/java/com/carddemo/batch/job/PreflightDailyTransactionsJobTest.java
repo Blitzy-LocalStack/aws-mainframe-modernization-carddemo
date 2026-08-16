@@ -80,10 +80,11 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  *
  * <p>Purpose: this is the tier-2 case set for {@link PreflightDailyTransactionsJob}, the migration of
  * {@code app/cbl/CBTRN01C.cbl} and state 3 of the eleven-state {@code carddemo-daily-batch} chain the
- * migration plan defines in AAP 0.4.1.7 -- delivered as state 4 of TWELVE, because the chain as built
- * inserts a VerifyMigration state after staging, which shifts this pass and everything after it by
- * one. Both figures are stated because the plan's number is the contract and the delivered number is
- * what an operator reads in the console, and quoting only one of them makes the other look wrong. It asserts what the pass DOES NOT do — it writes no row to
+ * migration plan defines in AAP 0.4.1.7 -- delivered at that same position, so the plan's number and
+ * the number an operator reads in the console now agree. An earlier revision published the
+ * whole-migration verification gate as a twelfth top-level state, which shifted this pass to state 4;
+ * the gate now runs INSIDE the staging state, which restores the plan's topology without giving up the
+ * verification AAP 0.9.2 and 0.7.7 require. It asserts what the pass DOES NOT do — it writes no row to
  * any table, it produces no rejected record, and it cannot report the soft-warn tier — alongside the
  * three input outcomes it reports, the one behavioural divergence it deliberately carries, and the
  * durable step record that makes a redriven state a no-op.</p>

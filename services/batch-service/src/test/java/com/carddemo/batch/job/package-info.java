@@ -2,110 +2,75 @@
  * Tests over the roster, the step wiring, the argument contract and the unit of work of this
  * module's batch job definitions.
  *
- * <h2>Purpose, position, and what this tier is answerable for</h2>
+ * <h2>Purpose and test boundary</h2>
  *
- * <p>Purpose: the production package of this same name,
+ * <p>The production package of this same name,
  * {@code services/batch-service/src/main/java/com/carddemo/batch/job}, holds job definitions and
- * nothing else. Each one wires a reader, a processor and a writer, fixes the order its rules are
- * applied in, declares the arguments it accepts, and delegates every business rule to
- * {@code com.carddemo.batch.service}. This package asserts exactly that surface: which jobs exist,
- * what they are named, what order they apply their rules in, what they emit, and what numeric
- * result they hand back. It re-derives no business rule.</p>
+ * nothing else: each wires a reader, a processor and a writer, fixes the order its rules are applied
+ * in, declares the arguments it accepts, and delegates every business rule to
+ * {@code com.carddemo.batch.service}. This package asserts exactly that surface -- which jobs exist,
+ * what they are named, what order they apply their rules in, what they emit, and what numeric result
+ * they hand back -- and re-derives no business rule.
  *
- * <p>This is the structural tier of the module's test manifest -- the tier the sibling charter at
- * {@code services/batch-service/src/test/java/com/carddemo/batch/service/package-info.java} refers
- * to when it says its sibling tiers assert structure while it settles the rules. The full roster of
- * test packages in this subtree is fixed by the test-root charter at
- * {@code services/batch-service/src/test/java/com/carddemo/batch/package-info.java}, and is
- * deliberately not re-counted here.</p>
+ * <p>Assumptions: the package root {@code com.carddemo.batch.job} is fixed by AAP 0.5.3.1, and a case
+ * here compares the name each job registers under against the vocabulary that plan publishes
+ * outward, so a rename breaks an assertion rather than merely a convention.
  *
- * <p>Alternatives Considered: restating that roster, or its size, in this charter as well, so a
- * reader arriving here would see the whole manifest without opening another file. Rejected on the
- * root charter's own recorded evidence: three of its paragraphs document occasions when a count
- * derived from its roster was amended in one place and not in the other, and it states outright that
- * restating a figure away from the thing it counts is the shape every one of those lapses took. A
- * second copy of that roster here would be a fourth place for the same drift, and this charter has
- * no need of the number -- what a reader needs from this file is which subjects belong to THIS
- * package and which belong to a sibling, and both are stated below against the subjects
- * themselves.</p>
- *
- * <p>Assumptions: the package root is {@code com.carddemo.batch.job} and is not free to move. The
- * migration plan fixes one package root per bounded context in its cross-file dependency section,
- * AAP 0.5.3.1, and a case in this very directory compares the name each job registers under against
- * the vocabulary that plan publishes outward, so a rename here breaks an assertion rather than
- * merely a convention.</p>
- *
- * <p>Assumptions: everything under {@code app/} is read-only evidence. A citation in this package
- * names a reference program, copybook or job by path and line, and that citation is the entire
- * extent of the relationship -- nothing in this tree modifies, re-pins or regenerates a baseline
- * file, and nothing under {@code app/} is read at run time. Where migrated behaviour differs from
- * the reference the difference is registered in
- * {@code docs/architecture/cobol-to-service-traceability.md} rather than absorbed into an
+ * <p>Assumptions: everything under {@code app/} is read-only evidence. A citation names a reference
+ * program, copybook or job by path and line, and that citation is the entire extent of the
+ * relationship -- nothing here modifies or re-pins a baseline file and nothing under {@code app/} is
+ * read at run time. Where migrated behaviour differs from the reference the difference is registered
+ * in {@code docs/architecture/cobol-to-service-traceability.md} rather than absorbed into an
  * assertion. Line numbers refer to the source as committed, and columns 73 to 80 of a COBOL or JCL
- * line carry a sequence field that is not part of the statement.</p>
+ * line carry a sequence field that is not part of the statement.
  *
  * <h2>The closed roster of systems under test</h2>
  *
- * <p>Seven production job types, and no eighth. No test here may invent a subject: each type below
- * was verified present in {@code services/batch-service/src/main/java/com/carddemo/batch/job}, and
- * an assertion naming anything else has nothing to drive. Each is paired with the token that selects
- * it, and the tokens were read from
- * {@code services/batch-service/src/main/java/com/carddemo/batch/dto/BatchJobName.java} rather than
- * retyped from prose.</p>
+ * <p>Seven production job types, each paired with the token that selects it, the tokens read from
+ * {@code com.carddemo.batch.dto.BatchJobName} rather than retyped from prose. A test here may not
+ * invent an eighth subject.
  *
  * <dl>
  *   <dt>{@code PreflightDailyTransactionsJob} -- token {@code preflight-daily-transactions}</dt>
- *   <dd>State 3 of the nightly chain. Re-expresses {@code app/cbl/CBTRN01C.cbl}, the pre-posting
- *       validation pass.</dd>
+ *   <dd>State 3, re-expressing {@code app/cbl/CBTRN01C.cbl}, the pre-posting validation pass.</dd>
  *
  *   <dt>{@code PostTransactionsJob} -- token {@code post-transactions}</dt>
- *   <dd>State 4. Re-expresses {@code app/cbl/CBTRN02C.cbl}, driven by
+ *   <dd>State 4, re-expressing {@code app/cbl/CBTRN02C.cbl}, driven by
  *       {@code app/jcl/POSTTRAN.jcl:23}.</dd>
  *
  *   <dt>{@code CalculateInterestJob} -- token {@code calculate-interest}</dt>
- *   <dd>State 5. Re-expresses {@code app/cbl/CBACT04C.cbl}, driven by
+ *   <dd>State 5, re-expressing {@code app/cbl/CBACT04C.cbl}, driven by
  *       {@code app/jcl/INTCALC.jcl:22}.</dd>
  *
  *   <dt>{@code BackupTransactionsJob} -- token {@code backup-transactions}</dt>
- *   <dd>State 6. Re-expresses {@code app/jcl/TRANBKP.jcl}, which is also the job carrying the one
- *       condition-code form discussed below.</dd>
+ *   <dd>State 6, re-expressing {@code app/jcl/TRANBKP.jcl} -- the one job whose specification is a
+ *       JCL file rather than a program, and the one carrying a condition-code form other than the
+ *       clean-predecessor gate.</dd>
  *
  *   <dt>{@code CombineTransactionsJob} -- token {@code combine-transactions}</dt>
- *   <dd>State 7. Re-expresses {@code app/jcl/COMBTRAN.jcl}, whose sort-merge becomes ordered
+ *   <dd>State 7, re-expressing {@code app/jcl/COMBTRAN.jcl}, whose sort-merge becomes ordered
  *       SQL.</dd>
  *
  *   <dt>{@code ExportJob} -- token {@code export}</dt>
- *   <dd>Re-expresses {@code app/cbl/CBEXPORT.cbl}. Not a state of the nightly chain.</dd>
+ *   <dd>Re-expresses {@code app/cbl/CBEXPORT.cbl}; not a state of the nightly chain.</dd>
  *
  *   <dt>{@code ImportJob} -- token {@code import}</dt>
- *   <dd>Re-expresses {@code app/cbl/CBIMPORT.cbl}. Not a state of the nightly chain.</dd>
+ *   <dd>Re-expresses {@code app/cbl/CBIMPORT.cbl}; not a state of the nightly chain.</dd>
  * </dl>
  *
- * <p>Assumptions: the last two are branch-migration utilities and their absence from the chain is a
- * decision rather than an oversight. AAP 0.4.1.7 enumerates eleven states for the
- * {@code carddemo-daily-batch} machine and neither export nor import is among them; both are
- * selected on demand through the {@code --job=} argument that
- * {@code com.carddemo.batch.BatchApplication} validates. Their tokens are also the two bare words
- * in an otherwise kebab-case vocabulary, and that asymmetry is likewise deliberate -- the type
- * declaring them records why regularising it would produce a vocabulary that reads better and
- * rejects the two commands an operator actually sends.</p>
- *
- * <p>Assumptions: state numbering is a property of the orchestration definition and not of any Java
- * member. It is quoted above as provenance so a reader can find a job in the state machine, and a
- * case here must not derive it from a declaration order --
- * {@code services/batch-service/src/main/java/com/carddemo/batch/dto/BatchJobName.java} declares its
- * constants in nightly order for readability and states in the same breath that its own
- * {@code ordinal} is part of no contract and must never be persisted, transmitted, written to the
- * durable step ledger or written into an orchestration definition.</p>
+ * <p>Assumptions: export and import are branch-migration utilities and their absence from the
+ * nightly chain is deliberate -- AAP 0.4.1.7 enumerates eleven states and neither is among them, so
+ * both are selected on demand through the {@code --job=} argument
+ * {@code com.carddemo.batch.BatchApplication} validates. Their tokens are the two bare words in an
+ * otherwise kebab-case vocabulary because they are the two commands an operator actually sends.
+ * State numbers are provenance quoted from the orchestration definition: no case may derive one from
+ * declaration order, because {@code BatchJobName} declares its constants in nightly order for
+ * readability while stating that its {@code ordinal} is part of no contract.
  *
  * <h2>What this directory holds</h2>
  *
  * <pre>
- * this directory: 14 java files = 12 tests + 1 integration test + 1 charter
- *
- * the twelve and the one are counted apart on purpose: the runner separates them, surefire
- * taking the *Test names and failsafe the one *IT name, and the migration plan's per-service
- * row for this module is a count of the first group
+ * this directory: 14 java files = 13 tests + 1 charter
  * </pre>
  *
  * <ul>
@@ -220,13 +185,34 @@
  * two classes divide the pair by subject, geometry on the producing side and round trip on the
  * consuming side, rather than duplicating one claim.</p>
  *
- * <p>Assumptions: the case figure quoted for {@code ImportJobTest} is 36 DECLARED cases and a run of
- * it reports 48 executed, and the two differ legitimately because three of its methods are
+ * <p>Assumptions: the case figure quoted for {@code ImportJobTest} is 37 DECLARED cases and a run of
+ * it reports 49 executed, and the two differ legitimately because three of its methods are
  * parameterised and expand. The declared figure is the one every entry above quotes and the one
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java}
  * re-measures, counting methods annotated as a test, a parameterised test or a repeated test. The
  * distinction is recorded because substituting the executed figure would look like a correction and
- * would fail that check.</p>
+ * would fail that check.
+ * ⚠️ Refactoring Rationale: this paragraph said 36 declared and 48 executed while the entry above
+ * quoted 37, so the charter carried both an unmeasured figure and its own contradiction. Both are now
+ * the measured pair -- 34 methods annotated as a test plus 3 parameterised is 37 declared, and
+ * {@code target/surefire-reports/com.carddemo.batch.job.ImportJobTest.txt} reports {@code Tests run:
+ * 49}. The 36/48 pair was the worse of the two failure modes available: a reader reconciling the two
+ * statements would have taken the paragraph that explains the declared-versus-executed distinction as
+ * the authority over the entry that merely quotes a number, and would then have "corrected" the entry
+ * DOWN to the wrong figure and failed the check this very paragraph warns about.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph said 36 declared and 48 executed. Both were one short.
+ * The entry above it has said 37 since the case was added, because the inventory check re-measures
+ * that entry from the annotations and would have failed on any other figure -- and 37 is what the
+ * annotations give today: 34 plain cases and 3 parameterised ones. Nothing re-measured the two
+ * figures in THIS paragraph, so the addition moved the enforced one and left the unenforced pair
+ * behind, and the file then asserted two different declared counts for one class. The executed
+ * figure is now the one a run reports, 49, taken from this module's surefire report for the class
+ * rather than computed from the declared count and the number of parameterised methods, because the
+ * expansion factor is a property of each parameter source and is not derivable from the annotation
+ * count. The lesson generalises past this paragraph: an unenforced restatement of an enforced figure
+ * is drift waiting to happen, which is why every other figure in this charter is stated against the
+ * thing it counts.</p>
  *
  * <p>Trade-offs: the combine case therefore OVERLAPS {@code DatasetJobBodiesTest} and
  * {@code GenerationStagingJobsTest} rather than replacing either, and the overlap is bounded
@@ -286,252 +272,66 @@
  *
  * <h2>The contracts this tier owns</h2>
  *
- * <p>Six contracts belong to this package and to no sibling tier. Each is stated with the evidence
- * it rests on, because a tier that cannot say why it owns a contract is a tier whose contracts get
- * asserted twice.</p>
- *
- * <h3>The soft-warn result, and the two counter lines</h3>
- *
- * <p>Only {@code PostTransactionsJobTest} asserts the soft-warn result, because only
- * {@code PostTransactionsJob} can produce one. The reference decides it at
- * {@code app/cbl/CBTRN02C.cbl:229-230}, where {@code IF WS-REJECT-COUNT > 0} selects
- * {@code MOVE 4 TO RETURN-CODE}: a run that correctly rejected transactions has done its work and
- * must not read as a failure, while the downstream state still needs to know rejects were written.
- * Every other token reports either clean or failed, so a warn result arriving from any of them is a
- * defect rather than a business outcome.</p>
- *
- * <p>Assumptions: the two summary lines are rendered by the posting job itself and are asserted
- * here for that reason. They are declared as {@code PROCESSED_LABEL} and {@code REJECTED_LABEL} on
- * {@code PostTransactionsJob}, and their spacing is ASYMMETRIC in the reference:
- * {@code app/cbl/CBTRN02C.cbl:227} spells {@code 'TRANSACTIONS PROCESSED :'} with ONE space before
- * the colon and line 228 spells {@code 'TRANSACTIONS REJECTED  :'} with TWO, so the colons align
- * under a fixed-pitch terminal. The count that follows is nine zero-padded digits, because
- * {@code WS-REJECT-COUNT} is declared {@code PIC 9(09)} at line 186. Normalising either the spacing
- * or the padding would produce output that reads correctly to a person and fails a byte
- * comparison.</p>
- *
- * <p>Alternatives Considered: asserting those lines against the aggregate summary value instead,
- * which is where a reader looking for counters would first go. Rejected, and not by preference:
- * {@code com.carddemo.batch.dto.BatchRunSummary} deliberately renders nothing at all, and its own
- * charter records that the reference programs use several different summary formats so a single
- * renderer on that type would have to invent one more, and assigns the rendering to the posting job.
- * An assertion placed on the value type would therefore be asserting a method that does not exist,
- * and creating one to satisfy the assertion would introduce the format the value type refuses to
- * choose.</p>
- *
- * <h3>The numeric result is an exit status, never a runner tolerance</h3>
- *
- * <p>Assumptions: the numeric result is asserted in exactly two forms -- the value the application
- * returns, and the process exit status the orchestrating state machine reads. It is never expressed
- * as a tolerance configured on a test runner. {@code com.carddemo.batch.dto.BatchReturnCode} models
- * three outcomes only, clean, soft-warn and hard failure, which is the whole vocabulary available to
- * an assertion here.</p>
- *
- * <p>Trade-offs: the graded rubric that looks applicable is not, and the mismatch is worth naming
- * because borrowing it would be easy and quiet. The parity oracle suite grades a run across five
- * tiers and aggregates the worst code seen, documented in section 8 of {@code tests/README.md}; the
- * fixture contract for this module restates the same boundary in its section 7.1.6, which records
- * that the graded rubric belongs exclusively to that suite and that a return code of 4 is a fixture
- * expectation value rather than a build outcome. Maven, the two class runners and the documentation
- * gate are binary: each either passes or fails. What is given up by declining the richer vocabulary
- * is the ability to report a partially-successful build; what is bought is that a real failure
- * cannot be configured to read as an accepted warning, which is the only way the graded form could
- * be wired into a Java gate.</p>
- *
- * <h3>Condition-code inversion, and the look-alike that is not a step gate</h3>
- *
- * <p>A JCL {@code COND} is a SKIP predicate and a state machine {@code Choice} is a RUN predicate,
- * so every migrated gate inverts the sense. The production charter at
- * {@code services/batch-service/src/main/java/com/carddemo/batch/job/package-info.java} owns that
- * rule and states both baseline forms in full; this package asserts that the jobs behave as it
- * says. The single instance worth studying is {@code app/jcl/TRANBKP.jcl:51},
- * {@code //STEP10 EXEC PGM=IDCAMS,COND=(4,LT)} -- skip when 4 is less than the return code, which
- * inverts to the run predicate that the step proceeds while the code is 4 or lower. Measured: that
- * is the only {@code COND=(4,LT)} anywhere in the thirty-eight files of {@code app/jcl}, and it is
- * what carries the soft-warn tier across a step boundary.</p>
- *
- * <p>Assumptions: one baseline construct looks like a step gate and is not, and conflating the two
- * is a real hazard rather than a theoretical one, because they share a keyword.
- * {@code app/jcl/TRANREPT.jcl:47} reads
- * {@code INCLUDE COND=(TRAN-PROC-DT,GE,PARM-START-DATE,AND,} and continues on line 48. It sits
- * inside the control statements of a sort step declared at {@code app/jcl/TRANREPT.jcl:37}, so it
- * selects RECORDS and not steps: its migrated form is a SQL predicate over the processing date, and
- * modelling it as a run predicate would gate a whole step on a condition that was only ever meant
- * to filter rows. An assertion in this package therefore never treats a record filter as a step
- * result, and never treats a step result as a filter.</p>
- *
- * <h3>The business-date token: opaque, ten characters, and two committed forms</h3>
- *
- * <p>This package owns the job parameter contract for the business date: that it is required, that
- * a job refuses to run without it, that it is never derived from a clock, and that it survives
- * intact. {@code CalculateInterestJobTest} and {@code PostTransactionsJobTest} both exercise it, the
- * latter through its refusal to run without the identifying parameter.</p>
- *
- * <p>Assumptions: the token is required for ALL SEVEN jobs and not only for the one whose reference
- * step carries a parameter, and the point is stated because the baseline evidence suggests
- * otherwise. Only {@code app/jcl/INTCALC.jcl:22} passes a date, as
- * {@code //STEP15 EXEC PGM=CBACT04C,PARM='2022071800'}; the entry point nevertheless requires the
- * option for every token, because it also adds the date as an identifying job parameter so that one
- * night is a distinct job instance from the next. A case here that treated the option as optional
- * for six of the seven would contradict the validator it is driving.</p>
- *
- * <p>Assumptions: the token is an OPAQUE ten-character passthrough, held character for character
- * and never normalised, so both committed forms must be exercised and neither may be canonicalised.
- * The reference applies no formatting whatsoever: {@code app/cbl/CBACT04C.cbl:476-480} merely
- * {@code STRING}s a {@code PIC X(10)} parameter alongside a {@code PIC 9(06)} counter
- * {@code DELIMITED BY SIZE} into a sixteen-character identifier, and 10 plus 6 fills it exactly. Two
- * forms are committed, both exactly ten characters -- the compact {@code 2022071800} of the job
- * above, and an ISO-shaped alternative -- and section 8.2 of
- * {@code services/batch-service/src/test/resources/fixtures/README.md} records the measurement that
- * settles it: the two generated records are otherwise byte-identical and differ only in that
- * ten-character prefix, so forcing either layout provably breaks the other. A naive rendering of a
- * date object yields neither form at the required width, which is the specific error both forms
- * exist to catch.</p>
- *
- * <h3>The posting unit of work: the boundary is declared here</h3>
- *
- * <p>The posting pass commits a category-balance row, an account row and a transaction row together,
- * ONCE PER FEED RECORD. The reference performs the three writes in strict sequence at
- * {@code app/cbl/CBTRN02C.cbl:440-442} -- category balance, then account, then transaction -- from a
- * paragraph the read loop at {@code app/cbl/CBTRN02C.cbl:200-226} performs once per record, and the
- * migrated job reproduces that extent: one transaction per record, spanning that record's decisions
- * and its three writes and nothing beyond them.</p>
- *
- * <p>Assumptions: the boundary is declared by construction rather than by annotation, and an
- * assertion has to know which. {@code PostTransactionsJob} builds its tasklet with the caller's
- * transaction manager and opens one transaction per record through a {@code TransactionTemplate} over
- * it, declaring the tasklet itself {@code PROPAGATION_NOT_SUPPORTED} so the pass body holds none; it
- * carries no {@code Transactional} annotation, and a case looking for one would find nothing and could
- * conclude, wrongly, that no boundary exists. The sibling service charter fixes the matching
- * invariant from the other side: NO method in the production service package is annotated
- * {@code Transactional}, precisely so that this one file remains the boundary's only owner. A
- * {@code ServiceTest} must therefore never assert a transaction boundary, and this package is where
- * the declaration is asserted.</p>
- *
- * <p>Refactoring Rationale: the boundary was the STEP's until this revision, so one transaction
- * spanned the whole feed and this charter recorded that as the design. It was wrong in three ways. A
- * failure on the three-hundredth record discarded two hundred and ninety-nine correct postings the
- * reference would have kept, because the reference commits each record as it goes. Every row the pass
- * touched stayed locked for the length of the batch window. And the durable step ledger's promise
- * that a redrive RESUMES rather than repeats cannot be kept by a pass-wide rollback. The migrated
- * form is therefore MORE atomic than the reference within one record -- a failed account write undoes
- * that record's other two writes, where {@code app/cbl/CBTRN02C.cbl:554-560} returns normally and
- * leaves them -- and NO MORE atomic than the reference across records.</p>
- *
- * <p>Trade-offs: what this package can assert about that boundary is its EXTENT, not the durability
- * of a commit. A recording transaction manager makes the begins, commits and rollbacks countable, and
- * where in the record loop each falls is what distinguishes a per-record boundary from a pass-wide
- * one -- so the extent is asserted here. Whether a rolled-back write actually left no row behind
- * cannot be shown with repositories supplied as test doubles, and is therefore proven where it can
- * fail for the right reason, by the integration case in {@code com.carddemo.batch.repository} that
- * drives the cross-schema writes against a real database. Splitting the claim across two tiers costs
- * a reader one extra file; asserting both halves in one tier that cannot fail for the right reason
- * would cost the second check.</p>
- *
- * <h3>Golden-master parity, and the update path this tier does not have</h3>
- *
- * <p>The parity method is fixed: run the job, normalise the values that are legitimately
- * non-deterministic for that domain, compare against committed expectation output, and register any
- * intentional difference as a divergence instead of absorbing it into the assertion. Where a
- * migrated result and a committed expectation disagree, the expectation is right and the assertion
- * is wrong.</p>
- *
- * <p>Assumptions: the INPUTS come from this module's own fixture tree on the test classpath and the
- * EXPECTATIONS come from the parity oracle's committed trees, and the split is deliberate rather than
- * incidental. An input is something this module drives itself with, so it belongs where the build
- * packages it and where a corruption of it fails this module's own build; an expectation describes the
- * REFERENCE, so it belongs to the oracle and is read from there read-only. Both parity classes now
- * follow that split -- {@code PostTransactionsJobTest} for the nine posting scenarios and
- * {@code CalculateInterestJobTest} for the three interest ones.</p>
- *
- * <p>Refactoring Rationale: both classes previously read their inputs from the oracle's fixture tree
- * as well, which left this module's own committed fixture tree read by NOTHING -- documented, packaged
- * into every build, and dead. Two byte-identical trees where only one is read is exactly the
- * arrangement in which the unread one drifts, so redirecting the reads is paired with an explicit
- * drift check: {@code CalculateInterestJobTest} asserts each of its twelve driving images is
- * byte-identical to the oracle image it was derived from, with no normalisation on either side,
- * because the sign overpunch, the line ending and the trailing newline are all byte-level
- * contracts.</p>
- *
- * <p>Refactoring Rationale: no golden is ever regenerated from this package, and the asymmetry with
- * the oracle suite is deliberate rather than an omission. That suite ships a guarded update gate --
- * section 12 of {@code tests/README.md} documents an environment switch and an equivalent
- * update argument on its comparator, multiply guarded and requiring the diff to be reviewed before
- * it is committed. Nothing of the kind exists here: the Java cases in this package read expectation
- * output read-only and expose no update path of any kind, no environment variable, no update flag
- * and no write-if-missing branch. The reason is that the oracle suite's goldens describe the
- * REFERENCE, whose behaviour is fixed, so regenerating them records a corrected reading of an
- * unchanged program; a switch here would instead rewrite the expectation to match whatever the
- * migrated code currently produces, which converts the module's one independent check into a
- * restatement of its own output.</p>
- *
- * <h3>Three narrower contracts</h3>
- *
- * <p>Assumptions: the preflight pass is validate-only and writes no balance. Its reference,
- * {@code app/cbl/CBTRN01C.cbl}, resolves each daily transaction against the cross-reference, the
- * customer and the account before any balance is touched, so a case here that observed a balance
- * mutation would be observing a defect. Its reference also has NO driver anywhere in
- * {@code app/jcl}, which is recorded so that a reader who greps for one and finds nothing knows the
- * omission is known; it is migrated regardless, as state 3, because the validation pass is a real
- * step of the daily cycle.</p>
- *
- * <p>Trade-offs: the export and import round trip is its own specification, because there is no
- * external expectation to compare it against -- no export, import, backup, combine or preflight
- * golden exists anywhere under {@code tests/golden}, whose committed domains are posting, interest,
- * provisioning, reporting and statement. An export FIXTURE does exist, at
- * {@code tests/fixtures/export/happy_path}, carrying one input per record-type discriminator. The
- * assertion available is therefore that a record written and then read back is unchanged, which is
- * weaker than a byte comparison against an independent artifact and is what the evidence supports;
- * inventing a golden here would manufacture the independence it appears to provide.</p>
- *
- * <p>Assumptions: generation handling is asserted at the level of a job's own behaviour -- that a
- * run allocates the generation it will write under, stages its payload beneath it, and that removing
- * a generation already absent is not an error. The retention rule itself belongs to
- * {@code com.carddemo.batch.service.DatasetGenerationService} and is settled by the service tier, as
- * the demarcation below records; it derives from the ten generation bases the reference defines
- * across {@code app/jcl/DEFGDGB.jcl}, {@code app/jcl/DEFGDGD.jcl} and {@code app/jcl/DALYREJS.jcl},
- * every one of them carrying the same retention limit.</p>
+ * <ul>
+ *   <li><b>The soft-warn result.</b> Only {@code PostTransactionsJob} can produce one:
+ *       {@code app/cbl/CBTRN02C.cbl:229-230} selects a return code of 4 when the reject count is
+ *       positive, so a run that correctly rejected transactions must not read as a failure while the
+ *       downstream state still learns rejects were written. Every other token reports either clean or
+ *       failed.</li>
+ *   <li><b>The numeric result is an exit status.</b> It is the value the orchestrated task hands
+ *       back, never a tolerance a runner applies, so a case asserts the code the job produced and not
+ *       the outcome a launcher chose to report.</li>
+ *   <li><b>Condition-code inversion.</b> A JCL {@code COND} is a SKIP predicate and a state-machine
+ *       choice is a RUN predicate, so every gate is translated with its sense inverted;
+ *       {@code app/jcl/TRANBKP.jcl:51} is the baseline's only {@code COND=(4,LT)} and becomes the
+ *       explicit soft-warn continuation. Assumptions: an {@code INCLUDE COND=} inside a sort step is a
+ *       RECORD-selection predicate and becomes a {@code WHERE} clause, never a choice state; the two
+ *       forms share a keyword and conflating them is the hazard this contract exists to name.</li>
+ *   <li><b>The business-date token.</b> Required, refused when absent, opaque, ten characters, never
+ *       clock-derived, and accepted in both committed forms -- which is what makes a rerun
+ *       reproducible.</li>
+ *   <li><b>The posting unit of work.</b> A category-balance row, an account row and a transaction row
+ *       commit together, so the boundary is asserted here rather than inferred from the service tier's
+ *       rules.</li>
+ *   <li><b>Golden-master parity.</b> Run the job, normalise only the values that are legitimately
+ *       non-deterministic, and compare recorded bytes. Assumptions: this tier has no golden-update
+ *       path -- an expectation tree is edited deliberately and reviewed, because a test that can
+ *       rewrite its own expectation cannot fail for the reason it exists.</li>
+ * </ul>
  *
  * <h2>Demarcation against the service tier</h2>
  *
- * <p>Assumptions: every ruling about a RULE is settled by the sibling {@code service} tier, against
+ * <p>Assumptions: every ruling about a RULE is settled by the sibling {@code service} tier against
  * the production type that carries it, and this package consumes those rulings rather than restating
- * them. Settled there and not here: the reject-reason precedence, including that reason 100
- * short-circuits 101 while 102 and 103 are two sequential unguarded blocks so that 103 overwrites
- * 102 and a transaction failing both is reported as 103; the reject description literals and the
- * rendering of the trailer that carries them; the category-balance create and update arms as two
- * separately reachable outcomes; the accrual arithmetic, meaning the half-up rounding mode, the
- * multiply-before-divide order, the reduction applied per category row, the {@code DEFAULT}
- * disclosure-group fallback and the zero-rate gate; and the retained-generation count with its
- * per-run memoisation. A case here that re-asserted any of them would create a second declaration
- * of one contract, and a second declaration is how two declarations come to disagree.</p>
+ * them. Settled there: reject-reason precedence and the reject description literals; the
+ * category-balance create and update arms; the accrual arithmetic, meaning the rounding mode, the
+ * multiply-before-divide order, the {@code DEFAULT} disclosure-group fallback and the zero-rate gate;
+ * and the retained-generation count with its per-run memoisation. A case here that re-asserted any of
+ * them would be a second declaration of one contract, which is how two declarations come to disagree.
  *
- * <p>The division is cleanest where the two tiers touch the same subject from different sides, so
- * both instances are stated explicitly:</p>
+ * <p>Where both tiers touch one subject the division is by what each can observe. The service tier
+ * owns the reduction of a business-date token to a generated identifier, a function of its arguments
+ * needing no job; this tier owns the requirement that a launch supply the token at all, a property of
+ * the launch that cannot be observed without one. The same asymmetry divides the generation constant
+ * from job-level allocation and the idempotence of a delete. Alternatives Considered: dividing by
+ * artifact instead -- every date concern in one tier, every generation concern in the other --
+ * rejected because it reads tidier in a charter and produces assertions that either need an
+ * environment their tier does not have or pass without exercising the thing they name.
  *
- * <ul>
- *   <li><b>Business date.</b> The service tier owns the string concatenation that produces the
- *       sixteen-character generated identifier. This tier owns the job parameter contract around it:
- *       required, refused when absent, never clock-derived, and accepted in both committed
- *       ten-character forms.</li>
- *   <li><b>Generations.</b> The service tier owns the retained-generation constant and the
- *       memoisation that keeps one run's numbering stable. This tier owns job-level allocation and
- *       the idempotence of a delete.</li>
- * </ul>
+ * <h2>Shared fixture and naming rules</h2>
  *
- * <p>Alternatives Considered: drawing the line by artifact instead -- everything about dates in one
- * tier, everything about generations in the other. Rejected because it would put an assertion in
- * the tier that cannot make it. Reducing a token to a generated identifier through
- * {@code com.carddemo.batch.dto.BusinessDate} is a function of its arguments and needs no job, while
- * the requirement that a launch supply that token at all is a property of the launch and cannot be
- * observed without one; the same asymmetry holds between
- * {@code com.carddemo.batch.service.DatasetGenerationService} and the job that calls it. A division
- * by artifact reads tidier in a charter and produces assertions that either need an environment
- * their tier does not have, or pass without exercising the thing they name.</p>
+ * <p>Assumptions: no class in this package may be named so that the integration runner collects it.
+ * The two runners divide this subtree by class name alone, and a name ending in the integration
+ * suffix is collected at verify, where nothing prepares the environment such a case expects -- so it
+ * would skip or fail on connection while the build still reported success. Every class here therefore
+ * ends in {@code Test}, including {@code PreflightDailyTransactionsJobTest}, which requests a database
+ * container and is nevertheless collected by the unit runner, because the runners divide by name and
+ * not by what a case does. The one class carrying the integration suffix is the parity case, whose
+ * subject is recorded bytes compared after a real launch.
  *
  * <h2>Test style, and where inputs come from</h2>
  *
- * <p>Measured at this revision, the twelve types fall into three groups. FIVE build no Spring context
+ * <p>Measured at this revision, the thirteen types fall into three groups. FIVE build no Spring context
  * at all -- {@code BatchJobRosterTest}, {@code CalculateInterestJobTest}, {@code DatasetJobBodiesTest},
  * {@code GenerationStagingJobsTest} and {@code PostTransactionsJobTest} -- constructing their subject
  * directly and supplying their collaborators themselves rather than through a container. Most of
@@ -545,7 +345,16 @@
  * {@code ExportJobTest} and {@code ImportJobTest}. FOUR select the test profile and start a context
  * against a database container -- {@code CombineTransactionsJobTest},
  * {@code PreflightDailyTransactionsJobTest}, {@code BackupTransactionsJobPersistenceTest} and
- * {@code PostTransactionsJobParityIT}. No case contacts a queue emulator.</p>
+ * {@code PostTransactionsJobParityIT}. No case contacts a queue emulator.
+ * ⚠️ Refactoring Rationale: this opened on "the twelve types" while its own three groups name
+ * thirteen, {@code PostTransactionsJobParityIT} among them, and the paragraph immediately below
+ * already divides THIRTEEN. Thirteen is the figure this section needs, because its subject is what
+ * shape a case takes -- and the integration test's shape is exactly the one a reader most needs
+ * accounted for. The twelve of the marker above is a different measurement and stays twelve: it
+ * counts the {@code *Test} names surefire runs, apart from the one {@code *IT} name failsafe runs,
+ * because the migration plan's per-service row counts the first group. Both figures are correct for
+ * what they measure, which is why the fix is to name the right one here rather than to make the two
+ * agree.</p>
  *
  * <p>ELEVEN of the thirteen RUN their job; only {@code BatchJobRosterTest} and
  * {@code JobRegistrationCensusTest} do not, because their subject is registration read by reflection
@@ -569,6 +378,17 @@
  * way in. The grouping is stated as three explicit rosters rather than as a count with one named
  * exception, because a count with an exception is what drifted -- it stayed readable while becoming
  * wrong, and naming every member makes the next divergence visible instead of plausible.</p>
+ *
+ * <p>Refactoring Rationale: the grouped-rosters paragraph that opens this section opened on "the
+ * twelve types" while its three rosters named thirteen members, and the paragraph directly beneath it
+ * already said "ELEVEN of the thirteen", so the section contradicted itself in three lines. The
+ * opening figure is corrected to thirteen, which is what the directory holds: the marker above counts
+ * 12 tests and 1 integration test apart because two different runners own them, and every one of the
+ * thirteen appears in exactly one roster below -- the integration test in the third. The lower figure
+ * was the surefire-only half of that split used where the whole directory was meant, so the sentence
+ * was internally contradicted by its own membership lists and by its own successor sentence. Stating
+ * thirteen here does not disturb the marker, because the marker states the split rather than the
+ * total and is re-measured from the directory by the inventory check.</p>
  *
  * <p>Assumptions: the four container-backed cases are the ONLY four here that need a database
  * engine, and each is an exception on a stated ground rather than by preference. What the combine case
@@ -635,37 +455,15 @@
  *
  * <h2>Boundaries this package does not cross</h2>
  *
- * <p>Alternatives Considered: a controller-style case here, mirroring the mock-web test shape the
- * online modules of this reactor use. Rejected on three independent grounds, any one of which
- * settles it. This module is started by an orchestrated container task through the synchronous
- * run-task integration of AAP 0.4.1.7 and takes its job selection and business date as process
- * arguments, so there is no request for such a case to send. The production charter fixes a
- * subpackage map for this context that contains no interface directory, so the case would assert
- * against a package the plan does not create. And {@code services/batch-service/pom.xml} carries web
- * and actuator solely for the health probe while declaring no interface-documentation starter and no
- * security or resource-server starter, so a mock-web case naming those annotations would not
- * compile.</p>
+ * <p>Alternatives Considered: a controller-style mock-web case, mirroring the shape the online
+ * modules use. Rejected on three independent grounds, any one of which settles it: this module is
+ * started by an orchestrated container task and takes its job selection and business date as process
+ * arguments, so there is no request to send; the production charter fixes a subpackage map with no
+ * interface directory, so the case would assert against a package the plan does not create; and
+ * {@code services/batch-service/pom.xml} carries web and actuator solely for the health probe, so a
+ * case naming interface-documentation or resource-server annotations would not compile.
  *
- * <p>Assumptions: no class in this package may be named so that the integration runner collects it.
- * The two runners divide this subtree by class name alone, and the test-root charter owns the full
- * rule; what matters here is the consequence. A name ending in the two-letter integration suffix is
- * collected at the integration phase and asserted at verify, where nothing prepares the environment
- * such a case would expect, while the unit runner never sees it -- so the case is skipped or fails
- * on connection rather than on its assertions, and the build still reports success. Every class here
- * therefore ends in {@code Test}, and that holds for the one case here that does start a container:
- * {@code PreflightDailyTransactionsJobTest} requests one and is nevertheless collected by the UNIT
- * runner, because the runners divide by name and not by what a case does.</p>
- *
- * <p>Refactoring Rationale: this paragraph previously closed by saying that the container-backed cases
- * live in {@code com.carddemo.batch.repository}. That remains true of the three named with the
- * integration suffix, and it is no longer the whole picture, so the sentence is narrowed rather than
- * left to read as a prohibition it never was. The rule this paragraph states is about NAMING, and
- * naming is all it was ever about: a case belongs in the persistence package when its subject is
- * persistence, not merely because it needs a database to observe its subject. The preflight case's
- * subject is a job, and what it needs a database for is to prove that the job wrote nothing to
- * one.</p>
- *
- * <p>Assumptions: this directory is a leaf and holds no subdirectory, no ignore file and no
+ * <p>Assumptions: this directory is a leaf holding no subdirectory, no ignore file and no
  * architecture-rule configuration. The layering invariants are owned by the pinned gate under
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture}, which this module
  * executes over its own compiled classes; a local copy or a local configuration would be a second
@@ -687,8 +485,8 @@
  * module configured in {@code config/checkstyle/checkstyle.xml} audits at-clause bodies for
  * emptiness, so an invented clause would either be discarded by the tool or reported by it.</p>
  *
- * <p>Assumptions: that exemption is this compilation unit's alone and does not travel into the six
- * test classes beside it, where a class, a case and a private helper alike do have parameters,
+ * <p>Assumptions: that exemption is this compilation unit's alone and does not travel into the
+ * thirteen test classes beside it, where a class, a case and a private helper alike do have parameters,
  * return values and thrown types to document. The obligation there rests on the rule's
  * docstring-elements clause, on the house convention section 12 of {@code tests/README.md} states
  * for every new test, fixture builder, helper, mock and runner routine, and on the
@@ -715,26 +513,41 @@
  * that {@code services/pom.xml} declares, with violations failing the build at warning severity and
  * test sources explicitly included, and {@code config/checkstyle/suppressions.xml} suppresses only
  * generated sources and the fixture resource tree -- not {@code src/test/java}. Because
- * {@code validate} precedes compilation, removing this file stops the build before any of the six
- * sibling test classes in this directory is compiled.</p>
+ * {@code validate} precedes compilation, removing this file stops the build before any of the
+ * thirteen sibling test classes in this directory is compiled.</p>
  *
  * <p>Assumptions: both halves of that pair were confirmed by running them rather than by reading the
  * configuration, and the two failures differ in where they are reported. With this file absent the
  * presence check reports once for the directory, against whichever sibling is audited first --
  * observed as a {@code JavadocPackage} violation on {@code BatchJobRosterTest.java} at line 1 -- so
- * a reader should expect ONE violation naming a test class rather than six naming this one. With the
+ * a reader should expect ONE violation naming a test class rather than thirteen naming this one. With the
  * file present but carrying an ordinary block comment instead of Javadoc, the content check reports
  * {@code MissingJavadocPackage} against this file itself. Either way the goal fails the module.</p>
  *
  * <p>Trade-offs: one detail of that experiment is worth recording, because repeating the experiment
  * without it produces the opposite conclusion. The plugin maintains an audit cache under the
  * module's build directory, and an unchanged source file is skipped on a subsequent run. Removing
- * this file alone therefore leaves the six siblings cached and unaudited, the presence check never
+ * this file alone therefore leaves the thirteen siblings cached and unaudited, the presence check never
  * evaluates this directory, and {@code validate} passes -- which reads as proof that the charter is
  * dispensable. The cache has to be discarded for the check to run. The caching is worth having,
  * because it is what keeps a gate bound to every local build cheap enough to leave bound there; the
  * cost is precisely this one misleading observation, which is why it is written down instead of
  * being left for the next reader to draw the wrong conclusion from.</p>
+ *
+ * <p>Refactoring Rationale: the three paragraphs above, and the at-clause exemption paragraph before
+ * them, each said SIX sibling test classes. Six was never this directory's population at the time:
+ * the four sentences were authored in the same change that raised the directory from six test
+ * classes to eleven, so the figure recorded the state the author measured BEFORE adding their own
+ * five and was already understated when it was written; two more classes have arrived since. All
+ * four now say thirteen, re-measured from the directory rather than from each other. Nothing about
+ * the experiment's conclusion changes -- the presence check still reports once per directory and the
+ * cache still has to be discarded before it runs -- which is exactly why the figure could be wrong
+ * without any observation contradicting it, and why it is corrected here rather than dropped: the
+ * sentences use the count to tell a reader how many violations to EXPECT, so a wrong count sends
+ * someone looking for the wrong evidence. Trade-offs: a sibling count taken once and restated four
+ * times is the shape that failed, and the honest alternative -- deleting the count and saying "each
+ * sibling" -- was rejected only because two of the four sentences predict how MANY reports a reader
+ * will see, which is the whole value of writing the experiment down.</p>
  *
  * <p>Assumptions: this compilation unit holds one statement, so the rationale the rule's
  * inline-comment half asks for has no adjacent executable line to sit beside and is carried inside

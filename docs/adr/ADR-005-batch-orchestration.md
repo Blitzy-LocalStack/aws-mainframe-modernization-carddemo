@@ -12,8 +12,9 @@
 >
 > **Source of truth.** The decision of record is the Agent Action Plan (AAP)
 > §0.1.2 row D5, which fixes the accepted option. AAP §0.4.1.7 enumerates eleven
-> states of the nightly chain and the delivered chain holds twelve, for the reason
-> recorded at the state table below; AAP §0.7.5 assigns the condition-code,
+> states of the nightly chain and the delivered chain holds eleven; where the
+> verification AAP §0.9.2 and §0.7.7 mandate runs, and why it is not a twelfth
+> state, is recorded at the state table below. AAP §0.7.5 assigns the condition-code,
 > restart and generation analyses to this file. The behavioural specification is
 > the COBOL and JCL baseline under `app/**` — specifically `app/jcl/**`,
 > `app/scheduler/**` and `app/cbl/CBTRN02C.cbl` — which is **read-only**: this
@@ -24,7 +25,7 @@
 - **Status:** Accepted
 - **Decision:** Replace JES2 job submission and the two scheduler decks with
   **EventBridge Scheduler → Step Functions → Spring Batch on ECS Fargate**. One
-  state machine, `carddemo-daily-batch`, holds the nightly chain as **twelve
+  state machine, `carddemo-daily-batch`, holds the nightly chain as **eleven
   states**; a scheduler rule starts one execution per night; each state that does
   real work runs a container task through the **synchronous run-task
   integration** and waits for it, receiving its step arguments as **container
@@ -182,22 +183,35 @@ two `<JOB>` elements inside `MONTHLY-InterestCalculation` share `JOBISN="4"`
 the container whose `FOLDER_NAME` is `WEEKLY-TransactionTypesDBRefresh` while
 carrying `PARENT_FOLDER="WEEKLY-DisclosureGroupsRefresh"`.
 
-### The nightly chain as twelve states
+### The nightly chain as eleven states
 
 AAP §0.4.1.7 fixes the chain. The state names below are not a paraphrase: they are
 the names declared in
 [`infra/modules/step-functions-batch/variables.tf`](../../infra/modules/step-functions-batch/variables.tf)
-at L1260–L1271, so this table and the provisioned definition cannot drift apart
+at L1298–L1309, so this table and the provisioned definition cannot drift apart
 without one of them failing review — the module validates that its per-state timeout map
-holds exactly these twelve names, no more and no fewer.
+holds exactly the names of these eleven states plus the nested verification gate, no more
+and no fewer.
 
-Refactoring Rationale: AAP §0.4.1.7 enumerates **eleven** states and the delivered chain
-holds **twelve**. The one addition, state 3, is the combined verification gate the AAP
-mandates as a first-class deliverable in §0.9.2 and specifies three passes for in §0.7.7 —
-mandated, but not given a state by §0.4.1.7, so the strongest pass in the system was
-reachable from nothing but a test. It replaces no JCL job, because the baseline verified
-no load at all, and its `Choice` is the ONLY edge into state 4, so business processing is
-unreachable over data that does not match its source.
+Refactoring Rationale: the delivered chain holds the **eleven** states §0.4.1.7
+enumerates, and the combined verification gate the AAP mandates as a first-class
+deliverable in §0.9.2 and specifies three passes for in §0.7.7 runs **inside state 2**
+rather than beside it. A previous revision of this record described a twelve-state chain,
+because that gate was published as a twelfth top-level state: §0.4.1.7 mandates the
+topology but gives the verification no state to run in, so the strongest pass in the
+system was reachable from nothing but a test, and adding a state was the first way found
+to give it a caller. Nesting is the better resolution, because it satisfies both
+requirements instead of trading one for the other. State 2 is now a `Parallel` wrapping a
+single branch; the branch runs the seed-refresh `Map` and then `VerifyMigration`, whose
+`Choice` admits only exit code zero and no warn tier. Every property the gate exists for
+survives the move — it still runs on the SELECT-only verification login, it still executes
+the two committed whole-migration queries, and state 2's single outgoing edge is still the
+ONLY edge into state 3, so business processing remains unreachable over data that does not
+match its source. What changes is only that the count published to a reader is once again
+the count the plan fixes. One consequence is worth stating because it looks like a
+contradiction: `var.state_timeout_seconds` carries **twelve** keys for an eleven-state
+chain, since `VerifyMigration` is a timed state without being a top-level one. That
+variable's own validation records the distinction.
 
 Refactoring Rationale: state 2 also changed, and that change added no state. §0.4.1.7
 describes it as replacing "the `IDCAMS REPRO` master-refresh block", but a `REPRO` both
@@ -210,16 +224,17 @@ transaction-identifier allocator past the rows it loaded — without which the f
 transaction the online service adds would collide on the primary key.
 
 Alternatives Considered: those two pieces of work were authored as two further top-level
-states, `LoadSeedDatasets` and `ReconcileTransactionSequence`, which would have made the
-chain fourteen. Both are withdrawn. Splitting one dataset's fetch, stage, load and verify
+states, `LoadSeedDatasets` and `ReconcileTransactionSequence`, which together with
+`VerifyMigration` would have made the chain fourteen. All three are withdrawn. Splitting
+one dataset's fetch, stage, load and verify
 across three `Map` states re-opens the question of which generation the load reads — the
 operator's inbox or the prefix staging actually wrote — and it makes the published chain
-length uncountable, because a `Map` branch holding five work states makes "twelve"
+length uncountable, because a `Map` branch holding five work states makes "eleven"
 ambiguous the moment anyone counts what runs. Keeping them in one branch keeps each
 failure attributable to one DATASET, which is the attribution an operator needs. The
-divergence from §0.4.1.7 is recorded here rather than resolved by leaving the verification
-gate out, because the alternative is a chain that posts over unverified data and reports
-success.
+verification gate was never a candidate for removal, because a chain without it posts over
+unverified data and reports success; nesting it inside state 2 is what lets the chain keep
+§0.4.1.7's eleven states without giving that up.
 
 Assumptions: **naming the states after the provisioned definition rather than
 after the jobs they replace is a deliberate choice, and it costs something.** A
@@ -227,27 +242,26 @@ state named `PostTransactions` does not announce that it replaces `POSTTRAN.jcl`
 so the mapping has to be written down — which is what the second column of this
 table is for. Alternatives Considered: naming each state after its baseline job
 would have made the mapping self-evident and was rejected, because three states
-have no single job behind them (state 2 replaces a block of `IDCAMS REPRO` steps,
-state 3 replaces nothing at all, state 4 replaces a program with no job, and state 10
-covers two jobs), so a job-derived name would have been either misleading or unavailable
-for those four.
+have no single job behind them (state 2 replaces a block of `IDCAMS REPRO` steps and
+nests a verification that replaces nothing at all, state 3 replaces a program with no job,
+and state 9 covers two jobs), so a job-derived name would have been either misleading or
+unavailable for those three.
 
 | State | Replaces | Mechanism |
 |---|---|---|
 | 1 `QuiesceOnlineWrites` | `CLOSEFIL.jcl` — `EXEC PGM=SDSF` at L22 issuing `CEMT SET FIL(...) CLO` at L26–L30 | Lambda setting a read-only flag in Parameter Store |
-| 2 `StageSeedDatasets` | the whole `IDCAMS REPRO` master-refresh block — its copy half **and** its `DEFINE CLUSTER`-and-load half | `Map` state, eleven branches, each a synchronous run-task on the ETL image invoking `refresh-dataset`: fetch, stage a generation, load, verify, and for the transaction master advance the identifier allocator |
-| 3 `VerifyMigration` | **nothing** — the baseline verified no load | Fargate task on the ETL image invoking `verify-all`, then a `Choice` admitting only exit code zero and no warn tier |
-| 4 `PreflightDailyTransactions` | `CBTRN01C` — **which has no JCL driver in the baseline** | Fargate task |
-| 5 `PostTransactions` | `POSTTRAN.jcl` / `CBTRN02C` | Fargate task, then a `Choice` on reject count that takes the **warn** path rather than failing |
-| 6 `CalculateInterest` | `INTCALC.jcl` / `CBACT04C` | Fargate task; business date passed as a parameter, never read from the clock |
-| 7 `BackupTransactions` | `TRANBKP.jcl`, **and** the unload halves of `TRANREPT.jcl` and `PRTCATBL.jcl` | Fargate task exporting three object-storage generations |
-| 8 `CombineTransactions` | `COMBTRAN.jcl` — `PGM=SORT` at L22 merging two generation inputs | Fargate task using SQL ordering |
-| 9 `GenerateStatements` | `CREASTMT.JCL` / `CBSTM03A` + `CBSTM03B` | Fargate task writing text and HTML statements |
-| 10 `GenerateReports` | `TRANREPT.jcl` / `CBTRN03C` and `PRTCATBL.jcl` | Fargate task writing the 133-column report and the 40-byte category-balance report |
-| 11 `AnalyzeTables` | `TRANIDX.jcl` — `BLDINDEX` at L52 | Lambda running `ANALYZE`; index *building* is retired because PostgreSQL maintains indexes transactionally |
-| 12 `ResumeOnlineWrites` | `OPENFIL.jcl` — `EXEC PGM=SDSF` at L22 issuing `CEMT SET FIL(...) OPE` at L26–L30 | Lambda clearing the read-only flag |
+| 2 `StageSeedDatasets` | the whole `IDCAMS REPRO` master-refresh block — its copy half **and** its `DEFINE CLUSTER`-and-load half. The verification nested inside it replaces **nothing** — the baseline verified no load | `Parallel` wrapping one branch. The branch runs a `Map` of eleven branches, each a synchronous run-task on the ETL image invoking `refresh-dataset` — fetch, stage a generation, load, verify, and for the transaction master advance the identifier allocator — then `VerifyMigration`, a Fargate task on the ETL image invoking `verify-all`, then a `Choice` admitting only exit code zero and no warn tier. This state's single outgoing edge is the ONLY edge into state 3 |
+| 3 `PreflightDailyTransactions` | `CBTRN01C` — **which has no JCL driver in the baseline** | Fargate task |
+| 4 `PostTransactions` | `POSTTRAN.jcl` / `CBTRN02C` | Fargate task, then a `Choice` on reject count that takes the **warn** path rather than failing |
+| 5 `CalculateInterest` | `INTCALC.jcl` / `CBACT04C` | Fargate task; business date passed as a parameter, never read from the clock |
+| 6 `BackupTransactions` | `TRANBKP.jcl`, **and** the unload halves of `TRANREPT.jcl` and `PRTCATBL.jcl` | Fargate task exporting three object-storage generations |
+| 7 `CombineTransactions` | `COMBTRAN.jcl` — `PGM=SORT` at L22 merging two generation inputs | Fargate task using SQL ordering |
+| 8 `GenerateStatements` | `CREASTMT.JCL` / `CBSTM03A` + `CBSTM03B` | Fargate task writing text and HTML statements |
+| 9 `GenerateReports` | `TRANREPT.jcl` / `CBTRN03C` and `PRTCATBL.jcl` | Fargate task writing the 133-column report and the 40-byte category-balance report |
+| 10 `AnalyzeTables` | `TRANIDX.jcl` — `BLDINDEX` at L52 | Lambda running `ANALYZE`; index *building* is retired because PostgreSQL maintains indexes transactionally |
+| 11 `ResumeOnlineWrites` | `OPENFIL.jcl` — `EXEC PGM=SDSF` at L22 issuing `CEMT SET FIL(...) OPE` at L26–L30 | Lambda clearing the read-only flag |
 
-Three of the twelve states — 1, 11 and 12 — are Lambda invocations, and that
+Three of the eleven states — 1, 10 and 11 — are Lambda invocations, and that
 boundary is owned by [ADR-002](ADR-002-compute-platform.md), which enumerates every
 function so that "Lambda for glue only" stays a checkable claim. The statistics state runs
 plain `ANALYZE` rather than `VACUUM ANALYZE`, for the reason that record gives at
@@ -262,15 +276,15 @@ graph LR
 
     subgraph TGT["Target — one state machine per night"]
         S["EventBridge Scheduler<br/>one execution per night"]
-        S --> Q1["1 Quiesce"] --> M["2 Refresh<br/>(Map, 11 branches)"] --> V3["3 Verify"]
-        V3 --> VC{"Choice<br/>exit code"}
-        VC -->|"0"| P4["4 Preflight"]
-        VC -->|"non-zero"| VF["VerificationFailed"]
-        P4 --> P5["5 Post"] --> C{"Choice<br/>reject count"}
-        C -->|"0"| I6["6 Interest"]
+        S --> Q1["1 Quiesce"] --> M["2 Refresh + Verify<br/>(Map, 11 branches)"]
+        M --> VC{"Map:<br/>every branch clean?"}
+        VC -->|"every branch clean"| P4["3 Preflight"]
+        VC -->|"any branch failed"| VF["NotifyFailure"]
+        P4 --> P5["4 Post"] --> C{"Choice<br/>reject count"}
+        C -->|"0"| I6["5 Interest"]
         C -->|"&gt; 0 = warn"| I6
-        I6 --> B7["7 Backup"] --> K8["8 Combine"] --> G9["9 Statements"]
-        G9 --> G10["10 Reports"] --> A11["11 Analyze"] --> R12["12 Resume"]
+        I6 --> B7["6 Backup"] --> K8["7 Combine"] --> G9["8 Statements"]
+        G9 --> G10["9 Reports"] --> A11["10 Analyze"] --> R12["11 Resume"]
     end
 
     REF -.->|"ordering and gating<br/>re-expressed, not ported"| TGT
@@ -283,10 +297,10 @@ graph LR
 **`CBTRN01C` has no JCL driver anywhere in the baseline.** No file in `app/jcl/**`
 names it; the only things that reference it are the program itself and the test
 suite — `tests/integration/test_cbtrn01c_prepost.py` and its fixtures. It is
-migrated regardless, as state 4, because the program exists and encodes
+migrated regardless, as state 3, because the program exists and encodes
 pre-posting behaviour. Assumptions: a program with no driver has no baseline step
 order to preserve, so its position in the chain is derived from its data
-dependency — it reads the daily transaction input that state 5 then posts — rather
+dependency — it reads the daily transaction input that state 4 then posts — rather
 than from a job it never had.
 
 **`TRANREPT` is submitted from CICS, not from a scheduler.** The transaction-report
@@ -297,13 +311,13 @@ job reaches JES through the transient-data queue defined at
 submission is **not** a state in the nightly chain: it becomes the reporting
 service calling `StartExecution` on a **second, smaller state machine**, declared
 separately in the same module. The nightly chain still generates the scheduled
-report as state 10; the two paths are distinct in the baseline and stay distinct in
+report as state 9; the two paths are distinct in the baseline and stay distinct in
 the target.
 
 ## Decision
 
 **EventBridge Scheduler starts one Step Functions execution per night; the state
-machine holds the twelve-state chain; each work state runs a Spring Batch job or a
+machine holds the eleven-state chain; each work state runs a Spring Batch job or a
 data-migration command as
 an ECS Fargate task through the synchronous run-task integration.**
 
@@ -367,7 +381,7 @@ concepts more directly than anything in the accepted option:
 
 It is rejected for one reason, and the reason is about fit rather than capability:
 **it would add job-queue and compute-environment management for a fixed nightly
-chain.** The workload is a known sequence of twelve steps running once per night —
+chain.** The workload is a known sequence of eleven steps running once per night —
 not a variable-width queue of independent work arriving at an unpredictable rate.
 Queues and compute environments are the machinery that solves the second problem,
 and this workload is the first. Adopting them would mean owning a queue's
@@ -392,7 +406,7 @@ longer than the ceiling into one that does not, and a step that is retried becau
 it was truncated is worse than one that was never attempted.
 
 The rejection is scoped, though, and the scope matters: **Lambda is adopted for
-glue — exactly three of the twelve states, 1, 11 and 12** — because those three do
+glue — exactly three of the eleven states, 1, 10 and 11** — because those three do
 one short, stateless thing each (set a flag, run a maintenance statement, clear a
 flag) and hold no connection pool and no step's work.
 [ADR-002](ADR-002-compute-platform.md) owns that boundary and names every function
@@ -530,7 +544,7 @@ that must be *rebuilt* after a bulk load, which is why `TRANIDX.jcl` exists at a
 In PostgreSQL a secondary index is maintained transactionally as part of the write
 that changes the row, so there is no rebuild step to schedule — the index is never
 stale in the way a freshly reloaded VSAM alternate index is. What remains useful
-after a bulk load is refreshing the planner's statistics, which is what state 11
+after a bulk load is refreshing the planner's statistics, which is what state 10
 does. Alternatives Considered: keeping a state that rebuilt indexes explicitly was
 rejected because it would either be a no-op dressed as work, or it would drop and
 recreate indexes, which would *introduce* a window of missing indexes that the
@@ -620,7 +634,7 @@ loop with:
 
 So a night on which some transactions were correctly rejected ends with return code
 4, and `app/jcl/TRANBKP.jcl:L51`'s `COND=(4,LT)` is what lets the backup step run
-anyway. **State 5's `Choice` on reject count is therefore preservation, not
+anyway. **State 4's `Choice` on reject count is therefore preservation, not
 invention** — it reproduces a contract the baseline already has. In the provisioned
 definition the warn branch is labelled `POSTING_REJECTS_PRESENT`.
 
@@ -738,7 +752,7 @@ outcome a batch restart is supposed to prevent. A ledger without redrive would
 record what happened without offering a way to continue. Alternatives Considered:
 relying on redrive alone was rejected for that reason; relying on each job's own
 Spring Batch job repository alone was rejected because it tracks a *job's* internal
-step state and cannot express "state 7 of this orchestrator run already finished",
+step state and cannot express "state 6 of this orchestrator run already finished",
 which is the question a resumed chain has to answer.
 
 ### (c) Generation datasets: ten bases, not six
@@ -807,14 +821,14 @@ stable and is what a reader needs.
 ### The orchestrator is charged per state transition, and the chain bounds it by construction
 
 Step Functions standard workflows are charged per **state transition**. The nightly
-chain has **twelve** states and runs **one execution per night**, so the
+chain has **eleven** states and runs **one execution per night**, so the
 orchestration charge is bounded by a fixed, small state count multiplied by a fixed,
 small execution count. Retries and the `Map` state's branches add transitions, and
 they are bounded too — retries by `MaxAttempts` and the `Map` by the number of seed
 datasets.
 
 **Saying this explicitly is the point: orchestration is not the interesting cost
-variable in this decision.** A chain of twelve states once a night cannot become
+variable in this decision.** A chain of eleven states once a night cannot become
 expensive as *orchestration*, whatever the per-transition rate is. That is what
 frees the comparison between Options 1 and 2 to be decided on operational burden
 rather than on the orchestrator's own bill.
@@ -849,7 +863,7 @@ two line items.
 ### The environment lever is sizing and retention, and there is no third
 
 AAP §0.4.1.6 fixes that `dev` and `prod` differ **only in sizing and retention,
-never in topology**. The same twelve states run in both environments, so the
+never in topology**. The same eleven states run in both environments, so the
 levers are exactly:
 
 | Lever | Effect |
@@ -895,7 +909,7 @@ environment**, and that is where the difference lies:
 
 The operational half is stated plainly because it is the half that decides. The
 question is not which option's per-hour rate is lower; it is whether this workload
-needs a queue and a compute environment at all. A fixed twelve-step nightly chain
+needs a queue and a compute environment at all. A fixed eleven-step nightly chain
 does not.
 
 Options 4 and 5 are both charged for **always-on** capacity — an instance to host a
@@ -926,7 +940,7 @@ managed batch service here**. Applying the sentence literally:
   capacity boundary to discover on a night when a step must run. Its failure modes
   are per-state and declared: a timeout, a bounded retry, a `Catch`.
 - **Lower cost.** The accepted option is charged for the seconds its steps run and
-  for twelve work-state transitions a night, with **no compute charge between
+  for eleven work-state transitions a night, with **no compute charge between
   runs**. The
   rejected option's cost depends on a compute environment's provisioning model, and
   on a persistent or minimum-capacity one it holds instance-hours for a chain that
@@ -956,7 +970,7 @@ successfully and fails later, under load, on a night when a step has to run.
 ### Accepted trade-off — a lower practical ceiling on massive parallel fan-out
 
 A purpose-built batch service's array jobs scale fan-out further than a `Map` state
-does in practice. Accepted, because the chain is a fixed twelve-step sequence with
+does in practice. Accepted, because the chain is a fixed eleven-step sequence with
 **two** `Map` states, and each iterates the same small, known list of eleven seed
 datasets rather than an open-ended work queue. Trade-offs: if this pipeline ever grew a
 genuinely wide, variable-width parallel stage, this is the trade-off that would be
@@ -1003,13 +1017,13 @@ stopped. This is stated plainly rather than implying the bracket is atomic, beca
 an operator woken by it needs to know the shape of the failure.
 
 Three things bound it. The `Catch` path on every work state routes to notification,
-so a failed chain is announced rather than merely stopped. State 12's flag clear is
+so a failed chain is announced rather than merely stopped. State 11's flag clear is
 **idempotent**, so clearing an already-cleared flag is safe and can be re-run
-freely. And the flag release does not depend solely on the chain reaching state 12:
+freely. And the flag release does not depend solely on the chain reaching state 11:
 [ADR-002](ADR-002-compute-platform.md) records that the same `resume` function is
 also the target of a bracket-finalizer rule
 (`aws_cloudwatch_event_rule.daily_finalizer`) which releases the flag when an
-execution ends `FAILED`, `TIMED_OUT` or `ABORTED` without reaching state 12 —
+execution ends `FAILED`, `TIMED_OUT` or `ABORTED` without reaching state 11 —
 including the abort case, which no in-execution `Catch` can observe.
 
 ### Risk — a resumed step re-runs work that already committed
@@ -1037,11 +1051,11 @@ records would have to be wrong in the same way for this to slip through.
   clock.** This is the baseline's own discipline, visible at
   `app/jcl/INTCALC.jcl:L22`, and the parity oracle depends on it.
 - **The ETL image, the batch image and the reporting image are separately
-  versioned.** States 2 and 3 run the ETL image, states 4 through 8 the batch image
-  and states 9 and 10 the reporting image. They are different artifacts with
+  versioned.** States 2 and 3 run the ETL image, states 3 through 8 the batch image
+  and states 8 and 10 the reporting image. They are different artifacts with
   different release cadences, and the state machine passes each its own overrides.
 - **The reject-count warn contract at return code 4 is preserved end to end** — from
-  `app/cbl/CBTRN02C.cbl:L229-L230` through the state 5 `Choice` to the aggregate a
+  `app/cbl/CBTRN02C.cbl:L229-L230` through the state 4 `Choice` to the aggregate a
   runner reports.
 - **A step's arguments are data, not code.** Everything that varies between runs —
   the business date, the dataset generation, the environment — arrives as an
@@ -1231,4 +1245,4 @@ existing suite, and untouched by the choice of orchestrator. This record decides
 - [`docs/architecture/cobol-to-service-traceability.md`](../architecture/cobol-to-service-traceability.md) — the register of documented behavioural divergences
 - [`docs/runbooks/batch-operations.md`](../runbooks/batch-operations.md) — running, monitoring and redriving the chain
 - [`docs/CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) — the documentation convention this record is written to
-- [`infra/modules/step-functions-batch/variables.tf`](../../infra/modules/step-functions-batch/variables.tf) — L1260–L1271 the twelve state names as provisioned, and L1290–L1305 the exactness check over them
+- [`infra/modules/step-functions-batch/variables.tf`](../../infra/modules/step-functions-batch/variables.tf) — L1298–L1309 the twelve timed-state names as provisioned (the eleven top-level work states plus the nested `VerifyMigration`), and L1335–L1348 the exactness check over them

@@ -536,6 +536,59 @@ class TransactionApiContractTest {
                 .isTrue();
     }
 
+    /**
+     * Asserts the copy-last body carries the keys and the confirmation and NO data member.
+     *
+     * <p>Purpose: {@code app/cbl/COTRN02C.cbl} L473 performs {@code VALIDATE-INPUT-KEY-FIELDS} and nothing
+     * else before the read, and L481 to L492 then FILL the eleven data fields from the copied record. So
+     * the data members are this action's output, and a body requiring them makes the action reachable only
+     * from a screen that is already filled in -- which is what the operation published before, and which
+     * this case exists to keep closed.</p>
+     *
+     * <p>Assumptions: the key rule is asserted to be the SHARED one -- the same class-level constraint
+     * annotation, resolved through the same validator by way of the interface both records implement -- so
+     * a submission carrying neither key is refused identically by both operations. Two independent copies
+     * of that rule could drift, and the copy they would drift on decides whether a write happens against a
+     * key that was never resolved.</p>
+     */
+    @Test
+    @DisplayName("the copy-last body carries a key and a confirmation, and no data member")
+    void theCopyLastBodyCarriesKeysAndConfirmationOnly() {
+        Map<String, Object> published = schema("CopyLastRequest");
+        List<String> components = Arrays.stream(CopyLastRequest.class.getRecordComponents())
+                .map(RecordComponent::getName)
+                .toList();
+
+        assertThat(mapping(published, "properties").keySet())
+                .as("the published members must be exactly the three the record binds")
+                .containsExactlyInAnyOrderElementsOf(components);
+        assertThat(components)
+                .as("the eleven data members of the capture body have no place on this one: they are"
+                        + " filled by the copy at L481 to L492, not submitted to it")
+                .containsExactlyInAnyOrder("accountId", "cardNumber", "confirmation");
+        assertThat(published.get("additionalProperties"))
+                .as("a closed body, like every other in this contract")
+                .isEqualTo(false);
+        assertThat(published)
+                .as("at least one key, expressed the way the capture body expresses it")
+                .containsKey("anyOf")
+                .doesNotContainKey("oneOf");
+        assertThat(published)
+                .as("no member is required outright: the keys are alternatives and the confirmation is"
+                        + " absent on the turn that only copies")
+                .doesNotContainKey("required");
+
+        assertThat(CopyLastRequest.class
+                .isAnnotationPresent(TransactionAddRequest.AtLeastOneKey.class))
+                .as("the copy body carries the SAME key constraint as the capture body, because L473"
+                        + " and L133 perform one paragraph")
+                .isTrue();
+        assertThat(TransactionKeySelection.class)
+                .as("the shared constraint reaches both records through the interface they implement")
+                .isAssignableFrom(CopyLastRequest.class)
+                .isAssignableFrom(TransactionAddRequest.class);
+    }
+
     // WHY : Assumptions: the enum's serialised form is asserted through fromWireValue rather than by
     //       name, because the defect was precisely that the names and the tokens differed. Comparing
     //       Direction.values() by name() would have reproduced the bug in the test.
@@ -741,7 +794,7 @@ class TransactionApiContractTest {
 
         assertSerialisedBodySatisfiesSchema(writer, "TransactionAddPreview",
                 TransactionAddPreview.prompting(Money.of("125.50"),
-                        "Confirm to add this transaction..."));
+                        "Confirm to add this transaction...", "00000000011", "4111111111111111"));
         assertSerialisedBodySatisfiesSchema(writer, "TransactionCreated",
                 new TransactionAddResponse("0000000000683580", Money.of("125.50"),
                         "Transaction added successfully."));

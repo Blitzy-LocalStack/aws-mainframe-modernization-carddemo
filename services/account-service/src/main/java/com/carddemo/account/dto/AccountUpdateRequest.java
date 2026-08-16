@@ -36,8 +36,13 @@ package com.carddemo.account.dto;
  * is composed into the load balancer's access record before any application code runs, and nothing inside a
  * service can withdraw it. Those three records are SELECTION bodies carrying one key each; this one is an
  * EDITING body carrying forty-three submitted values, which is the distinction the opening sentence now
- * draws. The end-user account view and update keep their identifier in the path deliberately, and the reason
- * is recorded on {@code AccountController} rather than repeated here.</p>
+ * draws. Refactoring Rationale: this paragraph closed by saying the end-user account view and update
+ * "keep their identifier in the path deliberately". They do not, and never did — {@code AccountController}
+ * binds no path variable on any of its four operations, all of which are a {@code POST} reading their key
+ * from a body — so the sentence described a split transport this context does not have. The single
+ * transport, its cost and the alternatives rejected are registered as
+ * {@code D-ACCOUNT-SELECTION-IN-BODY} in {@code docs/architecture/cobol-to-service-traceability.md}
+ * §7.4.</p>
  *
  * <p>The components are also the keys of the per-field error array the update response carries. That
  * array is keyed at this granularity and not at record granularity, which means the individual year,
@@ -223,7 +228,7 @@ package com.carddemo.account.dto;
  * behaviour. The cost accepted is that an over-long value is not stopped at the boundary; it is carried
  * to the validation and mapping stages, where the reference system's own padding and truncation rules
  * are applied and where a per-field error can still be raised. This choice is available because
- * {@code services/common-lib/pom.xml} L229 to L230 declares the constraint-annotation dependency
+ * {@code services/common-lib/pom.xml} L220 to L221 declares the constraint-annotation dependency
  * {@code optional}, so the annotations are a compile-scope convenience rather than a runtime guarantee,
  * and a consumer excluding that dependency still binds this record correctly.</p>
  *
@@ -324,10 +329,10 @@ package com.carddemo.account.dto;
  * boilerplate or with a generated mapper for the translation. Both are rejected across this migration and
  * both rejections apply here with force. Generated accessors cannot carry a docstring, and the gate this
  * file is audited by leaves no room for one that does not:
- * {@code config/checkstyle/checkstyle.xml} declares {@code MissingJavadocMethod} at L363 with
- * {@code scope} set to private at L364 and {@code allowMissingPropertyJavadoc} set to false at L365, and
- * it declares {@code MissingJavadocType} at L308 with {@code RECORD_DEF} among its tokens at L310 to
- * L311, so a generated member would fail the build rather than merely go undocumented. A generated
+ * {@code config/checkstyle/checkstyle.xml} declares {@code MissingJavadocMethod} at L356 with
+ * {@code scope} set to private at L357 and {@code allowMissingPropertyJavadoc} set to false at L358, and
+ * it declares {@code MissingJavadocType} at L301 with {@code RECORD_DEF} among its tokens at L303 to
+ * L304, so a generated member would fail the build rather than merely go undocumented. A generated
  * mapper has nowhere to record a justification, and this record's translation needs one at almost every
  * field: it composes each calendar value out of three parts across the eight-to-ten width bridge proven
  * at {@code app/cbl/COACTUPC.cbl} L4174 to L4179, recomposes one identifier out of three parts with no

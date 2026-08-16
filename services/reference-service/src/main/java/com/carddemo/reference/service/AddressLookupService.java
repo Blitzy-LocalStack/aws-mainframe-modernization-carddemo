@@ -13,8 +13,8 @@ import com.carddemo.reference.dto.UsStateZipPrefixResponse;
 import com.carddemo.reference.mapper.UsPhoneAreaCodeMapper;
 import com.carddemo.reference.mapper.UsStateMapper;
 import com.carddemo.reference.mapper.UsStateZipPrefixMapper;
+import com.carddemo.reference.repository.StateRepository;
 import com.carddemo.reference.repository.UsPhoneAreaCodeRepository;
-import com.carddemo.reference.repository.UsStateRepository;
 import com.carddemo.reference.repository.UsStateZipPrefixRepository;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -109,7 +109,7 @@ public class AddressLookupService {
     private final UsPhoneAreaCodeRepository areaCodes;
 
     /** Access to the seeded state codes. */
-    private final UsStateRepository states;
+    private final StateRepository states;
 
     /** Access to the seeded state-and-prefix pairs. */
     private final UsStateZipPrefixRepository zipPrefixes;
@@ -140,7 +140,7 @@ public class AddressLookupService {
      */
     public AddressLookupService(
             UsPhoneAreaCodeRepository areaCodes,
-            UsStateRepository states,
+            StateRepository states,
             UsStateZipPrefixRepository zipPrefixes,
             CursorToken cursorToken,
             UsPhoneAreaCodeMapper areaCodeMapper,

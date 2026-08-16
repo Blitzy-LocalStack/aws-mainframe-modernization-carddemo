@@ -22,11 +22,25 @@ import jakarta.validation.constraints.Size;
  * {@code services/auth-service/src/main/resources/openapi/auth-api.yaml} return this one shape, so a
  * component that suited only one of them would be wrong on the other two. Sign-on returns it as one
  * branch of a two-shape success, told apart by {@code outcome}. The renewal exchange
- * {@code POST /api/v1/auth/refresh} returns it directly with a null {@code refreshToken}, because
- * the user pool does not reissue one on renewal. The challenge exchange
+ * {@code POST /api/v1/auth/refresh} returns it directly carrying the ROTATED refresh token the pool
+ * reissues, because {@code infra/modules/cognito} enables refresh-token rotation -- so a renewal
+ * answers with a successor token the caller must store in place of the one it presented. Refactoring
+ * Rationale: this sentence said the pool reissues nothing on renewal and that the member is null there.
+ * That described the initiated flow the service used to call, which rotation forbids; a client written
+ * against it would keep presenting an already-exchanged token and be refused. The challenge exchange
  * {@code POST /api/v1/auth/challenge} returns it directly once a permanent credential has been
  * accepted. That {@code refreshToken} is nullable is precisely what lets one shape serve all three,
  * instead of a second and nearly identical shape existing for the renewal path alone.
+ *
+ * <p>Assumptions: ⚠️ Refactoring Rationale: this block said the renewal returns a null
+ * {@code refreshToken} "because the user pool does not reissue one on renewal", which described the
+ * legacy refresh flow rather than the one this service uses. Rotation is enabled on the app client --
+ * {@code RefreshTokenRotation} carries {@code Feature = "ENABLED"} with a zero retry grace period in
+ * {@code infra/modules/cognito/main.tf} -- so the ordinary answer carries a replacement and the
+ * submitted token is invalidated. Nullability is retained as a TOLERANCE rather than as the normal case:
+ * the retry grace period is a pool-side setting, and configured above zero it leaves the submitted token
+ * current and the answer without a replacement. A caller must therefore store a non-null value over the
+ * one it holds and keep what it holds on a null.
  *
  * <p>Refactoring Rationale: this record implements {@link SignOnOutcome}, and it did not always. The
  * sealed interface exists so the sign-on handler can declare a return type that admits both branches
@@ -262,8 +276,9 @@ import jakarta.validation.constraints.Size;
  *     server-side branch the reference program took at {@code app/cbl/COSGN00C.cbl} lines 231 to
  *     239, and it is accepted for authorisation by no operation here
  * @param refreshToken the refresh token the configured user pool minted where the app client is
- *     configured to issue one, or {@code null} where it is not and {@code null} on a renewal, because
- *     the pool does not reissue one there. It is not a bearer credential and no operation accepts it
+ *     configured to issue one, or {@code null} where it is not. On a renewal it carries the rotated
+ *     successor the pool issues in place of the token presented, which the caller must store, because
+ *     rotation invalidates the presented one. It is not a bearer credential and no operation accepts it
  *     for authorisation; the renewal operation takes it in a request body, which is the one direction
  *     it travels
  * @param tokenType the credential scheme the tokens are to be presented under, as the pool reports

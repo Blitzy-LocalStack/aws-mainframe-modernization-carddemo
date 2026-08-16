@@ -47,11 +47,13 @@
  */
 
 import { getApiClient, keysetPagingMembers, requestPath } from './client';
+import { MASKED_CARD_NUMBER } from './masking';
 import type {
   AccountDetail,
   AccountLookupRequest,
   AccountUpdateRequest,
   AccountUpdateResponse,
+  AccountUpdateValidationResponse,
   AccountViewResponse,
   CardXrefPage,
   CardXrefResponse,
@@ -76,6 +78,7 @@ export type {
   AccountLookupRequest,
   AccountUpdateRequest,
   AccountUpdateResponse,
+  AccountUpdateValidationResponse,
   AccountViewResponse,
   CardXrefPage,
   CardXrefResponse,
@@ -123,6 +126,18 @@ const UPDATE_ACCOUNT: ContractOperation = {
   operationId: 'updateAccount',
 };
 
+/*
+ * WHY : Assumptions: this operation is declared beside the write it judges, and its address sits
+ *       BENEATH the write's, because the two share a request body and a reader has to read them
+ *       together. Its own identifier carries no account, so nothing about it needed moving out of the
+ *       request line.
+ */
+const VALIDATE_ACCOUNT_UPDATE: ContractOperation = {
+  method: 'POST',
+  path: '/api/v1/accounts/update/validate',
+  operationId: 'validateAccountUpdate',
+};
+
 const READ_ACCOUNT_VIEW: ContractOperation = {
   method: 'POST',
   path: '/api/v1/accounts/view',
@@ -136,11 +151,11 @@ const LIST_ACCOUNT_CARD_CROSS_REFERENCES: ContractOperation = {
 };
 
 /**
- * The three END-USER operations `account-api.yaml` publishes, in the order that document declares
+ * The four END-USER operations `account-api.yaml` publishes, in the order that document declares
  * them.
  *
  * Assumptions: this is a SUBSET of the contract and not the whole of it, which is what distinguishes
- * it from the sibling manifests. `account-api.yaml` declares eleven operations; the eight it tags
+ * it from the sibling manifests. `account-api.yaml` declares twelve operations; the eight it tags
  * `internal` are unreachable with a browser token and are absent here by design. A reader adding
  * this manifest to the `BROWSER_CLIENTS` table in `ui/src/api/contracts.test.ts` would therefore
  * fail that gate rather than satisfy it: `theClientMatchesItsContract` compares a manifest with its
@@ -150,6 +165,7 @@ const LIST_ACCOUNT_CARD_CROSS_REFERENCES: ContractOperation = {
  */
 export const ACCOUNT_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
   UPDATE_ACCOUNT,
+  VALIDATE_ACCOUNT_UPDATE,
   READ_ACCOUNT_VIEW,
   LIST_ACCOUNT_CARD_CROSS_REFERENCES,
 ];
@@ -157,8 +173,35 @@ export const ACCOUNT_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
 /** Matches an account identifier within the eleven-digit range the contract admits. */
 const ACCOUNT_ID_DIGITS = /^[0-9]{1,11}$/u;
 
-/** Matches the masked rendering every cross-reference row must carry. */
-const MASKED_CARD_NUMBER = /^[*]{12}[0-9]{4}$/u;
+/*
+ * WHY : ⚠️ Assumptions: the masked-card pattern is IMPORTED from `./masking` and is no longer declared
+ *       here. The same regular expression was declared locally in five client modules and then extracted
+ *       into one, and the merge left this module holding both -- the import and its own copy. One owner is
+ *       transformation rule T2: a shape with two declarations can drift in one of them, and this one is
+ *       the boundary check that decides whether a published card rendering is masked at all.
+ */
+
+/**
+ * Matches the fixed marker the service publishes in place of either protected customer identifier.
+ *
+ * Assumptions: the marker is a CONSTANT and not a partial mask, which is why this pattern is anchored
+ * on a literal rather than shaped like {@link MASKED_CARD_NUMBER}. `CustomerMapper` declares
+ * `IDENTIFIER_REDACTED = "[REDACTED]"` and publishes it for both the national identifier and the
+ * government-issued one, and its own note records why nothing derived from the stored value can reach a
+ * caller through it: the values are enciphered and that class publishes no accessor for the clear
+ * form, so a trailing-digits mask of the kind a primary account number gets is not even constructible
+ * there. The marker therefore discloses neither a fragment of the value nor its length nor, for the
+ * optional government-issued identifier, whether the row has one at all.
+ *
+ * Refactoring Rationale: the pattern is asserted at the client boundary because the CONTRACT could not
+ * assert it. Both properties were published as `type: string` with a `maxLength` alone — 12 and 20, the
+ * screen-field widths — and a bare maximum admits a whole formatted national identifier: `123-45-6789`
+ * is eleven characters and satisfies `maxLength: 12` exactly as the ten-character marker does. So a
+ * service, a stub or a proxy that returned the clear value would have satisfied the schema, and this
+ * screen would have painted it. The contract now publishes the marker as a `pattern` on all four
+ * declarations, and this guard is what makes a violation fail HERE rather than on screen.
+ */
+const REDACTED_IDENTIFIER = /^\[REDACTED\]$/u;
 
 /** The response header carrying the revision the conditional edit requires back, lower-cased. */
 const REVISION_HEADER = 'etag';
@@ -307,6 +350,69 @@ function validateCardXrefRow(row: CardXrefResponse): CardXrefResponse {
 }
 
 /**
+ * Rejects a protected customer identifier that is not the redaction marker.
+ *
+ * Assumptions: this is a POSITIVE check — the value must MATCH the marker — rather than a search for
+ * anything that looks like a national identifier. A negative check has to enumerate the shapes it means
+ * to catch, and it would pass every shape it had not thought of: nine bare digits, a differently
+ * separated grouping, a government-issued identifier of any format at all. Requiring the one value the
+ * service is known to publish inverts that: anything else is refused, whether or not this module can
+ * recognise what it is.
+ *
+ * Assumptions: the check runs on the two members of the account-view read even though the same mapper
+ * fills the standalone customer read. The account-view composition is the one a browser token can
+ * reach — the contract tags the standalone customer read `internal` — so this is the surface a
+ * misconfiguration could actually expose.
+ * Assumptions: the parameter admits `undefined` although the contract declares the member required, and
+ * the check refuses that case too. A response missing the member entirely is as much a contract
+ * violation as one carrying a clear identifier, and it is the shape a stub or a partially-implemented
+ * service is most likely to send -- so refusing it here reports the violation as this guard's own
+ * `RangeError` naming the member, rather than as a `TypeError` raised several frames away when a screen
+ * tries to render it.
+ * @param {string | undefined} value - The published identifier exactly as the service sent it, or
+ *   `undefined` when the response omitted the member.
+ * @param {string} member - The response member being checked, named in the refusal so a failure says
+ *   which of the two was at fault.
+ * @returns {void} Nothing; the function asserts.
+ * @throws {RangeError} If the value is absent, is not text, or is anything other than the marker.
+ */
+function requireRedactedIdentifier(value: string | undefined, member: string): void {
+  if (typeof value !== 'string' || !REDACTED_IDENTIFIER.test(value)) {
+    // Assumptions: the offending value is NOT reproduced in the message, for the same reason the card
+    //   guard withholds its own. Naming the value here would copy a national identifier into an error
+    //   message and from there into whatever records the failure, which is precisely the disclosure
+    //   this guard exists to stop -- so the message names the MEMBER and describes the expectation.
+    throw new RangeError(
+      `The account view's ${member} must be the fixed redaction marker;` +
+        ' an unredacted identifier was returned.',
+    );
+  }
+}
+
+/**
+ * Validates the two protected identifiers of a composed account view and returns it unchanged.
+ *
+ * Refactoring Rationale: the response is returned rather than rewritten. Substituting the marker for an
+ * offending value was the alternative and is refused: it would let a service that leaked a national
+ * identifier keep serving a screen that looked correct, so the leak would persist undetected. Failing
+ * the read surfaces the misconfiguration at once, and the screen already renders a rejected read on its
+ * error channel without echoing what the rejection carried.
+ * @param {AccountViewResponse} view - The composed read exactly as the service sent it.
+ * @returns {AccountViewResponse} The same response, once both identifiers are established to be
+ *   redacted.
+ * @throws {RangeError} If either protected identifier is not the redaction marker.
+ */
+function validateAccountView(view: AccountViewResponse): AccountViewResponse {
+  // Assumptions: the customer grouping is reached with optional chaining although the contract declares
+  //   it required, so a response that omitted it is refused by the guard below rather than raising a
+  //   TypeError here. The declared type says the member is present; a response is not obliged to agree.
+  const customer: Partial<AccountViewResponse['customer']> | undefined = view.customer;
+  requireRedactedIdentifier(customer?.ssnMasked, 'ssnMasked');
+  requireRedactedIdentifier(customer?.governmentIssuedIdMasked, 'governmentIssuedIdMasked');
+  return view;
+}
+
+/**
  * Reads one account together with its customer, for the account-view screen.
  *
  * Assumptions: one call returns both records because the contract composes them in a single
@@ -327,7 +433,9 @@ function validateCardXrefRow(row: CardXrefResponse): CardXrefResponse {
  *   account and its customer as the screen renders them, the two message channels alongside them,
  *   and the revision to submit an edit under -- `null` when the response carried no entity tag, in
  *   which case the account may be displayed but not edited from this read.
- * @throws {RangeError} If the identifier is not one to eleven decimal digits.
+ * @throws {RangeError} If the identifier is not one to eleven decimal digits, or if the response's
+ *   national or government-issued identifier is not the fixed redaction marker -- see
+ *   {@link requireRedactedIdentifier} for why that is checked here rather than trusted from the schema.
  * @throws {Error} If the request fails. The rejection is the normalised problem document `./client`
  *   raises, whose `fieldErrors` array names `accountId` on HTTP 400 -- carrying the reference's own
  *   refusal wording from `app/cbl/COACTVWC.cbl` L672 -- and which reports HTTP 404 when the account,
@@ -342,7 +450,10 @@ export async function readAccountView(accountId: string): Promise<{
     accountLookupBody(accountId),
   );
 
-  return { account: response.data, revision: revisionFrom(response.headers) };
+  return {
+    account: validateAccountView(response.data),
+    revision: revisionFrom(response.headers),
+  };
 }
 
 /**
@@ -431,6 +542,32 @@ export async function updateAccount(
   );
 
   return { account: response.data, revision: revisionFrom(response.headers) };
+}
+
+/**
+ * Judges a submitted account edit without writing anything, which is the screen's first turn.
+ *
+ * Assumptions: NO revision is sent, unlike {@link updateAccount}. A verdict changes nothing, so there
+ * is no state a precondition would protect, and requiring one would make the first turn depend on a
+ * value it has no use for.
+ *
+ * Assumptions: a refused value resolves rather than rejects. The operation answers with HTTP 200
+ * carrying the verdict, so a caller reads `inputError` and `noChangesFound`; only a transport or key
+ * failure rejects. Treating a refusal as a rejection here would make an ordinary expected outcome
+ * indistinguishable from a broken request.
+ * @param {SensitiveAccountUpdateRequest} request - The submission to judge, exactly as the write would
+ *   receive it.
+ * @returns {Promise<AccountUpdateValidationResponse>} The verdict those edits reached.
+ */
+export async function validateAccountUpdate(
+  request: SensitiveAccountUpdateRequest,
+): Promise<AccountUpdateValidationResponse> {
+  const response = await getApiClient().post<AccountUpdateValidationResponse>(
+    requestPath(VALIDATE_ACCOUNT_UPDATE),
+    request,
+  );
+
+  return response.data;
 }
 
 /**

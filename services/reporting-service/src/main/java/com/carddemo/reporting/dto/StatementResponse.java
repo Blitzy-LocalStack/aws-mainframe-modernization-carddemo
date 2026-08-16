@@ -82,10 +82,11 @@ import jakarta.validation.constraints.Size;
  * {@code WS-TOTAL-AMT PIC S9(9)V99} in the packed group at {@code app/cbl/CBSTM03A.CBL} L64 to L65,
  * eleven significant digits, against the roughly 15 to 17 that binary64 offers -- which leaves
  * nothing at all once a client chains two operations of its own on a value that is itself a sum. The
- * encoding is not applied component by component: {@code com.carddemo.reporting.ReportingApplication}
- * registers {@code com.carddemo.common.money.MoneyModule} explicitly, for the reason recorded at
- * {@code com.carddemo.reporting.dto}, and that single registration is why this component needs no
- * serialisation annotation of its own.
+ * encoding is not applied component by component: the shared kernel registers
+ * {@code com.carddemo.common.money.MoneyModule} itself, both as an auto-configured bean and through a
+ * Jackson service-provider file, for the reason recorded at {@code com.carddemo.reporting.dto}, and
+ * those registrations are why this component needs no serialisation annotation of its own and why no
+ * class in this module declares the module at all.
  *
  * <p>Assumptions: the plain-text statement renders money three ways, all three place the sign in the
  * LAST position and none of the three groups thousands. The balance is
@@ -291,7 +292,7 @@ import jakarta.validation.constraints.Size;
  * declaration. No digits-only constraint is asserted on that component even though its source field
  * holds digits, because the value it actually carries is a mask and a digits-only assertion would
  * reject every legitimate one. And no rendering override is declared on this record, whereas
- * {@code StatementRequest} in this same package declares one at its L228 to L232: that type's card
+ * {@code StatementRequest} in this same package declares one at its L99 to L103: that type's card
  * number is a caller-supplied selector holding the unreduced value, so its generated rendering had
  * something worth withholding, while this type's has already been reduced before an instance can
  * exist.
@@ -320,7 +321,7 @@ import jakarta.validation.constraints.Size;
  *
  * <p>Alternatives Considered: each declared width is asserted once, by the {@code @Size} constraint
  * in the header, and the constructor below deliberately does not repeat that check. Repeating it was
- * the alternative and it is rejected on the ground {@code StatementRequest} L154 to L180 already
+ * the alternative and it is rejected on the ground {@code StatementRequest} L192 to L220 already
  * records: two executable positions for one declared width are what let a caller be published one
  * contract and held to another. The constraint is the single authority for width, and the constructor
  * asserts only the properties a width constraint cannot express -- that the values naming the
@@ -477,7 +478,7 @@ public record StatementResponse(
      * <p>Assumptions: no message raised below reproduces the value it rejected. One component is a
      * primary account number already reduced to a mask, and two are artifact locations, so naming
      * the component and withholding its content keeps a diagnostic from re-exposing either. This
-     * matches the refusal discipline {@code StatementRequest} L174 to L183 records for the request
+     * matches the refusal discipline {@code StatementRequest} L211 to L220 records for the request
      * half of this surface.
      *
      * @throws IllegalArgumentException if {@code cardNumber} is {@code null} or carries no content,

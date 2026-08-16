@@ -795,8 +795,11 @@ them appears anywhere in this repository.** The table is exhaustive against
 `Fallback` of **none** means the variable has no default anywhere, and every other row
 shows the literal the profile falls back to.
 
-**Fourteen** settings have **no fallback**, so an incomplete environment stops at startup
-rather than running a consumer bound to nothing.
+**Thirteen** settings have **no fallback**, so an incomplete environment stops at startup
+rather than running a consumer bound to nothing. Refactoring Rationale: this read **fourteen**
+and the figure is one lower because `CARDDEMO_MESSAGING_HMAC_KEY` is withdrawn — see the record
+under the secret table below. It is a measurement of the rows marked `none` in the table that
+follows, so it is checkable rather than asserted.
 
 Assumptions: that failure mode matters more in this context than in its siblings, because
 a consumer pointed at the wrong queue is **silent rather than broken** — it starts,
@@ -813,7 +816,6 @@ reports healthy, and processes nothing. A hard startup failure is the correct be
 | `CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID` | App client a presented token must name | Parameter Store | none |
 | `CARDDEMO_MESSAGING_PAUTH_REQUEST_QUEUE` | The one queue this context consumes | Parameter Store | none |
 | `CARDDEMO_MESSAGING_REPLY_QUEUE_ALLOWLIST` | Comma-separated **queue addresses** a reply may be sent to | Parameter Store | none |
-| `CARDDEMO_MESSAGING_HMAC_KEY` | Keys the one tokeniser this context holds — **secret** | Secrets Manager | none |
 | `CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY` | Seals the internal token presented on the calls into the account context — **secret** | Secrets Manager | none |
 | `CARDDEMO_ACCOUNT_CONTEXT_BASE_URL` | Where the account context answers; must be an absolute **HTTPS** origin with no path, query or user information | Parameter Store (internal load balancer) | none |
 | `CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY` | Seals keyset cursors — **secret**. Not declared in `application.yml`; see below | Secrets Manager | none |
@@ -897,16 +899,15 @@ hands one to the wrong service fails at `plan` rather than at container start.
 |---|---|---|
 | `SPRING_DATASOURCE_PASSWORD` | this service only | composed by `infra/modules/secrets` with the cluster credential |
 | `SPRING_FLYWAY_PASSWORD` | this service only, and used **before** the runtime credential | as above |
-| `CARDDEMO_MESSAGING_HMAC_KEY` | **this service alone** | attended, in [`docs/runbooks/batch-operations.md`](../../docs/runbooks/batch-operations.md) |
 | `CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY` | **two tasks** — this service signs with it and `account-service` verifies against it | attended and **not** a rolling change, in [`docs/runbooks/deploy.md`](../../docs/runbooks/deploy.md) |
 | `CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY` | **seven tasks**, sharing ONE value per environment | attended, in [`docs/runbooks/deploy.md`](../../docs/runbooks/deploy.md); rotating it refuses every cursor a client currently holds |
 
 Assumptions: the holder counts are the part to read carefully, because each implies a
-different rotation. The internal-identity key has two holders by necessity, the messaging
-key one by design, and the cursor key seven sharing a single value — so rotating the cursor
+different rotation. The internal-identity key has two holders by necessity and the cursor key
+seven sharing a single value — so rotating the cursor
 key has a blast radius of every browsing client in the deployment, while rotating the
-messaging key touches nothing else at all. Conflating them would make the first two look
-rolling. The internal-identity key is symmetric, so signer and verifier must hold the same
+internal-identity key affects one caller and its verifier. Conflating them would make the
+first look rolling. The internal-identity key is symmetric, so signer and verifier must hold the same
 bytes; each task reads its value once at start-up and the verifier holds exactly one key per
 subject with no predecessor, which is why replacing it has an unavoidable refusal window
 confined to that one caller. It is also **per caller** rather than shared with
@@ -914,12 +915,20 @@ confined to that one caller. It is also **per caller** rather than shared with
 holder writes rather than a property the verifier can check, so either caller could mint as
 the other.
 
-Assumptions: `CARDDEMO_MESSAGING_HMAC_KEY` is a different secret again from the masking key
-documented in [`data-migration/README.md`](../../data-migration/README.md), and from the
-cursor key above. Different holders, different trust purposes: sharing one value would let a
-one-off migration job that reads cardholder extracts compute values a production consumer
-derives, and would make rotating either purpose require stopping an interactive consumer and
-a batch workload together.
+⚠️ Refactoring Rationale: this table carried a fourth row, `CARDDEMO_MESSAGING_HMAC_KEY`,
+held by "this service alone" and rotated by an attended procedure in
+[`docs/runbooks/batch-operations.md`](../../docs/runbooks/batch-operations.md). Both the row and
+that procedure are **withdrawn**. The key fed exactly one Spring bean in this service, and
+**nothing injected that bean** once specification §0.4.1.8 fixed the pending-authorization
+queue's `MessageGroupId` as `card_num` and its `MessageDeduplicationId` as `transaction_id`:
+with the identities literal there was nothing left to derive. The variable, the property, the
+generated secret in both environment roots, the task-role read grant and the
+`infra/modules/ecs-service` condition that required this task to receive it are all gone. It is
+recorded here rather than deleted silently because a reader comparing this table against a task
+definition applied earlier will find the variable there, and because the reason it persisted is
+instructive: the bean was kept because the deployment provisioned the key, and the key was
+provisioned because the module required it for the bean. Neither half could be the one to go
+until both went together. The runbook section that rotated it now carries the same record.
 
 Assumptions: no task role holds `secretsmanager:PutSecretValue` for any of these. A task
 reads its entries and never writes them, so a compromised task cannot make its own key the
@@ -945,7 +954,7 @@ which is the point: a census a reader trusts has to be one a test maintains.
 | `service` | 15 | 4 | The decision unit of work, the fraud-marking boundary, the outbox drain's publication lifecycle, and that a purge window rolls back as one |
 | `fixtures` | 11 | 1 | The fraud-domain fixtures against real columns |
 | `mapper` | 10 | — | |
-| `config` | 12 | — | |
+| `config` | 13 | — | |
 | `dto` | 9 | — | |
 | `domain` | 8 | — | |
 | `repository` | — | 5 | Composite keys, key and reply-code domains, parentage, keyset paging, the fraud index order, and the outbox claim |
@@ -957,7 +966,7 @@ which is the point: a census a reader trusts has to be one a test maintains.
 # WHAT: run every test in this module, unit and integration alike.
 # WHY : Assumptions: `verify` rather than `test`, because Failsafe binds to
 #       `integration-test` and `verify`. Refactoring Rationale: this page used to
-#       document `test` alone, which exercises 72 of the 82 classes and silently
+#       document `test` alone, which exercises 73 of the 83 classes and silently
 #       skips all TEN Testcontainers-backed classes — every assertion about the
 #       single-transaction decision, the outbox drain and the purge rollback, which
 #       are precisely the properties D-5 and D-6 exist for. A container runtime is
@@ -997,7 +1006,7 @@ docker build -f services/authorization-service/Dockerfile -t carddemo/authorizat
 
 The gate is Checkstyle **13.8.0**, configured by
 [`config/checkstyle/checkstyle.xml`](../../config/checkstyle/checkstyle.xml) and bound by
-[`services/pom.xml`](../pom.xml) to the Maven **`validate`** phase (L841) under the
+[`services/pom.xml`](../pom.xml) to the Maven **`validate`** phase (L832) under the
 execution id `checkstyle-documentation-gate`, with `failOnViolation` **true** (L930) and
 `violationSeverity` **warning** (L931).
 
@@ -1007,17 +1016,17 @@ integration, **it runs on every local build** — there is no version of `mvn` p
 
 | Setting | Declared at | Consequence for code in this module |
 |---|---|---|
-| `JavadocPackage` at `Checker` level | `checkstyle.xml` L269 | A `package-info.java` is **required in every package**, main and test alike |
-| `allowMissingParamTags="false"` | `checkstyle.xml` L436 | **Every DTO record component needs an `@param`** — a record with five components needs five |
-| `allowMissingReturnTag="false"` | `checkstyle.xml` L451–L452 | Every non-void method needs `@return` |
-| `validateThrows="true"` | `checkstyle.xml` L451–L452 | Every declared or documented throw needs `@throws` |
-| `skipAnnotations` deliberately **not** set | `checkstyle.xml` L323 | Annotated types are **not** exempt, so `AuthorizationApplication` and every `config/*Config` class needs full Javadoc |
-| `includeTestSourceDirectory=true` | `services/pom.xml` L958 | **Test classes are not exempt** |
-| suppressions `optional="false"` | `checkstyle.xml` L252 | The gate is **fail-closed**: a missing suppressions file is an error, not a silent skip |
+| `JavadocPackage` at `Checker` level | `checkstyle.xml` L262 | A `package-info.java` is **required in every package**, main and test alike |
+| `allowMissingParamTags="false"` | `checkstyle.xml` L429 | **Every DTO record component needs an `@param`** — a record with five components needs five |
+| `allowMissingReturnTag="false"` | `checkstyle.xml` L444–L445 | Every non-void method needs `@return` |
+| `validateThrows="true"` | `checkstyle.xml` L444–L445 | Every declared or documented throw needs `@throws` |
+| `skipAnnotations` deliberately **not** set | `checkstyle.xml` L316 | Annotated types are **not** exempt, so `AuthorizationApplication` and every `config/*Config` class needs full Javadoc |
+| `includeTestSourceDirectory=true` | `services/pom.xml` L949 | **Test classes are not exempt** |
+| suppressions `optional="false"` | `checkstyle.xml` L245 | The gate is **fail-closed**: a missing suppressions file is an error, not a silent skip |
 
 Assumptions: the suppressions file is wired from **inside** `checkstyle.xml` via
 `${config_loc}/suppressions.xml` rather than by the plugin, and `config_loc` is supplied by
-the plugin's `propertyExpansion` (`services/pom.xml` L906). That indirection is why a
+the plugin's `propertyExpansion` (`services/pom.xml` L897). That indirection is why a
 reader looking only at the plugin configuration will not find the suppressions path.
 
 ⛔ **Suppressing anything under `src/main/java/**` in this module is prohibited.**
@@ -1084,7 +1093,7 @@ Assumptions: **Flyway needs its PostgreSQL companion artifact.** Flyway 13 requi
 `flyway-database-postgresql` alongside `flyway-core`, because Flyway 10 and later moved
 PostgreSQL support out of core; core alone fails at run time rather than at build time, which
 is the more expensive way to discover it. Both are declared in this module's `pom.xml`
-(L457 and L497) at versions managed by the parent. The schema, its roles and its grants are
+(L448 and L497) at versions managed by the parent. The schema, its roles and its grants are
 bootstrapped by `data-migration/sql/V0__schemas_and_roles.sql`.
 
 Secrets are prepared **out of band**, in a file that cannot be committed:

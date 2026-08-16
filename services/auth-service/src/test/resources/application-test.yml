@@ -52,7 +52,7 @@
 #       reviewer can see it was reasoned about and can hold later edits to the
 #       same shape. (2) Assumptions: the Checkstyle gate bound to the `validate`
 #       phase in services/pom.xml is scoped `fileExtensions="java"` at
-#       config/checkstyle/checkstyle.xml L185, so it inspects no YAML and cannot
+#       config/checkstyle/checkstyle.xml L178, so it inspects no YAML and cannot
 #       inspect this file. Nothing in the build will report a missing rationale
 #       here. Authoring discipline and review are therefore the only protection,
 #       which is why the absences at the foot of this file are enumerated

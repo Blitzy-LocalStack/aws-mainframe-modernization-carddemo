@@ -28,8 +28,9 @@ import org.springframework.security.authentication.BadCredentialsException;
 /**
  * Asserts each refusal renders the sentence its own operation's contract declares.
  *
- * <p>Purpose: three unauthenticated operations of the sign-on adapter refuse at 401, and a handler is
- * selected by exception TYPE rather than by the operation that raised it. The defect this class exists to
+ * <p>Purpose: three of the sign-on adapter's four unauthenticated operations refuse at 401 -- the fourth,
+ * the revocation, answers 204 for every token the pool will not accept and so has no 401 to render -- and a
+ * handler is selected by exception TYPE rather than by the operation that raised it. The defect this class exists to
  * prevent is the challenge and renewal exchanges rendering the CREDENTIAL sentence -- telling a caller its
  * password was wrong when it submitted none, and inviting it to reset a credential that works.
  *

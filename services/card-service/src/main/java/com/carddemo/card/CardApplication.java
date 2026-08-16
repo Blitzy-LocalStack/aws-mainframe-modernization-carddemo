@@ -71,7 +71,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  *
  * <p>Trade-offs: the scan root is left at this one package and is never widened towards
  * {@code com.carddemo}, which would reach the seven sibling service roots that
- * {@code services/pom.xml} declares beside this one at its L242 to L250. What is given up is the
+ * {@code services/pom.xml} declares beside this one at its L233 to L241. What is given up is the
  * convenience of one root covering everything; what it buys is a deployable that cannot couple to
  * another bounded context by accident. The boundary is enforced by the layering rules at
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java},
@@ -134,8 +134,8 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * What that does not weaken is text fidelity, since every user-visible message remains directly
  * checkable against its originating program character for character. The audit that governs this
  * file is pass or fail with no tolerated warning level, because the documentation gate is bound to
- * Maven's {@code validate} phase at {@code services/pom.xml} L850 with {@code failOnViolation} true
- * at its L939 and {@code violationSeverity} at warning at its L940, so a warning and a failure are
+ * Maven's {@code validate} phase at {@code services/pom.xml} L841 with {@code failOnViolation} true
+ * at its L930 and {@code violationSeverity} at warning at its L931, so a warning and a failure are
  * one outcome. The graded condition-code rubric of the COBOL suite, under which code 4 counts as a
  * passing result, describes no build in this tree, and reading a build here through it would treat a
  * real violation as acceptable.</p>

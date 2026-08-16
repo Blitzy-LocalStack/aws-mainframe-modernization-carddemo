@@ -3,7 +3,7 @@
  *
  * Purpose
  * -------
- * Assert what each of the eight published auth operations DOES: which target it addresses, which method
+ * Assert what each of the nine published auth operations DOES: which target it addresses, which method
  * it uses, what it puts in the request, which of the two sign-on outcomes it reads back, and which
  * combinations of arguments it refuses before dispatching at all.
  *
@@ -28,8 +28,10 @@ import {
   listUsers,
   refreshTokens,
   signOn,
+  signOut,
   updateUser,
 } from './auth';
+import { setAccessToken } from './client';
 import {
   HARNESS_CORRELATION_HEADER,
   HTTP_CREATED,
@@ -114,6 +116,71 @@ async function renewsTokensAtTheRenewalTarget(): Promise<void> {
   expect(request.body).toEqual({ userId: 'ADMIN001', refreshToken: 'refresh-token' });
 }
 
+/**
+ * Asserts a sign-out posts the token alone to the revocation target and reads nothing back.
+ *
+ * Assumptions: the body is compared for EQUALITY rather than for containing the token, because the
+ * absence of a `userId` is part of the request shape: the provider's revocation accepts no user name, and
+ * a client that sent one would be describing a request the contract does not declare.
+ *
+ * Assumptions: a 204 with no body is queued, which is what the operation answers for a token it revoked
+ * AND for one the provider declines to accept. The client returns nothing in either case, so there is no
+ * outcome for a caller to branch on -- which this case pins by resolving to `undefined`.
+ */
+async function revokesTheTokenAtTheRevocationTarget(): Promise<void> {
+  answerWith(undefined, HTTP_NO_CONTENT);
+
+  const answer = await signOut('refresh-token');
+
+  const request = onlyRequest();
+  expect(request.method).toBe('post');
+  expect(request.url).toBe('/auth/signout');
+  expect(request.body).toEqual({ refreshToken: 'refresh-token' });
+  expect(answer).toBeUndefined();
+}
+
+/**
+ * Asserts the four session exchanges are dispatched with no bearer, and the roster calls with one.
+ *
+ * Assumptions: this is asserted as a PARTITION across both sets rather than on the exchanges alone,
+ * because the property is a boundary: suppressing the header everywhere would satisfy an exchanges-only
+ * assertion while withdrawing the credential the five administrative operations require. The sign-out is
+ * the sharpest member of the open set -- a caller ending an abandoned session is the caller most likely
+ * to hold an access token the resource server will refuse -- so a regression that reinstated the header
+ * would break exactly the operation that most needs it.
+ */
+async function suppressesTheStoredBearerOnEverySessionExchange(): Promise<void> {
+  // Assumptions: ⚠️ Refactoring Rationale: the stale bearer is installed through `setAccessToken`,
+  //   where this case used to write it into `sessionStorage` under `carddemo.access-token`. The bearer
+  //   is now held in memory by `ui/src/api/client.ts` and that key no longer exists, so the public
+  //   setter is the only route to it -- and it is the route production uses, which makes the arranged
+  //   state the real state rather than one assembled beside it.
+  setAccessToken('stale-bearer');
+  answerWith(AUTHENTICATED_BODY);
+  answerWith(AUTHENTICATED_BODY);
+  answerWith(AUTHENTICATED_BODY);
+  answerWith(undefined, HTTP_NO_CONTENT);
+  answerWith(pageOf([USER_ROW]));
+
+  await signOn('ADMIN001', 'PASSWORD');
+  await refreshTokens('ADMIN001', 'refresh-token');
+  await answerSignOnChallenge('ADMIN001', 'session-token', 'NEWPASSWORD1!');
+  await signOut('refresh-token');
+  await listUsers();
+
+  const dispatched = dispatchedRequests();
+  expect(dispatched).toHaveLength(5);
+  for (const ordinal of [0, 1, 2, 3]) {
+    expect(
+      dispatched[ordinal]?.headers.authorization,
+      'a session exchange must not carry the stored bearer',
+    ).toBeUndefined();
+  }
+  expect(dispatched[4]?.headers.authorization, 'a roster call must carry the stored bearer').toBe(
+    'Bearer stale-bearer',
+  );
+}
+
 /** Asserts answering the challenge posts all three members to the challenge target. */
 async function answersTheChallengeAtItsOwnTarget(): Promise<void> {
   answerWith(AUTHENTICATED_BODY);
@@ -145,6 +212,20 @@ async function readsTheOpeningUserPageWithNoPagingParameter(): Promise<void> {
   expect(request.method).toBe('get');
   expect(request.url).toBe('/auth/users');
   expect(request.params).toEqual({});
+}
+
+/**
+ * Removes the harness and discards any bearer one case installed.
+ *
+ * Assumptions: ⚠️ the bearer is discarded explicitly, and it did not used to need to be. It lived in
+ * `sessionStorage`, which the environment cleared between files; it now lives in a module variable that
+ * outlives every case in this file, so one case's stale bearer would otherwise attach itself to every
+ * request the cases after it dispatched.
+ * @returns {void} Nothing; the harness is removed and no bearer is held.
+ */
+function discardTheHarnessAndTheBearer(): void {
+  removeApiHarness();
+  setAccessToken(null);
 }
 
 /** Asserts a supplied cursor travels with the direction the caller asked for. */
@@ -275,7 +356,7 @@ async function carriesACorrelationIdentifierOnEveryRequest(): Promise<void> {
  */
 function authClientBehaviour(): void {
   beforeEach(installApiHarness);
-  afterEach(removeApiHarness);
+  afterEach(discardTheHarnessAndTheBearer);
   it('signs on at the published target', signsOnAtThePublishedTarget);
   it(
     'reads the challenge outcome from its discriminator',
@@ -283,6 +364,11 @@ function authClientBehaviour(): void {
   );
   it('renews tokens at the renewal target', renewsTokensAtTheRenewalTarget);
   it('answers the challenge at its own target', answersTheChallengeAtItsOwnTarget);
+  it('revokes the token at the revocation target', revokesTheTokenAtTheRevocationTarget);
+  it(
+    'suppresses the stored bearer on every session exchange',
+    suppressesTheStoredBearerOnEverySessionExchange,
+  );
   it(
     'reads the opening user page with no paging parameter',
     readsTheOpeningUserPageWithNoPagingParameter,

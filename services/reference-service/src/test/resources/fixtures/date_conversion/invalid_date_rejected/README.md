@@ -378,16 +378,44 @@ the parameter level.
 Refactoring Rationale: this entry named `DateConversionMessageListener` as "the decoding
 consumer" and said it "shares its conversion method with `DateConversionController` ...
 so that the HTTP and queue transports produce byte-identical replies". That type has
-been removed: it carried a second `@SqsListener` competing with
-`DateInquiryMessageListener` for one request queue, and its evaluation was never on the
-queue path. The queue route emits the current system date and time and reads no field of
-its request, so it cannot reject a date at all — which is why **this** scenario is an
-HTTP-route scenario and names the HTTP route's own types.
+been removed: it carried a second `@SqsListener` competing for one request queue, and its
+evaluation was never on the queue path. The queue route cannot reject a date at all — it
+answers from the clock, never from the submitted value — which is why **this** scenario is
+an HTTP-route scenario and names the HTTP route's own types.
 
-**Not present in this module.** No `*ServiceTest`, `*ControllerTest` or `*RepositoryIT`
-class exists under `services/reference-service/src/test/java`; the count measured on
-this branch is zero. They are named here as a contract for whichever of them lands,
-not as something that reads these bytes today.
+Refactoring Rationale: the paragraph above previously named `DateInquiryMessageListener` as
+the surviving competitor and said the queue route "reads no field of its request". Both
+statements have since stopped being true of the target, so they are corrected rather than
+left standing. The whole inquiry exchange is now answered by one consumer,
+`services/account-service/src/main/java/com/carddemo/account/service/InquiryMessageListener.java`,
+and it DOES read one field: the four-character function code at offset 0, which is the only
+thing on the wire distinguishing the two flows that shared the baseline's single request
+queue. These bytes carry `DTE ` rather than `DATE` — section 4.1.1 tables that, and it is
+what makes them a varied-envelope vector — so on the queue they now receive
+`INVALID REQUEST PARAMETERS` rather than a date, where `CODATE01` would have answered with
+the date because it tests nothing. That divergence is registered as
+`D-INQUIRY-UNRECOGNISED-FUNCTION` in
+`docs/architecture/cobol-to-service-traceability.md`. It changes nothing about this
+scenario, whose subject is the HTTP evaluation route and whose assertion is made at the
+parameter level, but a reader comparing this file with the `happy_path` envelope needs to
+know the two now diverge on the queue as well as in name.
+
+**Present in this module, and none of them reads these bytes.** Measured on this branch,
+`services/reference-service/src/test/java` holds five `*ServiceTest`, four `*ControllerTest`
+and nine `*RepositoryIT` classes. Two of them cover the route this scenario documents --
+`DateConversionServiceTest` and `DateConversionControllerTest` -- and both drive the
+evaluation through its parameters rather than through a fixture file, which is the stance
+section 6 gives its reason for. The classes that read these bytes are the two fixture tests
+named above, and no other class in the module opens this file.
+
+Refactoring Rationale: this entry read "**Not present in this module.** No `*ServiceTest`,
+`*ControllerTest` or `*RepositoryIT` class exists ...; the count measured on this branch is
+zero. They are named here as a contract for whichever of them lands". That measurement was
+taken before those classes existed and was never retaken; on this branch all three
+categories are populated, so the entry asserted an absence a maintainer could disprove with
+one `find`. Stating the measured counts, and naming which of them cover this route without
+reading this file, keeps the section's actual point -- that these bytes have exactly two
+readers -- while removing a claim that had gone false.
 
 ---
 

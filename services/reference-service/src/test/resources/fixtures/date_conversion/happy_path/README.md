@@ -269,13 +269,33 @@ the branch rather than assumed, which is the stance the charter's section 10 tak
 for the tree as a whole.
 
 **The decoding consumer** is
-[`DateInquiryMessageListener`](../../../../../main/java/com/carddemo/reference/service/DateInquiryMessageListener.java),
-and it is present. Its `@SqsListener`-annotated `onRequest` receives the message,
-decodes the payload through `com.carddemo.common.codec.InquiryRequestCodec`, and
-answers with the fixed-width body
-[`DateInquiryReplyMapper`](../../../../../main/java/com/carddemo/reference/mapper/DateInquiryReplyMapper.java)
-renders. It is the **only** `@SqsListener` bound to the inquiry request queue, which
-`ReferenceQueueConsumerContractTest` asserts.
+[`InquiryMessageListener`](../../../../../../../account-service/src/main/java/com/carddemo/account/service/InquiryMessageListener.java)
+in **`account-service`**, and it is present. Its `@SqsListener`-annotated `onRequest`
+receives the message, decodes the payload through
+`com.carddemo.common.codec.InquiryRequestCodec`, reads the four-character function field
+these bytes carry as `DATE`, and answers with the fixed-width body
+[`DateInquiryReplyCodec`](../../../../../../../common-lib/src/main/java/com/carddemo/common/codec/DateInquiryReplyCodec.java)
+renders. It is the only consumer bound to the shared inquiry request queue.
+`InquiryMessageListenerTest.aDateFunctionCodeIsAnsweredFromTheClock` asserts the answer
+this envelope receives, and `theDateAnswerIsTheSharedCodecRendering` asserts it byte for
+byte against the shared renderer.
+
+Refactoring Rationale: this paragraph previously named `DateInquiryMessageListener` in THIS
+module, with the reply rendered by a `DateInquiryReplyMapper` beside it and
+`ReferenceQueueConsumerContractTest` cited as the assertion that it was the queue's only
+listener. All three are gone, and the reason is the queue count rather than anything about
+this fixture. The technical specification provisions ONE request queue for the whole
+inquiry exchange -- `app/app-vsam-mq/README.md` line 53 declares a single
+`CARDDEMO.REQUEST.QUEUE`, aliased `MQQUEUE(CARDREQ)` at line 71 -- and a receive HIDES a
+message from every other consumer rather than copying it, so two consumers on one queue
+make the answer depend on which container received a given delivery. Giving the queue one
+owner closes that at source, and the owner is `account-service` because its half of the
+exchange performs a keyed read that this half does not. The RENDERER moved into the shared
+kernel with it: it is a clock read against a fixed layout, holding no domain rule, and both
+halves of that layout now sit beside each other in one package.
+`ReferenceServiceStructureTest.noMethodInThisPackageBindsAQueueListener` asserts no
+consumer remains here. This fixture stays because its geometry is what this module asserts
+about it, and the geometry did not move.
 
 Refactoring Rationale: this paragraph named `DateConversionMessageListener` and said
 its `convert` method was "shared with the synchronous path, so the queue transport and
@@ -308,11 +328,19 @@ the shared kernel.
 - `ReferenceFixtureTest` decodes it through the registered layout and asserts the
   three field values tabled in section 3.
 
-`DateInquiryMessageListenerTest` resolves this domain's fixtures from the test
-classpath by building the path from the scenario name, which is what makes the
-constant filename in section 7 load-bearing rather than cosmetic. It IS the test class
-named for the decoding consumer, so the listener-level coverage sits where a reader
-looking for it would look.
+`ReferenceFixtureContractTest` and `ReferenceFixtureTest` both resolve this domain's
+fixtures from the test classpath by building the path from the scenario name, which is what
+makes the constant filename in section 7 load-bearing rather than cosmetic.
+
+Refactoring Rationale: this paragraph previously named `DateInquiryMessageListenerTest` as
+the class that builds the path, and closed by saying it "IS the test class named for the
+decoding consumer, so the listener-level coverage sits where a reader looking for it would
+look". That is no longer true in either half: the consumer moved to `account-service`, and
+so did its test. The consumer-level coverage is named in section 6 and lives beside the
+consumer, which is where a reader looking for it should now look; what remains in this
+module, and what this section is for, is the geometry coverage above. The
+scenario-name-to-path derivation is unchanged, so the sentence's load-bearing point still
+holds -- it is simply the fixture tests that depend on it now.
 
 Refactoring Rationale: this paragraph used to end "There is no test class named for the
 decoding consumer itself; the listener-level coverage sits in that class" — two sentences
@@ -363,8 +391,9 @@ here because **this record stands in for no dataset**: it is a queue message
 payload, not an image of a VSAM file record, so there is no dataset name to derive
 one from. The name is instead held identical across all four `date_conversion`
 scenario directories, which is what lets a test build the resource path from the
-scenario name alone -- as `DateInquiryMessageListenerTest` does. Diverging the
-filename per scenario would turn that one parameterised lookup into four literals.
+scenario name alone -- as `ReferenceFixtureContractTest` and `ReferenceFixtureTest` both
+do. Diverging the filename per scenario would turn those parameterised lookups into four
+literals each.
 
 Alternatives Considered: `INQA` as the function code. Declined because `INQA` is the
 **sibling** program's account-inquiry discriminator -- `COACCT01.cbl` line 393 tests
@@ -399,7 +428,7 @@ record and that the record has no copybook of its own.
 
 **Enforcement is human.**
 [`config/checkstyle/checkstyle.xml`](../../../../../../../../config/checkstyle/checkstyle.xml)
-scopes its `Checker` to `fileExtensions="java"` at L185, with its own adjacent note
+scopes its `Checker` to `fileExtensions="java"` at L178, with its own adjacent note
 recording that only Java carries a Javadoc construct, so **no file in this directory
 is ever scanned**.
 [`config/checkstyle/suppressions.xml`](../../../../../../../../config/checkstyle/suppressions.xml)

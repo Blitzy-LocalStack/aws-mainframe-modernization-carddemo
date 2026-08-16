@@ -11,7 +11,10 @@
  */
 
 // Assumptions: every test API is imported rather than taken from an ambient global, because
-// ui/vitest.config.ts sets `globals: false` and records that as a contract.
+// ui/tsconfig.json keeps its `types` list EMPTY -- so nothing is declared ambiently and an omitted
+// import fails to compile on the symbol it omitted. The runner's own `globals` option is set to
+// `true`, for the separate reason recorded beside it, so the enforcing mechanism is the empty
+// `types` list and never that option.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { loadRuntimeConfig, resetRuntimeConfig, runtimeApiBaseUrl } from './runtimeConfig';

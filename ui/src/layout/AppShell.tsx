@@ -6,12 +6,55 @@
  * -------
  * Compose the four zones that are shared by every migrated screen and owned by none of
  * them, in the one order the baseline always showed them: the title band, the screen
- * body, the message line and the function-key legend. It is a route element, so the body
- * zone is react-router's `Outlet` rather than a `children` prop, and the other three
- * zones are the three shared shell elements that AAP section 0.4.4 assigns here -
+ * body, the message line and the function-key legend. The other three zones are the three
+ * shared shell elements that AAP section 0.4.4 assigns here -
  * `ui/src/layout/ScreenHeader.tsx`, `ui/src/layout/MessageBand.tsx` and
- * `ui/src/layout/PfKeyBar.tsx` - with function-key semantics taken from
- * `ui/src/layout/usePfKeys.ts`.
+ * `ui/src/layout/PfKeyBar.tsx`. The bindings the legend renders are a screen's own, built
+ * by `ui/src/layout/usePfKeys.ts` at that screen and delegated here; this shell calls that
+ * hook nowhere, and installs no keyboard listener of its own, for the reason recorded
+ * under "Where it is mounted" below.
+ *
+ * Where it is mounted
+ * -------------------
+ * `ui/src/router.tsx` mounts this component as the layout element of the authenticated
+ * branch of the route tree, inside `RequireSignOn`, so every guarded screen renders into
+ * the `Outlet` below and inherits this frame. `ui/src/App.tsx` renders that router inside
+ * the single `ConfigProvider`. Refactoring Rationale: the mount is stated here because it
+ * used to be absent - this module was imported by neither of those two files, so the frame
+ * the migration plan requires existed as a component and rendered on no screen, and the
+ * delegation API below had publishers and consumers only within this file. A shell that is
+ * not mounted cannot be shown to be wrong by any test that renders a screen.
+ *
+ * Where it is mounted, and how a screen reaches it
+ * ----------------------------------------------
+ * Assumptions: `ui/src/router.tsx` mounts this component EXACTLY ONCE, as the element of a
+ * LAYOUT route, and it is mounted nowhere else. `ui/src/App.tsx` renders the route table
+ * inside the single `ConfigProvider` and composes no frame at all. Every screen inside the
+ * layout route therefore renders through the `Outlet` in the body zone and inherits this
+ * frame; the `children` prop below is the fallback, kept so the same component can also be
+ * rendered directly by a test that wants one screen inside the frame without a router.
+ *
+ * ⚠ Refactoring Rationale: BOTH mounts existed for a time - one above the router taking
+ * `children`, and one layout route inside it - and the two composed. `{children ?? <Outlet />}`
+ * means the outer mount never reaches its outlet, so the inner layout route rendered the
+ * screen through its own and every guarded screen was framed TWICE: two banners, two message
+ * lines, two legends and two skip links, with both frames reading the one publication. The
+ * layout route is the mount that survives, because it is the only one of the two that can
+ * frame some routes and not others - the root redirect and the not-found screen are
+ * deliberately outside the frame, which a mount above the whole table cannot express.
+ *
+ * Alternatives Considered: mounting above the route table, which reads as the simpler shape
+ * and keeps the frame a property of the application rather than of any route. Rejected on the
+ * two facts above: it cannot leave a route unframed, and while it is composed with a layout
+ * route it double-frames silently rather than failing.
+ *
+ * Refactoring Rationale: an earlier revision of this paragraph described the component as
+ * "a route element", which it was not - nothing imported it, `ui/src/App.tsx` built a
+ * second frame out of generic `Layout` primitives, and every screen either composed its own
+ * chrome or, in two cases, omitted it on the stated ground that this shell supplied it. Both
+ * halves of the integration now exist: the single mount above, and a `useShellSlot` call in
+ * each of the ten delivered screens. A statement about integration is only ever as true as
+ * the call sites, so the specific facts are named here rather than asserted in the abstract.
  *
  * Provenance
  * ----------
@@ -21,7 +64,7 @@
  * | Baseline rows | Zone            | Region              | Component      |
  * | ------------- | --------------- | ------------------- | -------------- |
  * | 1-3           | title band      | `Layout.Header`     | `ScreenHeader` |
- * | 4-22          | screen body     | `Layout.Content`    | `Outlet`       |
+ * | 4-22          | screen body     | `Layout.Content`    | `children`     |
  * | 23            | message line    | between the two     | `MessageBand`  |
  * | 24            | key legend      | `Layout.Footer`     | `PfKeyBar`     |
  *
@@ -91,30 +134,67 @@
  *
  * Boundary
  * --------
- * Assumptions: this module owns no route table, performs no data fetching and imports
- * nothing from `ui/src/api/**`, not even transitively. It instantiates no
- * `ConfigProvider` - `ui/src/App.tsx` is the sole theming injection point - and it holds
- * no user-visible string of its own beyond the additive chrome recorded at
- * {@link SKIP_TO_CONTENT_LABEL}, because `ui/src/messages/messages.ts` owns the rest.
+ * Assumptions: this module owns no route table and performs no data fetching of its own.
+ * It instantiates no `ConfigProvider` - `ui/src/App.tsx` is the sole theming injection
+ * point - and it holds no user-visible string of its own beyond the additive chrome
+ * recorded at {@link SKIP_TO_CONTENT_LABEL}, because `ui/src/messages/messages.ts` owns
+ * the rest.
+ *
+ * ⚠️ Refactoring Rationale: this paragraph claimed the module "imports nothing from
+ * `ui/src/api/**`, not even transitively", and that was FALSE in the revision that stated
+ * it. The import list below includes `../hooks/useAuth`, which imports `../api/auth` and
+ * `../api/client` - so the transitive edge existed, and the sentence most likely to be
+ * trusted was the one asserting it did not. The claim is corrected rather than the import
+ * removed: the shell needs the session to decide whether to offer sign-off and to end it,
+ * and reading identity through the same hook every other consumer uses is what keeps one
+ * module the owner of that fact.
+ *
+ * Assumptions: what the shell actually holds is a dependency on the SESSION and not on any
+ * resource client. The distinction is the one worth stating, because it is what the
+ * original sentence was reaching for: this module calls no endpoint, holds no query, and
+ * names no path. Its whole use of `useAuth` is two members - `signedOn`, which conditions
+ * the sign-off key, and `signOut`, which ends the session - and the transitive reach into
+ * `ui/src/api/**` is `useAuth`'s own, because that hook exchanges credentials.
+ *
+ * Assumptions: the paint instant is nonetheless threaded IN through the slot rather than
+ * read here, and that decision SURVIVES the correction above even though its original
+ * reasoning does not. `ShellSlot.now` records the reason as avoiding a transitive API
+ * dependency, and that reason no longer distinguishes anything now that `useAuth` supplies
+ * one. What still holds is ownership: the instant belongs to the screen, because a screen
+ * knows when it painted and the frame does not, and `ui/src/hooks/useServerInstant.ts`
+ * would otherwise be called once here for every screen beneath rather than once per screen.
+ * Reading it here would also make the frame re-render on a clock change that no mounted
+ * screen had asked for.
  */
 
-import { Col, Flex, Layout, Row, Typography, theme } from 'antd';
+import { Button, Col, Flex, Layout, Row, Typography, theme } from 'antd';
 import { useCallback, useLayoutEffect, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties, ReactElement, ReactNode } from 'react';
 import { Outlet } from 'react-router';
 
 import { useAuth } from '../hooks/useAuth';
+// WHY : Assumptions: the sign-off control's label is the LOCAL SHELL_SIGN_OFF_LABEL below and not the
+//       message catalog's SIGN_OFF_CONTROL_LABEL, which carries the same six characters. Both were
+//       authored for this one control; the local declaration is kept because the label is additive
+//       browser chrome rather than a string transcribed from a mapset, which is the distinction the
+//       catalog exists to draw -- and it is declared beside SKIP_TO_CONTENT_LABEL for the reason
+//       recorded there. The catalog's own entry stays where it is: it is exported, documented and
+//       reachable, and removing a published constant is not this file's decision to make.
 import { THANK_YOU_CARDDEMO } from '../messages/messages';
 import type { MapsetName } from '../messages/messages';
-import { BREAKPOINT_TOKENS, SPACING_TOKENS } from '../theme/tokens';
+import {
+  BMS_TEXT_COLOR_TOKENS,
+  BREAKPOINT_TOKENS,
+  SPACING_TOKENS,
+  SURFACE_TOKENS,
+} from '../theme/tokens';
 import type { AntdTokenName } from '../theme/tokens';
 import { MessageBand } from './MessageBand';
 import type { MessageBandSeverity } from './MessageBand';
 import { PfKeyBar } from './PfKeyBar';
 import type { PfKeyLegendColor } from './PfKeyBar';
 import { ScreenHeader } from './ScreenHeader';
-import { usePfKeys } from './usePfKeys';
-import type { CicsAid, PfKeyBinding, PfKeyHandlerMap } from './usePfKeys';
+import type { CicsAid, PfKeyBinding } from './usePfKeys';
 
 /*
  * Assumptions: `Outlet` is imported from `react-router` and never from
@@ -175,27 +255,45 @@ export const SHELL_CONTENT_ELEMENT_ID = 'carddemo-shell-content';
 export const SKIP_TO_CONTENT_LABEL = 'Skip to screen content';
 
 /**
- * Attention identifier the shell binds to sign-off when it owns the function keys.
+ * Visible label of the shell's sign-off control.
  *
- * Assumptions: PF12 rather than PF3, on measured usage. Across the online programs PF3
- * is overwhelmingly "back to the previous screen" and is bound by 14 of them, so a shell
- * that claimed it would fight the commonest screen binding in the application. PF12 is
- * the key the menu programs use to end a session, and `usePfKeys` already maps it to the
- * `cancel` action by default, which is the nearest published action to ending a session.
- * The sign-on screen is the one place PF3 itself signs off - `app/cbl/COSGN00C.cbl` L88 -
- * and that screen binds PF3 for the purpose itself rather than delegating to the shell.
+ * Refactoring Rationale: the shell's sign-off used to be a FUNCTION KEY - `PFK12`, legended
+ * `F12=Sign off` - and it is a rendered control now because the key form could not survive
+ * this shell being mounted. `usePfKeys` installs one document listener per call site, and
+ * every screen under `ui/src/screens/**` calls it, so a shell that bound a key of its own
+ * would sit alongside the mounted screen's listener and both would receive every keypress.
+ * Three screens bind PF12 as `Cancel` - measured at `ui/src/screens/accountUpdate/index.tsx`,
+ * `ui/src/screens/cardUpdate/index.tsx` and `ui/src/screens/userUpdate/index.tsx` - so on
+ * those screens one keypress would have BOTH cancelled the operator's edit and ended the
+ * session. The file already warned about that hazard at the binding site; what it could not
+ * do was avoid it, because the stand-down condition it used - "no screen has delegated a key
+ * legend" - is true of every screen that owns its own legend, which is all of them.
+ *
+ * Assumptions: nothing of the baseline is lost by this, because the shell's PF12 was never a
+ * baseline behaviour. Sign-off in the reference application belongs to the MENU programs:
+ * `app/cbl/COMEN01C.cbl` L196-L203 and `app/cbl/COADM01C.cbl` transfer to the sign-on program
+ * on PF3 with no `COMMAREA` clause, and `app/cbl/COSGN00C.cbl` L88 does the same. Those are
+ * screen bindings, and `ui/src/screens/menu/index.tsx` and `ui/src/screens/admin/index.tsx`
+ * carry them as such. What remains here is an always-available way out of any screen, which is
+ * additive browser chrome of exactly the kind {@link SKIP_TO_CONTENT_LABEL} already is - so it
+ * is declared here beside that label rather than in `ui/src/messages/messages.ts`, for the
+ * reason recorded there.
+ *
+ * Trade-offs: the cost is that this one action is reachable by pointer and by Tab rather than
+ * by a single function key. It is bounded: the control is a `Button`, so Enter and Space
+ * activate it once focused, and the keyboard route the baseline actually offered - PF3 on the
+ * menu screens - is unaffected.
  */
-export const SHELL_SIGN_OFF_AID: CicsAid = 'PFK12';
+export const SHELL_SIGN_OFF_LABEL = 'Sign off';
 
 /**
- * Legend text the shell paints for its own sign-off key.
+ * Stable `data-testid` on the shell's sign-off control.
  *
- * Assumptions: the `Fnn=Verb` shape is the baseline's own legend grammar, measured on
- * row 24 of all 17 mapsets - `ENTER=Sign-on  F3=Exit` on `app/bms/COSGN00.bms` L205 is
- * the canonical example - so the shell's added key reads as one of the same family
- * rather than as a foreign control.
+ * Assumptions: a data attribute in addition to the accessible name, because the label above is
+ * additive chrome rather than a catalogued baseline string, so a case that must not depend on
+ * its exact wording has a handle that does not.
  */
-export const SHELL_SIGN_OFF_LEGEND = 'F12=Sign off';
+export const SHELL_SIGN_OFF_CONTROL_TEST_ID = 'shell-sign-off-control';
 
 /**
  * Stable `data-testid` on the sign-off surface that replaces the frame after sign-off.
@@ -299,11 +397,17 @@ export interface ShellSlot {
    * Server-anchored instant the title band renders its date and time from.
    *
    * Assumptions: the instant is threaded IN rather than read here, and the reason is a
-   * dependency boundary rather than convenience. The hook that supplies it,
-   * `ui/src/hooks/useServerInstant.ts`, reads `ui/src/api/serverClock.ts`, so calling it
-   * would give this shell a transitive dependency on the API layer that it is required
-   * not to have. Omitting the value is legitimate and `ScreenHeader` degrades to the
-   * browser clock, which that module records as a registered divergence.
+   * question of OWNERSHIP rather than convenience. ⚠️ Refactoring Rationale: this note
+   * argued instead that reading the instant here "would give this shell a transitive
+   * dependency on the API layer that it is required not to have", and that argument does
+   * not survive measurement -- the shell already imports `../hooks/useAuth`, which imports
+   * `../api/auth` and `../api/client`, so the dependency it claimed to be avoiding is
+   * present by another route. The decision is unchanged and its reason is restated: a
+   * SCREEN knows when it painted and the frame does not, so the instant belongs to the
+   * screen; reading it here would also call `ui/src/hooks/useServerInstant.ts` once for the
+   * frame rather than once per screen, and would re-render the whole frame on a clock change
+   * no mounted screen had asked for. Omitting the value is legitimate and `ScreenHeader`
+   * degrades to the browser clock, which that module records as a registered divergence.
    */
   readonly now?: Date | undefined;
 }
@@ -337,6 +441,16 @@ export interface ShellSlot {
 
 /** The slot state meaning "no screen has delegated any zone", shared to keep identity stable. */
 const EMPTY_SLOT: ShellSlot = Object.freeze({});
+
+/**
+ * The empty legend passed to `PfKeyBar` when no screen has delegated its keys.
+ *
+ * Assumptions: one frozen instance rather than a fresh `[]` per render, for the reason
+ * `ui/src/hooks/useAuth.ts` gives for its own shared empty array - a new array each render is a
+ * new prop identity, which defeats any memoisation downstream of it for a value that never
+ * differs.
+ */
+const NO_LEGEND_KEYS: readonly PfKeyBinding[] = Object.freeze([]);
 
 /*
  * Refactoring Rationale: the store keeps TWO references to what is conceptually one
@@ -479,19 +593,55 @@ function arePfKeySlotsEquivalent(
 }
 
 /**
+ * Milliseconds in the smallest unit the title band actually displays.
+ *
+ * Assumptions: one second, because {@link ScreenHeader}'s `HEADER_TIME_FORMAT` is `HH:mm:ss` and its
+ * `HEADER_DATE_FORMAT` is `MM/DD/YY`, so nothing finer than a second reaches the display. Truncation
+ * uses the epoch value directly, which is sound for any zone: every offset in use is a whole number of
+ * minutes, so a second boundary in UTC is a second boundary locally.
+ */
+const HEADER_INSTANT_GRANULARITY_MS = 1000;
+
+/**
  * Reports whether two instants would paint the same header date and time.
  *
- * Assumptions: compared by elapsed milliseconds rather than by reference, because a caller
- * that derives the instant per render yields a fresh `Date` each time for the same moment.
+ * Refactoring Rationale: compared at the granularity the band DISPLAYS, not by exact milliseconds,
+ * which an earlier revision did. `useServerInstant` is a paint-time reading of an anchored monotonic
+ * clock - by design, matching `POPULATE-HEADER-INFO`, which re-read the clock on every `SEND MAP` - so
+ * it answers a different millisecond on every render of the screen that publishes it. Under an
+ * exact-millisecond comparison every one of those commits counted as a visible difference, so the
+ * snapshot was replaced and every subscriber notified on each keystroke of a form: the whole frame -
+ * title band, message line and key legend - re-rendered to display a time that formatted identically.
+ * At second granularity the gate lets through only a change the operator could actually see.
+ *
+ * Assumptions: this is a wasted-work correction and NOT a fix for a render cycle, and the distinction is
+ * worth stating because the shell renders the very screen that publishes to it, which looks like a
+ * cycle. It is not one: `children` is an element built by `ui/src/App.tsx`, which does not re-render, so
+ * React sees a referentially identical element with identical props and bails out of that subtree.
+ * `appShellIntegration.test.tsx` pins that bailout, because a change that rebuilt the child's props -
+ * cloning the element, or spreading it into a new one - would turn the wasted work into an unbounded
+ * loop.
+ *
+ * Alternatives Considered: memoising the instant in each screen so the same `Date` is republished until
+ * something else changes. Rejected because it moves a shell-internal concern into ten call sites, and
+ * because it would make the displayed time a mount-time reading rather than a paint-time one, which is
+ * the fidelity property the clock hook exists to provide. Excluding `now` from the comparison entirely
+ * was also rejected: the band would then never repaint its clock at all.
+ *
+ * Trade-offs: two instants in the same second are treated as equal, so the band can lag the true second
+ * by less than one render pass. That is invisible - the value it would have shown formats identically.
  * @param {Date | undefined} previous - Instant currently rendered.
  * @param {Date | undefined} next - Instant just published.
- * @returns {boolean} `true` when both represent the same moment, or both are absent.
+ * @returns {boolean} `true` when both would render the same date and time, or both are absent.
  */
 function areInstantsEquivalent(previous: Date | undefined, next: Date | undefined): boolean {
   if (previous === undefined || next === undefined) {
     return previous === next;
   }
-  return previous.getTime() === next.getTime();
+  return (
+    Math.floor(previous.getTime() / HEADER_INSTANT_GRANULARITY_MS) ===
+    Math.floor(next.getTime() / HEADER_INSTANT_GRANULARITY_MS)
+  );
 }
 
 /**
@@ -636,15 +786,24 @@ export function publishShellSlot(slot: ShellSlot): () => void {
  * or key legend, instead of rendering those bands itself. Omit a member to keep that zone
  * unpainted; the shell renders a band if and only if it has been delegated one.
  *
- * Assumptions: the delegation contract is opt-in for a concrete reason. Every screen
- * currently delivered under `ui/src/screens/**` composes its own `MessageBand` and
- * `PfKeyBar`, and most compose their own `ScreenHeader`, so a shell that painted those
- * bands unconditionally would render a second message line and a second legend on every
- * such screen - two live regions announcing one message, and a duplicate `message-band`
- * test handle where callers reasonably expect one. Making publication the signal means a
- * screen that owns its bands is unaffected by this shell, while a screen that omits a band
- * on the stated ground that the shell supplies it - `ui/src/screens/accountView/index.tsx`
- * documents exactly that for the header - gets one by delegating.
+ * Assumptions: the delegation contract is opt-in, and every one of the ten screens delivered
+ * under `ui/src/screens/**` opts in - each publishes its transaction identifier, program
+ * name, paint instant, message and resolved key bindings here, and none composes a
+ * `ScreenHeader`, a row-23 `MessageBand` or a `PfKeyBar` of its own. THREE screens keep a band
+ * inside their body -- the account view, the account update and the card detail -- and each one is
+ * the INFORMATIONAL field its mapset declares separately from the row-23 error line this shell owns,
+ * at row 22 on the two account mapsets and row 20 on `COCRDSL`; `ui/src/screens/accountView/index.tsx`
+ * documents that split at its own render site.
+ *
+ * Refactoring Rationale: opt-in is what it is for a reason worth keeping even now that every
+ * screen opts in. Publication is the signal a zone is wanted, so a shell that painted its
+ * bands unconditionally would render a second message line and a second legend on any screen
+ * that still composed its own - two live regions announcing one message, and a duplicate
+ * `message-band` test handle where a caller expects one. Keeping the zone conditional on the
+ * publication is also what lets a single screen withhold one deliberately: the card detail
+ * and card update screens publish an empty key list and no header in their erased states,
+ * because `app/cbl/COCRDSLC.cbl` L838-L848 answers an unaddressable selector with
+ * `SEND TEXT ... ERASE` rather than by re-sending the map.
  *
  * Trade-offs: publication happens on commit rather than during render, because writing to
  * a module store from a render body would publish from renders React may discard. The cost
@@ -725,10 +884,11 @@ export interface AppShellProps {
   /**
    * Body content, used instead of the routed outlet.
    *
-   * Assumptions: the shell is a route element, so the body region is normally
-   * react-router's `Outlet` and this member is left unset. It exists so the frame can be
-   * rendered and asserted without standing up a router, and a value here replaces the
-   * outlet rather than sitting beside it.
+   * Assumptions: this is the member the production mount uses. `ui/src/App.tsx` renders
+   * `<AppShell><CardDemoRouter /></AppShell>`, so the body region is the route tree passed
+   * here; react-router's `Outlet` is the fallback when the member is absent, which keeps the
+   * same component usable as a layout route and lets a test render the frame without standing
+   * up a router. A value here replaces the outlet rather than sitting beside it.
    */
   readonly children?: ReactNode | undefined;
   /** Title-band identity, overriding any delegated by the mounted screen. */
@@ -739,6 +899,24 @@ export interface AppShellProps {
   readonly pfKeys?: ShellPfKeySlot | undefined;
   /** Server-anchored instant for the title band, overriding any delegated value. */
   readonly now?: Date | undefined;
+  /*
+   * WHY : ⚠️ Refactoring Rationale: there is NO `ownsFunctionKeys` prop here any more, and the prop this
+   *       note replaces was a correct diagnosis with a weaker remedy. It let a mount site declare whether
+   *       the shell might bind its own sign-off function key, because `usePfKeys` installs one document
+   *       listener per call site with no arbitration and PF12 is `Cancel` on account update, card update
+   *       and user update -- so a shell that also bound PF12 would end the session on the keystroke that
+   *       cancels an edit. That diagnosis is exactly right. The remedy adopted instead is that the shell
+   *       installs no keyboard listener AT ALL and offers sign-off as a rendered control, which makes the
+   *       collision impossible rather than avoidable: a gate has to be passed correctly at every mount
+   *       site, and this one was already omitted at the production table in `ui/src/router.tsx` while two
+   *       isolated test renders passed it. See {@link SHELL_SIGN_OFF_LABEL} for what the rendered control
+   *       costs and what it does not.
+   * WHY : Assumptions: the property the prop existed to protect is asserted from the outside rather than
+   *       configured -- `routerReachability.test.tsx > the frame paints one function-key legend only`
+   *       renders the production table and asserts one legend region and no `F12=Sign off` control, which
+   *       holds unconditionally under this design and held only for a correctly-configured mount site
+   *       under the other.
+   */
 }
 
 /**
@@ -769,7 +947,8 @@ export interface AppShellProps {
  * redundant roles would restate what the markup already exposes.
  * @param {AppShellProps} props - Optional frame overrides and body content.
  * @returns {ReactElement} The four-zone frame, or the sign-off surface once the operator
- *   has signed off through the shell's own function key.
+ *   has signed off through the shell's own sign-off control; see
+ *   {@link SHELL_SIGN_OFF_LABEL} for why that control is not a function key.
  */
 export function AppShell(props: AppShellProps): ReactElement {
   const { children, screen, message, pfKeys, now } = props;
@@ -798,7 +977,7 @@ export function AppShell(props: AppShellProps): ReactElement {
   const { cssVar } = theme.useToken();
 
   /*
-   * Assumptions: `auto` and the two token references are the whole of this override, and
+   * Assumptions: `auto` and the three token references are the whole of this override, and
    * every one of them is admissible. `height: auto` lets the band grow to its own content,
    * and `auto` is one of the values the zero-hardcoded-values rule exempts by name.
    * `lineHeight` comes from the theme's own base line-height token, which is what neutralises
@@ -806,60 +985,97 @@ export function AppShell(props: AppShellProps): ReactElement {
    * would merely overflow further down. The vertical padding comes from the spacing scale
    * through `ui/src/theme/tokens.ts`, so the band breathes without a pixel literal. The
    * horizontal padding antd already applies is deliberately left alone.
+   *
+   * Refactoring Rationale: the background is now stated, and stating it is an ACCESSIBILITY
+   * correction rather than a styling preference. `Layout.Header` fills with the design
+   * system's own dark navy by default, and the BMS bridge maps the mapsets' dominant
+   * `COLOR=BLUE` - 289 measured occurrences - onto the primary role, so every label, value
+   * and link this band carried measured 4.49:1 against that fill where WCAG AA asks 4.5:1
+   * for normal text. An earlier revision recorded the shortfall and shipped it, on the ground
+   * that the deficient half was a component default and correcting it here would fork the
+   * palette. The measurement was right and the conclusion was wrong: the same text token
+   * measured three different ratios in the three zones, so no token map could fix it while
+   * the backgrounds disagreed. Painting all three zones with `SURFACE_TOKENS.screen` gives
+   * the whole frame one measurable surface, which is what lets `BMS_TEXT_COLOR_TOKENS` be
+   * verified once - at 6.16:1 for this band's text - and hold in every zone.
+   *
+   * Trade-offs: the dark band is given up, and nothing transcribed goes with it. It is a
+   * design-system default and not a measured source value: the 3270 screens paint no header
+   * fill at all, they paint coloured text on one uniform display, so a uniform surface is
+   * closer to the baseline than the default was. The value written here is a token reference
+   * rather than a colour, so the band still follows the theme.
+   */
+  /*
+   * Refactoring Rationale: the background is set here, and it is the surface half of a
+   * contrast resolution the token bridge carries the other half of. `Layout.Header` ships
+   * `headerBg: '#001529'`, a dark navy, and a review measured this band's text on it at
+   * 4.49:1 against the WCAG AA 4.5:1 minimum for normal text. The navy was never a
+   * migration decision - `ui/src/theme/antdTheme.ts` rejects a dark surface outright on the
+   * ground that no requirement asks for one, and the ten screens that compose `ScreenHeader`
+   * themselves already paint the same band on the light content surface. Naming the light
+   * surface makes both paths agree, which is what lets one text shade be legible on either.
+   * See {@link SURFACE_TOKENS} for the rejected alternative and
+   * {@link BMS_TEXT_COLOR_TOKENS} for the measured pairs.
    */
   const headerStyle: CSSProperties = {
     height: 'auto',
     lineHeight: cssVar.lineHeight,
     paddingBlock: cssVar[SPACING_TOKENS.controlPaddingCompact],
+    background: cssVar[SURFACE_TOKENS.screen],
   };
 
   /*
-   * Trade-offs: the frame is given a minimum height of one viewport, and the unit is a
-   * literal because the design system has no token for viewport height - the token scales
-   * cover colour, spacing, radius, typography and motion, none of which can express "as
-   * tall as the window". The alternative was to leave the frame sized to its content, which
-   * is what it did when measured: on a short screen the key legend floated directly beneath
-   * the body with the rest of the window blank, where the baseline always painted the legend
-   * on row 24 at the bottom edge of the display. Reproducing that position is the fidelity
-   * gain; the cost is the one unresolved value below, flagged rather than hidden.
-   * `dvh` rather than `vh` is used because a mobile browser's dynamic toolbar makes `vh`
-   * overshoot the visible area, which would push the legend out of sight on exactly the
-   * viewports the responsive reflow exists to serve.
+   * Assumptions: the body and legend zones take the same surface as the header, for the
+   * reason argued there - one surface is what makes one contrast measurement the whole
+   * answer. The design system fills the frame and its footer with the layout grey by
+   * default, against which the same text tokens measure lower than they do here.
    */
-  /*
-   * Trade-offs: a browser measurement showed this produces 16px of VERTICAL scroll, and the
-   * cause is worth recording because it is not this declaration. A document that keeps the
-   * user agent's default `body { margin: 8px }` adds 8px above and below a frame that is
-   * itself exactly one viewport tall, so the page becomes 16px longer than the window.
-   * `ui/index.html` links no stylesheet by a decision it documents at L145-L154 - antd 6
-   * injects its own styles as CSS-in-JS, and a reset sheet would put design values in a
-   * second place beside `ui/src/theme/antdTheme.ts` - so no margin reset exists to absorb
-   * it. Reducing the height by a literal 16px to compensate was rejected: it would encode
-   * one document's margin into a component that any document may mount, and it would be
-   * wrong the moment a reset arrived. The 16px scroll is accepted as the smaller cost, and
-   * a `body` margin reset at whichever layer serves the document removes it entirely.
-   */
-  /* BLITZY [LAYOUT]: viewport height has no Ant Design token; 100dvh emitted literally. */
-  const frameStyle: CSSProperties = { minHeight: '100dvh' };
+  const zoneStyle: CSSProperties = { background: cssVar[SURFACE_TOKENS.screen] };
 
   /*
-   * Assumptions: the contrast pairing below is measured, reported and deliberately NOT
-   * corrected here. `Layout.Header` fills with antd's own dark header background and the
-   * BMS bridge maps the mapsets' dominant `COLOR=BLUE` - 289 measured occurrences - onto
-   * `colorPrimary`, so every label, value and link this band carries is that blue on that
-   * navy. A browser audit measures the pair at 4.49:1 where WCAG AA asks 4.5:1 for normal
-   * text: a shortfall of 0.01, across the skip link and the header's label and value spans.
-   * It is left as the design system produces it because the token mapping is owned by
-   * `ui/src/theme/tokens.ts` and the background by the component's own default, so lightening
-   * a colour here would fork the palette at one element - the precise failure the single
-   * theming injection point exists to prevent - and would put a literal colour in a file whose
-   * rule is that every value resolves to a token. Raising `colorPrimary` one step in the
-   * theme, or mapping the band's text to a lighter semantic token, fixes all twelve affected
-   * nodes at once and is the correct place for the change.
+   * Assumptions: the skip link is TEXT and therefore resolves through `BMS_TEXT_COLOR_TOKENS`
+   * like every other sentence in this tree, not through the link token the design system
+   * would otherwise apply. `ui/src/theme/antdTheme.ts` pins the link seed to the measured
+   * blue anchor deliberately - so a turquoise informational seed cannot drag the link ramp
+   * with it - and states in the same place that those seeds govern fills, borders,
+   * backgrounds and icons because no consumer paints either name as text. This element was
+   * the one consumer that did: the design system's link component resolves the anchor
+   * itself, which measured 4.10:1 against the surface this shell paints where WCAG AA asks
+   * 4.5:1 for normal text. Naming the text-grade shade here restores the invariant the theme
+   * file already claims rather than moving a seed and re-deriving thirteen tokens to reach
+   * one element.
+   * Alternatives Considered: moving the link seed to the text-grade shade. Rejected because
+   * the seed feeds a nine-shade ramp plus hover and active states that fills and borders also
+   * read, so a change made for one sentence would move surfaces no measurement asked to move.
+   * Trade-offs: the underline and the focus ring still come from the component, which is
+   * correct - only the hue is overridden, and it is overridden to a shade of the same family.
    */
-  /* BLITZY [A11Y]: colorPrimary on the header background measures 4.49:1, below WCAG AA
-   * 4.5:1 for normal text. Implemented as the design system specifies; flagged for designer
-   * review rather than corrected locally. */
+  const skipLinkStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.BLUE] };
+
+  /*
+   * Assumptions: the sign-off surface takes the same fill and, unlike the frame, needs its own
+   * growth declaration. The design system's layout primitive sets `flex: auto` on itself and
+   * the flex primitive used here does not, so without `flex: 1` the erased surface would
+   * collapse to the height of its one sentence inside a mount point sized to the viewport -
+   * which is the collapse the alignment note below records having measured once already.
+   * `1` is a flex factor rather than a design value, so it resolves to no token by nature.
+   */
+  const signOffStyle: CSSProperties = { ...zoneStyle, flex: 1 };
+
+  /*
+   * Refactoring Rationale: this component no longer sizes the frame to the viewport, and the
+   * declaration it used to carry was `minHeight: '100dvh'` - the one unresolved literal in
+   * the file, flagged as such. A browser measurement showed that pairing produced a permanent
+   * 16px vertical scroll, because a document keeping the user agent's default `body { margin:
+   * 8px }` adds 8px above and below a frame exactly one viewport tall. Both halves of that
+   * defect belong to the document rather than to a component any document may mount, so both
+   * moved to `ui/index.html`: it resets the margin and sizes the mount point to one viewport,
+   * and the design system's own `.ant-layout { flex: auto }` then stretches this frame to
+   * fill it. The fidelity property that motivated the original declaration - the key legend
+   * sitting at the bottom edge of the display, as row 24 always did - is preserved by that
+   * arrangement, and the literal is now at the layer that owns viewport sizing.
+   */
+
   const delegated = useSyncExternalStore(
     subscribeToShellSlot,
     getShellSlotSnapshot,
@@ -908,28 +1124,22 @@ export function AppShell(props: AppShellProps): ReactElement {
   );
 
   /*
-   * Refactoring Rationale: the shell binds a function key only when NO screen has
-   * delegated one, and that condition is what keeps two keyboard owners from fighting.
-   * `usePfKeys` installs a listener per call site on the shared document, so a shell that
-   * always bound its own keys would sit alongside the mounted screen's listener and both
-   * would receive every keypress - and since PF12 is `cancel` on the screens that bind it,
-   * one key would both cancel a screen's edit and end the session.
+   * Refactoring Rationale: this shell now installs NO keyboard listener of its own, where it
+   * previously called `usePfKeys` with a sign-off handler whenever no screen had delegated a
+   * legend. The condition could not hold: `usePfKeys` installs one document listener per call
+   * site, every screen calls it, and no screen delegates its legend - so "no screen has
+   * delegated one" was true on every screen, and the shell's PF12 would have arrived alongside
+   * the three screens that bind PF12 as `Cancel`. Sign-off is a rendered control instead; see
+   * {@link SHELL_SIGN_OFF_LABEL} for what that costs and what it does not.
    *
-   * Assumptions: `enabled: false` is a SILENT stand-down and not merely a disabled legend,
-   * which is what makes this safe rather than noisy. `usePfKeys` tests that flag at the top
-   * of `invoke`, ahead of the unmapped-attention-identifier branch, so a disabled hook
-   * returns without reporting a rejection. Standing down by passing an empty handler map
-   * alone would instead take the unmapped branch and surface the baseline's
-   * `Invalid key pressed` message on every function key the operator pressed.
+   * Assumptions: the legend region is therefore driven entirely by delegation. A screen that
+   * publishes its bindings has them painted here and its activations forwarded back through
+   * {@link dispatchShellPfKey}; a screen that paints its own legend publishes nothing and this
+   * region stays empty, because `PfKeyBar` returns `null` for an empty binding list rather than
+   * an empty landmark. The dispatcher is passed unconditionally because it reads the published
+   * slot at call time and is a no-op when nothing is published.
    */
-  const shellOwnsFunctionKeys = activePfKeys === undefined && signedOn;
-  const shellHandlers: PfKeyHandlerMap = shellOwnsFunctionKeys
-    ? { [SHELL_SIGN_OFF_AID]: { onInvoke: signOffFromShell, label: SHELL_SIGN_OFF_LEGEND } }
-    : {};
-  const { bindings, invoke } = usePfKeys(shellHandlers, { enabled: shellOwnsFunctionKeys });
-
-  const legendKeys: readonly PfKeyBinding[] = activePfKeys?.keys ?? bindings;
-  const legendInvoke = activePfKeys === undefined ? invoke : dispatchShellPfKey;
+  const legendKeys: readonly PfKeyBinding[] = activePfKeys?.keys ?? NO_LEGEND_KEYS;
 
   if (signedOff) {
     /*
@@ -962,11 +1172,12 @@ export function AppShell(props: AppShellProps): ReactElement {
          * the centring effective, the alignment was corrected to match the baseline. An
          * `EXEC CICS SEND TEXT ... ERASE` clears the screen and writes from its beginning, so
          * the sign-off line belongs at the top of the cleared display; centring it would have
-         * been a browser flourish the terminal never performed. The frame height is reused so
-         * the erased surface still occupies the whole display, as the cleared screen did.
+         * been a browser flourish the terminal never performed. The surface still occupies the
+         * whole display, as the cleared screen did, because the document sizes the mount point
+         * to one viewport and this primitive is given the flex growth to fill it.
          */
         align="start"
-        style={frameStyle}
+        style={signOffStyle}
         // Assumptions: the gap is antd's semantic size name rather than a number, so it
         // resolves through the theme's spacing scale. A number here would be a pixel literal,
         // which under CSS-variable theming does not merely duplicate a token but opts the
@@ -991,7 +1202,7 @@ export function AppShell(props: AppShellProps): ReactElement {
   }
 
   return (
-    <Layout data-testid={APP_SHELL_TEST_ID} style={frameStyle}>
+    <Layout data-testid={APP_SHELL_TEST_ID} style={zoneStyle}>
       <Layout.Header style={headerStyle}>
         <Flex vertical gap="small">
           {/*
@@ -1005,9 +1216,34 @@ export function AppShell(props: AppShellProps): ReactElement {
             screen without any positioning at all. It is first in DOM order, so tab order
             reaches it before the title band, which is the whole point of the control.
           */}
-          <Typography.Link href={`#${SHELL_CONTENT_ELEMENT_ID}`}>
-            {SKIP_TO_CONTENT_LABEL}
-          </Typography.Link>
+          {/*
+            Assumptions: the skip link and the sign-off control share one row, and both are
+            additive browser chrome rather than migrated fields - so they sit together, ahead
+            of the migrated title band, instead of being interleaved with it. `justify` keeps
+            the sign-off control at the trailing edge without a positioned element, which
+            design gap G1 forbids.
+            Assumptions: the sign-off control is rendered only while a session is held. An
+            operator with no session has nothing to end, and the sign-on screen is outside
+            this shell entirely, so an always-rendered control would offer an action that
+            could not apply. `size="small"` and `type="link"` keep it chrome rather than a
+            primary action of whatever screen is mounted; both are antd variants and neither
+            introduces a value of its own.
+          */}
+          <Flex align="center" justify="space-between" gap="small">
+            <Typography.Link href={`#${SHELL_CONTENT_ELEMENT_ID}`} style={skipLinkStyle}>
+              {SKIP_TO_CONTENT_LABEL}
+            </Typography.Link>
+            {signedOn ? (
+              <Button
+                data-testid={SHELL_SIGN_OFF_CONTROL_TEST_ID}
+                type="link"
+                size="small"
+                onClick={signOffFromShell}
+              >
+                {SHELL_SIGN_OFF_LABEL}
+              </Button>
+            ) : null}
+          </Flex>
           {activeScreen === undefined ? null : (
             <ScreenHeader
               transactionId={activeScreen.transactionId}
@@ -1051,6 +1287,14 @@ export function AppShell(props: AppShellProps): ReactElement {
         Assumptions: it is a sibling of the three regions rather than a child of the footer,
         so a screen-level message is not announced from inside `contentinfo`, which is for
         information about the document rather than the outcome of an action.
+        Assumptions: the line is rendered only when a message SLOT exists, which is not the
+        same test as whether that slot carries text. Every one of the 21 mapset screens
+        publishes a slot on every turn - empty when it has nothing to say - so each of them
+        reserves the row unconditionally and gets the no-layout-shift guarantee the band
+        exists for. The `undefined` arm is reached only by a surface with no message field in
+        the reference at all, of which the router's own not-found page is the one instance:
+        reserving a 3270 message row on a screen no mapset declares would assert a contract
+        that has no source.
       */}
       {activeMessage === undefined ? null : (
         <MessageBand
@@ -1059,7 +1303,7 @@ export function AppShell(props: AppShellProps): ReactElement {
           mapset={activeMessage.mapset}
         />
       )}
-      <Layout.Footer>
+      <Layout.Footer style={zoneStyle}>
         {/*
           Assumptions: the legend is rendered unconditionally and needs no guard of its own,
           because `PfKeyBar` returns `null` for an empty binding list rather than an empty
@@ -1073,7 +1317,7 @@ export function AppShell(props: AppShellProps): ReactElement {
         */}
         <PfKeyBar
           keys={legendKeys}
-          onInvoke={legendInvoke}
+          onInvoke={dispatchShellPfKey}
           {...(activePfKeys?.legendColor === undefined
             ? {}
             : { legendColor: activePfKeys.legendColor })}

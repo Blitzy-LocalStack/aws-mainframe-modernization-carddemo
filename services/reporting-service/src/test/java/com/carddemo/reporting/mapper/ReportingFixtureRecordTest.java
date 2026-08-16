@@ -35,7 +35,7 @@ import org.junit.jupiter.params.provider.MethodSource;
  * provide.</p>
  *
  * <table>
- *   <caption>The four fixture files, measured on the branch</caption>
+ *   <caption>The four fixture files THIS CLASS consumes, measured on the branch</caption>
  *   <tr><th>File</th><th>Layout</th><th>Record</th><th>Width</th><th>Rows</th><th>Bytes</th></tr>
  *   <tr><td>{@code acctfile.txt}</td><td>{@code ACCOUNT}</td><td>{@code CVACT01Y.cpy}</td>
  *       <td>300</td><td>4</td><td>1204</td></tr>
@@ -101,6 +101,14 @@ import org.junit.jupiter.params.provider.MethodSource;
  * zero-padded customer identifier) so that no value resembles a real document number. No primary
  * account number and no card verification value appears in any of the four files, because none of the
  * four records declares either.</p>
+ *
+ * <p>Assumptions: that last sentence is a claim about THESE FOUR FILES and is not a claim about the
+ * fixture directory, which holds seven. Two of the other three -- the card master and the card
+ * cross-reference -- do declare a primary account number, and the card master also declares a
+ * verification value; what those columns hold, and the checkable grounds on which no value in them can
+ * be a live credential, are recorded in section 2.1 of that directory's own README. The scope is
+ * spelled out because the unqualified reading is false, and a sensitive-data attestation that is
+ * accidentally read as directory-wide is one a reader stops checking.</p>
  *
  * <p>Assumptions: the fixtures are read through the test classpath rather than by filesystem path.
  * Maven copies {@code src/test/resources/} into {@code target/test-classes/}, so each file resolves as

@@ -667,13 +667,16 @@ COBOL baseline or the parity oracle.
 
 ## 10. What drives this corpus, and what reads it
 
-This corpus is a **driven input**. `PostTransactionsJobParityIT` resolves each scenario under
-`/fixtures/posting/`, seeds the masters from it, launches the posting job and compares the resulting
-transaction master, category balances, account master and reject stream against
-`tests/golden/posting/reject_101_acct_missing` -- so an edit to these bytes changes what the parity
-run asserts. `BatchFixtureContractTest` additionally holds every file here to its declared geometry
-and to the values that make the scenario discriminating, so a layout mistake is caught in this module
-rather than surfacing later as a comparison failure.
+This corpus is a **driven input**, and **three** classes read it. `PostTransactionsJobParityIT`
+resolves each scenario under `/fixtures/posting/`, seeds the masters from it, launches the posting
+job and compares the resulting transaction master, category balances, account master and reject
+stream against `tests/golden/posting/reject_101_acct_missing`. `PostTransactionsJobTest` resolves the same
+scenario under `fixtures/posting/` at the unit tier and seeds all four relations from the same
+bytes, so both tiers read this folder -- an edit to these bytes changes what BOTH runs assert.
+`BatchFixtureContractTest` additionally holds every file here to its declared geometry, to the
+values that make the scenario discriminating and to its committed SHA-256 per master section 11.5,
+so a layout mistake or an unintended byte change is caught in this module rather than surfacing
+later as a comparison failure.
 
 Assumptions: the seed root is declared in the test, not inferred from the directory layout, and that
 declaration is what makes these bytes load-bearing. `PostTransactionsJobParityIT` line 223 declares
@@ -684,9 +687,26 @@ change to a driven input is the most expensive mistake this folder admits. Verif
 before trusting a claim either way -- a folder's purpose is a property of the classes that name it
 and can change without any byte here changing.
 
-Assumptions: the sibling `preflight/**` and `interest/**` families are still mirrors -- no test
-declares either as a seed root -- so the tree serves two different purposes and only this one changes
-what a run asserts.
+Assumptions: this section exists because two record files sitting in the same tree can differ in
+whether a job opens them, and the difference is invisible from the layout. Master section 1.5 holds the
+measurement, taken from the resource root each consuming class declares rather than from prose: all four
+files in every one of the NINE `posting/**` scenarios are opened -- by `PostTransactionsJobTest` under
+the classpath prefix `fixtures/posting/` and by `PostTransactionsJobParityIT` under `/fixtures/posting/`
+-- all four files in every one of the THREE `interest/**` scenarios are opened by
+`CalculateInterestJobTest` under `fixtures/interest/`, and `PreflightDailyTransactionsJobTest` opens the
+three `preflight/**` feed files plus `preflight/unmatched_card/acctdata.txt` under
+`fixtures/preflight/`. **53 of the 62 record files in this tree are live job input**; master section 1.5
+names the nine that are not.
+
+Assumptions: this paragraph previously said the sibling `preflight/**` and `interest/**` families were
+mirrors that no test in this module read, and that `CalculateInterestJobTest` resolved its inputs from
+the repository-root `tests/fixtures/interest/` tree. Both claims were false. That class declares
+`FIXTURE_INTEREST_ROOT` as the classpath prefix `fixtures/interest/` and loads through
+`getClassLoader().getResourceAsStream(...)`, so it reads this tree; it DISCUSSES the reference oracle
+tree in its prose, and the two were conflated -- a path named in a docstring is not a path being opened.
+The correction matters in exactly the direction the paragraph was warning about: a reader told that a
+sibling directory was inert would carry that belief into it and edit a live job input believing the
+change was free.
 
 Assumptions: Rule 1's fourth category name, the one its line 32 scopes to *replacing existing code*,
 is deliberately absent from this document. Nothing here replaces anything: the four record files are
@@ -710,7 +730,7 @@ transfers here in full, which is why the four required elements -- purpose, para
 errors -- appear as sections 1, 5, 3 and 4 rather than as a header comment in each file.
 
 Assumptions: **no automated gate reads this file, and the two that might are both verified not to.**
-`config/checkstyle/checkstyle.xml` line 215 sets `fileExtensions` to `java`, so Checkstyle never
+`config/checkstyle/checkstyle.xml` line 208 sets `fileExtensions` to `java`, so Checkstyle never
 opens Markdown. `config/rule1/rule1_gate.py` does govern Markdown for its `labels` check, but its
 `_is_governed` function at line 528 returns false for any path containing
 `/src/test/resources/fixtures/` -- the segment declared at its line 142 -- so every file in this

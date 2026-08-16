@@ -62,13 +62,12 @@ Scope:
   import, line-length, metrics or header modules here. Every module left out is
   listed, with the reason it was left out, in the EXCLUDED MODULES section at the
   foot of this file, and the whole import family is among them.
-    Refactoring Rationale: two import-hygiene modules, RedundantImport and
-      UnusedImports, were WITHDRAWN from this file rather than documented alongside
-      the Javadoc family, because this gate is chartered documentation-only and two
-      groups of different standing in one file is two charters. Withdrawal cost
-      nothing measurable: a scan of every Java file in the reactor finds zero
-      duplicate and zero unused imports. Both are recorded in the Import family
-      entry of EXCLUDED MODULES so the omission reads as a decision.
+    Assumptions: import hygiene is out of scope here, not merely unconfigured. This
+      gate is chartered documentation-only, and two module groups of different
+      standing in one file is two charters. RedundantImport and UnusedImports are
+      recorded in the Import family entry of EXCLUDED MODULES so the omission reads
+      as a decision, and excluding them masks nothing: a scan of every Java file in
+      the reactor finds zero duplicate and zero unused imports.
     Assumptions: the check is by NAME rather than by count of declarations. The
       file declares THIRTEEN module elements, of which Checker, TreeWalker and
       SuppressionFilter are a container, a container and a filter respectively,
@@ -112,7 +111,7 @@ What this rule set cannot check: it does NOT enforce all of Rule 1.
   the five items enumerated above remain a review obligation.
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-WHY (non-obvious design decisions):
+Rationale for the non-obvious decisions in this file:
   - Trade-offs: severity is error, declared once at Checker level, so a
     missing @param stops the build instead of printing a line nobody
     reads. Rule 1's Validation Gate is written in blocking terms, "Code
@@ -154,15 +153,9 @@ WHY (non-obvious design decisions):
     layouts: "never duplicate a layout; keep it single-sourced from
     app/cpy/".
   - Trade-offs: the module set is confined to the Javadoc family and one
-    comment-placement check. Refactoring Rationale: this sentence also
-    named two no-effect import checks from the Scope section, which
-    stopped being true when RedundantImport and UnusedImports were
-    WITHDRAWN. The Scope section above records that withdrawal and the
-    EXCLUDED MODULES section at the foot carries both entries, so this
-    line was the last place still describing them as configured, and a
-    reader who trusted it would have gone looking for two modules that
-    are not here. Adding naming, whitespace, import-ORDERING,
-    line-length, metrics or header modules was considered and rejected,
+    comment-placement check, and nothing else is configured. Adding
+    naming, whitespace, import-ORDERING, line-length, metrics or header
+    modules was considered and rejected,
     because the build would then fail on style noise that Rule 1 never
     asks about, and CONTRIBUTING.md asks for the opposite: "Modify the
     source; please focus on the specific change you are contributing. If

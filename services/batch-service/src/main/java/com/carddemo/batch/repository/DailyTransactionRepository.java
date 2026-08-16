@@ -1,15 +1,9 @@
 package com.carddemo.batch.repository;
 
 import com.carddemo.batch.domain.DailyTransaction;
-import jakarta.persistence.QueryHint;
 import java.util.List;
-import java.util.stream.Stream;
-import org.hibernate.jpa.HibernateHints;
 import org.springframework.data.domain.Limit;
-import org.springframework.data.jpa.repository.QueryHints;
 import org.springframework.data.repository.Repository;
-import org.springframework.transaction.annotation.Propagation;
-import org.springframework.transaction.annotation.Transactional;
 
 /**
  * Reads the unposted daily-transaction feed that drives the preflight and posting jobs.
@@ -28,8 +22,33 @@ import org.springframework.transaction.annotation.Transactional;
  * {@code save}, {@code saveAll}, {@code delete}, {@code deleteAll} and {@code flush}, and this
  * interface must expose none of them. {@code org.springframework.data.repository.Repository} is the
  * marker that gives Spring Data enough to build a proxy while contributing no member of its own, so
- * the reachable surface is exactly the two methods declared below and the read-only guarantee is
+ * the reachable surface is exactly the one method declared below and the read-only guarantee is
  * structural rather than a convention a later edit could relax by adding one call.</p>
+ *
+ * <h2>The unbounded cursor this interface used to declare, and why it is gone</h2>
+ *
+ * <p>Refactoring Rationale: a second member, {@code Stream<DailyTransaction>
+ * findAllByOrderByIngestSeqAsc()}, was declared here as "the migrated form of the reference read loop"
+ * and was WITHDRAWN because no caller in this module ever reached it. Both consumers read chunked
+ * through the continuation finder below -- {@code job/PreflightDailyTransactionsJob.java} and
+ * {@code job/PostTransactionsJob.java} each loop on it -- and both begin from
+ * {@code DailyFeedWatermarkService.NOTHING_CONSUMED}, which is {@code 0L} and is below every assigned
+ * ordinal, so the continuation finder already covers the first chunk as well as every later one. The
+ * cursor was reachable only from its own test, which is the one caller a repository member must not
+ * have: a member no step uses cannot lose parity when it changes, so a test asserting it reports on
+ * nothing the nightly chain runs.</p>
+ *
+ * <p>Trade-offs: what the withdrawal gives up is a walk whose heap cost is flat in the size of the
+ * feed no matter what the caller does with it. That property is not lost, because a chunked read is
+ * flat in the CHUNK size, which is smaller; and it was never usable here in any case, because a
+ * server-side cursor stays open only for the transaction that opened it, so consuming one would have
+ * required a single transaction spanning the entire feed. Both jobs deliberately commit per record
+ * instead -- the boundary the fixture guides under {@code src/test/resources/fixtures} describe -- so
+ * a feed-long transaction would have held one connection and one snapshot open for the whole nightly
+ * step and would have made a mid-feed failure roll back every record already posted. Alternatives
+ * Considered: keeping the cursor and routing one job through it to give it a caller. Rejected because
+ * the caller would have had to abandon per-record commits to satisfy the cursor's lifetime, which
+ * trades a real property of the migrated jobs for the convenience of not deleting a method.</p>
  *
  * <p>Assumptions: the feed genuinely has no writer in this module, and the evidence for that is
  * documentary rather than stylistic. {@code app/cbl/CBTRN02C.cbl:29-32} selects it as
@@ -43,7 +62,7 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <h2>The ordering key, and the two keys it is deliberately not</h2>
  *
- * <p>Both methods below order by the ingestion ordinal the entity declares as {@code ingestSeq}.
+ * <p>The method below orders by the ingestion ordinal the entity declares as {@code ingestSeq}.
  * That is the most consequential decision in this file, because a walk in a different order still
  * returns every row and still produces output a golden-master comparison rejects, so the ordering is
  * part of the contract rather than a convenience.</p>
@@ -104,8 +123,8 @@ import org.springframework.transaction.annotation.Transactional;
  * parses the text of a native query. A property path resolving to a column the schema does not have
  * is therefore reported at start-up, before a row is read, whereas a mistyped physical column inside
  * a native statement stays invisible until that statement executes -- which for this module means
- * part-way through a nightly chain with earlier steps already committed. Both members below are
- * derived methods bound to property names declared on {@code DailyTransaction}, so no physical column
+ * part-way through a nightly chain with earlier steps already committed. The member below is a
+ * derived method bound to property names declared on {@code DailyTransaction}, so no physical column
  * name appears anywhere in this file.</p>
  *
  * <p>Assumptions: the offset-pagination vocabulary the charter prohibits package-wide appears on no
@@ -134,103 +153,28 @@ import org.springframework.transaction.annotation.Transactional;
  * on the ingestion ordinal would be single valued but would be answering a question no step asks,
  * since a step that holds an ordinal holds it in order to continue from it, which is what the
  * continuation finder below is for. It is added when a caller genuinely needs it, with its own
- * recorded rationale, rather than pre-emptively now.</p>
+ * recorded rationale, rather than pre-emptively now -- which is the same standard the withdrawn
+ * cursor above failed to meet.</p>
  *
  * @see DailyTransaction
  */
 public interface DailyTransactionRepository extends Repository<DailyTransaction, Long> {
 
     /**
-     * Opens a forward-only walk of the whole feed in ingestion order, which is the sequential drive
-     * of the preflight and posting jobs.
-     *
-     * <p>This is the migrated form of the reference read loop rather than a convenience over it. The
-     * posting driver at {@code app/cbl/CBTRN02C.cbl:202-219} reads to end of file in one pass and
-     * never revisits a record, and the preflight at {@code app/cbl/CBTRN01C.cbl:164-186} does the
-     * same, so one forward cursor expresses both exactly.</p>
-     *
-     * @return a lazily-populated {@code Stream<DailyTransaction>} delivering every row of the feed in
-     *     ascending ingestion order, empty when the feed holds no rows. The caller owns two
-     *     obligations that a materialised return would not impose: it must CONSUME the stream inside
-     *     the transaction it already holds, because the underlying database cursor stays valid only
-     *     for that transaction's duration, and it must CLOSE the stream, which means a
-     *     try-with-resources block at the call site rather than a bare assignment
-     * @throws org.springframework.transaction.IllegalTransactionStateException if the caller holds no
-     *     transaction when it calls this method, since the propagation declared below is
-     *     {@code MANDATORY} and a cursor cannot outlive a transaction that was never started
-     */
-    // Trade-offs: a Stream return rather than a List. A list was evaluated and rejected because it
-    //     materialises the entire feed into one heap before the caller sees a single row, which
-    //     abandons the memory profile of the forward-only cursor at
-    //     app/cbl/CBTRN02C.cbl:29-32 -- a profile that is flat in the size of the feed rather than
-    //     linear in it. The compromise accepted is a heavier call-site contract than a list would
-    //     impose: the caller must hold a transaction open for the whole walk and must close the
-    //     stream. That cost is bounded and local, whereas the cost a list defers is unbounded and
-    //     grows with every extract, so the heavier contract is the cheaper of the two.
-    // Assumptions: the walk is unbounded on purpose, which is what distinguishes it from the
-    //     continuation finder below and from the bounded walks the sibling interfaces expose. The
-    //     reference read has no chunk size because it reads to end of file, and a caller that wants
-    //     bounded reads asks the continuation finder for them instead. Laziness is what makes an
-    //     unbounded return safe here: the row count never becomes a heap requirement.
-    // Alternatives Considered: the default REQUIRED propagation, which is the shorter annotation and
-    //     the one the two words "read-only transaction" suggest. Rejected because it is actively
-    //     misleading on a method that returns a cursor. REQUIRED would start a transaction when no
-    //     caller had one, commit it as this method RETURNED, and hand back a stream whose cursor was
-    //     already closed -- so the failure would surface at the first element, inside the caller's
-    //     loop, naming neither this method nor the missing transaction. MANDATORY refuses the call
-    //     outright and names the actual mistake at the actual call site.
-    // Trade-offs: readOnly is declared and is nonetheless inert, and saying so is better than
-    //     leaving a reader to discover it. Because propagation is MANDATORY this method always joins
-    //     a caller's transaction, and a joined definition's read-only flag does not override the
-    //     transaction already in progress. It is retained because it states the intent of the method
-    //     at the method, and because it is the flag that would govern if the propagation were ever
-    //     relaxed. The enforcement of read-only access rests on the base type above and on the grant,
-    //     not on this attribute.
-    @Transactional(propagation = Propagation.MANDATORY, readOnly = true)
-    // Assumptions: the fetch-size hint is what makes this stream actually stream. The driver opens a
-    //     server-side cursor only when a positive fetch size and a non-auto-commit connection both
-    //     hold; with either missing it buffers the whole result client-side, which on a large feed is
-    //     heap exhaustion rather than a slowdown. Only POSITIVITY carries that property, so the
-    //     streaming contract of this method rests on the value being above zero and not on which value
-    //     it is.
-    // Refactoring Rationale: this note used to say the value matches the module-wide
-    //     hibernate.jdbc.fetch_size "so the two cannot disagree". They can, and in two of the three
-    //     profiles they do. The base declares 100 at application.yml:764, which is where the numeric
-    //     agreement comes from, but application-dev.yml:215 narrows the session default to 25 and
-    //     application-prod.yml:426 widens it to 250, each for a reason argued at the key. A query hint
-    //     is a compile-time constant and cannot track any of them, so the old sentence claimed an
-    //     invariant that no mechanism enforces -- and it contradicted its own next clause, which
-    //     correctly observed that a profile can change the property.
-    // Trade-offs: this hint is therefore an intentional per-query OVERRIDE, not an echo. It governs
-    //     the statement it annotates, so this walk reads 100 rows per round trip under every profile:
-    //     four times the dev session default and rather less than half the prod one. What is given up
-    //     is per-environment tuning of exactly this walk -- prod cannot widen it by editing a property
-    //     -- and what is bought is that the one unbounded read in this interface has a window that is
-    //     fixed at the method rather than inherited from configuration, so it cannot be set to zero
-    //     from outside and turned into a full client-side buffer. Aligning the constant with the base
-    //     value keeps the default deployment's behaviour identical whichever of the two governs, which
-    //     is why 100 rather than an unrelated number.
-    // Alternatives Considered: a fetch size of one, which would reproduce the reference's
-    //     record-at-a-time input-output pattern literally. Rejected because parity is owed to the
-    //     semantics and not to the round-trip count: app/cbl/CBTRN02C.cbl:202-219 advances one record
-    //     at a time because a sequential read returns one record, not because records per
-    //     input-output operation form part of any compared output. The annotation's counting flag is
-    //     left at its default because this interface declares no counting query for it to reach.
-    @QueryHints(@QueryHint(name = HibernateHints.HINT_FETCH_SIZE, value = "100"))
-    Stream<DailyTransaction> findAllByOrderByIngestSeqAsc();
-
-    /**
      * Continues the walk after a given ingestion ordinal, which is how a restarted step resumes the
      * feed rather than reprocessing it from the beginning.
      *
-     * <p>This exists for resumption and not for reading in convenient chunks. A redriven
+     * <p>This serves resumption FIRST and the ordinary forward drive as a consequence of it. A redriven
      * state-machine execution restarts a step that may already have processed part of its input, and
-     * this finder is what turns the ordinal it resumes from back into the remainder of the walk.</p>
+     * this finder is what turns the ordinal it resumes from back into the remainder of the walk. A step
+     * that has processed nothing yet is the same question with the ordinal at its floor, which is why
+     * both jobs drive their whole pass through this one member.</p>
      *
      * @param lastIngestSeq the ingestion ordinal of the last row the caller already processed, of
      *     type {@code Long}, treated as an EXCLUSIVE lower bound so that the row carrying it is not
-     *     returned again; must not be {@code null}, and a caller starting from the beginning uses the
-     *     unbounded walk above rather than passing a sentinel here
+     *     returned again; must not be {@code null}. A caller starting from the beginning passes
+     *     {@code DailyFeedWatermarkService.NOTHING_CONSUMED}, which is {@code 0L} and therefore below
+     *     every ordinal the table's identity assigns, so the first chunk needs no separate member
      * @param limit the greatest number of rows to return, of type {@code Limit}, which the caller
      *     sets from its own chunk size; must not be {@code null}
      * @return the matching rows as a {@code List<DailyTransaction>} in ascending ingestion order,
@@ -248,9 +192,15 @@ public interface DailyTransactionRepository extends Repository<DailyTransaction,
     //     arithmetic step to the next value.
     // Assumptions: the ordinal the caller passes comes from the framework's own step ExecutionContext,
     //     persisted with the step's chunk commit and restored into the same step on a restart. It does
-    //     NOT come from batch.batch_run: that table's migration declares seven columns -- id, run_id,
-    //     step_name, status, started_at, finished_at and return_code -- and none of them could hold a
-    //     cursor. The two mechanisms answer different questions, and the package charter records the
+    //     NOT come from batch.batch_run: that table's migration declares eight columns -- id, run_id,
+    //     step_name, status, started_at, finished_at, return_code and attempt -- and none of them could
+    //     hold a cursor. Refactoring Rationale: this list named seven and omitted attempt, which was the
+    //     shape before the redrive counter was added; BatchRunRepositoryIT asserts eight columns and
+    //     seven named constraints against the live catalog. The omission mattered for this comment
+    //     specifically, because attempt is the one column a reader might mistake for progress within a
+    //     step -- it counts redrives OF a step, not position INSIDE one -- so leaving it out of a list
+    //     whose point is that no column here holds a cursor left the strongest candidate unaddressed.
+    //     The two mechanisms answer different questions, and the package charter records the
     //     split in full: batch.batch_run answers whether a step already completed for a run, which is
     //     the idempotency question a redrive asks before doing anything, while the execution context
     //     answers how far into its input the step had got, which is the question this finder serves.
@@ -265,11 +215,12 @@ public interface DailyTransactionRepository extends Repository<DailyTransaction,
     //     is offered and no caller can derive a progress percentage from this interface. Nothing
     //     observable is given up: app/cbl/CBTRN02C.cbl:206 counts records as it processes them and
     //     never asks the dataset how many it holds, so the reference reported no total either.
-    // Alternatives Considered: a Stream return here too, for symmetry with the walk above. Rejected
-    //     because the two methods have genuinely different lifetimes. The walk is consumed once inside
-    //     one transaction, whereas a bounded chunk is read, its transaction committed, and its last
-    //     ordinal recorded before the next chunk is asked for -- so a lazy return would be forced shut
-    //     at exactly the commit that makes the chunk durable. A list is what a bounded read returns.
+    // Alternatives Considered: a lazily-populated Stream return, which this interface's withdrawn
+    //     second member used and which reads as the more faithful form of a sequential read. Rejected
+    //     because a bounded chunk and a lazy cursor have incompatible lifetimes: a chunk is read, its
+    //     transaction COMMITTED, and its last ordinal recorded before the next chunk is asked for, so a
+    //     lazy return would be forced shut at exactly the commit that makes the chunk durable. A list is
+    //     what a bounded read returns, and the per-chunk commit is the property being protected.
     List<DailyTransaction> findByIngestSeqGreaterThanOrderByIngestSeqAsc(Long lastIngestSeq,
             Limit limit);
 }

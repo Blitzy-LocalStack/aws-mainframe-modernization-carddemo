@@ -4,37 +4,48 @@
 # Purpose:
 #   The Terraform CLI and provider contract for the `step-functions-batch`
 #   module, and nothing else. The module body provisions the batch orchestration
-#   layer that replaces the mainframe's nightly job stream: the twelve-work-state
+#   layer that replaces the mainframe's nightly job stream: the eleven-work-state
 #   `carddemo-daily-batch` state machine, a second and much smaller state machine
 #   for on-demand reports, one shared IAM execution role and one CloudWatch log
 #   group per machine. Resources, inputs and outputs live in main.tf,
 #   variables.tf and outputs.tf, and README.md carries the JCL lineage of the
 #   step ordering. The choice of Terraform itself is settled in
 #   docs/adr/ADR-009-iac-tool.md.
+#   ⚠️ Refactoring Rationale: this said the module provisions the daily machine,
+#   "a second and much smaller state machine for on-demand reports, one shared IAM
+#   execution role and one CloudWatch log group per machine". Two of those three
+#   were wrong and they were wrong in opposite directions. There are four machines,
+#   not two -- main.tf declares aws_sfn_state_machine.daily, .adhoc,
+#   .dataset_roundtrip and .authorization_extract -- and there is no shared role:
+#   aws_iam_role.this carries `for_each = local.machines`, whose four keys give one
+#   role per machine, and the rationales at the dataset and authorization machines
+#   record that the union role they once shared was SPLIT deliberately so that
+#   neither carries a capability only the other needs. Understating the machine
+#   count would have left a reader looking for two log groups where four exist;
+#   claiming a shared role would have invited the next machine to reuse one and
+#   silently undo that split.
 #
-# WHY (non-obvious design decisions):
-#   - Assumptions: this is a reusable MODULE, never a Terraform root. Both
-#     environment roots consume it by relative source, so it is initialised
-#     transitively inside a calling root's module graph and never applied on its
-#     own. Every absence follows from that one fact and none becomes appropriate
-#     later: a `provider` block would burn one region and one credentials chain
-#     into a module both roots share, keep the root's `default_tags` off these
-#     resources and bar a caller from passing an aliased provider; a `backend`
-#     block fails `init` for every calling root, because Terraform accepts state
-#     configuration only in a root module; `experiments` would propagate unstable
-#     language features to every caller; and `provider_meta` serves a published
-#     provider rather than a first-party module. The deliberate contrast is
-#     infra/bootstrap, which IS a root and therefore does own a provider
-#     configuration; inverting the two cases is the error to avoid.
-#   - Trade-offs: both constraints are character-for-character identical to every
-#     sibling module's, which is deliberate rather than copy-paste inertia. A
-#     calling root intersects the constraints of every module in its graph and
-#     resolves one release of each provider for the whole graph, so a range that
-#     differs per module narrows that intersection and, in the limit, empties it.
-#     Restating one contract per directory is accepted so each states what it
-#     needs on its own terms; letting a module inherit its contract from
-#     whichever root loaded it would leave a module reached from an unexpected
-#     caller carrying no contract at all.
+#   Assumptions: this is a reusable MODULE, never a Terraform root. Both
+#   environment roots consume it by relative source, so it is initialised
+#   transitively inside a calling root's module graph and never applied on its
+#   own. Every absence follows from that one fact: a `provider` block would burn
+#   one region and one credentials chain into a module both roots share, keep the
+#   root's `default_tags` off these resources and bar a caller from passing an
+#   aliased provider; a `backend` block fails `init` for every calling root,
+#   because Terraform accepts state configuration only in a root module;
+#   `experiments` would propagate unstable language features to every caller; and
+#   `provider_meta` serves a published provider rather than a first-party module.
+#   The deliberate contrast is infra/bootstrap, which IS a root and therefore does
+#   own a provider configuration.
+#
+#   Trade-offs: both constraints are character-for-character identical to every
+#   sibling module's. A calling root intersects the constraints of every module in
+#   its graph and resolves one release of each provider for the whole graph, so a
+#   range that differs per module narrows that intersection and, in the limit,
+#   empties it. Restating one contract per directory is accepted so each states
+#   what it needs on its own terms; letting a module inherit its contract from
+#   whichever root loaded it would leave a module reached from an unexpected
+#   caller carrying no contract at all.
 # =============================================================================
 
 terraform {

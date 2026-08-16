@@ -46,7 +46,8 @@ adds an AWS path and leaves the existing z/OS and AWS Mainframe Modernization pa
 ## Prerequisites
 
 - Terraform 1.15.8.
-- AWS provider 6.x locked by each environment root and the random provider 3.9.x.
+- AWS provider 6.x locked by each environment root and the random provider 3.9.x --
+  the only two providers any root declares, matching AAP §0.6.1.4.
 - AWS CLI with the Cognito `add-user-pool-client-secret`,
   `list-user-pool-client-secrets`, and `delete-user-pool-client-secret` operations.
 - Maven 3.9.16 on Java 21, Node.js compatible with `ui/package.json`, Python 3.13, Docker, and `jq`.
@@ -169,26 +170,72 @@ Build each Dockerfile and tag it with `<commit-sha>`. Never publish only `latest
 prevents an ECS task definition from identifying the exact bytes required for rollback. The ECR
 module enables scan-on-push, so inspect each repository's scan result after push.
 
-### Step 2b - Mirror the telemetry collector image
+### Step 2b - Supply the identity-provider egress destinations, if in-task issuer resolution is needed
 
-The registry holds an eleventh repository, `aws-otel-collector`, that this repository does not build.
-Copy the pinned upstream image into it before the apply.
+Refactoring Rationale: this step used to mirror a pinned AWS Distro for OpenTelemetry collector image
+into an eleventh ECR repository. Both the mirror and that repository are withdrawn, because
+`infra/modules/ecs-service` no longer composes a collector sidecar -- the collector is not in the
+frozen AAP, and it was forcing an eleventh repository against the ten of AAP §0.4.1.6 and a ninth
+interface endpoint against the eight of AAP §0.4.1.9. Nothing needs mirroring before an apply now;
+every image this deployment runs is built in Step 2a.
+
+What does need a deliberate decision at this point is one security-group flow. `infra/modules/network`
+ships `identity_provider_egress_cidrs` as the **empty set**, so by default the application tier
+reaches only Aurora, the eight interface endpoints, the S3 gateway prefix list and the internal load
+balancer -- nothing outside the VPC. With no destinations supplied, a task cannot resolve a public
+Cognito issuer, and because each service builds its JWT decoder at context refresh that is a start-up
+dependency; such a deployment relies on the API Gateway Cognito JWT authorizer at the edge, which
+reaches the provider natively because it is not in the VPC.
+
+If this environment also wants in-task issuer resolution, derive the reviewed destinations for its
+Region from AWS's own published address ranges and set them in the environment's `terraform.tfvars`.
+The input refuses `0.0.0.0/0` by name, refuses anything broader than a `/12`, and refuses the VPC's
+own CIDR.
 
 ```bash
-# WHAT: copies the pinned OpenTelemetry collector image into this deployment's registry.
-# WHY : Assumptions: the environment roots point every task's telemetry sidecar at this PRIVATE
-#       repository, because the application security group's egress is enumerated rather than
-#       allow-all and the public registry has neither an interface endpoint nor a managed prefix
-#       list. Skipping this step registers task definitions naming an image that was never pushed,
-#       and because the sidecar is attached to every workload by default, NO task starts.
-# WHY : Assumptions: the tag is the upstream version and matches local.telemetry_collector_image_tag
-#       in infra/envs/<env>/main.tf, not the release commit SHA -- a third-party artifact tagged with
-#       a CardDemo commit would claim a provenance it does not have.
-collector_tag="v0.48.0"
-docker pull "public.ecr.aws/aws-observability/aws-otel-collector:${collector_tag}"
-docker tag "public.ecr.aws/aws-observability/aws-otel-collector:${collector_tag}" \
-  "<account-registry>/<name-prefix>-<environment>/aws-otel-collector:${collector_tag}"
-docker push "<account-registry>/<name-prefix>-<environment>/aws-otel-collector:${collector_tag}"
+# WHAT: prints the AWS-published IPv4 ranges for one Region, which is the reviewed source for the
+#       identity-provider egress destinations.
+# WHY : Assumptions: the value is derived from the provider's own published list rather than guessed
+#       or copied from a blog, and it is recorded in tfvars so the destinations a deployment used are
+#       visible in review rather than buried in a shared default.
+# WHY : Trade-offs: a security group admits far fewer rules than a Region's full range list holds, so
+#       aggregate to the smallest set of prefixes that covers the endpoint and stay at /12 or
+#       narrower. Where that is not achievable, prefer leaving the set empty and relying on the edge
+#       authorizer over widening the rule.
+region="<aws-region>"
+curl -fsSL https://ip-ranges.amazonaws.com/ip-ranges.json |
+  jq -r --arg region "$region" \
+    '.prefixes[] | select(.region == $region and .service == "AMAZON") | .ip_prefix'
+```
+
+---
+
+## Step 2c - Build the operational Lambda packages
+
+The three archives the environment roots deploy as Lambda functions are **build output**, not
+tracked files. Build them before any `terraform validate`, `plan` or `apply` in this runbook.
+
+```bash
+# WHAT: assembles dist/online-write-flag.zip, dist/database-admin.zip and
+#       dist/dataset-generation-retention.zip from the reviewed sources beside them.
+# WHY : ⚠️ Refactoring Rationale: these were built INSIDE Terraform by `archive` provider data
+#       sources. That provider is not in the frozen dependency inventory (AAP §0.6.1.4 names the
+#       Terraform CLI, `hashicorp/aws` and `hashicorp/random`), and an in-file comment recording
+#       the divergence does not amend the plan, so packaging moved here. The builder uses only the
+#       Python standard library, so this step adds no dependency to the prerequisites above.
+# WHY : Assumptions: the archives are byte-deterministic -- member timestamps and modes are pinned
+#       -- so rebuilding produces an identical `source_code_hash` and a plan shows no function
+#       change unless a handler actually changed. That is why they can safely be gitignored rather
+#       than committed, and why a plan produced on a runner matches one produced here.
+# WHY : Assumptions: skipping this step does not produce a subtly wrong deployment. Both
+#       `validate` and `plan` evaluate `filebase64sha256` over each archive, so a missing package
+#       fails immediately and names the path it could not read.
+python3 infra/lambda/build_packages.py
+
+# WHAT: proves the built archives match the sources, writing nothing.
+# WHY : Assumptions: use this before quoting a plan as evidence -- it compares bytes rather than
+#       timestamps, so it answers exactly "was this plan produced from these handlers".
+python3 infra/lambda/build_packages.py --check
 ```
 
 ---
@@ -231,6 +278,7 @@ export TF_VAR_github_oidc_provider_arn="<oidc-provider-arn>"
 #       lookups, and why they are absent from terraform.tfvars.
 export TF_VAR_permissions_boundary_arn="<iam-permissions-boundary-arn>"
 export TF_VAR_mask_hmac_secret_arn="<mask-hmac-secret-arn>"
+export TF_VAR_mask_hmac_secret_kms_key_arn="<mask-hmac-cmk-arn>"
 # WHY : Assumptions: at least one alarm recipient is REQUIRED, in both environments, and it is
 #       supplied here rather than in terraform.tfvars because an on-call or team address is
 #       personal data this repository does not carry. Both roots declare the input with no
@@ -260,6 +308,7 @@ environment needs the twelve variables below plus the four `CARDDEMO_TF_STATE_*`
 | `CARDDEMO_GITHUB_OIDC_PROVIDER_ARN` | `github_oidc_provider_arn` | Output of `infra/bootstrap`, created once per account |
 | `CARDDEMO_PERMISSIONS_BOUNDARY_ARN` | `permissions_boundary_arn` | Organisation IAM guardrail |
 | `CARDDEMO_MASK_HMAC_SECRET_ARN` | `mask_hmac_secret_arn` | ARN of the masking HMAC secret. The secret's **value** is the operator's to create and must be canonical standard base64 of at least 32 random bytes -- see the note below |
+| `CARDDEMO_MASK_HMAC_SECRET_KMS_KEY_ARN` | `mask_hmac_secret_kms_key_arn` | ARN of the customer-managed KMS key that encrypts the secret above. Must be in the same account and Region as the secret, which the root validates by comparing the two ARNs. The AWS-managed `alias/aws/secretsmanager` key is **not** accepted -- it cannot be granted to one principal |
 | `CARDDEMO_IMAGE_DIGESTS_JSON` | `image_digests` | Has a default; supplied so a review plan reflects the deployed images |
 | `CARDDEMO_AWS_REGION` | *(not a variable)* | Region for the ECR login and image push |
 | `CARDDEMO_DEPLOY_ROLE_ARN` | *(not a variable)* | Role the workflow assumes by OIDC |
@@ -279,9 +328,9 @@ calls four registry action families directly and fails at the calling step witho
 
 | Action | Which step needs it | Why |
 |---|---|---|
-| `ecr:GetAuthorizationToken` | image push, collector mirror | The `docker login` that precedes every push |
-| `ecr:BatchCheckLayerAvailability`, `ecr:InitiateLayerUpload`, `ecr:UploadLayerPart`, `ecr:CompleteLayerUpload`, `ecr:PutImage` | image push, collector mirror | Writing the ten built images and the mirrored sidecar |
-| `ecr:DescribeImages` | image push, collector mirror | Reading back each pushed digest, and deciding whether the mirror tag already exists |
+| `ecr:GetAuthorizationToken` | image push | The `docker login` that precedes every push |
+| `ecr:BatchCheckLayerAvailability`, `ecr:InitiateLayerUpload`, `ecr:UploadLayerPart`, `ecr:CompleteLayerUpload`, `ecr:PutImage` | image push | Writing the ten built images |
+| `ecr:DescribeImages` | image push | Reading back each pushed digest |
 | `ecr:DescribeImageScanFindings` | vulnerability gate | Reading the scan result the gate refuses a deployment on |
 
 Trade-offs: the last one is the newest and the easiest to omit, because nothing else in the run
@@ -311,9 +360,28 @@ python3 -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32
   | tr -d '\n' \
   | aws secretsmanager create-secret \
   --name "carddemo/<env>/mask-hmac" \
+  --kms-key-id "<mask-hmac-cmk-arn>" \
   --secret-string fileb:///dev/stdin \
   --query "null" --output text
 ```
+
+WHY : ⚠️ Refactoring Rationale: `--kms-key-id` was absent, and omitting it is not neutral --
+Secrets Manager then encrypts under the account's AWS-managed `aws/secretsmanager` key. That key's
+policy admits any principal in the account holding the matching Secrets Manager permission, so the
+decrypt the data-migration task performs succeeded through a key policy far wider than the one task
+that needs it, and the root could neither name nor grant the key actually in use. The key is now a
+required input (`mask_hmac_secret_kms_key_arn`), the task role is granted `kms:Decrypt` on exactly
+it through Secrets Manager, and the root refuses a key in a different account or Region from the
+secret. Create the key first, with a policy admitting this account, and pass the same ARN to both
+the command above and the variable.
+
+WHY : Assumptions: an EXISTING secret created without the flag is not repaired by supplying the
+variable -- the ciphertext is already sealed under the managed key, and the grant this root writes
+names a different one, so the task fails to decrypt. Re-key it with
+`aws secretsmanager update-secret --secret-id "carddemo/<env>/mask-hmac" --kms-key-id
+"<mask-hmac-cmk-arn>"`, which re-encrypts subsequent versions; then store the value again so the
+version the task reads is one sealed under the new key. Rotating the VALUE re-derives every
+fingerprint, so do this between load campaigns for the reason stated below.
 
 WHY : Assumptions: the refusal is stated here rather than only in the ETL's own README because the
 failure surfaces during a batch run, long after the apply that wired the ARN succeeded -- an apply
@@ -489,6 +557,45 @@ aws cognito-idp list-user-pool-client-secrets --region "<aws-region>" --user-poo
 The deployment role needs only the scoped Cognito add/list/delete client-secret actions and
 Secrets Manager get/put permissions for the app-client secret, plus KMS use through Secrets Manager.
 Do not grant wildcard secret access.
+
+#### If the rotation refuses: two active secrets, neither identified
+
+The bridge **fails closed** when the client has two active secrets and the stored payload identifies
+neither of them, printing the client id, the secret ARN and this remedy. It does not guess. Either of
+the two unidentified secrets may be the credential running tasks are authenticating with, and
+deleting that one takes the deployment down until every task is redeployed — so an apply that cannot
+tell them apart stops instead of choosing.
+
+This state is not reachable through the module's own lifecycle: a first apply finds one secret and
+mints the second, and every rotation after that finds two of which one is recorded. It arises from an
+out-of-band change to the client, or from a managed payload written before `client_secret_id` was
+recorded in it. Resolve it by hand, then re-apply:
+
+```bash
+# WHAT: lists the identifiers and creation dates of the active secrets, and the stored payload's own
+#       recorded identifier, so the two can be compared.
+# WHY : Assumptions: no ClientSecretValue is queried and none is printed. Cognito returns a secret's
+#       value only from the call that creates it, so the value in Secrets Manager cannot be matched
+#       against a descriptor -- the recorded identifier is the only link between them, which is why
+#       restoring it is the fix rather than a workaround.
+aws cognito-idp list-user-pool-client-secrets --region "<aws-region>" --user-pool-id "<user-pool-id>" --client-id "<app-client-id>" --query "ClientSecrets[].{id:ClientSecretId,created:ClientSecretCreateDate}"
+aws secretsmanager get-secret-value --region "<aws-region>" --secret-id "<app-client-secret-arn>" --query "SecretString" --output text | python3 -c 'import json,sys; print(json.load(sys.stdin).get("client_secret_id", "<absent>"))'
+```
+
+Then take exactly one of the two actions below.
+
+* **The stored value is the one in use, and its identifier is simply absent.** Confirm which
+  descriptor it is — the deployment's last recorded rotation time is the usual evidence — and add
+  that identifier to the payload as `client_secret_id`, preserving `client_id` and `client_secret`
+  unchanged. The next apply then recognises it and prunes the other.
+* **The stored value is not in use, or you cannot establish which descriptor it is.** Delete the
+  secret you have positively established is unused with
+  `aws cognito-idp delete-user-pool-client-secret`, leaving one active. The next apply finds a free
+  slot, mints into it and records the new identifier.
+
+Do not delete a secret you have not established is unused. If neither action can be taken with
+confidence, force a fresh deployment of `auth-service` first: every task then loads the value
+currently in Secrets Manager, which makes that value demonstrably the one in use.
 
 ### Rotate a service database credential (operator-managed)
 
@@ -785,6 +892,7 @@ document or a shared log.
 | Flow | Verification |
 |:---|:---|
 | Sign-on | Authenticate through `POST /auth/signon`; complete `POST /auth/challenge` when the temporary credential requires a change. |
+| Sign-out | Revoke the held grant through `POST /auth/signout`, then verify the same refresh token is refused by `POST /auth/refresh`. A sign-out that only cleared the browser would leave that renewal succeeding for the token's full thirty-day life, so the second call is the one that proves the first. |
 | Account view/update | Read one account, update an allowed field, and verify a stale version returns conflict. |
 | Card list/update | List cards narrowed by account, then resolve one card through `POST /api/v1/cards/lookup` and address detail/update by the opaque `cardKey` that lookup and every list row return. No primary account number appears in a request line or a query string on any card route, so none can reach an access log, a referrer header or a browser history; the administrative full-number read sits on its own `/api/v1/admin/cards/{cardKey}` path and returns the number in the response body only. |
 | Transaction add/list | Add a fixed-point amount and verify the list returns the same decimal string. |

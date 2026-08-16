@@ -176,6 +176,16 @@ class UserServiceTest {
     private UserService service;
 
     /**
+     * The substituted transaction manager both write templates run through.
+     *
+     * Assumptions: held as a field rather than as a local of the builder below so that a case can assert
+     * the SPAN's outcome and not merely its effects. One case needs exactly that -- a demotion the provider
+     * refuses must roll back rather than commit -- and the in-memory doubles honour no transaction, so the
+     * rollback is observable here and nowhere else in this class.
+     */
+    private PlatformTransactionManager transactions;
+
+    /**
      * Builds the service over substituted stores, a real cursor sealer and a real identity-sync ledger.
      *
      * <p>This method takes no parameter and yields no value; it assigns the collaborators every case
@@ -199,7 +209,7 @@ class UserServiceTest {
         provisioning = mock(CognitoUserProvisioningService.class);
         sealer = new CursorToken(CURSOR_KEY, Duration.ofMinutes(5));
         ledger = inMemoryLedger();
-        PlatformTransactionManager transactions = mock(PlatformTransactionManager.class);
+        transactions = mock(PlatformTransactionManager.class);
         // WHY pass the SAME user-row substitute the service under test writes through: the reconciler
         //   decides whether a withdrawal is still owed by probing for the row, so sharing one substitute
         //   is what lets a case arrange "the insert landed" or "it did not" once and have both halves
@@ -1564,6 +1574,110 @@ class UserServiceTest {
     }
 
     /**
+     * Asserts a DEMOTION withdraws administrative authority before the row is committed.
+     *
+     * <p>Purpose: every authorization decision in the fleet is made on a signed group claim, so lowering a
+     * user's type is not effective until the account has lost the administrative group and the tokens
+     * already minted under it can no longer be used or renewed. This case pins the ORDER that makes a
+     * reported success mean that: the withdrawal is called inside the write span, before the commit, and
+     * therefore before the caller has been answered.</p>
+     *
+     * <p>Assumptions: the ordering assertion is what carries the claim, and the fact of the call alone would
+     * not. The arrangement this replaces called the provider after the commit and discarded the outcome, so
+     * a case asserting only that the provider was reached would have passed against it while a caller was
+     * still being told a demotion had happened that had not.</p>
+     *
+     * <p>Assumptions: the post-commit projection is asserted to STILL run, because the withdrawal removes
+     * the administrative group and ends the sessions while the projection updates the attributes and adds
+     * the ordinary group. Dropping it would leave the account holding no group at all.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a demotion withdraws administrative authority inside the write span, before the commit")
+    void aDemotionWithdrawsAuthorityBeforeTheRowIsCommitted() {
+        when(users.findById("ADMIN001")).thenReturn(Optional.of(admin("ADMIN001")));
+        when(users.saveAndFlush(any(User.class))).thenAnswer(call -> call.getArgument(0));
+
+        UserResponse updated = service.update("ADMIN001", new UpdateUserRequest("Ada", "Lovelace", "U"));
+
+        assertThat(updated.userType()).isEqualTo("U");
+        verify(provisioning).withdrawAdministrativeAuthority("ADMIN001");
+
+        InOrder ordered = inOrder(users, ledger, provisioning);
+        ordered.verify(users).saveAndFlush(any(User.class));
+        ordered.verify(ledger).save(any(IdentitySyncTask.class));
+        ordered.verify(provisioning).withdrawAdministrativeAuthority("ADMIN001");
+        ordered.verify(provisioning).synchronise("ADMIN001", "Ada", "Lovelace", "A", "U");
+    }
+
+    /**
+     * Asserts a demotion the provider will not accept is REFUSED rather than reported as done.
+     *
+     * <p>Purpose: this is the fail-closed half. If the withdrawal cannot be applied there is nothing anyone
+     * can do about the outstanding administrative tokens, so the honest answer is that the demotion did not
+     * happen -- and the row must not be left saying otherwise. The withdrawal is the last statement of the
+     * write span, so its failure rolls the span back and no row, and no intention, is committed.</p>
+     *
+     * <p>Assumptions: the ledger is asserted EMPTY afterwards, which is the difference between this and the
+     * ordinary projection failure the next case covers. A pending intention would mean the row had been
+     * committed and the pool was merely behind; nothing pending means nothing was written at all, so
+     * retrying the request is the whole of the remedy.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a demotion the provider refuses fails the request and commits nothing")
+    void aDemotionThePoolRefusesIsNotReportedAsDone() {
+        when(users.findById("ADMIN001")).thenReturn(Optional.of(admin("ADMIN001")));
+        when(users.saveAndFlush(any(User.class))).thenAnswer(call -> call.getArgument(0));
+        doThrow(InternalErrorException.builder().message("the pool is unavailable").build())
+                .when(provisioning).withdrawAdministrativeAuthority("ADMIN001");
+
+        assertThatThrownBy(() ->
+                service.update("ADMIN001", new UpdateUserRequest("Ada", "Lovelace", "U")))
+                .isInstanceOf(InternalErrorException.class);
+
+        verify(provisioning, never()).synchronise(any(), any(), any(), any(), any());
+        // WHY : Assumptions: the SPAN is asserted to have rolled back, which is what makes "nothing was
+        //       committed" a claim rather than a hope. It cannot be asserted through the stores: the
+        //       ledger substitute keeps its rows in a map and the row store is a mock, so neither honours
+        //       a rollback and the intention this span recorded is still readable from the double after
+        //       the span was abandoned. The manager is the one collaborator that observes the outcome.
+        verify(transactions).rollback(any());
+        verify(transactions, never()).commit(any());
+    }
+
+    /**
+     * Asserts a PROMOTION reaches no withdrawal, because it takes no authority away.
+     *
+     * <p>Assumptions: the opposite transition leaves outstanding tokens carrying the ordinary group, so the
+     * holder can reach less than the row now permits until they sign on again. That is the safe direction
+     * and the reference has no revocation to reproduce, so signing a working session out to grant an
+     * authority the user did not ask for at that moment is not done.</p>
+     *
+     * <p>Assumptions: a change that leaves the type alone is covered by the same assertion, because the
+     * predicate compares the two types rather than asking whether the update touched anything.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a promotion, and a name-only change, withdraw nothing")
+    void aPromotionWithdrawsNothing() {
+        when(users.findById("USER0001")).thenReturn(Optional.of(row("USER0001")));
+        when(users.saveAndFlush(any(User.class))).thenAnswer(call -> call.getArgument(0));
+
+        service.update("USER0001", new UpdateUserRequest("Grace", "Hopper", "A"));
+        // WHY : Assumptions: the second update names the type the FIRST one left behind, so it is a
+        //       name-only change. The substituted read answers with one row instance, which the first
+        //       update mutated in place -- naming "U" again here would be a genuine demotion of that
+        //       mutated row and would assert the opposite of what this case is for.
+        service.update("USER0001", new UpdateUserRequest("Ada", "Lovelace", "A"));
+
+        verify(provisioning, never()).withdrawAdministrativeAuthority(any());
+    }
+
+    /**
      * Asserts an update whose pool call fails still succeeds and leaves the intention owed.
      *
      * <p>This case takes no parameter and yields no value.</p>
@@ -2705,6 +2819,22 @@ class UserServiceTest {
      */
     private static User row(String userId) {
         return new User(userId, "Ada", "Lovelace", "U",
+                UUID.fromString("99999999-8888-7777-6666-555555555555"));
+    }
+
+    /**
+     * Builds a stored row that holds ADMINISTRATIVE authority, which is the only row a demotion can start
+     * from.
+     *
+     * <p>Assumptions: it differs from {@link #row(String)} in the type alone, so a case built on it isolates
+     * the one transition that withdraws authority -- administrator to ordinary user -- from every other
+     * difference two rows could have.</p>
+     *
+     * @param userId the identifier the row carries, of type {@code String}; must not be {@code null}
+     * @return a stored row of the administrative type, never {@code null}
+     */
+    private static User admin(String userId) {
+        return new User(userId, "Ada", "Lovelace", "A",
                 UUID.fromString("99999999-8888-7777-6666-555555555555"));
     }
 

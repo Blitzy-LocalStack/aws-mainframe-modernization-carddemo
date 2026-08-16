@@ -35,18 +35,18 @@
 #     requirement: omitting one fails in the CALLING ROOT at `terraform
 #     validate` with a missing-required-argument error, before any resource
 #     in this module is evaluated.
-#   - Fifty-two variables carry sixty-four `validation` blocks between them, so a
+#   - Forty-nine variables carry sixty-one `validation` blocks between them, so a
 #     bad value is rejected before the AWS API sees it. The checks cover
 #     identifiers and ARN shapes, Fargate CPU/memory and network contracts,
 #     HTTPS health checks, deployment/autoscaling bounds, CloudWatch retention,
-#     the pinned telemetry image and sampling percentage, non-secret
+#     non-secret
 #     environment-variable namespaces, store-specific references, the container
 #     health-check argument vector and IAM policy document syntax.
 #   - WHEN a rule is checked is not uniform. A `validation` reading only its
 #     own variable is evaluated by `terraform validate`; one reading ANOTHER
 #     variable is deferred to `terraform plan`, because the context that lets
 #     one variable see another does not exist at validate time. Fifteen of the
-#     sixty-four rules fall in the second group -- among them
+#     sixty-one rules fall in the second group -- among them
 #     writable_mount_paths reading readonly_root_filesystem, task_memory
 #     reading task_cpu, the four autoscaling and desired_count rules reading
 #     create_service, task_role_policy_json reading create_task_role_policy and
@@ -54,11 +54,11 @@
 #     so `validate` alone reports none of those pairings and `plan` reports all
 #     of them. Both precede any resource, so no task definition is created from
 #     a broken pairing either way.
-#   - Six variables select the module's SHAPE rather than one of its values:
+#   - Five variables select the module's SHAPE rather than one of its values:
 #     create_service, attach_load_balancer, enable_autoscaling,
-#     enable_telemetry_collector, create_task_role_policy and
+#     create_task_role_policy and
 #     create_online_write_gate_policy. Disabling one is not an error; it removes
-#     the corresponding service/target/scaler, collector or task-role policy
+#     the corresponding service/target/scaler or task-role policy
 #     resources. Each states its own coupling because none is inferable from the
 #     boolean type. container_health_check_command belongs to the same group
 #     without being a boolean: left null it removes the container healthCheck
@@ -584,10 +584,25 @@ variable "container_user" {
 
 # WHY : Assumptions: Fargate accepts only a fixed set of task CPU sizes, and
 #       only certain memory sizes alongside each one, so an arbitrary integer
-#       is rejected by the API during apply. The validation restates that set
-#       to move the rejection to plan time, where the message names this
-#       variable rather than the task definition. The set is an AWS contract
-#       this module depends on rather than something verified here.
+#       is rejected by the API during apply. The validation moves the rejection to
+#       plan time, where the message names this variable rather than the task
+#       definition. The sizes themselves are an AWS contract this module depends on
+#       rather than something verified here.
+#       ⚠️ Refactoring Rationale: the enumeration below is a deliberate SUBSET and
+#       is now labelled as one. It reads 256 through 16384 and both it and its error
+#       message claimed to be "the task CPU sizes AWS Fargate supports" -- which
+#       stopped being true in June 2026, when Fargate added a 32 vCPU tier (32768
+#       units, with 61440, 122880 or 249856 MiB). A list that says "what Fargate
+#       supports" and then omits a tier Fargate supports misreads as a stale
+#       transcription rather than a decision, so the next reader cannot tell whether
+#       32768 is missing on purpose.
+#       Assumptions: 32768 is excluded ON PURPOSE and not by omission. A 32 vCPU task
+#       is roughly sixty times the production task size these services actually run
+#       (1024 units / 2048 MiB), so admitting it would turn a mistyped digit into a
+#       very large hourly bill on a module whose stated purpose for a low ceiling is
+#       to BOUND cost. Extending the pair of lists is a two-line change if a workload
+#       ever needs it; the point of leaving it out is that doing so is a decision
+#       somebody makes, rather than a value that was always available.
 #       Trade-offs: the pairing with task_memory cannot be validated as a pair
 #       without embedding the whole CPU-to-memory matrix in a condition, so
 #       each is bounded independently and the coupling is documented on both.
@@ -598,10 +613,13 @@ variable "container_user" {
 variable "task_cpu" {
   description = <<-EOT
     Task-level CPU units for aws_ecs_task_definition, where 1024 units is one
-    vCPU. Must be one of the sizes Fargate supports, and must pair with a
-    task_memory value Fargate allows alongside it. Expected to differ between
-    the dev and prod roots, which is one of the few axes on which those two
-    roots are permitted to diverge.
+    vCPU. Must be one of the seven sizes this module admits -- 256, 512, 1024,
+    2048, 4096, 8192 or 16384 -- and must pair with a task_memory value Fargate
+    allows alongside it. That is a deliberate SUBSET of what Fargate accepts:
+    Fargate also offers a 32 vCPU tier, which this module excludes as a cost
+    bound because it is far larger than any CardDemo service needs. Expected to
+    differ between the dev and prod roots, which is one of the few axes on which
+    those two roots are permitted to diverge.
   EOT
   type        = number
   default     = 1024
@@ -611,8 +629,12 @@ variable "task_cpu" {
       256, 512, 1024, 2048, 4096, 8192, 16384,
     ], var.task_cpu)
     error_message = join(" ", [
-      "task_cpu must be one of the task CPU sizes AWS Fargate supports:",
+      "task_cpu must be one of the seven task CPU sizes this module admits:",
       "256, 512, 1024, 2048, 4096, 8192 or 16384.",
+      "This is a deliberate subset of what Fargate accepts -- Fargate also offers",
+      "a 32 vCPU tier (32768 units), excluded here as a cost bound because it is",
+      "far larger than any CardDemo service requires. Admitting it means adding",
+      "32768 here and its memory row to task_memory.",
     ])
   }
 }
@@ -630,8 +652,10 @@ variable "task_memory" {
   description = <<-EOT
     Task-level memory in MiB for aws_ecs_task_definition. Must be a value
     Fargate permits alongside the chosen task_cpu, so the two are always
-    changed together. Expected to differ between the dev and prod roots for
-    the same reason task_cpu does.
+    changed together. The matrix below covers the seven CPU sizes this module
+    admits; it is a deliberate subset of Fargate's, which also has a 32 vCPU
+    row. Expected to differ between the dev and prod roots for the same reason
+    task_cpu does.
   EOT
   type        = number
   default     = 2048
@@ -655,9 +679,16 @@ variable "task_memory" {
   #       when raising capacity for prod, because each value is individually
   #       plausible and only the COMBINATION is refused.
   #       Trade-offs: transcribing the matrix means a size AWS adds later is
-  #       refused here until this list is extended. Accepted: the set has been
-  #       stable across the platform generations this stack targets, and the
-  #       failure it prevents lands partway through creating a task definition.
+  #       refused here until this list is extended, and the failure it prevents lands
+  #       partway through creating a task definition, so the trade is worth making.
+  #       ⚠️ Refactoring Rationale: this went on to say "the set has been stable across
+  #       the platform generations this stack targets", and that is no longer true --
+  #       Fargate added a 32 vCPU tier in June 2026 (32768 units, with 61440, 122880 or
+  #       249856 MiB), which is exactly the event the trade-off predicted. The prediction
+  #       was right and the reassurance was wrong, so the reassurance is withdrawn rather
+  #       than the trade-off. The new tier is deliberately NOT added, for the cost reason
+  #       recorded on task_cpu; what changes here is that the matrix no longer presents
+  #       itself as the whole of Fargate's.
   validation {
     condition = contains(lookup({
       256   = [512, 1024, 2048]
@@ -1812,163 +1843,29 @@ variable "allow_service_managed_log_encryption" {
   nullable    = false
 }
 
-# WHY : Refactoring Rationale: every service already exposes Micrometer metrics
-#       on its Actuator Prometheus endpoint, but an endpoint with no scraper is
-#       not centralized telemetry. The sidecar closes that path in the same task
-#       network namespace and exports metrics and traces without making the
-#       application image own AWS-specific collector configuration.
-#       Trade-offs: enabled by default because an optional collector would let
-#       a root produce a deployment whose dashboards exist but never receive
-#       application metrics. The collector is essential, so a bad configuration
-#       fails task placement visibly instead of leaving a healthy-looking task
-#       with a silent telemetry gap.
-variable "enable_telemetry_collector" {
-  description = <<-EOT
-    Whether to add the AWS Distro for OpenTelemetry collector sidecar that
-    receives this workload's telemetry and exports it: traces over OTLP to
-    X-Ray, and metrics to CloudWatch EMF. Metrics reach it one of two ways,
-    selected by create_service so that no meter is exported twice -- a serving
-    workload's Actuator Prometheus endpoint is scraped over loopback, while a
-    task-only workload pushes through Micrometer's OTLP registry.
-  EOT
-  type        = bool
-  default     = true
-}
-
-# WHY : Refactoring Rationale: the default was v0.48.0 named by TAG, and both
-#       halves of that changed. v0.48.0 has been superseded upstream -- verified
-#       against the publishing registry, whose tag list for this repository carries
-#       84 entries of which the highest semantic version is v0.49.0 and `latest` is
-#       the only non-semver one -- and a tag is not a pin. A tag is a label the
-#       publisher can move, so "pinned by tag" means "pinned to whatever that label
-#       resolves to on the day of the pull", which for the one container attached to
-#       every workload in the estate is the weakest place in the supply chain.
-#       The default is now the v0.49.0 OCI INDEX digest, read two independent ways
-#       that agree: the registry's own Docker-Content-Digest header and
-#       `docker buildx imagetools inspect`, which also confirms the index carries
-#       linux/amd64 and linux/arm64 manifests.
-# WHY : Trade-offs: the digest form drops the human-readable version from the
-#       value, so the version is stated here and in the description instead. That
-#       is accepted for the same reason the base-image pins in every Dockerfile take
-#       the same shape: the digest is what is enforced and the version is what is
-#       read. Refreshing it is a two-line change -- this default and the mirror pull
-#       in .github/workflows/deploy.yml -- and a gate in
-#       .github/workflows/infra-ci.yml keeps the two roots' tag from drifting from
-#       the workflow's.
-# WHY : Assumptions: the pure `@sha256:` form is used rather than `:tag@sha256:`.
-#       Both are accepted by container tooling, but the ECS container-definition
-#       `image` field is documented for the tag form OR the digest form, so the
-#       combined spelling would rest on an undocumented acceptance for the sake of
-#       carrying a version string that a comment carries instead.
-# WHY : Refactoring Rationale: the validation REQUIRED a `public.ecr.aws`
-#       reference, and that requirement made every task unstartable rather than
-#       merely public. infra/modules/network enumerates the application tier's
-#       egress instead of allowing 0.0.0.0/0, and the public registry has neither
-#       an interface endpoint nor a managed prefix list, so the sidecar image
-#       could not be pulled at all -- and because the sidecar is created for every
-#       workload by default, no task in the environment could start while
-#       `terraform plan` reported nothing. A PRIVATE registry reference is now
-#       admissible and is what both roots pass, from the mirror repository
-#       infra/modules/ecr provisions.
-#       Assumptions: the public form is still admitted, deliberately. A caller
-#       that has its own controlled egress -- or a local plan that never runs a
-#       task -- can keep the upstream reference, so this input widens rather than
-#       switches. What is NOT admitted is an unpinned reference, in either form.
-#       Alternatives Considered: hard-requiring the private form, which would
-#       have made the module unusable outside this deployment's network shape.
-#       Rejected because a module input should not encode one root's egress
-#       policy; the roots express that by what they pass.
-variable "telemetry_collector_image" {
-  description = <<-EOT
-    Pinned AWS Distro for OpenTelemetry collector image used by the telemetry
-    sidecar. Either a private Amazon ECR reference -- which is what both
-    environment roots pass, from the mirror repository the ecr module provisions,
-    because the application tier's egress is enumerated and admits no public
-    registry -- or the upstream public reference for a caller whose egress
-    reaches it. A private reference must carry an explicit non-latest tag or a
-    digest; the public reference must carry a digest, because only the private
-    registry is configured for immutable tags. The default is the upstream
-    v0.49.0 index digest. Collector upgrades therefore stay reviewed
-    task-definition changes rather than something a moved label delivers.
-  EOT
-  type        = string
-  default     = "public.ecr.aws/aws-observability/aws-otel-collector@sha256:d2bdfff2c377c3d71d78bd5d9ce9862fd535b12134a5739d87a07801297cf9fd"
-
-  # WHY : Refactoring Rationale: the public form must now be DIGEST-pinned, where it
-  #       previously accepted a tag. The two registries do not offer the same
-  #       guarantee: infra/modules/ecr sets image_tag_mutability to IMMUTABLE, so a
-  #       tag in the private form cannot be moved onto different bytes and is a pin
-  #       in practice, while nothing constrains a tag in a public registry this
-  #       repository does not control. Admitting a public tag therefore admitted a
-  #       reference whose meaning can change with no diff anywhere -- which is
-  #       exactly what a pin is supposed to prevent, and which the previous comment
-  #       claimed the explicit tag already prevented.
-  #       Trade-offs: a caller keeping the upstream reference now has to look up a
-  #       digest, which is one registry query. Accepted: that caller is bypassing
-  #       the mirror and so has no immutability from the registry either, which is
-  #       the case that needs the digest most.
-  validation {
-    condition = (
-      (
-        can(regex("^public\\.ecr\\.aws/aws-observability/aws-otel-collector@sha256:[a-f0-9]{64}$", var.telemetry_collector_image)) ||
-        can(regex("^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9._/-]+(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$", var.telemetry_collector_image))
-      ) &&
-      !endswith(lower(var.telemetry_collector_image), ":latest")
-    )
-    error_message = "telemetry_collector_image must be either the upstream public AWS observability collector image pinned by @sha256 digest, or a private Amazon ECR reference carrying an explicit non-latest tag or a digest. A public TAG is refused because only the private registry is configured for immutable tags, so only there is a tag a pin."
-  }
-}
-
-# WHY : Assumptions: this is a SECOND repository ARN rather than a widening of
-#       ecr_repository_arn, and the separation is the least-privilege point. The
-#       task execution role must pull two images when the sidecar is enabled --
-#       the service's own and the mirrored collector -- and the alternative was to
-#       accept a list and let a caller pass any number of repositories. A named
-#       second input says exactly which second image the role may fetch, and the
-#       statement in main.tf compacts a null away, so a caller that supplies no
-#       mirror grants no second repository.
-# WHY : Assumptions: nullable with a null default, because the collector may be
-#       disabled and because a caller keeping the public reference has no
-#       repository to name. Requiring it would force every caller into the
-#       mirrored shape this deployment happens to use.
-variable "telemetry_collector_repository_arn" {
-  description = <<-EOT
-    ARN of the Amazon ECR repository holding the mirrored telemetry collector
-    image, added to the task execution role's image-pull statement so the sidecar
-    can be fetched. Null when the collector is disabled or when
-    telemetry_collector_image names a registry this role needs no grant for, in
-    which case no second repository is authorized.
-  EOT
-  type        = string
-  default     = null
-
-  validation {
-    condition = (
-      var.telemetry_collector_repository_arn == null ||
-      can(regex("^arn:[a-z0-9-]+:ecr:[a-z0-9-]+:[0-9]{12}:repository/[a-z0-9._/-]+$", var.telemetry_collector_repository_arn))
-    )
-    error_message = "telemetry_collector_repository_arn must be null or an ECR repository ARN of the form arn:<partition>:ecr:<region>:<account>:repository/<name>; a repository name or an image URI produces an IAM statement matching no repository, so the sidecar fails to pull."
-  }
-}
-
-# WHY : Trade-offs: successful traffic is sampled to bound X-Ray ingest volume,
-#       while status-code ERROR traces are a separate tail-sampling policy and
-#       are retained independently. This is a cost control rather than a
-#       service-level objective, so the environment root may choose the value.
-variable "telemetry_success_sample_percentage" {
-  description = <<-EOT
-    Percentage of successful traces retained by the collector after its
-    always-keep-error policy. Accepts 0 through 100 and may differ by
-    environment without changing task topology.
-  EOT
-  type        = number
-  default     = 5
-
-  validation {
-    condition     = var.telemetry_success_sample_percentage >= 0 && var.telemetry_success_sample_percentage <= 100
-    error_message = "telemetry_success_sample_percentage must be between 0 and 100 inclusive."
-  }
-}
+# WHY : Refactoring Rationale: four telemetry inputs stood here --
+#       enable_telemetry_collector, telemetry_collector_image,
+#       telemetry_collector_repository_arn and telemetry_success_sample_percentage --
+#       and all four are WITHDRAWN together with the AWS Distro for OpenTelemetry
+#       collector sidecar they configured. The reason is scope: the frozen technical
+#       specification contains no collector, and the sidecar could not be delivered
+#       inside the numbers the specification does state. Section 0.4.1.6 fixes the
+#       ecr module at TEN repositories, one per deployable, and pulling a public
+#       image from a private application subnet needed an ELEVENTH to mirror it into,
+#       because Amazon ECR Public is a separate service that the ecr.api and ecr.dkr
+#       interface endpoints do not serve. Section 0.4.1.9 fixes the interface-endpoint
+#       set at exactly eight services, and exporting spans needed a NINTH for xray.
+#       One out-of-specification component was therefore forcing two
+#       out-of-specification topology changes. main.tf records the full argument, the
+#       alternatives weighed against it and what is kept for this concern -- container
+#       logs, the Actuator Prometheus surface, the common metric tags and end-to-end
+#       request correlation -- at the locals block that replaced the collector
+#       configuration.
+#       Trade-offs: a caller that previously set any of these four now fails the plan
+#       with an "argument is not expected here" error naming the input, which is the
+#       outcome intended. The alternative was to keep them as accepted-but-ignored
+#       inputs, which would have let a root believe a sidecar was configured while
+#       nothing rendered one.
 
 # -----------------------------------------------------------------------------
 # Configuration injection.
@@ -2223,9 +2120,15 @@ variable "secret_arns" {
 #       executions, which is the opposite of the least-privilege posture this
 #       package is required to hold. Taking the document as an input means the
 #       task role starts with no BUSINESS permission and receives only what one
-#       caller passes for one service. The module's fixed telemetry policy is
-#       separate and grants only writes to this service's own log group and
-#       X-Ray ingestion, so it cannot widen a bounded context's data access.
+#       caller passes for one service, and the module attaches no fixed policy of
+#       its own to this role at all.
+#       Refactoring Rationale: this sentence previously ended "The module's fixed
+#       telemetry policy is separate and grants only writes to this service's own log
+#       group and X-Ray ingestion, so it cannot widen a bounded context's data
+#       access." That policy went with the withdrawn collector sidecar, so the
+#       sentence would describe an attachment that no longer exists -- and the
+#       property it was reassuring a reader about is now unconditional rather than
+#       argued.
 #       Refactoring Rationale: the migrated system delegated this to an
 #       external security manager that has no cloud equivalent and is not
 #       pretended to have one. Its role is filled by these per-service task
@@ -2247,8 +2150,8 @@ variable "task_role_policy_json" {
     Complete IAM policy document, as JSON, granting this one service the AWS
     API permissions it needs at run time. Attached to the task role, which the
     module otherwise leaves free of business-resource access. Leave null for a
-    service that needs none; the collector-only log and X-Ray export policy may
-    still be present when telemetry is enabled. This is the TASK role used by
+    service that needs none, in which case the role carries no inline policy at
+    all. This is the TASK role used by
     the application, not the execution role the ECS agent uses to pull the image
     and read parameters.
   EOT
@@ -2311,6 +2214,38 @@ variable "sqs_send_queue_arns" {
 #       create a service that receives a message it can never acknowledge, so
 #       the one set drives ReceiveMessage, DeleteMessage and visibility changes
 #       together.
+# -----------------------------------------------------------------------------
+# The key that encrypts this service's queues
+# -----------------------------------------------------------------------------
+# WHY : Assumptions: an SSE-KMS queue cannot be used with the queue permission
+#       alone. A producer's SendMessage makes the service call kms:GenerateDataKey
+#       and kms:Decrypt on the queue's key on the caller's behalf, and a consumer's
+#       ReceiveMessage makes it call kms:Decrypt; without those the queue grant
+#       resolves to AccessDenied at the moment the queue is used. Taking the key as
+#       a typed input here, beside the queue lists that necessitate it, is what
+#       keeps the two from drifting -- a caller that adds a queue and forgets the
+#       key gets a grant that fails only on the path it was added for.
+# WHY : Refactoring Rationale: three roots' service policy documents used to grant
+#       this key themselves, unconditioned, and one -- batch -- did not grant it at
+#       all. That asymmetry is the reason it moves here: batch sends ONLY on its
+#       failure path, so the missing grant would have surfaced as an error report
+#       that could not be published, at exactly the moment reporting mattered most.
+# WHY : Trade-offs: the input is optional and defaults to null, unlike
+#       permissions_boundary_arn. A service with no queues legitimately needs no key,
+#       and the statement is emitted only when the queue lists are non-empty, so a
+#       null here cannot silently disable a grant that was needed -- there would be
+#       no queue to use it with.
+variable "sqs_kms_key_arn" {
+  description = "ARN of the customer-managed KMS key that encrypts the queues in sqs_send_queue_arns and sqs_receive_queue_arns. Required whenever those queues use SSE-KMS, because the queue permission alone does not authorise the key use the service performs on the caller's behalf. Null for a service that uses no queue."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.sqs_kms_key_arn == null || can(regex("^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/[a-f0-9-]+$", var.sqs_kms_key_arn))
+    error_message = "sqs_kms_key_arn must be null or an anchored KMS key ARN, for example arn:aws:kms:us-east-1:111122223333:key/<key-id>."
+  }
+}
+
 variable "sqs_receive_queue_arns" {
   description = <<-EOT
     Exact environment-owned SQS queue ARNs this application's task role may

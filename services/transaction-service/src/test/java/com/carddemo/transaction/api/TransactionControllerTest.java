@@ -10,6 +10,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -20,6 +22,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.carddemo.common.CardDemoCommonAutoConfiguration;
+import com.carddemo.common.control.OnlineWriteGateExempt;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.error.GlobalExceptionHandler;
@@ -36,6 +39,8 @@ import com.carddemo.transaction.config.SecurityConfig;
 import com.carddemo.transaction.dto.TransactionAddPreview;
 import com.carddemo.transaction.dto.TransactionAddRequest;
 import com.carddemo.transaction.dto.TransactionAddResponse;
+import com.carddemo.transaction.dto.CopiedTransactionData;
+import com.carddemo.transaction.dto.CopyLastRequest;
 import com.carddemo.transaction.dto.TransactionDetailResponse;
 import com.carddemo.transaction.dto.TransactionListItemResponse;
 import com.carddemo.transaction.dto.TransactionListRequest;
@@ -199,6 +204,25 @@ class TransactionControllerTest {
     private static final String ASSIGNED_ID = "0000000000000002";
 
     /**
+     * The sentence a copy raises when the selected key has no transaction to copy from.
+     *
+     * <p>Assumptions: the value is a plain sentence rather than one of the service's published
+     * constants, because what this class asserts about that condition is its STATUS and the absence of a
+     * created address. Which sentence the service chooses for it is the service package's to pin, and
+     * asserting a constant here as well would give one decision two owners.
+     */
+    private static final String COPY_SOURCE_ABSENT_SENTENCE = "no transaction to copy for that key";
+
+    /**
+     * Text standing for a diagnostic the store would produce, which must never reach a caller.
+     *
+     * <p>Assumptions: shaped like a real one -- naming a relation and a key -- so that a case asserting
+     * its absence from a body is asserting something a real failure would actually carry.
+     */
+    private static final String STORE_DIAGNOSTIC =
+            "ERROR: could not append to relation \"ledger.transactions\"; key (tran_id)=(0000000000000002)";
+
+    /**
      * A primary account number whose leading digit is a zero.
      *
      * <p>Assumptions: this value is not invented. It is the card number of the second record of
@@ -207,6 +231,15 @@ class TransactionControllerTest {
      * second is the witness a leading zero needs.</p>
      */
     private static final String LEADING_ZERO_CARD_NUMBER = "0927987108636232";
+
+    /**
+     * The card number a preview reports as the RESOLVED one.
+     *
+     * <p>Assumptions: deliberately different from {@link #LEADING_ZERO_CARD_NUMBER}, so that a case
+     * asserting the block reports the resolved card cannot pass against a block that echoed a submitted
+     * one. That distinction is the whole point of the identity members being on the preview at all.
+     */
+    private static final String RESOLVED_CARD_NUMBER = "4111111111111111";
 
     /** {@link #LEADING_ZERO_CARD_NUMBER} reduced to its last four digits, as a response carries it. */
     private static final String MASKED_CARD_NUMBER = "************6232";
@@ -943,7 +976,8 @@ class TransactionControllerTest {
         this.callerIn("carddemo-user");
         when(this.addService.addTransaction(any(TransactionAddRequest.class))).thenReturn(
                 TransactionAddPreview.prompting(Money.of("125.50"),
-                        TransactionAddService.MESSAGE_CONFIRM_ADD));
+                        TransactionAddService.MESSAGE_CONFIRM_ADD, "00000000011",
+                        RESOLVED_CARD_NUMBER).withCopiedSource(copiedData()));
 
         this.mockMvc.perform(this.capture(captureBody("\"accountId\": \"00000000011\",",
                         TransactionAddService.CONFIRM_NO_UPPER)))
@@ -1437,6 +1471,353 @@ class TransactionControllerTest {
         assertThat(refused.getRequest().getSession(false)).isNull();
         assertThat(refused.getResponse().getCookies()).isEmpty();
         verifyNoInteractions(this.listService, this.viewService, this.addService);
+    }
+
+
+    /**
+     * The copy action is mapped, and a confirmed copy is answered created at the assigned path.
+     *
+     * <p>Refactoring Rationale: this operation had no boundary assertion of any kind. Its handler is
+     * declared, its service method is unit-tested against a substituted store, and the routing contract
+     * class mentions the path only in prose -- so nothing established that a request to it resolved to a
+     * handler, that a confirmed copy answered 201 rather than 200, or that the created address named the
+     * ASSIGNED identifier. The action reproduces a function key on the reference's own capture screen,
+     * which lines 471 to 495 of {@code app/cbl/COTRN02C.cbl} implement as a key-field validation, an
+     * eleven-member move and then the ordinary enter-key path, so its success shape is the capture's --
+     * and that is precisely why an unasserted 200 would have looked plausible.</p>
+     *
+     * <p>Assumptions: the address is asserted against the identifier the SERVICE assigned rather than
+     * anything the request carried, because the request carries no identifier member at all. A created
+     * address derived from input would name a row the store did not write.</p>
+     *
+     * @throws Exception if the request could not be performed
+     */
+    @Test
+    @DisplayName("copy: answer a confirmed copy created, at the assigned identifier's path")
+    void copyAnswersAConfirmedCopyCreated() throws Exception {
+        this.callerIn("carddemo-user");
+        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class))).thenReturn(
+                new TransactionAddResponse(ASSIGNED_ID, Money.of("125.50"), assembledSuccess()));
+
+        this.mockMvc.perform(this.copyLast(copyBody("\"accountId\": \"00000000011\",",
+                        TransactionAddService.CONFIRM_YES_UPPER)))
+                .andExpect(status().isCreated())
+                .andExpect(header().string("Location",
+                        TransactionController.BASE_PATH + "/" + ASSIGNED_ID))
+                .andExpect(jsonPath("$.transactionId").value(ASSIGNED_ID))
+                .andExpect(jsonPath("$.amount").value("125.50"));
+
+        verify(this.addService).copyLastTransactionData(any(CopyLastRequest.class));
+        verify(this.addService, never()).addTransaction(any(TransactionAddRequest.class));
+    }
+
+    /**
+     * A copy with the confirmation withheld is answered 200 with the prompt and no created address.
+     *
+     * <p>Purpose: the two turns of this action answer with two DIFFERENT shapes at two different
+     * statuses, and the absence of the created address on the withheld turn is the half a client acts
+     * on -- it is how the client knows nothing was written. A handler that answered 201 on both turns
+     * would tell a client a row exists at an address that resolves to nothing.</p>
+     *
+     * <p>Assumptions: the address is asserted ABSENT rather than merely unequal, because the published
+     * 200 declares no such header and an empty or partially-composed one would be a header the contract
+     * does not declare.</p>
+     *
+     * @throws Exception if the request could not be performed
+     */
+    @Test
+    @DisplayName("copy: answer a withheld confirmation 200 with the prompt and no created address")
+    void copyAnswersAWithheldConfirmationWithThePrompt() throws Exception {
+        this.callerIn("carddemo-user");
+        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class))).thenReturn(
+                TransactionAddPreview.prompting(Money.of("125.50"),
+                        TransactionAddService.MESSAGE_CONFIRM_ADD, "00000000011",
+                        RESOLVED_CARD_NUMBER).withCopiedSource(copiedData()));
+
+        this.mockMvc.perform(this.copyLast(copyBody("\"accountId\": \"00000000011\",",
+                        TransactionAddService.CONFIRM_NO_UPPER)))
+                .andExpect(status().isOk())
+                .andExpect(header().doesNotExist("Location"))
+                .andExpect(jsonPath("$.written").value(false))
+                .andExpect(jsonPath("$.returnMessage")
+                        .value(TransactionAddService.MESSAGE_CONFIRM_ADD))
+                .andExpect(jsonPath("$.transactionId").doesNotExist());
+    }
+
+    /**
+     * A copy carrying neither key is refused, naming both key members, and reaches no service.
+     *
+     * <p>Purpose: the reference validates the key fields FIRST on this path -- line 473, before the
+     * eleven-member move at 482 to 492 -- so a copy with no key selects no record to copy from. Pinning
+     * the refusal at the boundary is what keeps that ordering observable: a copy that reached the store
+     * with no key would have to invent a selection.</p>
+     *
+     * <p>Assumptions: the per-field array is asserted rather than the status alone, for the same reason
+     * the capture's sibling case gives -- a client displays a complaint beside the input it belongs to,
+     * and a refusal attributed to the request as a whole answers 400 just the same while being
+     * undisplayable.</p>
+     *
+     * @throws Exception if the request could not be performed
+     */
+    @Test
+    @DisplayName("copy: refuse a submission carrying neither key, naming both members")
+    void copyRefusesASubmissionCarryingNeitherKey() throws Exception {
+        this.callerIn("carddemo-user");
+
+        this.mockMvc.perform(this.copyLast(copyBody("",
+                        TransactionAddService.CONFIRM_YES_UPPER)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors[*].field",
+                        hasItems(TransactionAddService.FIELD_ACCOUNT_ID,
+                                TransactionAddService.FIELD_CARD_NUMBER)))
+                .andExpect(jsonPath("$.fieldErrors[*].message",
+                        hasItem(TransactionAddRequest.KEY_FIELD_REQUIRED)));
+
+        verifyNoInteractions(this.addService);
+    }
+
+    /**
+     * A copy whose key resolves to no transaction to copy is answered 404, not 201 and not 500.
+     *
+     * <p>Purpose: an empty ledger for the selected key is a condition the caller can act on -- by
+     * capturing a transaction rather than copying one -- so it belongs on the not-found channel. A
+     * handler that rendered it as a fault would put an actionable outcome on the channel the alerting
+     * watches, and one that rendered it as a created capture would report a row that does not exist.</p>
+     *
+     * @throws Exception if the request could not be performed
+     */
+    @Test
+    @DisplayName("copy: answer a key with nothing to copy as 404, never as created or as a fault")
+    void copyAnswersNothingToCopyAsNotFound() throws Exception {
+        this.callerIn("carddemo-user");
+        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class)))
+                .thenThrow(new NoSuchElementException(COPY_SOURCE_ABSENT_SENTENCE));
+
+        this.mockMvc.perform(this.copyLast(copyBody("\"accountId\": \"00000000011\",",
+                        TransactionAddService.CONFIRM_YES_UPPER)))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value(ApiError.CODE_NOT_FOUND))
+                .andExpect(header().doesNotExist("Location"));
+    }
+
+    /**
+     * A fault while copying answers a leak-free 500 and carries no store diagnostic.
+     *
+     * <p>Assumptions: the failure raised is the standard illegal-state one, which is what the handler
+     * declares for a read or an append the caller cannot correct, and it is given a diagnostic-shaped
+     * message so the body can be asserted free of it rather than asserted against nothing.</p>
+     *
+     * <p>Assumptions: the created address is asserted absent here too. A fault mid-append is exactly the
+     * condition in which a handler that composed the header before deciding the status would emit an
+     * address for a row that was rolled back.</p>
+     *
+     * @throws Exception if the request could not be performed
+     */
+    @Test
+    @DisplayName("copy: answer a fault with a leak-free 500 and no created address")
+    void copyAnswersAFaultLeakFree() throws Exception {
+        this.callerIn("carddemo-user");
+        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class)))
+                .thenThrow(new IllegalStateException(STORE_DIAGNOSTIC));
+
+        MvcResult result = this.mockMvc.perform(this.copyLast(
+                        copyBody("\"accountId\": \"00000000011\",",
+                                TransactionAddService.CONFIRM_YES_UPPER)))
+                .andExpect(status().isInternalServerError())
+                .andExpect(header().doesNotExist("Location"))
+                .andReturn();
+
+        assertThat(result.getResponse().getContentAsString())
+                .as("nothing the store said about itself may reach a caller")
+                .doesNotContain(STORE_DIAGNOSTIC);
+    }
+
+    /**
+     * The copy action demands a business authority, and refuses a token carrying neither.
+     *
+     * <p>Assumptions: it is deliberately NOT narrowed to an administrative authority. The reference
+     * binds this action to a function key on the ordinary capture screen, available to whoever may
+     * capture at all, so requiring more here would refuse an operator the reference admits -- and
+     * requiring less would admit a token with no business group to a write.</p>
+     *
+     * <p>Assumptions: both halves are asserted in one case. Admission alone is satisfiable by a chain
+     * that authorizes everything, and refusal alone by a chain that authorizes nothing; only the pair
+     * establishes that the authority is what decided.</p>
+     *
+     * @throws Exception if either request could not be performed
+     */
+    @Test
+    @DisplayName("copy: admit a business authority and refuse a token carrying neither")
+    void copyDemandsABusinessAuthority() throws Exception {
+        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class))).thenReturn(
+                new TransactionAddResponse(ASSIGNED_ID, Money.of("125.50"), assembledSuccess()));
+
+        this.callerIn("carddemo-user");
+        this.mockMvc.perform(this.copyLast(copyBody("\"accountId\": \"00000000011\",",
+                        TransactionAddService.CONFIRM_YES_UPPER)))
+                .andExpect(status().isCreated());
+
+        this.callerIn("some-unrelated-group");
+        this.mockMvc.perform(this.copyLast(copyBody("\"accountId\": \"00000000011\",",
+                        TransactionAddService.CONFIRM_YES_UPPER)))
+                .andExpect(status().isForbidden());
+
+        this.mockMvc.perform(post(TransactionController.BASE_PATH
+                        + TransactionController.COPY_LAST_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(copyBody("\"accountId\": \"00000000011\",",
+                                TransactionAddService.CONFIRM_YES_UPPER)))
+                .andExpect(status().isUnauthorized());
+    }
+
+    /**
+     * A copy submission carrying a key and a confirmation ALONE reaches the service.
+     *
+     * <p>⚠️ Purpose: this is the case that would have caught the defect, and it is the only kind of case
+     * that could. The operation was published over the capture request shape, whose eleven data components
+     * each carry a not-blank and a width or shape constraint; bean validation runs on the bound body
+     * BEFORE any handler is entered, so a copy submission leaving those fields empty was refused with
+     * eleven field errors and never reached the service at all. That empty submission is the ONLY one the
+     * reference's own function key can produce -- the operator presses it on a screen they have not filled
+     * in, because lines 482 to 492 of {@code app/cbl/COTRN02C.cbl} are about to overwrite every data field
+     * -- so the normal copy flow was unreachable through the published surface while the service method
+     * behind it was correct. No service test could see it: a service-level call bypasses bean validation
+     * entirely.</p>
+     *
+     * <p>Assumptions: the body carries the account and the confirmation and NOTHING else, and the service
+     * is verified to have been called. Asserting the status alone would not distinguish a refusal that
+     * happened to answer 200 from a submission that was actually processed, and asserting the service call
+     * is what pins the reachability rather than the outcome.</p>
+     *
+     * <p>Assumptions: the first turn is exercised with the confirmation WITHHELD as well as with it given,
+     * because the withheld turn is the one an operator performs first and it is the turn whose body is
+     * emptiest. A case covering the affirmative turn alone would still carry one more member than the
+     * shape strictly requires.</p>
+     *
+     * @throws Exception if either request could not be performed
+     */
+    @Test
+    @DisplayName("copy: accept a key and a confirmation alone, with no data member at all")
+    void copyAcceptsAKeyAndConfirmationAlone() throws Exception {
+        this.callerIn("carddemo-user");
+        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class))).thenReturn(
+                TransactionAddPreview.prompting(Money.of("42.75"),
+                        TransactionAddService.MESSAGE_CONFIRM_ADD, "00000000011",
+                        RESOLVED_CARD_NUMBER).withCopiedSource(copiedData()));
+
+        this.mockMvc.perform(this.copyLast(
+                        "{\"accountId\": \"00000000011\", \"confirmation\": \"N\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.written").value(false))
+                .andExpect(jsonPath("$.resolvedCardNumber").value(RESOLVED_CARD_NUMBER));
+
+        this.mockMvc.perform(this.copyLast("{\"accountId\": \"00000000011\"}"))
+                .andExpect(status().isOk());
+
+        verify(this.addService, times(2))
+                .copyLastTransactionData(any(CopyLastRequest.class));
+    }
+
+    /**
+     * A copy preview publishes the resolved pair and the copied record, so a client can render what it is
+     * confirming.
+     *
+     * <p>⚠️ Purpose: the disclosure is only useful if it reaches the wire, and the published schema closes
+     * the preview object with {@code additionalProperties: false} -- so a member the record carries and
+     * the document does not would make every preview body invalid against its own contract. This case
+     * reads the block off the RESPONSE rather than off the record, which is the only place that
+     * distinction is observable.</p>
+     *
+     * <p>Assumptions: the resolved card is asserted in FULL rather than masked. It is the one value the
+     * operator must be able to compare against what they typed, and a suffix cannot distinguish two cards
+     * on one account; the prohibition the sensitive-data contract states is on durable diagnostics, which
+     * is why the record's own rendering withholds it and this body does not.</p>
+     *
+     * @throws Exception if the request could not be performed
+     */
+    @Test
+    @DisplayName("copy: publish the resolved pair, the source row and all ten data values")
+    void copyPublishesTheResolvedPairAndTheCopiedRecord() throws Exception {
+        this.callerIn("carddemo-user");
+        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class))).thenReturn(
+                TransactionAddPreview.prompting(Money.of("42.75"),
+                        TransactionAddService.MESSAGE_CONFIRM_ADD, "00000000011",
+                        RESOLVED_CARD_NUMBER).withCopiedSource(copiedData()));
+
+        this.mockMvc.perform(this.copyLast(copyBody("\"accountId\": \"00000000011\",",
+                        TransactionAddService.CONFIRM_NO_UPPER)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.resolvedAccountId").value("00000000011"))
+                .andExpect(jsonPath("$.resolvedCardNumber").value(RESOLVED_CARD_NUMBER))
+                .andExpect(jsonPath("$.copied.typeCode").value("01"))
+                .andExpect(jsonPath("$.copied.categoryCode").value("0001"))
+                .andExpect(jsonPath("$.copied.source").value("POS TERM"))
+                .andExpect(jsonPath("$.copied.description").value("GROCERY PURCHASE"))
+                .andExpect(jsonPath("$.copied.merchantId").value("123456789"))
+                .andExpect(jsonPath("$.copied.merchantName").value("CORNER STORE"))
+                .andExpect(jsonPath("$.copied.merchantCity").value("SEATTLE"))
+                .andExpect(jsonPath("$.copied.merchantZip").value("98101"))
+                .andExpect(jsonPath("$.copied.originDate").value("2026-01-15"))
+                .andExpect(jsonPath("$.copied.processDate").value("2026-01-16"));
+    }
+
+    /**
+     * Builds a copy-last body: the key members, the confirmation, and nothing else.
+     *
+     * <p>Purpose: the copy operation binds {@code CopyLastRequest}, which declares the two key
+     * components and the confirmation ONLY. Sending a full capture body here would compile and pass while
+     * testing the wrong shape, so this helper exists to make the two bodies impossible to confuse.</p>
+     *
+     * <p>Assumptions: no data member is sent, which is the reachable form of this request rather than an
+     * economy. The reference's function key is pressed on a screen the operator has NOT filled in --
+     * lines 482 to 492 of {@code app/cbl/COTRN02C.cbl} are about to overwrite every data field -- and a
+     * body carrying eleven data values is exactly the submission that has no need to copy anything.</p>
+     *
+     * @param keyMembers the key members as JSON text including their trailing comma, or empty text for a
+     *     submission naming neither key; must not be {@code null}
+     * @param confirmation the confirmation character, or {@code null} to omit the member entirely
+     * @return the JSON body; never {@code null}
+     */
+    private static String copyBody(String keyMembers, String confirmation) {
+        String members = keyMembers.isEmpty() ? "" : keyMembers;
+        String confirmed = confirmation == null ? "" : "\"confirmation\": \"" + confirmation + "\"";
+        String body = members + confirmed;
+        return "{\n" + (body.endsWith(",") ? body.substring(0, body.length() - 1) : body) + "\n}";
+    }
+
+    /**
+     * Builds the copied-data block a withheld preview reports.
+     *
+     * <p>Assumptions: the values match the ones {@code captureBody} submits and the resolved identity the
+     * substituted service would report, so a case asserting a member of the block is asserting a value the
+     * exchange could actually have produced rather than an arbitrary one.</p>
+     *
+     * @return the disclosure block; never {@code null}
+     */
+    private static CopiedTransactionData copiedData() {
+        return new CopiedTransactionData(SOURCE_TRANSACTION_ID, "01", "0001", "POS TERM",
+                "GROCERY PURCHASE", "123456789", "CORNER STORE", "SEATTLE", "98101", "2026-01-15",
+                "2026-01-16");
+    }
+
+    /** The identifier of the row a copied block names as its source. */
+    private static final String SOURCE_TRANSACTION_ID = "0000000000000001";
+
+    /**
+     * Builds a copy request carrying the supplied body as a caller already made known.
+     *
+     * <p>Assumptions are the capture helper's: the address is composed from the controller's own two
+     * published constants rather than a second spelling, so a route that moves takes these cases with it
+     * instead of leaving them addressing nothing -- which would answer 404 and read as a refusal.</p>
+     *
+     * @param requestBody the JSON body to submit, of type {@link String}; must not be {@code null}
+     * @return the request builder, never {@code null}
+     */
+    private MockHttpServletRequestBuilder copyLast(String requestBody) {
+        return post(TransactionController.BASE_PATH + TransactionController.COPY_LAST_PATH)
+                .header(AUTHORIZATION_HEADER, BEARER_TOKEN)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(requestBody);
     }
 
     /**

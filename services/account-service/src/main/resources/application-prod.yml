@@ -186,7 +186,7 @@
 #   - Assumptions: no linter in this project reads this file. The only
 #     documentation gate in the Java build is Checkstyle, and
 #     config/checkstyle/checkstyle.xml narrows itself with a fileExtensions
-#     property of "java" at its physical line 209, so it never sees a YAML
+#     property of "java" at its physical line 202, so it never sees a YAML
 #     document; the standard records the same absence of a mechanical gate for
 #     YAML. The obligation therefore rests on that written standard and on review,
 #     and no comment in this file claims a gate enforces something it does not.
@@ -398,6 +398,35 @@ spring:
           #       would leave a reader believing this file governs redelivery when
           #       it does not - which is the worst of the three outcomes, because it
           #       is the one that looks like it worked.
+
+carddemo:
+  account:
+    inquiry:
+
+      # WHY : (1) Refactoring Rationale: this pair is what actually bounds the
+      #       account-inquiry consumer, and its absence is why the
+      #       spring.cloud.aws.sqs.listener pair above bounded nothing. The consumer's
+      #       @SqsListener attributes read
+      #       carddemo.account.inquiry.max-concurrent-messages and
+      #       max-messages-per-poll, and an annotation attribute takes precedence over
+      #       the container factory's own setting -- so while those attributes carried
+      #       an inline fallback of ten, every profile's factory setting was overridden
+      #       by it. Here the fallback and the intended value happened to agree, so
+      #       prod behaved as documented by coincidence rather than by configuration;
+      #       in dev they did not agree and the profile's smaller pair had no effect at
+      #       all.
+      #       (2) Assumptions: the values RESTATE the base document's ten rather than
+      #       varying it, and the restatement is the point in this file exactly as it
+      #       is for the pair above: the two profiles must carry the same key set so
+      #       they can be diffed side by side, and a key present in dev and absent here
+      #       would read as a topology difference rather than as a sizing one.
+      #       (3) Assumptions: poll-timeout-seconds is NOT set here, in either profile,
+      #       for the reason already recorded above -- the base document owns the
+      #       five-second wait because it is transcribed from
+      #       app/app-vsam-mq/cbl/COACCT01.cbl physical line 337 rather than tuned. It
+      #       is a preserved behavioural contract, not a sizing knob.
+      max-concurrent-messages: 10
+      max-messages-per-poll: 10
 
 logging:
   level:

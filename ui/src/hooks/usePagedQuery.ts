@@ -910,6 +910,20 @@ export function usePagedQuery<T>(options: UsePagedQueryOptions<T>): UsePagedQuer
           //   code or correlation identifier would be indistinguishable from one a service produced.
           //   The sentence a screen shows comes from `ui/src/messages/messages.ts` under rule T8, which
           //   is why none is composed here either.
+          // Assumptions: ⚠️ Refactoring Rationale: the delivered value is checked for BEING a page before
+          //   its rows are counted, and it was not. `page.items.length` on an answer that carries no
+          //   `items` throws a `TypeError` inside a `then` handler, which becomes an UNHANDLED REJECTION
+          //   -- nothing awaits this settlement, by design, because the reducer is how an outcome
+          //   arrives -- so a screen reached with a stubbed or proxied transport reported a browse still
+          //   loading while the runner reported an unhandled error against whichever test happened to be
+          //   running. A malformed answer is a failed read, which is a state this hook already has and
+          //   already reports; it is not a reason to throw out of a settlement.
+          // Assumptions: the refusal carries NO problem document, for the reason recorded below: no
+          //   service sent one, and a fabricated code would be indistinguishable from one that did.
+          if (!Array.isArray(page?.items)) {
+            dispatch({ kind: 'browse-failed', sequence, error: null });
+            return;
+          }
           if (page.items.length > pageSizeRef.current) {
             dispatch({ kind: 'browse-failed', sequence, error: null });
             return;

@@ -31,10 +31,14 @@
  * assembly is what stops it becoming a second, invisible source of either.
  *
  * Assumptions: no test API is re-exported from here, and none is made ambient.
- * `ui/vitest.config.ts` sets `globals: false` and records that as a contract, so
- * every test file imports `describe`, `it`, `expect` and `vi` for itself. A
- * convenience re-export here would reintroduce exactly the ambient surface that
- * setting exists to withhold from production sources.
+ * `ui/tsconfig.json` keeps its `types` list empty, so nothing is declared
+ * ambiently and every test file imports `describe`, `it`, `expect` and `vi` for
+ * itself or fails to compile on the symbol it omitted. Refactoring Rationale: this
+ * note credited `globals: false` in `ui/vitest.config.ts` for that; the option is
+ * set to `true` there, for the separate reason recorded beside it, so the empty
+ * `types` list is named instead of an option that says the opposite. A convenience
+ * re-export here would reintroduce exactly the ambient surface the empty list
+ * exists to withhold from production sources.
  */
 
 import '@testing-library/jest-dom/vitest';

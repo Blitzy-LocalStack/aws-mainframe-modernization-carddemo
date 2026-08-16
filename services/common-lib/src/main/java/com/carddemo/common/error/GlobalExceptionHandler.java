@@ -6,6 +6,7 @@ import com.carddemo.common.observability.ThrowableDigest;
 import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.validation.FieldValidationFlag;
 import jakarta.servlet.http.HttpServletRequest;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -580,6 +581,23 @@ public class GlobalExceptionHandler {
      */
     private static final String INTEGRITY_VIOLATION_EXCEPTION_NAME =
             "org.springframework.dao.DataIntegrityViolationException";
+
+    /**
+     * The two-character SQL state class the standard reserves for an integrity-constraint violation.
+     *
+     * <p>Assumptions: matched as a CLASS rather than as an enumerated list of subclasses, so the
+     * five members the engine can report -- the unclassified {@code 23000}, a not-null breach, a
+     * foreign-key breach, a unique breach and a check breach -- are all recognised without this
+     * class holding a list that would have to be kept in step with an engine. Every one of them
+     * describes data the caller supplied being refused by a rule, which is the one thing the
+     * conflict answer below asserts.</p>
+     *
+     * <p>Assumptions: the class is spelled as a literal rather than imported from a driver, for the
+     * reason recorded on the type names above. The shared kernel is on the path of a service with no
+     * database at all, and a SQL state is a two-character string in the standard rather than a
+     * vendor's constant.</p>
+     */
+    private static final String SQL_STATE_INTEGRITY_CONSTRAINT_CLASS = "23";
 
     /**
      * The number of cause-chain elements {@link #isOfType(Throwable, String)} will inspect.
@@ -1561,7 +1579,27 @@ public class GlobalExceptionHandler {
             return conflictResponse(MESSAGE_LOCK_UNAVAILABLE, request, null);
         }
 
-        if (isOfType(failure, INTEGRITY_VIOLATION_EXCEPTION_NAME)) {
+        // WHY : Refactoring Rationale: this branch used to answer 409 for EVERY translated integrity
+        //       violation, without looking at the state the engine reported, and that was wrong in one
+        //       specific and damaging direction. The persistence abstraction raises this same type for
+        //       failures that are not caller errors at all -- a relation that does not exist reports
+        //       42P01, and a translated schema fault of that shape was answered with "Please delete
+        //       associated child records first:" and a 409. A caller was told to delete child rows that
+        //       do not exist, was invited to retry a request that cannot succeed, and the genuine
+        //       defect never reached the 500 channel the alerting watches. Narrowing the branch to the
+        //       integrity-constraint state class keeps every real constraint breach on 409 and lets
+        //       everything else fall through to the fault answer at the end of this method.
+        // WHY : Assumptions: a chain carrying NO state answers the fault as well, and that is the safe
+        //       direction of the two. A fault says the row could not be written, which is true of every
+        //       case; a conflict would tell a caller that a rule it can act on was violated on the
+        //       strength of a failure that never said so. This is the same rule, and the same reasoning,
+        //       that auth-service's own uniqueness classifier already applies to the state it looks for.
+        // WHY : Trade-offs: an engine that reported a constraint breach with no state at all would now
+        //       be answered 500 where it was previously answered 409. That is accepted: the abstraction
+        //       builds this exception by translating a driver failure, so the state travels with it, and
+        //       an untranslated one is a defect in the layer below rather than a caller error.
+        if (isOfType(failure, INTEGRITY_VIOLATION_EXCEPTION_NAME)
+                && reportsIntegrityConstraintState(failure)) {
             LOG.warn("event=api.conflict.integrity code={} status=409 path={} exception={}",
                     ApiError.CODE_CONFLICT, pathOf(request), failure.getClass().getName());
             return conflictResponse(MESSAGE_REFERENCED_ROW, request, null);
@@ -1623,9 +1661,22 @@ public class GlobalExceptionHandler {
      * The number of consecutive digits at which a run is treated as an account or card identifier.
      *
      * <p>Assumptions: the shortest primary account number in circulation is thirteen digits, so a run of
-     * that length is refused whether or not it is one. The correlation filter applies the same threshold
-     * to the identifier a client supplies, and using one number in both places keeps a single rule rather
-     * than two that could drift.</p>
+     * that length is refused whether or not it is one.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this bound is NO LONGER the same as the correlation filter's, and the
+     * note that stood here claimed it was -- "the correlation filter applies the same threshold ... using
+     * one number in both places keeps a single rule rather than two that could drift". That claim is
+     * withdrawn because the filter's bound moved to nine, the shortest protected identifier this system
+     * holds, and the reason it moved does not apply here. The difference is deliberate and turns on WHAT
+     * each rule judges. The filter judges CALLER-SUPPLIED metadata that is published to the mapped
+     * diagnostic context on every log line and echoed in the response, so it must exclude every
+     * identifier shape a caller could smuggle -- a nine-digit customer or national identifier included.
+     * This rule judges a sentence THIS SYSTEM composed, where a digit run is a value the system itself
+     * put there, and its consequence is to discard the sentence and answer with a generic one. Lowering
+     * it to nine would discard sentences over ordinary numbers a service legitimately quotes -- a
+     * nine-digit count, a timestamp -- and buy nothing, because no caller chooses this text.
+     * {@code com.carddemo.auth.service.CognitoIdentityService} matches THIS bound and not the filter's,
+     * for the reason its own constant records, and that parity is unaffected.</p>
      */
     private static final int SENSITIVE_DIGIT_RUN = 13;
 
@@ -1915,6 +1966,51 @@ public class GlobalExceptionHandler {
             //       whole depth budget on one element and hide a real match no deeper than the second.
             Throwable cause = current.getCause();
             current = cause == current ? null : cause;
+        }
+        return false;
+    }
+
+    /**
+     * Reports whether a failure's bounded cause chain names an integrity-constraint SQL state.
+     *
+     * <p>Assumptions: the state is read from a {@link SQLException} in the chain rather than from the
+     * translated exception's own type, because the translated type is the same for every breach the
+     * engine reports and for several failures that are not breaches at all. The state is the only thing
+     * that separates them, and it travels on the driver's exception.</p>
+     *
+     * <p>Assumptions: a prefix match on the two-character class is used rather than an equality test
+     * against a list of states, so the whole integrity-constraint family is recognised without this
+     * class carrying a list to keep in step with an engine.</p>
+     *
+     * <p>Trade-offs: the walk is bounded by {@link #MAX_CAUSE_DEPTH} and stops at a throwable naming
+     * itself as its own cause, for exactly the reason recorded on {@link #isOfType(Throwable, String)}:
+     * this runs while a failure is already being reported, so a cycle here would spin inside the error
+     * path itself.</p>
+     *
+     * @param failure the translated failure to classify; never {@code null} on any path that reaches here
+     * @return {@code true} when some link of the bounded chain reports a SQL state in the
+     *     integrity-constraint class, otherwise {@code false}, which includes a chain reporting no state
+     *     at all
+     */
+    private static boolean reportsIntegrityConstraintState(Throwable failure) {
+        Throwable current = failure;
+        for (int depth = 0; current != null && depth < MAX_CAUSE_DEPTH; depth++) {
+            if (current instanceof SQLException reported) {
+                String state = reported.getSQLState();
+                if (state != null && state.startsWith(SQL_STATE_INTEGRITY_CONSTRAINT_CLASS)) {
+                    return true;
+                }
+            }
+
+            // WHY : Assumptions: a throwable naming itself as its own cause ends the walk, for the reason
+            //       recorded on the sibling classifier above. The standard accessor answers with the
+            //       throwable itself rather than with null in that case, so following it would spend the
+            //       whole depth budget on one element and miss a match at the second.
+            Throwable cause = current.getCause();
+            if (cause == current) {
+                return false;
+            }
+            current = cause;
         }
         return false;
     }

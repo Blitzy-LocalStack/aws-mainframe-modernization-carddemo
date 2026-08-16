@@ -4,6 +4,7 @@ import com.carddemo.auth.dto.SignOnChallengeRequest;
 import com.carddemo.auth.dto.SignOnOutcome;
 import com.carddemo.auth.dto.SignOnRequest;
 import com.carddemo.auth.dto.SignOnResponse;
+import com.carddemo.auth.dto.SignOutRequest;
 import com.carddemo.auth.dto.TokenRefreshRequest;
 import com.carddemo.auth.service.CognitoIdentityService;
 import com.carddemo.common.control.OnlineWriteGateExempt;
@@ -25,6 +26,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -94,19 +96,22 @@ import org.springframework.web.bind.annotation.RestController;
  * adapter in this migration is annotated the same way, so the convention is uniform rather than local
  * to this file.</p>
  *
- * <p>Refactoring Rationale: this class now serves ALL THREE operations the committed document tags
- * {@code Sign-On}, where it previously served one. The two that were missing were
+ * <p>Refactoring Rationale: this class now serves ALL FOUR operations the committed document tags
+ * {@code Sign-On}, where it once served one. Two were added with the exchanges they complete --
  * {@code answerSignOnChallenge} on {@code POST /api/v1/auth/challenge} and {@code refreshTokens} on
- * {@code POST /api/v1/auth/refresh}, and their absence was not a tidy boundary: the filter chain
+ * {@code POST /api/v1/auth/refresh} -- and their absence was not a tidy boundary: the filter chain
  * already opened both paths and the edge already forwarded them, so the gateway routed two operations
  * the service answered with 404. The challenge one mattered more than a missing route usually does.
  * Every account the infrastructure provisions is created with a temporary password, a temporary
  * password always raises {@code NEW_PASSWORD_REQUIRED} on first use, and with no operation to answer
  * that challenge no provisioned user could obtain a token at all -- the first sign-on of every user
- * answered 500. All three operations are published unauthenticated, which the committed document
- * states by declaring {@code security: []} on each: one issues a token, one completes the exchange
- * that issues one, and one renews a token that may already have expired, so none of the three can
- * require one.</p>
+ * answered 500. The fourth, {@code signOut} on {@code POST /api/v1/auth/signout}, is the reverse
+ * direction and was missing for a worse reason: nothing in this migration ended a session at the pool,
+ * so signing out cleared the browser and left a thirty-day refresh token able to mint access tokens for
+ * the rest of its life. All four operations are published unauthenticated, which the committed document
+ * states by declaring {@code security: []} on each: one issues a token, one completes the exchange that
+ * issues one, one renews a token that may already have expired, and one revokes the token it renews from
+ * -- so none of the four can require the token being issued, renewed or revoked.</p>
  *
  * <p>Trade-offs: no golden-master oracle exists for this path. The online programs of this context
  * cannot run end to end without a CICS runtime, which {@code tests/README.md:83-85} records among the
@@ -119,7 +124,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping(path = AuthController.BASE_PATH, produces = MediaType.APPLICATION_JSON_VALUE)
 @OnlineWriteGateExempt(reason =
-        "All three operations here are authentication exchanges with the identity provider, not"
+        "All four operations here are authentication exchanges with the identity provider, not"
         + " writes to migrated record data, and sign-on in particular has to keep working while the"
         + " batch window is open: reads stay available during a quiesce, and nobody can read without"
         + " first signing on. Assumptions: this is a deliberate NARROWING of the reference bracket."
@@ -141,6 +146,9 @@ public class AuthController {
     /** The segment beneath {@link #BASE_PATH} that the token renewal is served at. */
     public static final String REFRESH_SUBPATH = "/refresh";
 
+    /** The segment beneath {@link #BASE_PATH} that the session revocation is served at. */
+    public static final String SIGNOUT_SUBPATH = "/signout";
+
     // WHY : Alternatives Considered: publishing the whole path as one constant here, rather than
     //       importing com.carddemo.auth.config.SecurityConfig and reusing its SIGNON_PATH. Reusing it
     //       would guarantee the route and the permit rule could never drift, but the charter beside
@@ -159,6 +167,11 @@ public class AuthController {
 
     /** The full path of the token renewal, as the contract and the filter chain both declare it. */
     public static final String REFRESH_PATH = BASE_PATH + REFRESH_SUBPATH;
+
+    /**
+     * The full path of the session revocation, as the contract and the filter chain both declare it.
+     */
+    public static final String SIGNOUT_PATH = BASE_PATH + SIGNOUT_SUBPATH;
 
     // WHY : Assumptions: this sentence is the externally visible vocabulary of the refusal below, and
     //       it is reproduced character for character from app/cbl/COSGN00C.cbl:242, where the literal
@@ -357,15 +370,18 @@ public class AuthController {
      * already expired must still be able to renew. Authority comes from the refresh token, which the
      * pool verifies and which a caller cannot forge.</p>
      *
-     * <p>Assumptions: the renewed body carries a null renewal token, because the pool does not reissue
-     * one -- the caller keeps the token it already holds. The response shape declares that member
-     * nullable for exactly this reason, which is what lets one shape serve all three operations of this
-     * tag rather than a second nearly identical shape existing for this path alone.</p>
+     * <p>⚠️ Assumptions: the renewed body carries a ROTATED renewal token and the caller must store it
+     * in place of the one it presented, because {@code infra/modules/cognito} enables refresh-token
+     * rotation with a zero retry grace period -- the presented token is invalidated as it is exchanged.
+     * The response member stays nullable so one shape serves all three operations of this tag rather
+     * than a second nearly identical shape existing for this path alone. Refactoring Rationale: this
+     * paragraph promised a null renewal token, which was true of the flow the service used to initiate
+     * and false of the rotation-compatible operation it now calls.</p>
      *
      * @param request the identifier the token set was issued for and the refresh token to renew it
      *     with, bean-validated before this method is entered; must not be {@code null}
-     * @return the renewed token set, carrying a new access token and identity token and a null renewal
-     *     token, answered with 200; never {@code null}
+     * @return the renewed token set, carrying a new access token, a new identity token and the rotated
+     *     renewal token that replaces the one presented, answered with 200; never {@code null}
      * @throws ClientInputException if a submitted field is absent or blank, which the shared advice
      *     renders as 400
      * @throws CognitoIdentityService.SessionRefusedException if the refresh token was not accepted,
@@ -376,6 +392,56 @@ public class AuthController {
     @PostMapping(path = REFRESH_SUBPATH, consumes = MediaType.APPLICATION_JSON_VALUE)
     public SignOnResponse refreshTokens(@Valid @RequestBody TokenRefreshRequest request) {
         return this.identityService.refresh(request);
+    }
+
+    /**
+     * Revokes the refresh token a session was renewed from, ending that session at the pool.
+     *
+     * <p>Purpose: this is the operation that makes signing out an event rather than a change of local
+     * state. Discarding a token in a browser leaves it valid: the refresh token is provisioned with a
+     * thirty-day life, so a copy taken from a browser store, a synchronised profile or a shared
+     * workstation could keep minting access tokens for a month after the user believed the session had
+     * ended. This operation is what stops that, and its absence is why signing out previously guaranteed
+     * nothing.</p>
+     *
+     * <p>Assumptions: the baseline has no counterpart. Its menus end a session by transferring control
+     * back to the sign-on screen -- {@code app/cbl/COMEN01C.cbl} and {@code app/cbl/COADM01C.cbl} move
+     * the sign-on program's literal into the next-program field on the exit key -- and nothing is revoked,
+     * because a terminal session WAS the session and it lasted until the terminal disconnected. So no
+     * message literal is transcribed for this operation and none of the three sign-on sentences is
+     * reused.</p>
+     *
+     * <p>Assumptions: it is published unauthenticated, and for this operation that is a stronger position
+     * than requiring a bearer rather than a weaker one. Authority is possession of the refresh token,
+     * which the provider's revocation call verifies and which a caller cannot forge; requiring a valid
+     * access token instead would refuse the revocation in precisely the case it matters most, an access
+     * token that has already expired, which is the state of every session an operator abandons rather
+     * than closes.</p>
+     *
+     * <p>Trade-offs: the response is 204 with no body, and a token the pool will not accept produces the
+     * same 204 as one it revoked. The service owns that decision and states its reasoning; what this
+     * adapter adds is that the status carries no discrimination either, so a caller cannot use this
+     * operation to learn whether a token is live. The one failure reported is a pool that could not be
+     * reached, because then the token is still able to mint.</p>
+     *
+     * @param request the refresh token to revoke, bean-validated before this method is entered so that a
+     *     blank or over-length value is answered without the pool being consulted; must not be
+     *     {@code null}
+     * @throws ClientInputException if the submitted token is absent or blank, which the shared advice
+     *     renders as 400 carrying one entry keyed {@code refreshToken}
+     * @throws IllegalStateException if the pool could not be reached or answered a fault, which the
+     *     shared advice renders as 500 carrying the sentence this service reports for an unevaluable
+     *     exchange
+     */
+    // WHY : Assumptions: the status is declared on the handler rather than returned as an entity,
+    //       because exactly one status is possible on the success path and a void return leaves the
+    //       framework nothing to serialise. Returning a body -- even an empty object -- would publish a
+    //       shape a client would then be written to read, and there is nothing this operation could
+    //       truthfully put in one: it reports neither whether a token was live nor whose it was.
+    @PostMapping(path = SIGNOUT_SUBPATH, consumes = MediaType.APPLICATION_JSON_VALUE)
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void signOut(@Valid @RequestBody SignOutRequest request) {
+        this.identityService.signOut(request);
     }
 
     /**

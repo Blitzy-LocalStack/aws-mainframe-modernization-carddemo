@@ -9,8 +9,9 @@ import jakarta.validation.constraints.Size;
  *
  * <p>Purpose: this is the body of {@code POST /api/v1/auth/refresh}, which exchanges the refresh token
  * a previous sign-on returned for a new access token and identity token, answered as
- * {@link SignOnResponse} with a null {@code refreshToken} because the pool does not reissue one on
- * renewal.
+ * {@link SignOnResponse} carrying the rotated refresh token the pool reissues -- the token submitted
+ * here is invalidated as it is exchanged, because {@code infra/modules/cognito} enables refresh-token
+ * rotation, so a caller must replace the value it holds with the one the response carries.
  *
  * <h2>This record has no reference counterpart</h2>
  *

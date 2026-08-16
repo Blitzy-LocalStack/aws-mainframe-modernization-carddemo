@@ -215,8 +215,8 @@
  * current. Concentrating them costs one indirection when reading a single
  * class, which is accepted because this file cannot be skipped in any case:
  * {@code config/checkstyle/checkstyle.xml} requires it to exist through
- * {@code JavadocPackage} at line 222 and requires it to carry Javadoc
- * through {@code MissingJavadocPackage} at line 331, and
+ * {@code JavadocPackage} at line 215 and requires it to carry Javadoc
+ * through {@code MissingJavadocPackage} at line 324, and
  * {@code services/pom.xml} binds that gate to the Maven {@code validate}
  * phase, so it is audited before a single class in this module is compiled.
  * Each class Javadoc therefore documents its own methods and cites its own

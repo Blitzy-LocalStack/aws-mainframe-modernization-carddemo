@@ -69,7 +69,7 @@ import jakarta.validation.constraints.Size;
  * <p>Alternatives Considered: the constraints below are declarative, and the alternative was imperative
  * checking inside a compact constructor. Bean Validation is genuinely available here
  * rather than conditionally: {@code services/card-service/pom.xml} declares
- * {@code spring-boot-starter-validation} at line 211 with no optional flag. The constructor route is
+ * {@code spring-boot-starter-validation} at line 202 with no optional flag. The constructor route is
  * rejected on two independent grounds. It reports by throwing, so it stops at the first fault and
  * cannot describe a submission in which several members are bad, which is precisely what the per-field
  * array exists to carry; and the charter of this package makes a record here an inert carrier that

@@ -43,7 +43,7 @@
 #   has been withdrawn; the group note at the foot of this file records why.
 #
 # Parameters:
-#   None. An outputs.tf declares no input. The module's twenty inputs, each
+#   None. An outputs.tf declares no input. The module's twenty-one inputs, each
 #   carrying its own `type` and `description`, are declared in
 #   infra/modules/kms/variables.tf, and not one of them is republished here.
 #   An output echoing an input returns to the caller only what that caller
@@ -259,7 +259,7 @@
 # created, so it cannot be absent or malformed without that resource having
 # failed and stopped the run before any output is evaluated. The assertions that
 # do earn their place in this module guard its INPUTS, where a caller-supplied
-# value genuinely can be wrong, and they are already there: the nineteen
+# value genuinely can be wrong, and they are already there: the twenty
 # `validation` blocks in variables.tf. A precondition here would restate a
 # guarantee the provider already makes, while having to be read and maintained as
 # though it were load-bearing.

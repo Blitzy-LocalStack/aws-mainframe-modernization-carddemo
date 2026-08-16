@@ -187,10 +187,10 @@ output "log_group_arn" {
 # WHY : Refactoring Rationale: this note claimed that "main.tf deliberately
 #       attaches no statement of its own to this role" and that what a service
 #       may reach is therefore "exactly what a caller grants to this ARN and
-#       nothing besides". Both statements were false. main.tf attaches FOUR
+#       nothing besides". Both statements were false. main.tf attaches THREE
 #       inline policies to this role -- aws_iam_role_policy.task from the
-#       caller's own document, and the module-composed task_sqs,
-#       task_online_write_gate and task_telemetry -- and the last three exist
+#       caller's own document, and the module-composed task_sqs and
+#       task_online_write_gate -- and the last two exist
 #       precisely so that a caller cannot widen or replace them. The accurate
 #       division is stated in the description below, because a reader deciding
 #       where to grant something has to know that this role already carries
@@ -198,10 +198,15 @@ output "log_group_arn" {
 # WHY : Assumptions: the one-directional property the old note was reaching for
 #       is real and is narrower than it claimed: the module writes no BUSINESS
 #       resource access onto this role. Queue actions are bounded to the exact
-#       ARNs a caller passes, the flag read is bounded to one parameter, and the
-#       telemetry statement reaches only this service's own log group and X-Ray
-#       ingestion, so no statement composed here can reach another bounded
-#       context's data.
+#       ARNs a caller passes and the flag read is bounded to one parameter, so no
+#       statement composed here can reach another bounded context's data.
+# WHY : Refactoring Rationale: a fourth policy, task_telemetry, stood beside these
+#       and is withdrawn with the collector sidecar it served -- it granted this
+#       role log-stream writes on its own group plus the two X-Ray ingestion
+#       actions, and the latter was the only wildcard Resource anywhere on this
+#       role. Both counts above are restated rather than left standing, and the
+#       role's posture is now stronger than the sentence they were qualifying:
+#       neither a wildcard action nor a wildcard resource reaches it.
 output "task_role_arn" {
   description = <<-EOT
     ARN string of the IAM role the APPLICATION assumes at run time, as
@@ -212,10 +217,10 @@ output "task_role_arn" {
     iam:PassRole statement, and a resource-owning module names it in a resource
     policy where a grant belongs with the resource rather than with the
     workload. The role is not empty when it arrives: main.tf attaches the
-    caller's task_role_policy_json plus three module-composed statements -- the
-    exact-queue actions, the one-parameter write-gate read, and log and X-Ray
-    export scoped to this service's own log group -- so what the service may
-    reach is those four things and nothing besides. Never null: both roles are
+    caller's task_role_policy_json plus two module-composed statements -- the
+    exact-queue actions and the one-parameter write-gate read -- so what the
+    service may reach is those three things and nothing besides. Never null: both
+    roles are
     created for all nine instantiations.
   EOT
   value       = aws_iam_role.task.arn

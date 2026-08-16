@@ -35,7 +35,7 @@ import org.junit.jupiter.params.provider.MethodSource;
  * after it. The explanation therefore lives here, in Javadoc, which the documentation gate configured
  * at {@code config/checkstyle/checkstyle.xml} inspects mechanically at Maven {@code validate} with
  * {@code includeTestSourceDirectory} enabled. Prose kept beside the fixture instead would be
- * inspected by nothing: that file sets {@code fileExtensions="java"} at its line 185, which is also
+ * inspected by nothing: that file sets {@code fileExtensions="java"} at its line 178, which is also
  * the honest reason the {@code [\\/]src[\\/]test[\\/]resources[\\/]fixtures[\\/]} entry in
  * {@code config/checkstyle/suppressions.xml} is defensive rather than load-bearing -- it excludes a
  * tree the extension filter already excludes.</p>

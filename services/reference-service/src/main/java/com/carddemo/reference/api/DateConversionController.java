@@ -1,11 +1,11 @@
 package com.carddemo.reference.api;
 
+import com.carddemo.common.codec.DateInquiryReplyCodec;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.validation.DateEditValidator;
 import com.carddemo.reference.dto.DateConversionRequest;
 import com.carddemo.reference.dto.DateConversionResponse;
-import com.carddemo.reference.mapper.DateInquiryReplyMapper;
 import com.carddemo.reference.service.DateConversionService;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
@@ -49,15 +49,26 @@ import org.springframework.web.bind.annotation.RestController;
  *
  * <h2>The reply the sibling route carries, and why this class does not compose it</h2>
  *
+ * <p>Refactoring Rationale: the composing type named below is {@link DateInquiryReplyCodec} in the
+ * shared kernel, where it replaced a {@code @Component} that stood in this module's mapper package.
+ * The queue route it serves is answered by the ONE consumer that owns the shared inquiry request queue
+ * -- the account context, because {@code app/app-vsam-mq/README.md} L53 defines a single request
+ * destination for both inquiry programs and one queue admits exactly one owning consumer -- so the
+ * renderer had to be reachable from there. Placing it in the shared kernel beside the request codec
+ * that already single-sources the same one-thousand-character wire keeps ONE transcription of the
+ * layout, which is what transformation rule T2 requires; a copy in each context would be two chances
+ * to disagree about an offset. This class keeps only the citation, because the widths below are the
+ * reason its own two pictures are NOT that picture.</p>
+ *
  * <p>Assumptions: the queue reply is a forty-six-character string whose shape is load-bearing, and it
- * is composed by {@link DateInquiryReplyMapper} rather than here. Its two labels are exactly fourteen
+ * is composed by {@link DateInquiryReplyCodec} rather than here. Its two labels are exactly fourteen
  * characters each, {@code 'SYSTEM DATE : '} and {@code 'SYSTEM TIME : '}: the word, a space, four
  * letters, a space, a colon and a trailing space, so the space on BOTH sides of the colon and the
  * trailing space are part of the label. The composition at
  * {@code app/app-vsam-mq/cbl/CODATE01.cbl} L355 to L360 concatenates them with the values under
  * {@code DELIMITED BY SIZE}, which inserts NOTHING between the date value and the second label. The
  * total is therefore 14 + 10 + 14 + 8 = 46, published as
- * {@link DateInquiryReplyMapper#REPLY_BODY_LENGTH}, over the two declared value widths
+ * {@link DateInquiryReplyCodec#REPLY_BODY_LENGTH}, over the two declared value widths
  * {@code WS-MMDDYYYY PIC X(10)} at L37 and {@code WS-TIME PIC X(8)} at L38. Inserting a space, a comma
  * or a line break between the date value and the second label would leave every label present and the
  * total wrong, which is the one way that shape breaks without looking broken.</p>
@@ -75,8 +86,9 @@ import org.springframework.web.bind.annotation.RestController;
  * {@code EXEC CICS ASKTIME ABSTIME(WS-ABS-TIME)}, and rendered it at L347 to L353. This endpoint
  * reports on a date a caller submits, so it needs no instant and reads none: there is no clock call in
  * this class and no clock member on it. The route that does need one, the reply composition described
- * above, takes it from a {@code java.time.Clock} supplied to
- * {@code com.carddemo.reference.service.DateInquiryMessageListener} at construction. That is the
+ * above, takes it from a {@code java.time.Clock} supplied to the ONE consumer that owns the shared
+ * inquiry request queue, {@code com.carddemo.account.service.InquiryMessageListener}, at construction,
+ * and hands it to {@link DateInquiryReplyCodec} as an argument. That is the
  * supported path rather than a preference, because
  * {@code com.carddemo.common.time.TimestampFormatter} publishes a member taking a clock and
  * deliberately publishes no argument-free equivalent, and it is what lets a reply be asserted byte for
@@ -214,11 +226,12 @@ public class DateConversionController {
      *
      * <p>Refactoring Rationale: this parameter is typed for the evaluation it reaches and not for a
      * transport. It formerly took {@code DateConversionMessageListener}, a type that carried a second
-     * queue consumer competing with {@code DateInquiryMessageListener} for the same request queue;
-     * consolidating that flow removed the competing consumer and left this evaluation as the only
-     * member the controller needed, so the type was withdrawn rather than kept as a wrapper. A
-     * controller depending on a type named for a queue listener is a dependency a reader has to
-     * explain away, and there is now nothing to explain.</p>
+     * queue consumer competing for the same request queue; consolidating that flow removed the
+     * competing consumer and left this evaluation as the only member the controller needed, so the type
+     * was withdrawn rather than kept as a wrapper. A controller depending on a type named for a queue
+     * listener is a dependency a reader has to explain away, and there is now nothing to explain --
+     * this module holds no queue consumer at all, which
+     * {@code ReferenceServiceStructureTest.noMethodInThisPackageBindsAQueueListener} asserts.</p>
      *
      * @param evaluator the holder of the migrated date rules, as a {@link DateConversionService};
      *     must not be {@code null}
@@ -275,11 +288,13 @@ public class DateConversionController {
             //       as received, including as null, so that the default is applied in the one place
             //       that also echoes which picture was used.
             // WHY : Assumptions: this evaluation is reached from this route ALONE, and no shared path
-            //       with the queue route exists to be preserved. The queue route is
-            //       DateInquiryMessageListener; it emits the current system date and time, reads no
-            //       field of its request and calls no evaluation, so the two transports answer
-            //       different questions. Stating that here keeps a reader from looking for a common
-            //       evaluation to hold the two to.
+            //       with the queue route exists to be preserved. The queue route is not in this module
+            //       at all: it is the one consumer owning the shared inquiry request queue,
+            //       com.carddemo.account.service.InquiryMessageListener, which emits the current system
+            //       date and time for a request whose function field reads DATE and calls no evaluation
+            //       to do it. The two transports answer different questions -- one reports on a date a
+            //       caller submits, the other reports the clock -- so stating that here keeps a reader
+            //       from looking for a common evaluation to hold the two to.
             return this.evaluator.convert(new DateConversionRequest(date, mask));
         } catch (DateEditValidator.DateWidthException widthRefusal) {
             // WHY : Refactoring Rationale: the width mismatch is re-raised as a caller refusal rather

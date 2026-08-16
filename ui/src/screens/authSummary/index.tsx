@@ -54,11 +54,26 @@
  * reader can traverse, neither of which absolute character positions permit. All layout therefore
  * goes through `Descriptions`, `Table`, `Flex` and `Space`, and no raw element carries bespoke
  * geometry.
+ *
+ * The title band is the shell's, and this screen now says so executably
+ * --------------------------------------------------------------------
+ * Refactoring Rationale: the two `PIC X(40)` title constants painted on rows 1 and 2 are deliberately
+ * not rendered here, and until this revision that statement was prose with nothing behind it. No
+ * screen in the tree called `useShellSlot`, so the band this screen documented as belonging to the
+ * shell was painted by nobody and rows 1 and 2 were simply blank. The screen now DELEGATES its
+ * identity -- {@link AUTH_SUMMARY_TRANSACTION_ID} and {@link AUTH_SUMMARY_PROGRAM_NAME} -- together
+ * with a server-derived paint instant, so `ui/src/layout/AppShell.tsx` renders the band above the
+ * outlet with this screen's own `Tran:` and `Prog:` values in it.
+ *
+ * Assumptions: only the header zone is delegated. The message band and the key legend stay composed
+ * here, because this mapset's message field is 78 characters wide and its legend colour and bindings
+ * are this screen's, and `useShellSlot` renders a zone only when it is delegated -- so delegating
+ * those two as well would paint a second live region and a second legend beside the ones below.
  */
 
 import { Descriptions, Flex, Form, Input, Radio, Table, Typography, theme } from 'antd';
 import type { DescriptionsProps, RadioChangeEvent, TableColumnsType } from 'antd';
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import type { CSSProperties, ReactElement } from 'react';
 import { useNavigate } from 'react-router';
 
@@ -73,20 +88,25 @@ import type {
   PendingAuthListQuery,
   PendingAuthSummary,
 } from '../../api/types';
-import { MessageBand } from '../../layout/MessageBand';
+import { useShellSlot } from '../../layout/AppShell';
+
 import type { MessageBandSeverity } from '../../layout/MessageBand';
-import { PfKeyBar, UNIFORM_PF_KEY_LABELS } from '../../layout/PfKeyBar';
+import { UNIFORM_PF_KEY_LABELS } from '../../layout/PfKeyBar';
 import { usePfKeys } from '../../layout/usePfKeys';
 import type { PfKeyRejection } from '../../layout/usePfKeys';
 import { usePagedQuery } from '../../hooks/usePagedQuery';
 import type { PagedQueryRequest } from '../../hooks/usePagedQuery';
+import { useServerInstant } from '../../hooks/useServerInstant';
 import { PROGRAM_MESSAGES, SHARED_MESSAGES } from '../../messages/messages';
+import { MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
 import {
-  BMS_COLOR_TOKENS,
+  BMS_TEXT_COLOR_TOKENS,
   DESIGN_GAPS,
   FIELD_ERROR_TOKENS,
   TYPOGRAPHY_TOKENS,
 } from '../../theme/tokens';
+import { RECORD_VIEW_COLUMNS } from '../../layout/recordLayout';
+import { VISUALLY_HIDDEN_STYLE, fieldAriaProps, fieldErrorHelp } from '../../layout/fieldHelp';
 
 /**
  * The `var(--…)` reference form of the design tokens, as antd's theme hook publishes it.
@@ -159,6 +179,33 @@ export const AUTH_SUMMARY_LABELS = {
   cashBalance: 'Cash Bal:',
   /** `COPAU00.bms` L188 to L191, `LENGTH=9`, `COLOR=DEFAULT`. */
   declinedAmount: 'Decl Amt:',
+} as const;
+
+/*
+ * WHY : Assumptions: these two names are held SEPARATELY from the catalog above and not added to it,
+ *       because that catalog is a transcription -- every member carries the mapset line its literal comes
+ *       from -- and these two literals appear in no mapset. They are accessible names for the two fields
+ *       the mapset labels with nothing, they never reach the screen, and mixing them into a transcription
+ *       would make the next reader unable to tell which of its members the source actually paints.
+ */
+
+/*
+ * WHY : Assumptions: the value is `'max-content'` and not a pixel figure, and it is declared once here so
+ *       the table's narrow-screen behaviour is stated in one place rather than inline among its props.
+ *       `max-content` asks the layout for the width the eight fixed-width columns actually need, which is
+ *       the only figure that cannot drift from the column definitions; the full reasoning, including the
+ *       stacked-representation alternative that was rejected, is recorded at the render site.
+ */
+
+/** Horizontal scroll policy for the eight-column authorization table. */
+export const AUTH_SUMMARY_TABLE_SCROLL = { x: 'max-content' } as const;
+
+/** Accessible names for the two address lines the mapset paints with no label of their own. */
+export const AUTH_SUMMARY_HIDDEN_LABELS = {
+  /** Names `ADDR001`, `COPAU00.bms` L107 to L110. */
+  addressLine1: 'Address line 1',
+  /** Names `ADDR002`, `COPAU00.bms` L118 to L121. */
+  addressLine2: 'Address line 2',
 } as const;
 
 /**
@@ -311,17 +358,41 @@ export const AUTH_SUMMARY_PAGE_SIZE = 5;
  */
 export const AUTH_SUMMARY_SELECTION_CODE = 'S';
 
+/*
+ * WHY : ⚠️ Refactoring Rationale: a row's control is named for the ACTION it performs, where it used to be
+ *       named `'S <transaction id>'` -- the selection character followed by the identifier. That name was
+ *       the terminal's INPUT, not a description: on the 3270 an operator types `S` into the selector, so
+ *       `S` is what the field would contain, and a control announced as "S 0000000123456789" tells a
+ *       screen-reader user the letter to type into a field that does not exist in a browser while saying
+ *       nothing about what choosing the row does. The selection character remains what the screen sends
+ *       for the turn -- `resolveSelectionAction` still tests it -- and it is no longer what the control
+ *       is called.
+ */
+
+/**
+ * Builds the accessible name of one row's selection control.
+ * @param {string} transactionId - The acquirer's transaction identifier, which names the row.
+ * @returns {string} The action-oriented name for that row's control.
+ */
+export function selectionActionLabel(transactionId: string): string {
+  return `Select authorization ${transactionId}`;
+}
+
 /**
  * Route the back key returns to.
  *
  * Assumptions: the main menu, because `COPAUS0C.cbl` L235 to L238 moves `WS-PGM-MENU` -- declared
  * `'COMEN01C'` at L35 -- into the next-program field before transferring. `RETURN-TO-PREV-SCREEN` at
  * L664 to L677 substitutes `'COSGN00C'` only when that field is blank, which cannot occur on this arm
- * because the same arm sets it. The path is declared here rather than imported because
- * `ui/src/routes/navigation.ts` is not among this screen's declared dependencies; it is the route the
- * migration plan assigns to `COMEN01C`.
+ * because the same arm sets it.
+ *
+ * ⚠️ Refactoring Rationale: the path is now the routing tree's own `MAIN_MENU_ROUTE` rather than a second
+ * `'/menu'` literal, and the sentence that used to stand here -- that the shared module "is not among
+ * this screen's declared dependencies" -- is gone with the duplicate navigation helper it justified. One
+ * literal in two modules is one rename away from a screen whose back key reaches a route that no longer
+ * exists, and the failure would be invisible until an operator pressed PF3.
  */
-export const AUTH_SUMMARY_BACK_ROUTE = '/menu';
+export const AUTH_SUMMARY_BACK_ROUTE: typeof MAIN_MENU_ROUTE = MAIN_MENU_ROUTE;
 
 /**
  * Severity every sentence on this screen is shown at.
@@ -363,8 +434,20 @@ const ACCOUNT_ID_LABEL_ID = 'auth-summary-account-id-label';
 /** Identifier of the account-entry control itself, so its label can name it. */
 const ACCOUNT_ID_INPUT_ID = 'auth-summary-account-id';
 
-/** Matches an entry consisting only of decimal digits, which is COBOL's `IS NUMERIC` on a `PIC X`. */
-const DIGITS_ONLY = /^[0-9]+$/u;
+/*
+ * WHY : ⚠️ Refactoring Rationale: the pattern requires exactly the declared field width, where it used to
+ *       accept one digit or more. The count is spelled from `AUTH_SUMMARY_FIELD_WIDTHS.accountId` rather
+ *       than written as `{11}`, so the local test and the control's `maxLength` cannot come to disagree
+ *       about the width both take from `ACCTIDI PIC X(11)`. It is built once at module scope rather than
+ *       per keystroke because a `RegExp` constructed from a template is compiled on every construction.
+ * WHY : Assumptions: an exact width is COBOL's `IS NUMERIC` on this field, not a stricter rule added on
+ *       top of it. The terminal delivers the field space-padded to eleven, so anything shorter carries
+ *       spaces into the numeric test and fails it there; the reasoning is recorded in full at
+ *       `classifyAccountIdEntry`.
+ */
+
+/** Matches an entry of exactly the declared width, all digits — COBOL's `IS NUMERIC` on the padded field. */
+const ELEVEN_DIGITS = new RegExp(`^[0-9]{${String(AUTH_SUMMARY_FIELD_WIDTHS.accountId)}}$`, 'u');
 
 /**
  * Builds the detail route for one authorization.
@@ -382,42 +465,21 @@ export function authorizationDetailPath(key: string): string {
   return `/authorizations/${encodeURIComponent(key)}`;
 }
 
-/**
- * Performs a route change and guarantees the destination is reached.
- *
- * Assumptions: the router's navigate function returns a PROMISE in this version, and that promise
- * rejects when a transition is interrupted or blocked. Leaving it unhandled would drop the operator's
- * key press silently -- the screen would simply not change, with nothing anywhere saying why -- so the
- * rejection falls back to a document-level navigation, which cannot be interrupted by the router. That
- * matters more here than on a pointer-driven screen: PF3 and a row selection are the only ways off this
- * screen, and a swallowed transition would leave an operator pressing a key that appears dead.
- *
- * Trade-offs: this repeats a seam the routing tree already owns, and the duplication is accepted rather
- * than hidden. `ui/src/routes/navigation.ts` holds the same fallback for the card screens, but it is not
- * among this screen's declared dependencies, and inventing an import outside that set is the one thing
- * the import discipline forbids outright. The cost is two copies of one policy; the note is here so a
- * later revision that widens this screen's dependency set can collapse them rather than discover them.
- * @param {(destination: string) => void | Promise<void>} navigateTo - The router's navigate function.
- * @param {string} destination - The path to reach.
- * @returns {void} Nothing; the transition is performed as a side effect.
+/*
+ * WHY : ⚠️ Refactoring Rationale: both route changes on this screen now go through `navigateSafely` from
+ *       `ui/src/routes/navigation.ts`, where a local `navigateAssured` used to hold a byte-for-byte copy
+ *       of the same policy -- take the router's returned promise and, if it rejects because a transition
+ *       was interrupted or blocked, fall back to a document-level navigation the router cannot interrupt.
+ *       The copy's own comment recorded the duplication and declined to remove it on the ground that the
+ *       shared module was not among this screen's declared dependencies; that ground was wrong, because
+ *       a route change is not this screen's concern to own and the routing tree already publishes the
+ *       decision. Two copies of a fallback policy is two places for it to drift, and the drift would show
+ *       up as a key press that appears dead on one screen and works on another.
+ * WHY : Assumptions: the shared seam is behaviourally identical for the two call sites here, which is
+ *       what makes the swap safe rather than merely tidier. It widens the accepted destination from a
+ *       string to the router's own `To`, and it resolves the fallback target from a `To` object's
+ *       pathname -- both call sites below pass a string, so they take exactly the path the copy took.
  */
-function navigateAssured(
-  navigateTo: (destination: string) => void | Promise<void>,
-  destination: string,
-): void {
-  const transition = navigateTo(destination);
-  if (transition instanceof Promise) {
-    transition.catch(
-      /**
-       * Reaches the destination directly when the router could not complete the transition.
-       * @returns {void} Nothing; the document is replaced as a side effect.
-       */
-      () => {
-        window.location.assign(destination);
-      },
-    );
-  }
-}
 
 /**
  * One sentence bound for the message band, paired with the appearance it is shown in.
@@ -441,22 +503,44 @@ interface ScreenNotice {
  * `= SPACES OR LOW-VALUES` against a fixed 11-byte field, where an operator who typed only spaces and
  * one who typed nothing arrive identically.
  *
- * Assumptions: the numeric test is applied to the characters the operator supplied, NOT to a parsed
- * number, and not to a space-padded field. The source's `IS NOT NUMERIC` runs over `ACCTIDI PIC X(11)`
- * as the 3270 delivers it, space-padded to eleven, so on the terminal a short entry also fails that
- * test. A browser control delivers exactly what was typed with no padding, so the width contract is
- * carried by `maxLength` on the control instead and this test decides only whether every supplied
- * character is a digit. Parsing to a number would additionally accept `1e3`, a sign and a decimal
- * point, none of which is numeric to COBOL.
+ * ⚠️ Assumptions: the numeric test requires EXACTLY eleven digits, and the width is part of that one
+ * test rather than a separate rule -- because it is part of the source's one test too. `IS NOT NUMERIC`
+ * runs over `ACCTIDI PIC X(11)` as CICS delivers it, which is left-justified and SPACE-PADDED to eleven,
+ * so a ten-digit entry arrives as ten digits and one space and fails the test. The terminal therefore
+ * answers a short entry with `'Acct Id must be Numeric ...'`, exactly as it answers one carrying a letter.
+ *
+ * ⚠️ Refactoring Rationale: this used to accept ANY non-blank digit run, on the ground that "a browser
+ * control delivers exactly what was typed with no padding, so the width contract is carried by
+ * `maxLength` on the control instead". That reasoning is withdrawn: `maxLength` caps a control at eleven
+ * characters and says nothing about ten, so a ten-digit entry passed the classification and was SENT --
+ * where the source refuses it locally and reads nothing. The consequence was a round trip the reference
+ * never makes, answered by whatever the service says about an identifier of the wrong width, in place of
+ * the one verbatim sentence the operator should have seen. Padding the entry to eleven and re-testing
+ * would be the literal transcription and is not used, because it would report a short entry through a
+ * value the operator did not type; requiring the exact width states the same rule directly.
+ *
+ * Assumptions: the test runs over the supplied characters and never over a parsed number. Parsing would
+ * additionally accept `1e3`, a sign and a decimal point, none of which is numeric to COBOL.
  * @param {string} entry - The account identifier as entered, unpadded.
  * @returns {FieldValidationState | null} `'BLANK'` for an empty or all-space entry, `'NOT_OK'` for one
- *   carrying a non-digit, or `null` when the entry is usable.
+ *   that is not exactly {@link AUTH_SUMMARY_FIELD_WIDTHS.accountId} digits, or `null` when the entry is
+ *   usable.
  */
 export function classifyAccountIdEntry(entry: string): FieldValidationState | null {
   if (entry.trim() === '') {
     return 'BLANK';
   }
-  return DIGITS_ONLY.test(entry) ? null : 'NOT_OK';
+  /*
+   * WHY : Refactoring Rationale: the width test and the digit test are ONE pattern, {@link ELEVEN_DIGITS},
+   *       rather than a digits-only pattern combined with a length comparison. Two revisions independently
+   *       added the width requirement to a base that had only the digit test -- one by building the width
+   *       into the pattern from `AUTH_SUMMARY_FIELD_WIDTHS.accountId`, one by comparing `entry.length`
+   *       against the same constant -- and the merged file kept the second body beside the first's
+   *       declaration, so it referenced a pattern that no longer existed. They are the same rule and the
+   *       pattern is the form kept: it takes the declared width from the same constant, so neither
+   *       spelling can drift from the field, and it leaves exactly one thing to read at the call site.
+   */
+  return ELEVEN_DIGITS.test(entry) ? null : 'NOT_OK';
 }
 
 /**
@@ -648,7 +732,7 @@ function displayText(value: string | null): string {
  */
 function moneyCellStyle(tokens: AntdCssVariables, width: number): CSSProperties {
   return {
-    color: tokens[BMS_COLOR_TOKENS.BLUE],
+    color: tokens[BMS_TEXT_COLOR_TOKENS.BLUE],
     // WHY : Refactoring Rationale: `display` is set to `inline-block` because `Typography.Text`
     //       renders a `span`, and CSS applies neither `min-inline-size` nor `text-align` to a
     //       non-replaced INLINE box -- such a box is sized by its content. Browser validation of
@@ -684,7 +768,7 @@ function moneyCellStyle(tokens: AntdCssVariables, width: number): CSSProperties 
  * @returns {CSSProperties} The style for a plain value cell.
  */
 function valueCellStyle(tokens: AntdCssVariables): CSSProperties {
-  return { color: tokens[BMS_COLOR_TOKENS.BLUE], overflowWrap: 'break-word' };
+  return { color: tokens[BMS_TEXT_COLOR_TOKENS.BLUE], overflowWrap: 'break-word' };
 }
 
 /**
@@ -697,11 +781,22 @@ function valueCellStyle(tokens: AntdCssVariables): CSSProperties {
  * is preserved even though absolute position is not, which is the half of design gap **G1** that is
  * kept.
  *
- * Assumptions: the two address entries carry NO label, because the mapset paints none for them --
- * `ADDR001` at L107 and `ADDR002` at L118 have no preceding `INITIAL=` field, unlike every other value
- * in the panel. Supplying one would put user-visible text on screen that no baseline source declares,
- * which Transformation Rule T8 forecloses; the association survives structurally because both sit
- * directly beneath the name they continue, exactly as painted.
+ * ⚠️ Refactoring Rationale: the two address entries carry a label that is present in the accessibility
+ * tree and absent from the screen, where they used to carry no label at all. The mapset genuinely paints
+ * none -- `ADDR001` at L107 and `ADDR002` at L118 have no preceding `INITIAL=` field, unlike every other
+ * value in the panel -- and a visible label would put text on screen that no baseline source declares,
+ * which transformation rule T8 forecloses. What the old reasoning got wrong was the sentence that
+ * followed: it held that "the association survives structurally because both sit directly beneath the
+ * name they continue, exactly as painted". That is positional identification, and positional
+ * identification is precisely what design gap G1 surrenders -- these entries reflow to one column below
+ * the medium breakpoint, so "directly beneath" is not a property the delivered screen has at every
+ * width, and it was never a property a screen reader could use at any width. Two bordered cells whose
+ * header cell is empty are announced as a value with no name.
+ *
+ * Assumptions: the two hidden names are composed from the mapset's own field data names, `ADDR001` and
+ * `ADDR002`, expressed as the address line each one is -- so the name an assistive technology reads
+ * corresponds to a field a maintainer can find in `COPAU00.bms`, and nothing is invented beyond the
+ * ordinal the source itself numbers them by.
  *
  * Alternatives Considered: binding the `'Acct Status: '` entry to the five `accountStatus1` through
  * `accountStatus5` members instead of to `authStatus`. Rejected on width: `ACCSTAT` is declared
@@ -739,6 +834,11 @@ export function buildAuthSummaryDescriptions(
     },
     {
       key: 'addressLine1',
+      label: (
+        <Typography.Text style={VISUALLY_HIDDEN_STYLE}>
+          {AUTH_SUMMARY_HIDDEN_LABELS.addressLine1}
+        </Typography.Text>
+      ),
       children: (
         <Typography.Text style={value}>{displayText(summary.addressLine1)}</Typography.Text>
       ),
@@ -750,6 +850,11 @@ export function buildAuthSummaryDescriptions(
     },
     {
       key: 'addressLine2',
+      label: (
+        <Typography.Text style={VISUALLY_HIDDEN_STYLE}>
+          {AUTH_SUMMARY_HIDDEN_LABELS.addressLine2}
+        </Typography.Text>
+      ),
       children: (
         <Typography.Text style={value}>{displayText(summary.addressLine2)}</Typography.Text>
       ),
@@ -915,25 +1020,33 @@ export function formatAuthOrigTime(stored: string | null): string {
  * eight-character composed stamps, a four-character type and three single characters -- and the token
  * mapping assigns `fontFamilyCode` to "fixed-pitch money and identifier columns". A proportional font
  * would let digits of different widths break the column alignment the terminal had.
- * @param {string | null} selectedKey - The sealed selector of the chosen row, or `null` when none is
- *   chosen.
- * @param {(key: string) => void} onSelect - Invoked with a row's selector when that row is chosen.
+ *
+ * ⚠️ Refactoring Rationale: the selection state and the selection handler are NO LONGER passed in, because
+ * the five controls are now members of one `Radio.Group` mounted around the table and a group owns both.
+ * Five independent radios, each holding its own `checked` and its own change handler, are five separate
+ * one-of-one groups to an assistive technology: arrow keys do not move between them, the set is not
+ * announced as a set, and nothing states that choosing one clears another. The source is unambiguous
+ * that they ARE one set -- `PROCESS-ENTER-KEY` scans the five selectors in order and takes the first
+ * carrying the selection character (`COPAUS0C.cbl` L296 to L330), which is single-select, first wins.
+ *
+ * Assumptions: dropping the two parameters is what makes the change enforceable rather than merely
+ * present. Had they stayed, a caller could still pass a handler and re-create the per-row binding beside
+ * the group's, and the two would fight over the same click.
  * @param {AntdCssVariables} tokens - The theme's CSS-variable references.
  * @returns {TableColumnsType<PendingAuthListItem>} The table columns, ready for `Table`.
  */
 export function buildPendingAuthColumns(
-  selectedKey: string | null,
-  onSelect: (key: string) => void,
   tokens: AntdCssVariables,
 ): TableColumnsType<PendingAuthListItem> {
   const code: CSSProperties = {
-    color: tokens[BMS_COLOR_TOKENS.BLUE],
+    color: tokens[BMS_TEXT_COLOR_TOKENS.BLUE],
     fontFamily: tokens[TYPOGRAPHY_TOKENS.fixedPitchData],
   };
   return [
     {
       title: AUTH_SUMMARY_COLUMN_HEADERS.selection,
       key: 'selection',
+      fixed: 'left',
       /**
        * Renders one row's selection control.
        *
@@ -947,29 +1060,13 @@ export function buildPendingAuthColumns(
        * @returns {ReactElement} That row's selection control.
        */
       render: (row: PendingAuthListItem): ReactElement => (
-        <Radio
-          aria-label={`${AUTH_SUMMARY_SELECTION_CODE} ${row.transactionId}`}
-          checked={selectedKey === row.key}
-          onChange={
-            /**
-             * Records this row as the selected one.
-             * @param {RadioChangeEvent} event - The change event antd forwards; read only to confirm
-             *   the control became checked rather than cleared.
-             * @returns {void} Nothing; the selection is recorded as a side effect.
-             */
-            (event: RadioChangeEvent) => {
-              if (event.target.checked) {
-                onSelect(row.key);
-              }
-            }
-          }
-          value={row.key}
-        />
+        <Radio aria-label={selectionActionLabel(row.transactionId)} value={row.key} />
       ),
     },
     {
       title: AUTH_SUMMARY_COLUMN_HEADERS.transactionId,
       key: 'transactionId',
+      fixed: 'left',
       /**
        * Renders the acquirer's transaction identifier.
        * @param {PendingAuthListItem} row - The authorization being listed.
@@ -1070,6 +1167,15 @@ export function buildPendingAuthColumns(
   ];
 }
 
+/*
+ * WHY : Refactoring Rationale: a frozen `SHELL_IDENTITY_SLOT` constant stood here for an identity-only
+ *       publication, and both are withdrawn in favour of the single complete slot in the component body.
+ *       Its reason for delegating the identity ALONE was that this mapset paints its own message field
+ *       and its own legend, so delegating those would duplicate them -- and that is resolved by moving
+ *       them rather than by withholding the slot: the row-23 line and the row-24 legend ARE delegated
+ *       and the body's own copies are withdrawn with them, so exactly one element paints each row.
+ */
+
 /**
  * The pending-authorization summary screen.
  *
@@ -1091,19 +1197,60 @@ export function buildPendingAuthColumns(
  * driven purely by the response and by this turn's own validation rather than by a remembered turn
  * count as `app/cpy/CSSETATY.cpy` gates it.
  *
- * Chrome is composed here because there is no shell to compose it
- * -------------------------------------------------------------
- * Assumptions: this screen mounts its own message band and function-key bar. `ui/src/layout/` holds
- * `MessageBand`, `PfKeyBar`, `ScreenHeader` and `usePfKeys` and no shell component, and there is no
- * context provider anywhere in the application, so every screen composes its own chrome -- which is
- * what the authored card screens do. The shared title band is deliberately NOT mounted here:
- * `ScreenHeader` is not among this screen's declared dependencies, and the two `PIC X(40)` title
- * constants it paints belong to it rather than to this mapset, whose own contribution to the heading is
- * the row-3 sub-title rendered below.
+ * Chrome is part composed and part delegated
+ * -----------------------------------------
+ * Assumptions: this screen mounts its own message band and function-key bar, and DELEGATES the shared
+ * title band to the frame. `ui/src/layout/AppShell.tsx` is the frame, `ui/src/router.tsx` mounts it as
+ * the authenticated layout route, and it paints each of its zones only for a screen that has published
+ * one -- so publishing the screen identity through `useShellSlot` gets the band this mapset omits while
+ * the two bands composed below are left untouched.
+ *
+ * Refactoring Rationale: this section previously stated that `ui/src/layout/` held no shell component
+ * and concluded that every screen must therefore compose all of its own chrome. The first half was
+ * wrong -- `AppShell.tsx` sits in that directory and publishes `AppShell`, `useShellSlot` and
+ * `publishShellSlot` -- and the second half was acted on selectively: the message band and the key
+ * legend were composed here, and the title band was omitted on the separate ground that the two
+ * `PIC X(40)` title constants belong to the band rather than to this mapset. Both grounds were
+ * defensible and their combination was not, because with the shell mounted by no route the omitted band
+ * was painted by nobody: rows 1 and 2 of this screen -- `TRNNAME`, `TITLE01`, `CURDATE`, `PGMNAME`,
+ * `TITLE02` and `CURTIME` -- rendered nothing at all.
+ *
+ * Assumptions: the title constants still belong to the band rather than to this module, which is why
+ * the band is delegated rather than composed. What this mapset contributes to the heading is the row-3
+ * sub-title, which is rendered below and stays here.
  * @returns {ReactElement} The composed screen.
  */
 export function AuthSummaryScreen(): ReactElement {
+  /*
+   * WHY : Refactoring Rationale: every text colour in this module resolves through
+   *       `BMS_TEXT_COLOR_TOKENS` and not through the hue map `BMS_COLOR_TOKENS`. The measured source
+   *       roles and the bridge that assigns each `COLOR=` operand its semantic role are unchanged;
+   *       what changed is that the hue map's entries are mid-ramp FILL anchors, and read as text the
+   *       turquoise role measures 2.205:1 and the blue role 4.104:1 against the surface the shell
+   *       paints, where WCAG AA asks 4.5:1 for normal text. `ui/src/theme/tokens.ts` records, per
+   *       role, the in-family shade that was measured and the text-grade token that replaced it.
+   */
   const navigate = useNavigate();
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: this screen publishes ONE shell slot and reads the server instant
+   *       ONCE, where four publications and three reads stood together. Each publication was a later
+   *       generation of the same remedy -- the screen painted no title band, so nothing supplied the
+   *       transaction identifier, the program name or a clock -- and every generation was kept: two
+   *       identity-only publications, one adding the legend, and the complete one below. The last one
+   *       wins for every member it names, so the earlier three added three hook calls and an appearance
+   *       of disagreement about which zones this screen delegates.
+   * WHY : Assumptions: the surviving publication is the LAST one, and it has to be: it names `bindings`
+   *       and `invoke` from this screen's own `usePfKeys` call and the derived `bandNotice`, none of which
+   *       exist this early. It delegates the identity, the paint instant, the row-23 message line and the
+   *       key legend, and what stays in the body is the mapset's row-22 selection prompt.
+   * WHY : Assumptions: the instant is read here and handed up rather than read inside the shell, because
+   *       `ui/src/hooks/useServerInstant.ts` reads `ui/src/api/serverClock.ts` and the shell is required
+   *       to carry no dependency on the API layer. Handing up nothing makes `ScreenHeader` fall back to
+   *       the browser clock -- the divergence registered as D-7 -- so two screens in one frame would
+   *       disagree about the time for no reason a reader could discover.
+   */
+  const paintedAt = useServerInstant();
   const { cssVar } = theme.useToken();
 
   const [accountIdEntry, setAccountIdEntry] = useState('');
@@ -1112,6 +1259,13 @@ export function AuthSummaryScreen(): ReactElement {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [summary, setSummary] = useState<PendingAuthSummary | null>(null);
   const [serviceMessage, setServiceMessage] = useState<string | null>(null);
+  /*
+   * WHY : ⚠️ Assumptions: the read generation is a REF and not state, because nothing renders from it and
+   *       a settlement must be able to read it synchronously, before the next render. A state value would
+   *       be read from the closure of the render that opened the read, so every settlement would compare
+   *       its own number against itself and every one of them would look current.
+   */
+  const readGeneration = useRef(0);
   const [notice, setNotice] = useState<ScreenNotice | null>(null);
 
   const readPage = useCallback(
@@ -1137,9 +1291,33 @@ export function AuthSummaryScreen(): ReactElement {
         request.cursor === null
           ? { accountId: scopedAccountId }
           : { accountId: scopedAccountId, cursor: request.cursor, direction: request.direction };
+      const generation = readGeneration.current + 1;
+
+      readGeneration.current = generation;
+
       const response = await listPendingAuthorizations(query);
-      setSummary(response.summary);
-      setServiceMessage(response.screenMessage);
+
+      /*
+       * WHY : ⚠️ Refactoring Rationale: the two side effects are GUARDED, and they were not. This function
+       *       is handed to the paging hook, which discards a page envelope belonging to a superseded read
+       *       -- but these two writes happen HERE, before the envelope is returned, so they landed
+       *       whatever the hook then decided about the rows. The consequence is a disclosure and not a
+       *       stale view: the panel above the table renders the account holder's name, address and
+       *       balances, so an account-A response settling after an account-B page put account A's holder
+       *       and balances above account B's rows, attributed to account B.
+       * WHY : Alternatives Considered: returning a compound result so the hook could apply all three
+       *       together. Rejected because the hook's `fetchPage` contract is a page envelope and nothing
+       *       else -- widening it would put a member on every browse for the benefit of one -- and
+       *       because a generation guard is what the hook itself uses, so the two agree by construction
+       *       rather than by coincidence.
+       * WHY : Assumptions: the generation is compared rather than the scope. A scope comparison would
+       *       miss the case that matters most: two reads under the SAME account, where the later one
+       *       carries a page the earlier one's summary would still overwrite.
+       */
+      if (readGeneration.current === generation) {
+        setSummary(response.summary);
+        setServiceMessage(response.screenMessage);
+      }
       return response.page;
     },
     [scopedAccountId],
@@ -1233,7 +1411,7 @@ export function AuthSummaryScreen(): ReactElement {
     const selectionFlag = selectedKey === null ? '' : AUTH_SUMMARY_SELECTION_CODE;
     const action = resolveSelectionAction(selectionFlag, selectedKey);
     if (action === 'open' && selectedKey !== null) {
-      navigateAssured(navigate, authorizationDetailPath(selectedKey));
+      navigateSafely(navigate, authorizationDetailPath(selectedKey));
       return;
     }
     if (action === 'invalid') {
@@ -1266,9 +1444,22 @@ export function AuthSummaryScreen(): ReactElement {
     setSelectedKey(null);
     if (accountIdEntry === scopedAccountId) {
       browse.reset();
-    } else {
-      setScopedAccountId(accountIdEntry);
+      return;
     }
+
+    /*
+     * WHY : ⚠️ Assumptions: the panel and the service sentence are CLEARED as the scope changes, and the
+     *       generation is advanced with them. Without both, a turn that scopes to a second account leaves
+     *       the first account's holder name, address and balances on display until the new read settles --
+     *       so the panel names one account while the entry field and, moments later, the rows name
+     *       another. Advancing the generation is the other half: it withdraws any read still outstanding
+     *       under the previous scope, so that read cannot repaint what this clears. The source has no
+     *       equivalent moment because it composes the whole screen once per turn, after its read.
+     */
+    readGeneration.current += 1;
+    setSummary(null);
+    setServiceMessage(null);
+    setScopedAccountId(accountIdEntry);
   }
 
   /**
@@ -1326,7 +1517,7 @@ export function AuthSummaryScreen(): ReactElement {
    * @returns {void} Nothing; navigation is performed as a side effect.
    */
   function returnToMenu(): void {
-    navigateAssured(navigate, AUTH_SUMMARY_BACK_ROUTE);
+    navigateSafely(navigate, AUTH_SUMMARY_BACK_ROUTE);
   }
 
   /*
@@ -1396,6 +1587,34 @@ export function AuthSummaryScreen(): ReactElement {
   const bandNotice = notice ?? listingFailure ?? serviceNotice;
 
   /*
+   * WHY : Refactoring Rationale: the three persistent zones are DELEGATED to the single mounted
+   *       `AppShell` instead of composed below, which is what gives this screen the title band its
+   *       mapset paints at rows 1 and 2. Those six fields were previously absent from the rendered
+   *       screen: this module documented that the band was the shell's to paint, and no shell was
+   *       mounted and nothing published to it, so the transaction identifier, program name and clock
+   *       reached no display at all.
+   * WHY : Assumptions: the resolved `bindings` and `invoke` from this screen's own `usePfKeys` call are
+   *       handed over rather than re-derived by the shell, and delegating them is also what keeps the
+   *       keyboard singly owned. The shell binds its own sign-off key only while NO screen has published
+   *       one, so publishing here makes it stand down and exactly one document listener stays installed
+   *       while this screen is mounted.
+   * WHY : Assumptions: no `legendColor` is delegated, because this mapset paints its row-24 legend
+   *       `COLOR=YELLOW` at L507 to L512, which is the slot's own default and the majority across the
+   *       mapset population. Stating it would suggest this screen departs from the majority when it does
+   *       not.
+   */
+  useShellSlot({
+    screen: { transactionId: AUTH_SUMMARY_TRANSACTION_ID, programName: AUTH_SUMMARY_PROGRAM_NAME },
+    now: paintedAt,
+    message: {
+      text: bandNotice?.message ?? null,
+      severity: bandNotice?.severity ?? AUTH_SUMMARY_MESSAGE_SEVERITY,
+      mapset: AUTH_SUMMARY_MAPSET,
+    },
+    pfKeys: { keys: bindings, onInvoke: invoke },
+  });
+
+  /*
    * WHY : Assumptions: the field highlight is driven by this turn's validation first and by the
    *       response body second, and by nothing else. The baseline reaches the same appearance through
    *       the templated copybook `app/cpy/CSSETATY.cpy` L17 to L27, which moves `DFHRED` into a
@@ -1430,7 +1649,7 @@ export function AuthSummaryScreen(): ReactElement {
        * itself, which is already the token pair the design mapping assigns to a screen title, so no
        * font token is restated here.
        */}
-      <Typography.Title level={3} style={{ color: cssVar[BMS_COLOR_TOKENS.NEUTRAL] }}>
+      <Typography.Title level={3} style={{ color: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL] }}>
         {AUTH_SUMMARY_SUBTITLE}
       </Typography.Title>
       {/*
@@ -1448,14 +1667,29 @@ export function AuthSummaryScreen(): ReactElement {
          * `'Search Acct Id:'` at L79 to L83 with its colon inside the `INITIAL=` literal, so letting
          * antd append its own would render two.
          */}
+        {/*
+         * WHY : ⚠️ Refactoring Rationale: the help sentence is wrapped by `fieldErrorHelp`, which gives it a
+         *       stable identifier the control points at with `aria-describedby`; it used to be passed as a
+         *       bare string. antd renders `help` in a container of its own with no relationship to the
+         *       input, so the sentence was on screen beside the control and absent from the control's
+         *       accessible description -- a screen-reader user reached a field marked as refused with no
+         *       statement of what was wrong with it. The same two helpers do this for every field on the
+         *       sign-on, account-view and account-update screens, so the association is one mechanism
+         *       rather than one per screen.
+         * WHY : Assumptions: the spread form is used because antd's own prop types admit `help` being
+         *       ABSENT and not `help` being `undefined`, and the two are different states to a component
+         *       that tests for the property.
+         */}
         <Form.Item
           colon={false}
-          help={serviceFieldError?.message}
+          {...(serviceFieldError === null
+            ? {}
+            : { help: fieldErrorHelp(ACCOUNT_ID_INPUT_ID, serviceFieldError.message) })}
           htmlFor={ACCOUNT_ID_INPUT_ID}
           label={
             <Typography.Text
               id={ACCOUNT_ID_LABEL_ID}
-              style={{ color: cssVar[BMS_COLOR_TOKENS.TURQUOISE] }}
+              style={{ color: cssVar[BMS_TEXT_COLOR_TOKENS.TURQUOISE] }}
             >
               {AUTH_SUMMARY_LABELS.searchAccountId}
             </Typography.Text>
@@ -1472,15 +1706,23 @@ export function AuthSummaryScreen(): ReactElement {
            *       from a screen reader's own entry point on arrival.
            * WHY : Assumptions: `maxLength` is the copybook picture width and not a chosen limit.
            *       `ACCTID` is declared `LENGTH=11` at L84 to L88 and the symbolic map declares
-           *       `ACCTIDI PIC X(11)`, so eleven is the field's contract; the digits-only rule is
-           *       applied separately by `classifyAccountIdEntry`, because the source tests width and
-           *       content in two different places too.
+           *       `ACCTIDI PIC X(11)`, so eleven is the field's contract. It caps the control at eleven
+           *       characters and is NOT the whole of the rule: `classifyAccountIdEntry` requires exactly
+           *       eleven digits, because `IS NOT NUMERIC` runs over the space-padded field and so refuses
+           *       a short entry as well as a non-numeric one. The two work together -- the control stops
+           *       a twelfth character being typed, the classification stops a tenth-character entry being
+           *       sent.
            * WHY : Assumptions: `HILIGHT=UNDERLINE` on that field needs no token. It is the 3270's
            *       editable-field affordance, which the `Input` border already carries structurally --
            *       registered design gap **G4** -- so inventing an underline style would draw the
            *       affordance twice.
            */}
           <Input
+            {...fieldAriaProps(ACCOUNT_ID_INPUT_ID, {
+              invalid: fieldState !== null,
+              hasError: serviceFieldError !== null,
+              hasHint: false,
+            })}
             aria-labelledby={ACCOUNT_ID_LABEL_ID}
             id={ACCOUNT_ID_INPUT_ID}
             inputMode="numeric"
@@ -1517,7 +1759,7 @@ export function AuthSummaryScreen(): ReactElement {
         <Descriptions
           bordered
           colon={false}
-          column={2}
+          column={RECORD_VIEW_COLUMNS}
           items={buildAuthSummaryDescriptions(summary, cssVar)}
         />
       )}
@@ -1531,25 +1773,81 @@ export function AuthSummaryScreen(): ReactElement {
        *       (`COPAUS0C.cbl` L121, L391 to L394). Leaving antd's pager on would additionally show a
        *       total-page count the envelope cannot supply.
        */}
-      <Table<PendingAuthListItem>
-        columns={buildPendingAuthColumns(selectedKey, setSelectedKey, cssVar)}
-        dataSource={browse.items}
-        loading={browse.isLoading}
-        pagination={false}
-        rowKey={
+      {/*
+       * WHY : ⚠️ Refactoring Rationale: the table is wrapped in ONE `Radio.Group` that owns the selection
+       *       value and the change handler, where each row used to hold an independent `Radio` with its
+       *       own `checked` and handler. antd's group publishes itself through context, so the controls
+       *       stay exactly where the mapset paints them -- one per row in the leading column -- while
+       *       becoming a single set: one tab stop, arrow keys moving between rows, and the set announced
+       *       as a group named by the source's own row-22 prompt. That prompt is the natural name because
+       *       it is the sentence the terminal paints to say what selecting a row does.
+       * WHY : Alternatives Considered: `Table`'s built-in `rowSelection` with `type: 'radio'`, which
+       *       provides the same semantics for free. Rejected because it renders its own leading selection
+       *       column with its own heading, and the mapset declares that column and its `'Sel'` heading
+       *       itself at `COPAU00.bms` L197 to L201 -- adopting antd's would either duplicate the column
+       *       or discard the declared heading, and its control is not addressable by the row's sealed
+       *       selector without re-deriving the key.
+       * WHY : Assumptions: the group's `value` is `null` when nothing is chosen and antd accepts that as
+       *       "no member checked", which is the state a freshly painted page is in -- `INITIALIZE-AUTH-DATA`
+       *       protects all five selectors before a page is built.
+       */}
+      <Radio.Group
+        aria-label={AUTH_SUMMARY_SELECTION_PROMPT}
+        onChange={
           /**
-           * Uses each row's own sealed selector as its reconciliation identity.
-           *
-           * Assumptions: the selector is unique per row by construction, so nothing needs to be
-           * composed from other members. It is the same token the detail route carries and the same
-           * one the selection control binds to, which is what keeps a selection and a navigation
-           * addressing the same record.
-           * @param {PendingAuthListItem} row - One listed authorization.
-           * @returns {string} That row's sealed selector.
+           * Records the row whose control the operator chose.
+           * @param {RadioChangeEvent} event - The change event antd forwards; its value is the row's
+           *   sealed selector, because that is what each member control carries.
+           * @returns {void} Nothing; the selection is recorded as a side effect.
            */
-          (row: PendingAuthListItem): string => row.key
+          (event: RadioChangeEvent) => {
+            setSelectedKey(String(event.target.value));
+          }
         }
-      />
+        value={selectedKey}
+      >
+        {/*
+         * WHY : ⚠️ Refactoring Rationale: the table scrolls horizontally and its two identifying columns
+         *       are pinned, where it had no narrow-screen policy at all. Eight columns whose contents are
+         *       fixed-width by contract -- a 15-character transaction identifier, two 8-character stamps,
+         *       a 4-character type, two single characters and a 12-character edited amount -- cannot be
+         *       narrowed by wrapping without breaking the column geometry the edit masks produce, so at a
+         *       phone width the table used to push the whole page wider than the viewport and the leading
+         *       columns went off-screen with it.
+         * WHY : Assumptions: `x: 'max-content'` rather than a pixel width, because the sum of eight
+         *       fixed-width columns is a property of the CONTENT and stating it as a number here would be
+         *       a second, drifting copy of widths the column definitions already carry.
+         * WHY : Assumptions: the pinned pair is the selection control and the transaction identifier --
+         *       the control that acts on a row and the value that names it -- so a row remains both
+         *       identifiable and selectable while its later columns are scrolled to. Pinning more would
+         *       leave too little scrollable width to be worth scrolling on the narrow viewport this
+         *       exists for.
+         * WHY : Alternatives Considered: a stacked card representation below the medium breakpoint, which
+         *       the review offered as the alternative. Rejected because it abandons the row-and-column
+         *       reading order the mapset paints and that design gap G1 commits to preserving, and because
+         *       it would mean two renderings of one table to keep in step.
+         */}
+        <Table<PendingAuthListItem>
+          columns={buildPendingAuthColumns(cssVar)}
+          dataSource={browse.items}
+          loading={browse.isLoading}
+          pagination={false}
+          scroll={AUTH_SUMMARY_TABLE_SCROLL}
+          rowKey={
+            /**
+             * Uses each row's own sealed selector as its reconciliation identity.
+             *
+             * Assumptions: the selector is unique per row by construction, so nothing needs to be
+             * composed from other members. It is the same token the detail route carries and the same
+             * one the selection control binds to, which is what keeps a selection and a navigation
+             * addressing the same record.
+             * @param {PendingAuthListItem} row - One listed authorization.
+             * @returns {string} That row's sealed selector.
+             */
+            (row: PendingAuthListItem): string => row.key
+          }
+        />
+      </Radio.Group>
       {/*
        * Assumptions: the prompt is painted `ATTRB=(ASKIP,BRT)` at L497, and brightness is carried as
        * WEIGHT rather than as a brighter colour -- the measured resolution for all 37 bright fields in
@@ -1557,29 +1855,33 @@ export function AuthSummaryScreen(): ReactElement {
        * keeps its own `colorTextSecondary`. Substituting a colour would overwrite the one the field
        * declares.
        */}
-      <Typography.Text strong style={{ color: cssVar[BMS_COLOR_TOKENS.NEUTRAL] }}>
+      <Typography.Text strong style={{ color: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL] }}>
         {AUTH_SUMMARY_SELECTION_PROMPT}
       </Typography.Text>
       {/*
-       * Assumptions: the band is given this mapset's name so it is sized to the field this screen
-       * actually paints. See {@link AUTH_SUMMARY_MESSAGE_SEVERITY} for how the mapset's 78-character
-       * message field and the shared 75-character work area are both satisfied, and why the severity is
-       * a constant on this screen.
+       * Refactoring Rationale: the row-23 message line and the row-24 legend that used to close this
+       * body are now delegated to the shell in the `useShellSlot` call above, so the last thing the
+       * body renders is the mapset's row-22 selection prompt. The rendered order is unchanged - the
+       * shell paints both lines immediately below the body region - and what is removed is the
+       * duplication that mounting the shell would otherwise have produced.
        */}
-      <MessageBand
-        mapset={AUTH_SUMMARY_MAPSET}
-        message={bandNotice?.message ?? null}
-        severity={bandNotice?.severity ?? AUTH_SUMMARY_MESSAGE_SEVERITY}
-      />
       {/*
        * Assumptions: no `legendColor` is passed, because this mapset paints its row-24 legend
        * `COLOR=YELLOW` at L507 to L512, which is the bar's own default and the majority across the
        * mapset population. Passing it explicitly would state a value that is already in force and
        * would suggest this screen departs from the majority when it does not.
        */}
-      <PfKeyBar keys={bindings} onInvoke={invoke} />
     </Flex>
   );
 }
 
-export default AuthSummaryScreen;
+/*
+ * WHY : Refactoring Rationale: this module publishes the component under its NAME ONLY, and the
+ *       default export that used to sit here has been removed rather than kept alongside it. The
+ *       argument for publishing both was that a route could then be declared as
+ *       `lazy(() => import('./screens/<name>'))` with no adapter -- but no route is declared that way
+ *       anywhere, so the second key had no caller, and AAP section 0.6.2.1 fixes the import discipline
+ *       for this tree as named imports with the named-to-default adapter held in `ui/src/router.tsx`.
+ *       Two keys for one component also make a screen reachable by two spellings, so a reader cannot
+ *       tell from an import which convention this tree follows.
+ */

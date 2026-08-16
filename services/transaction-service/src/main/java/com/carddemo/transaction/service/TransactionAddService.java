@@ -7,10 +7,13 @@ import com.carddemo.common.money.Money;
 import com.carddemo.common.validation.DateEditValidator;
 import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.transaction.domain.Transaction;
+import com.carddemo.transaction.dto.CopiedTransactionData;
+import com.carddemo.transaction.dto.CopyLastRequest;
 import com.carddemo.transaction.dto.TransactionAddOutcome;
 import com.carddemo.transaction.dto.TransactionAddPreview;
 import com.carddemo.transaction.dto.TransactionAddRequest;
 import com.carddemo.transaction.dto.TransactionAddResponse;
+import com.carddemo.transaction.dto.TransactionKeySelection;
 import com.carddemo.transaction.mapper.TransactionMapper;
 import com.carddemo.transaction.repository.TransactionRepository;
 import java.math.BigDecimal;
@@ -211,6 +214,32 @@ public class TransactionAddService {
 
     /** The prompt the reference emits at line 178 for a refused, blank or low-value confirmation. */
     public static final String MESSAGE_CONFIRM_ADD = "Confirm to add this transaction...";
+
+    /**
+     * The refusal a confirming turn receives when it names a card the supplied key did not resolve to.
+     *
+     * <p>⚠️ Assumptions: this sentence is the TARGET's and not the reference's, and it is the only user
+     * visible sentence on this surface that is. The condition it reports cannot arise on the reference
+     * screen at all: the account arm reads the cross-reference at line 208 of
+     * {@code app/cbl/COTRN02C.cbl} and line 209 moves the entry's card number over the screen field, after
+     * which the screen is re-sent -- so the field the operator confirms already holds the resolved card and
+     * there is no keystroke sequence that confirms a different one. The reference therefore emits nothing
+     * for it, and transformation rule T8 governs sentences that EXIST rather than requiring one to be
+     * invented.</p>
+     *
+     * <p>Alternatives Considered: reusing the reference's own key sentences -- the not-numeric complaint or
+     * the neither-key complaint. Both rejected because each states something untrue about this submission:
+     * the card supplied is perfectly numeric and a key was certainly supplied. A sentence that misdescribes
+     * the refusal is worse than one that is new, because an operator acts on it.</p>
+     *
+     * <p>Assumptions: the wording names the REMEDY rather than the mechanism, because the remedy is what
+     * the operator can act on -- read the preview again and confirm the card it reports. Naming the
+     * cross-reference or the resolution order would describe an internal step to somebody who cannot
+     * change it. The divergence is registered as {@code D-CONFIRMED-CARD-BINDING} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+     */
+    public static final String MESSAGE_CONFIRM_RESOLVED_CARD =
+            "Card Number changed. Review the transaction and confirm again...";
 
     /**
      * The complaint the reference emits at line 184 for any other confirmation value.
@@ -491,7 +520,8 @@ public class TransactionAddService {
     public TransactionAddOutcome addTransaction(TransactionAddRequest request) {
         Objects.requireNonNull(request, "request must not be null");
 
-        String resolvedCardNumber = validateInputKeyFields(request);
+        AccountContextClient.CardXref resolved = validateInputKeyFields(request);
+        String resolvedCardNumber = resolved.cardNumber();
         Money canonicalAmount = validateInputDataFields(request);
 
         String confirmation = request.confirmation();
@@ -517,13 +547,73 @@ public class TransactionAddService {
                 //       such member, so a client reading the body alone had to infer a prompt from a
                 //       missing identifier. This shape carries both, and its discriminator is fixed at
                 //       its own factory.
-                return TransactionAddPreview.prompting(canonicalAmount, MESSAGE_CONFIRM_ADD);
+                // WHY : ⚠️ Assumptions: the resolved PAIR travels on every withheld answer, and it used
+                //       to travel on the copy operation's answer alone. The reference resolves and
+                //       repaints both key fields on every turn -- line 166 performs
+                //       VALIDATE-INPUT-KEY-FIELDS for the Enter arm as line 473 does for the copy arm,
+                //       and lines 209 and 221 write the two fields -- and then re-sends the screen at
+                //       lines 173 to 176, so the operator confirming has already been shown the pair.
+                //       Publishing it on one of the two turns left an ordinary capture unable to show
+                //       it, which is the display half of the confirmed-card defect.
+                return TransactionAddPreview.prompting(canonicalAmount, MESSAGE_CONFIRM_ADD,
+                        resolved.accountId(), resolvedCardNumber);
             }
             throw new ClientInputException(ApiError.CODE_VALIDATION, FIELD_CONFIRMATION,
                     FieldValidationFlag.NOT_OK, MESSAGE_INVALID_CONFIRMATION);
         }
 
+        requireTheConfirmedCardIsTheResolvedCard(request.cardNumber(), resolvedCardNumber);
         return appendTransaction(request, resolvedCardNumber);
+    }
+
+    /**
+     * Refuses a CONFIRMING turn whose submitted card is not the card the key resolved to.
+     *
+     * <p>⚠️ Purpose: this is the second half of the fix for a confirmation that could name the wrong card,
+     * and it is what binds the write to what was previewed. The disclosure half is the preview reporting the
+     * resolved identity, which {@link TransactionAddPreview} carries as its {@code resolvedAccountId} and
+     * {@code resolvedCardNumber} components on EVERY withheld answer; this half makes a client that
+     * confirms some OTHER card unable to write. Without it the resolved identity would be published and a client would remain free to
+     * ignore it, so the operator could still confirm one card while the service wrote another.</p>
+     *
+     * <p>Assumptions: the condition is UNREACHABLE in the reference, and that is what makes refusing it
+     * faithful rather than a divergence in behaviour. The reference's account arm reads the cross-reference
+     * at line 208 of {@code app/cbl/COTRN02C.cbl} and line 209 moves the entry's card number over the
+     * screen's card field; the screen is then re-sent, so by the time the operator types the affirmative
+     * character the field they are looking at ALREADY holds the resolved card. There is no keystroke
+     * sequence on that screen that confirms a card the program did not resolve. Splitting one screen turn
+     * into two stateless requests is what made the state reachable, so refusing it restores the property
+     * rather than adding one.</p>
+     *
+     * <p>Assumptions: the check runs ONLY on the affirmative turn, and never on the preview turn. On a
+     * preview the disagreement is exactly what the reference corrects and re-displays, so refusing it there
+     * would refuse the submission the baseline accepts and would make the correction unreachable.</p>
+     *
+     * <p>Assumptions: a submission that carried NO card number passes, because there is nothing to
+     * disagree. That is the ordinary account-only capture, and the resolved card is then the only card the
+     * exchange has ever mentioned.</p>
+     *
+     * <p>Trade-offs: the refusal carries a TARGET-OWNED sentence rather than a reference one, because the
+     * reference emits none for a condition it cannot reach. Inventing a reference-styled sentence would put
+     * text on a screen the baseline never produced, so the sentence names the remedy instead -- re-read the
+     * preview and confirm what it reports -- and the divergence is registered as
+     * {@code D-CONFIRMED-CARD-BINDING} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+     *
+     * @param submittedCardNumber the card number the confirming submission carried, possibly absent
+     * @param resolvedCardNumber the card number the supplied key resolved to; must not be {@code null}
+     * @throws ClientInputException if a card number was submitted and is not the resolved one
+     */
+    private static void requireTheConfirmedCardIsTheResolvedCard(String submittedCardNumber,
+            String resolvedCardNumber) {
+
+        if (FieldValidationFlag.isNeverSupplied(submittedCardNumber)) {
+            return;
+        }
+        if (!resolvedCardNumber.equals(submittedCardNumber)) {
+            throw new ClientInputException(ApiError.CODE_VALIDATION, FIELD_CARD_NUMBER,
+                    FieldValidationFlag.NOT_OK, MESSAGE_CONFIRM_RESOLVED_CARD);
+        }
     }
 
     /**
@@ -551,7 +641,9 @@ public class TransactionAddService {
      *     decides whether the copied capture is appended; must not be {@code null}
      * @return the same outcome {@link #addTransaction(TransactionAddRequest)} returns for the copied
      *     capture, being {@link TransactionAddResponse} when it was confirmed and appended and
-     *     {@link TransactionAddPreview} when it was not; never {@code null}
+     *     {@link TransactionAddPreview} when it was not -- and in that second case carrying the
+     *     {@link CopiedTransactionData} a caller adopts so that its confirming turn writes the values it
+     *     was shown rather than re-resolving which row is last; never {@code null}
      * @throws NullPointerException if {@code request} is {@code null}
      * @throws ClientInputException if a key field, a copied data field or the confirmation carries a
      *     value the reference refuses
@@ -561,14 +653,39 @@ public class TransactionAddService {
      * @throws IllegalStateException if a read or the append failed for a reason the caller cannot
      *     correct
      */
-    public TransactionAddOutcome copyLastTransactionData(TransactionAddRequest request) {
+    public TransactionAddOutcome copyLastTransactionData(CopyLastRequest request) {
         Objects.requireNonNull(request, "request must not be null");
-        validateInputKeyFields(request);
+        String resolvedCardNumber = validateInputKeyFields(request).cardNumber();
 
         Transaction latest = readLatestTransaction()
                 .orElseThrow(() -> new NoSuchElementException(MESSAGE_TRANSACTION_LOOKUP_FAILED));
 
-        return addTransaction(copiedSubmission(request, latest));
+        TransactionAddRequest copied = copiedSubmission(request, latest);
+        TransactionAddOutcome outcome = addTransaction(copied);
+
+        // WHY : ⚠️ Refactoring Rationale: the withheld turn now answers with WHAT WAS COPIED and not with
+        //       the amount alone, and the omission it replaces was a write hazard rather than a display
+        //       gap. The reference's copy block moves eleven values into the operator's own map fields
+        //       (app/cbl/COTRN02C.cbl lines 480 to 493) and every later turn reads them back off the
+        //       SCREEN, so the row that was copied is consulted exactly once. Publishing only the
+        //       normalised amount left a browser unable to hold the other ten, so the confirming turn had
+        //       to reach this operation a second time -- re-resolving "the most recently stored
+        //       transaction" and silently replacing what the operator had been shown with any row
+        //       appended in between. A client holding this member confirms through the ordinary capture
+        //       operation instead, which resolves "last" once.
+        // WHY : Assumptions: the source is attached only to the WITHHELD outcome, and the confirmed one
+        //       is returned untouched. A confirmed turn has already appended the copied capture and
+        //       answers with the identifier it assigned, so there is nothing left for a caller to adopt;
+        //       naming the copied row there as well would publish a second identifier on a body whose
+        //       whole subject is the first.
+        // WHY : Assumptions: the copied SUBMISSION is what is published, not the row re-read. It is the
+        //       object that was validated and, on the confirmed arm, written, so publishing it is what
+        //       makes the preview and the eventual capture describe the same values.
+        if (outcome instanceof TransactionAddPreview preview) {
+            return preview.withCopiedSource(
+                    CopiedTransactionData.of(copied, latest.getTranId()));
+        }
+        return outcome;
     }
 
     /**
@@ -599,7 +716,7 @@ public class TransactionAddService {
      * @return a submission carrying the copied data fields, never {@code null}
      * @throws IllegalStateException if the stored row leaves one of the copied fields absent
      */
-    private static TransactionAddRequest copiedSubmission(TransactionAddRequest request,
+    private static TransactionAddRequest copiedSubmission(CopyLastRequest request,
             Transaction latest) {
 
         Long merchantId = latest.getMerchantId();
@@ -639,8 +756,11 @@ public class TransactionAddService {
      * back-fill is a screen effect of a paragraph that also serves the account arm, and nothing
      * downstream of this method reads it, so this method returns the card number alone.</p>
      *
-     * @param request the submitted capture, whose account identifier and card number are read; must not
-     *     be {@code null}
+     * @param request whichever submission is being keyed -- a capture or a copy -- of which only the
+     *     account identifier and the card number are read, which is why the parameter is the shared key
+     *     interface rather than either record: line 473 performs this same paragraph for the copy arm and
+     *     lines 133 and 134 for the Enter arm, so one paragraph serves both and so does one method; must
+     *     not be {@code null}
      * @return the card number the cross-reference resolved, as sixteen digit characters, never
      *     {@code null}
      * @throws ClientInputException if the supplied key is not composed of digits, or if neither key was
@@ -648,19 +768,29 @@ public class TransactionAddService {
      * @throws NoSuchElementException if the supplied key resolves to no cross-reference entry
      * @throws IllegalStateException if the lookup could not be performed
      */
-    private String validateInputKeyFields(TransactionAddRequest request) {
+    private AccountContextClient.CardXref validateInputKeyFields(TransactionKeySelection request) {
         if (!FieldValidationFlag.isNeverSupplied(request.accountId())) {
             // WHY : Assumptions: the numeric test at line 197 runs BEFORE the conversion at line 204,
             //       because FUNCTION NUMVAL has no defined result for characters that are not a number
             //       and the reference guards it rather than relying on one.
             String accountId = numericValueOf(request.accountId(), ACCOUNT_ID_WIDTH,
                     FIELD_ACCOUNT_ID, TransactionAddRequest.ACCOUNT_ID_NOT_NUMERIC);
-            return readCardXrefByAccountId(accountId);
+            // WHY : ⚠️ Assumptions: the account identifier reported is the CONVERTED submitted one and not
+            //       the cross-reference entry's, because line 206 moves the converted value back into the
+            //       screen's own account field before the read at line 208 -- so the value the reference
+            //       displays on this arm is the operator's key at its declared width, and taking the
+            //       entry's would substitute a second spelling of the same account.
+            return new AccountContextClient.CardXref(accountId, readCardXrefByAccountId(accountId));
         }
 
         if (!FieldValidationFlag.isNeverSupplied(request.cardNumber())) {
             String cardNumber = numericValueOf(request.cardNumber(), CARD_NUMBER_WIDTH,
                     FIELD_CARD_NUMBER, TransactionAddRequest.CARD_NUMBER_NOT_NUMERIC);
+            // WHY : ⚠️ Assumptions: this arm reads the entry ONCE and reports both of its values, where it
+            //       used to report the card number alone. Line 221 moves the entry's account identifier
+            //       into the screen's account field on this path, so the account is a resolution result
+            //       here exactly as the card is one on the arm above; deriving it with a second read would
+            //       make two remote calls where the reference makes one.
             return readCardXrefByCardNumber(cardNumber);
         }
 
@@ -722,8 +852,8 @@ public class TransactionAddService {
      * @throws IllegalStateException if the read could not be performed
      */
     private String readCardXrefByAccountId(String accountId) {
-        return resolveCardNumber(() -> this.accounts.findCardXrefByAccountId(accountId),
-                MESSAGE_ACCOUNT_NOT_FOUND, MESSAGE_ACCOUNT_XREF_LOOKUP_FAILED);
+        return resolveEntry(() -> this.accounts.findCardXrefByAccountId(accountId),
+                MESSAGE_ACCOUNT_NOT_FOUND, MESSAGE_ACCOUNT_XREF_LOOKUP_FAILED).cardNumber();
     }
 
     /**
@@ -736,12 +866,13 @@ public class TransactionAddService {
      * at line 630 whose sentence is at line 633.</p>
      *
      * @param cardNumber the card number as sixteen digit characters; must not be {@code null}
-     * @return the card number the cross-reference entry carries, never {@code null}
+     * @return the cross-reference entry, whose account identifier is what line 221 paints back onto the
+     *     screen's account field; never {@code null}
      * @throws NoSuchElementException if the card number resolves to no entry
      * @throws IllegalStateException if the read could not be performed
      */
-    private String readCardXrefByCardNumber(String cardNumber) {
-        return resolveCardNumber(() -> this.accounts.findCardXrefByCardNumber(cardNumber),
+    private AccountContextClient.CardXref readCardXrefByCardNumber(String cardNumber) {
+        return resolveEntry(() -> this.accounts.findCardXrefByCardNumber(cardNumber),
                 MESSAGE_CARD_NOT_FOUND, MESSAGE_CARD_XREF_LOOKUP_FAILED);
     }
 
@@ -758,16 +889,19 @@ public class TransactionAddService {
      *     outcome handling; must not be {@code null}
      * @param absentMessage the sentence for a key that resolves to nothing; must not be {@code null}
      * @param failedMessage the sentence for a read that could not be performed; must not be {@code null}
-     * @return the resolved card number, never {@code null}
+     * @return the resolved cross-reference entry, never {@code null}
      * @throws NoSuchElementException if the key resolves to nothing
      * @throws IllegalStateException if the read could not be performed
      */
-    private static String resolveCardNumber(Supplier<Optional<AccountContextClient.CardXref>> read,
-            String absentMessage, String failedMessage) {
+    private static AccountContextClient.CardXref resolveEntry(
+            Supplier<Optional<AccountContextClient.CardXref>> read, String absentMessage,
+            String failedMessage) {
         try {
-            return read.get()
-                    .map(AccountContextClient.CardXref::cardNumber)
-                    .orElseThrow(() -> new NoSuchElementException(absentMessage));
+            // WHY : ⚠️ Assumptions: the whole ENTRY is returned where the card number alone used to be.
+            //       Both of its values are resolution results the reference paints back onto the screen --
+            //       the card on the account arm at line 209, the account on the card arm at line 221 --
+            //       so narrowing here would have forced one arm to read a second time to learn the other.
+            return read.get().orElseThrow(() -> new NoSuchElementException(absentMessage));
         } catch (AccountContextClient.AccountContextUnavailableException unavailable) {
             throw new IllegalStateException(failedMessage, unavailable);
         }

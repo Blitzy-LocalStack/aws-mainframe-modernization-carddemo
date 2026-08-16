@@ -109,13 +109,21 @@ import org.junit.jupiter.params.provider.MethodSource;
  *
  * <p>Alternatives Considered: driving them from this module's fixture files. Rejected on measurement.
  * The register at {@code src/test/resources/fixtures/README.md} declares the {@code ACCOUNT},
- * {@code CARD}, {@code CUSTOMER}, {@code TCATBAL}, {@code TRANTYPE} and {@code TRANCAT} record
- * types, and none of them is a
+ * {@code CARD}, {@code XREF}, {@code CUSTOMER}, {@code TCATBAL}, {@code TRANTYPE} and
+ * {@code TRANCAT} record types -- the same seven {@code ReportingFixtureContractTest} binds -- and
+ * none of them is a
  * {@code TRNX} record, so no fixture description exists to carry trailing blanks in the first place;
  * and {@code ReportingFixtureContractTest} asserts that the fixture directory contains EXACTLY the
  * closed set of entries it names, so adding one would fail that sibling rather than help this one.
  * Trade-offs: this paragraph now names the record types instead of counting them, because a count
- * goes stale the next time a planned fixture lands while the argument it supports does not. The
+ * goes stale the next time a planned fixture lands while the argument it supports does not.
+ * Assumptions: naming them is only better than counting them if the NAMES are complete, and this
+ * list omitted {@code XREF} while {@code cardxref.txt} was bound -- so the enumeration went stale in
+ * exactly the way the count would have. It is a weaker failure than a wrong count, because the
+ * argument this paragraph supports is that NO bound record type is a {@code TRNX} record, and an
+ * omitted name cannot falsify that; it is corrected anyway, since a reader checking the list against
+ * the contract test would have found a seventh type and no reason for its absence. The
+
  * sibling {@code StatementTextMapperTest} reaches its own four boundaries the same way and for the
  * same recorded reason, so the two emitters are proven against values built by one convention.</p>
  *

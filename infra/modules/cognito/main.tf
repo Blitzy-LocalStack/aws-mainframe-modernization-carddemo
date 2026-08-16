@@ -344,17 +344,19 @@ resource "aws_cognito_user_pool" "this" {
     temporary_password_validity_days = var.temporary_password_validity_days
   }
 
-  # WHY : Trade-offs: OPTIONAL in dev, and variables.tf structurally requires ON
-  #       in prod. ON compels every user to enrol a factor before completing a
-  #       sign-in, which would block all ten seed users on the very first
-  #       authentication -- the one sign-in that has to succeed for a freshly
-  #       provisioned environment to be usable at all. OPTIONAL keeps the
-  #       baseline's single-factor flow working while making a second factor
-  #       available, so a capability the baseline entirely lacked is present
-  #       without gating provisioning on it.
-  #       Alternatives Considered: OFF, which removes the capability rather than
-  #       deferring the obligation, and ON everywhere, which is right once real
-  #       users exist and is exactly what prod is held to.
+  # WHY : ⚠️ Refactoring Rationale: this passed through OPTIONAL in dev and ON in
+  #       prod, and variables.tf now structurally requires OFF everywhere. The value
+  #       is only half of a multi-factor capability: the pool raises a challenge and
+  #       something has to answer it, and the service that authenticates against this
+  #       pool answers exactly one challenge -- NEW_PASSWORD_REQUIRED -- and reports
+  #       every other as an unevaluable exchange, which the contract renders as HTTP
+  #       500. So OPTIONAL handed a 500 to every user who took up the option, and ON
+  #       would have handed one to every user's first sign-in. The full argument, the
+  #       precondition for raising the value, and why implementing the challenge union
+  #       is a new capability rather than a fix are recorded on the input itself.
+  #       Assumptions: the pass-through and the software-token pairing below are kept
+  #       exactly as they were, so lifting the restriction is one deleted validation
+  #       rather than a re-wiring.
   mfa_configuration = var.mfa_configuration
 
   # WHY : Assumptions: this block IS the mechanism the setting above requires.
@@ -370,6 +372,11 @@ resource "aws_cognito_user_pool" "this" {
   #       because it needs an SNS caller role and a phone number, and these
   #       identities carry neither -- the seed record at
   #       app/cpy/CSUSR01Y.cpy L17-L23 has no telephone field at all.
+  #       Assumptions: with the input now validated to OFF this block emits nothing,
+  #       and it is retained rather than deleted for the reason recorded on that
+  #       input: it is the mechanism half of a capability whose service half is
+  #       missing, and keeping the two coupled here means raising the value later is
+  #       one change in one place rather than a re-derivation of this pairing.
   dynamic "software_token_mfa_configuration" {
     for_each = var.mfa_configuration == "OFF" ? [] : [1]
 
@@ -807,11 +814,10 @@ resource "terraform_data" "app_client_secret_rotation" {
       #       names this client AND records a client_secret_id AND that id is still
       #       among the active descriptors. Any other state -- no stored payload, a
       #       payload for a different client, a payload written before ids were
-      #       recorded, or an id Cognito no longer lists -- leaves it empty, which
-      #       selects the re-initialisation path below rather than failing. That is
-      #       deliberate: a secret this script cannot identify is one it also cannot
-      #       preserve, and refusing to proceed would leave the deployment with no
-      #       usable credential at all.
+      #       recorded, or an id Cognito no longer lists -- leaves it empty, and what
+      #       an empty value then selects depends on how many secrets are active: with
+      #       one, a slot is free and the run proceeds by minting into it; with two,
+      #       the run REFUSES, for the reason recorded at that branch.
       KNOWN_SECRET_ID=""
       if aws secretsmanager get-secret-value \
         --region "$REGION" \
@@ -823,18 +829,45 @@ resource "terraform_data" "app_client_secret_rotation" {
 
       # WHY : Assumptions: a slot must be freed before a secret can be added,
       #       because Cognito permits at most two and the add below always creates
-      #       one. Which secret is pruned depends on what is known: with a
-      #       recognised managed secret the OTHER one is stale by definition and goes;
-      #       without one, nothing distinguishes the two except age, so the oldest by
-      #       CreatedDate is pruned. Deleting before adding is forced by the cap and
-      #       is safe in both branches, because the value held in Secrets Manager is
-      #       either the survivor or already unusable.
+      #       one. With a recognised managed secret the OTHER one is stale by
+      #       definition and goes, and deleting before adding is safe because the value
+      #       held in Secrets Manager is the survivor.
+      # WHY : ⚠️ Refactoring Rationale: the branch for an UNRECOGNISED managed secret
+      #       used to prune the older of the two by CreatedDate, and it now refuses.
+      #       The old behaviour could delete a live credential that running tasks were
+      #       authenticating with, which is the one outcome rotation exists to avoid.
+      #       Its justification -- "a secret this script cannot identify is one it also
+      #       cannot preserve" -- conflated two different unknowns. A stored payload
+      #       naming an id Cognito no longer lists does describe a dead value; but a
+      #       payload written BEFORE ids were recorded describes a value that is very
+      #       much alive, is the one every task loaded at start-up, and is by age the
+      #       likelier of the two to be pruned. Deleting it takes the deployment down
+      #       until every task is redeployed, and it does so during a routine apply.
+      #       Assumptions: refusing costs nothing that the old path bought. The
+      #       ambiguous state is not reachable through this module's own lifecycle --
+      #       a first apply finds one secret and mints the second, and every rotation
+      #       after that finds two of which one is recognised -- so it arises only from
+      #       an out-of-band change or from a payload predating the id field. In both
+      #       cases an operator has to look, and a refusal that names the remedy is how
+      #       they find out.
+      #       Alternatives Considered: pruning the NEWER of the two instead, on the
+      #       reasoning that the older is likelier to be the one in use. Rejected
+      #       because "likelier" is not a property to delete a live credential on, and
+      #       the failure mode is identical whenever the guess is wrong.
+      #       Alternatives Considered: minting a third secret and letting Cognito
+      #       refuse the excess. Rejected because the service caps a client at two, so
+      #       the add fails and the run ends with no new credential and no diagnostic
+      #       naming the ambiguity that caused it.
+      #       Trade-offs: an apply in this state now FAILS rather than completing, and
+      #       that is the intended trade -- a failed apply leaves every existing
+      #       credential working, whereas the previous completion could leave a working
+      #       deployment unable to authenticate.
       if [ "$SECRET_COUNT" -eq 2 ]; then
-        if [ -n "$KNOWN_SECRET_ID" ]; then
-          STALE_SECRET_ID="$(python3 -c 'import json, sys; current=sys.argv[1]; stale=[item.get("ClientSecretId", "") for item in json.load(open(sys.argv[2], encoding="utf-8")).get("ClientSecrets", []) if item.get("ClientSecretId") != current]; print(stale[0] if len(stale) == 1 else "")' "$KNOWN_SECRET_ID" "$DESCRIPTORS_FILE")"
-        else
-          STALE_SECRET_ID="$(python3 -c 'import json, sys; items=[item for item in json.load(open(sys.argv[1], encoding="utf-8")).get("ClientSecrets", []) if item.get("ClientSecretId")]; items.sort(key=lambda item: item.get("CreatedDate", "")); print(items[0].get("ClientSecretId", "") if len(items) == 2 else "")' "$DESCRIPTORS_FILE")"
+        if [ -z "$KNOWN_SECRET_ID" ]; then
+          echo "Cognito app client $CARDDEMO_APP_CLIENT_ID has two active secrets and neither is identified by the managed payload in $CARDDEMO_APP_CLIENT_SECRET. Refusing to rotate: either of the two may be the credential running tasks are using, and deleting it would take the deployment down until every task is redeployed. Resolve by hand -- confirm which secret is in use, record its ClientSecretId in the managed payload as client_secret_id, or delete the unused secret with cognito-idp delete-user-pool-client-secret -- then re-apply. docs/runbooks/deploy.md carries the procedure." >&2
+          exit 1
         fi
+        STALE_SECRET_ID="$(python3 -c 'import json, sys; current=sys.argv[1]; stale=[item.get("ClientSecretId", "") for item in json.load(open(sys.argv[2], encoding="utf-8")).get("ClientSecrets", []) if item.get("ClientSecretId") != current]; print(stale[0] if len(stale) == 1 else "")' "$KNOWN_SECRET_ID" "$DESCRIPTORS_FILE")"
         if [ -z "$STALE_SECRET_ID" ]; then
           echo "Unable to identify exactly one stale Cognito client secret." >&2
           exit 1

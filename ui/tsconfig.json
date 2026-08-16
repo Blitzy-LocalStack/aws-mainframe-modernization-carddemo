@@ -104,11 +104,16 @@
     // the env typing, so the empty list would stop meaning anything. A single
     // declaration file keeps the widening local.
     // Trade-offs: test-only ambient declarations are withheld for the same
-    // reason. ui/vitest.config.ts sets `globals` to false so a test imports
-    // `describe`, `it` and `expect` from 'vitest' by name, and ui/src/test/setup.ts
-    // imports '@testing-library/jest-dom/vitest', whose module augmentation
-    // reaches every test through an import rather than through an ambient global
-    // that production code could also reach.
+    // reason, and THIS empty list is what obliges a test to import `describe`,
+    // `it` and `expect` from 'vitest' by name -- with nothing declared ambiently,
+    // an omitted import fails to compile on the symbol it omitted. Refactoring
+    // Rationale: this comment credited `globals: false` in ui/vitest.config.ts for
+    // that obligation, and that option is set to `true` there, for the separate
+    // reason its own note records. Naming an option that says the opposite left a
+    // reader with two documents disagreeing and no way to tell which enforced the
+    // rule. ui/src/test/setup.ts imports '@testing-library/jest-dom/vitest', whose
+    // module augmentation reaches every test through an import rather than through
+    // an ambient global that production code could also reach.
     "types": [],
 
     // Assumptions: Vite and esbuild own emission, so no consumer reads a tsc

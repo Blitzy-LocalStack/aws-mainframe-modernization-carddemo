@@ -24,7 +24,7 @@ import com.carddemo.reference.dto.DisclosureGroupRateResponse;
  *
  * <p>Assumptions: no reduction is needed, so none is performed. {@code app/cpy/CVTRA02Y.cpy} L9
  * declares {@code 05 DIS-INT-RATE PIC S9(04)V99}, four integer digits and two decimal places;
- * {@code V1__reference.sql} L337 declares {@code interest_rate NUMERIC(6,2)}, the exact image of that
+ * {@code V1__reference.sql} L326 declares {@code interest_rate NUMERIC(6,2)}, the exact image of that
  * picture; and {@code DisclosureGroup} already reduces every rate it accepts to the column's declared
  * scale at assignment, supplying no mode, so a value carrying a third decimal place raises there
  * instead of resolving quietly. The value this class receives is therefore already at scale two, and
@@ -256,7 +256,7 @@ public final class DisclosureGroupMapper {
                 // WHY : Trade-offs: the stored decimal is admitted to the money type and nothing else
                 //       happens to it -- no reduction mode, no rescaling and no arithmetic. The entity
                 //       has already reduced it to the scale of the NUMERIC(6,2) column at
-                //       V1__reference.sql L337, so this admission discards no digit, and the column's
+                //       V1__reference.sql L326, so this admission discards no digit, and the column's
                 //       four integer digits keep it well inside the magnitude the money type accepts.
                 //       The rate is an operand of the accrual at app/cbl/CBACT04C.cbl L464 to L465,
                 //       whose multiplication is parenthesised in the reference source itself, so an

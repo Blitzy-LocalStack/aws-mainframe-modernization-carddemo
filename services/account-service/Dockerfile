@@ -48,8 +48,13 @@
 #       CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY
 #     - CARDDEMO_REFERENCE_CONTEXT_BASE_URL
 #     - AWS_REGION
-#     - CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE, CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE
-#       and CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE
+#     - CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE_URL,
+#       CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE_URL and
+#       CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE_URL -- each a FULL queue URL, which is what
+#       module.sqs.*_queue_url publishes and what the consumer validates at
+#       construction. The three were named ..._QUEUE while carrying addresses, and the
+#       consumer resolved them as queue names, which could only fail and did so only
+#       after the request's ledger claim had already been committed.
 #   That list is the complete set of no-fallback placeholders across
 #   application.yml and application-prod.yml with ONE deliberate exclusion, and the
 #   completeness is mechanically held rather than asserted: common-lib's

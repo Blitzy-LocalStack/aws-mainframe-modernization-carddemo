@@ -25,7 +25,26 @@
 aws_region  = "us-east-1"
 name_prefix = "carddemo"
 environment = "dev"
-vpc_cidr    = "10.0.0.0/16"
+
+# WHY : ⚠️ Refactoring Rationale: this read "10.0.0.0/16" against production's
+#       "10.1.0.0/16". The two are now the SAME block, deliberately. Specification
+#       section 0.4.1.6 fixes a closed set of axes on which the environments may
+#       differ -- Aurora capacity floor, ceiling and auto-pause interval, ECS task
+#       count and CPU/memory, log retention days, CloudFront price class, and the
+#       deletion-protection and final-snapshot flags -- and states that the roots
+#       differ "only in sizing and retention and never in topology". An address
+#       space is topology, and it is not on that list, so a divergence here was a
+#       topology difference between two environments required to have none.
+#       Trade-offs: identical CIDRs in two VPCs are legal and cannot conflict, but
+#       they do preclude ever peering dev to prod directly. Accepted: the
+#       specification places multi-region and disaster-recovery topology out of
+#       scope and this package provisions no peering, transit gateway or VPN, so
+#       the connectivity being given up is not connectivity either environment has.
+#       Alternatives Considered: arguing the CIDR is a legitimate fourth axis,
+#       which is the usual practice for exactly the peering reason above. Rejected
+#       because the specification is frozen and its axis list is closed; widening
+#       it is a specification change, not a configuration choice.
+vpc_cidr = "10.1.0.0/16"
 
 tags = {
   Project     = "carddemo"
@@ -33,26 +52,92 @@ tags = {
   ManagedBy   = "terraform"
 }
 
-aurora_engine_version               = "16.6"
-aurora_parameter_group_family       = "aurora-postgresql16"
-aurora_min_capacity                 = 0
-aurora_max_capacity                 = 4
-aurora_seconds_until_auto_pause     = 300
-aurora_backup_retention_period      = 1
+# WHY : Refactoring Rationale: this pin was "16.6", whose Aurora STANDARD SUPPORT
+#       ended on 2026-05-31 -- a cluster created from it would either be force
+#       upgraded on Aurora's schedule or attract Extended Support charges, and in
+#       either case the version this file claims to deploy would stop being the
+#       version running. Trade-offs: 16.8 is chosen over the newest available
+#       16.x because AWS designates it a LONG-TERM SUPPORT release (published
+#       2025-04-07), which carries a minimum three-year availability horizon
+#       instead of the twelve months a standard minor gets, so this pin needs
+#       reviewing once every few years rather than every year. What is given up
+#       is new engine features added after 16.8 -- nothing this workload uses,
+#       since the schemas need only ordinary relational features -- while
+#       critical security and stability patches still arrive, because Aurora
+#       patches LTS clusters to that release's latest patch version annually.
+#       Alternatives Considered: 17.x LTS would also be supported, but a major
+#       version change would also move aurora_parameter_group_family below and
+#       is a larger change than closing a support-calendar gap. Assumptions: 16.8
+#       is comfortably above the 16.3 minor that Serverless v2 scale-to-zero
+#       requires, which dev depends on through aurora_min_capacity = 0.
+#
+#       The marker line below is MACHINE-READ by the "Verify the Aurora engine
+#       pin against its support review horizon" gate in infra-ci.yml, which fails
+#       the build once the horizon is reached or passed. WHY a declared horizon
+#       rather than a live lookup: the static validation job holds no AWS
+#       credentials and must run offline, so a gate that queried the support
+#       calendar would be skipped exactly when it mattered; a declared date
+#       cannot silently age out because its expiry is what breaks the build.
+# aurora-engine-support-review: 16.8 by 2028-04-07
+aurora_engine_version           = "16.8"
+aurora_parameter_group_family   = "aurora-postgresql16"
+aurora_min_capacity             = 0
+aurora_max_capacity             = 4
+aurora_seconds_until_auto_pause = 300
+# WHY : ⚠️ Refactoring Rationale: this read 1 against production's 35 and is now 35.
+#       Backup retention is not one of the axes specification section 0.4.1.6
+#       enumerates -- its only retention axis is log retention days -- so the
+#       divergence was off-axis. Aligning upward rather than reducing production is
+#       the safe direction, and the cost is storage for 34 additional days of
+#       backups on a cluster whose capacity floor is zero.
+aurora_backup_retention_period      = 35
 aurora_preferred_backup_window      = "07:00-08:00"
 aurora_preferred_maintenance_window = "sun:09:00-sun:10:00"
 
+# WHY : Task sizing. Trade-offs: the smallest Fargate combination that runs a Spring
+#       Boot service at all, and ONE task per service, so a development environment costs
+#       one task rather than two. Assumptions: a single task means an ECS deployment is
+#       briefly a full interruption for that service, which is acceptable here and is
+#       precisely why prod runs two. Alternatives Considered: sizing dev to match prod so
+#       that performance observations transferred. Rejected as the wrong purpose for this
+#       environment -- correctness rehearsal, not capacity measurement -- and the cost
+#       runs continuously while the observation would be occasional.
 ecs_task_cpu      = 512
 ecs_task_memory   = 1024
 ecs_desired_count = 1
 
-log_retention_days        = 7
-cloudfront_price_class    = "PriceClass_100"
+# WHY : Log retention and edge reach. Trade-offs: SEVEN days of logs, against 365 in prod.
+#       A development log is read while debugging the change that produced it and has no
+#       audit value, so a longer retention pays storage for data nobody queries.
+#       PriceClass_100 restricts CloudFront to its cheapest edge set, which is correct
+#       here because the only viewers are developers, and wrong in prod where cardholder
+#       traffic arrives from everywhere.
+log_retention_days     = 7
+cloudfront_price_class = "PriceClass_100"
+# WHY : Schedule. Assumptions: 02:00 UTC, and the SAME expression in both roots. It is
+#       placed before the backup and maintenance windows above so the chain completes
+#       against a cluster nothing else is restarting, and it is identical across
+#       environments so a rehearsal in development exercises the same ordering against
+#       those windows that production will. This is the EventBridge Scheduler expression
+#       that replaces the CA-7 and Control-M definitions under app/scheduler, whose
+#       intent -- one nightly chain rather than per-job triggers -- is what the single
+#       expression carries.
 batch_schedule_expression = "cron(0 2 * * ? *)"
 
-deletion_protection            = false
-skip_final_snapshot            = true
-secret_recovery_window_in_days = 0
+deletion_protection = false
+skip_final_snapshot = true
+# WHY : ⚠️ Refactoring Rationale: this read 0 -- immediate, unrecoverable deletion --
+#       against production's 30, and is now 30. It is off-axis for the same reason
+#       backup retention is, and it was the most destructive of the three
+#       divergences: at 0 a `destroy` erased every generated credential with no
+#       recovery window, so an accidental destroy could not be undone. What 0 bought
+#       was a repeatable destroy/recreate cycle, because a scheduled-for-deletion
+#       secret name cannot be reused until its window elapses. Trade-offs: recreating
+#       this environment under the same names now requires
+#       `aws secretsmanager delete-secret --force-delete-without-recovery` on the six
+#       purpose secrets first, which is one deliberate operator step in place of a
+#       standing setting that silently removed the recovery window from every one.
+secret_recovery_window_in_days = 30
 # WHY : alarm_email_endpoints is deliberately ABSENT from this file. It is a required
 #       input with no default, supplied out of band (TF_VAR_alarm_email_endpoints or
 #       the deploy workflow's own variable), because a team address is personal data

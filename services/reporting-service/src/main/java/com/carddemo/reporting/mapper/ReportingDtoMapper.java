@@ -333,7 +333,7 @@ import java.util.Objects;
  * file follows is stated in {@code docs/CODE_DOCUMENTATION_STANDARD.md}, and where two sources
  * appear to disagree the order of precedence is user-specified Rule 1 (Explainability) first,
  * then {@code config/checkstyle/checkstyle.xml}, then that standard, and prose last.
- * The single-sourcing precedent is stated at L540-L542 of {@code tests/README.md}.
+ * The single-sourcing precedent is stated at L533-L535 of {@code tests/README.md}.
  */
 public final class ReportingDtoMapper {
 

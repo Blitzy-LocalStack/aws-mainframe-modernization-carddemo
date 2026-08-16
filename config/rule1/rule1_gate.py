@@ -314,8 +314,22 @@ def _mask_code_regions(text: str) -> str:
     """
 
     def blank(match: re.Match[str]) -> str:
-        # Newlines survive so a masked span never merges two lines into one and
-        # shifts every line number after it.
+        """Replace one matched span with blanks, keeping its newlines.
+
+        Args:
+            match: The span a masking pattern matched, which may cover several lines.
+
+        Returns:
+            A string of the same length as the matched text, with every character
+            replaced by a space except the newlines, which are kept.
+
+        Raises:
+            None. Every branch is a character substitution.
+        """
+        # Assumptions: newlines survive so a masked span never merges two lines into
+        #   one and shifts every line number after it. Every finding this gate reports
+        #   names a line, so the substitution has to be length- AND line-preserving
+        #   rather than merely emptying the span.
         return "".join("\n" if char == "\n" else " " for char in match.group(0))
 
     masked = re.sub(r"```.*?```", blank, text, flags=re.S)

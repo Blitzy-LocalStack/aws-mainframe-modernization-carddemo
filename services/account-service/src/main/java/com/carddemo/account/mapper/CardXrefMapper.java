@@ -106,8 +106,8 @@ import org.springframework.stereotype.Component;
  * accessors. Rejected on the same mechanical ground, recorded at
  * {@code docs/CODE_DOCUMENTATION_STANDARD.md} L439 to L442: a generated member cannot carry a docstring,
  * and {@code config/checkstyle/checkstyle.xml} configures {@code MissingJavadocMethod} with
- * {@code allowMissingPropertyJavadoc} false at L365 and clears {@code allowedAnnotations} entirely at
- * L366, so the usual exemptions a generator relies on are not available here.</p>
+ * {@code allowMissingPropertyJavadoc} false at L358 and clears {@code allowedAnnotations} entirely at
+ * L359, so the usual exemptions a generator relies on are not available here.</p>
  *
  * <h2>The access path this class serves, and the one it knows nothing about</h2>
  *

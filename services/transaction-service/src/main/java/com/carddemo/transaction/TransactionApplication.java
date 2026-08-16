@@ -110,7 +110,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * <p>Alternatives Considered: the first rejected mechanism was widening the scan root to
  * {@code com.carddemo}. That root also covers the seven sibling service packages {@code .auth},
  * {@code .account}, {@code .card}, {@code .reference}, {@code .batch}, {@code .authorization} and
- * {@code .reporting}, every one of which {@code services/pom.xml} lines 242 to 250 declares as a
+ * {@code .reporting}, every one of which {@code services/pom.xml} lines 233 to 241 declares as a
  * module of this same reactor. The classpath risk is bounded to zero here by a specific mechanism and
  * not by reassurance: this module declares a Maven dependency on {@code common-lib} alone, so no
  * sibling service class is ever resolvable on its classpath. Widening the root would make that bound a
@@ -133,7 +133,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * <h2>Four starters are re-declared, and omitting one fails at run time</h2>
  *
  * <p>Assumptions: {@code services/common-lib/pom.xml} marks {@code spring-boot-starter-web} optional
- * at its line 225, {@code spring-boot-starter-validation} at its line 230,
+ * at its line 216, {@code spring-boot-starter-validation} at its line 230,
  * {@code spring-boot-starter-security} at its line 235 and
  * {@code spring-boot-starter-oauth2-resource-server} at its line 240, and Maven does not propagate an
  * optional dependency to a consumer, so not one of the four arrives transitively from the kernel. The
@@ -183,7 +183,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * <h2>This class is the main class of the executable archive</h2>
  *
  * <p>Assumptions: {@code services/transaction-service/pom.xml} activates
- * {@code spring-boot-maven-plugin} at its lines 537 to 540 and declares no {@code mainClass} element,
+ * {@code spring-boot-maven-plugin} at its lines 528 to 531 and declares no {@code mainClass} element,
  * so the plugin resolves the main class by scanning for an annotated class that declares a
  * {@code main} method, finds this one, and produces the single self-contained archive the runtime stage
  * copies at {@code Dockerfile:159} through {@code :161}. A second annotated class declaring
@@ -192,7 +192,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * file's member set is closed.</p>
  *
  * <p>Alternatives Considered: the same plugin is deliberately absent from
- * {@code services/common-lib/pom.xml}, whose non-adoption note at its lines 610 to 620 states why, and
+ * {@code services/common-lib/pom.xml}, whose non-adoption note at its lines 601 to 611 states why, and
  * the asymmetry between the two POMs is a decision rather than an inconsistency to be tidied away. The
  * {@code repackage} goal moves application classes from the archive root down to
  * {@code BOOT-INF/classes} and dependency jars to {@code BOOT-INF/lib}. That layout is loadable by the

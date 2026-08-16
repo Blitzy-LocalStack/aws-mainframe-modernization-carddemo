@@ -53,10 +53,21 @@
  *   <li>{@code app/cbl/CBSTM03A.CBL}, 924 lines - the statement generator, emitting 17
  *       plain-text bands at 80 bytes and 34 HTML fragments at 100 bytes.</li>
  *   <li>{@code app/cbl/CBSTM03B.CBL}, 230 lines - a four-file data-access dispatcher,
- *       {@code CALL}'d from {@code CBSTM03A.CBL} at six sites and resolved at run time. Its
- *       four inputs, declared at L31, L37, L43 and L49, become four repositories here
- *       rather than one dispatching type, so a caller names the data it wants instead of
- *       naming an operation code.</li>
+ *       {@code CALL}'d from {@code CBSTM03A.CBL} at <b>thirteen</b> sites and resolved at run
+ *       time: L351, L377, L401, L734, L746, L769, L787, L805, L835, L860, L877, L893 and L909,
+ *       which decompose as four opens, four closes and five reads. Its four inputs, declared at
+ *       L31, L37, L43 and L49, become four repositories here rather than one dispatching type, so
+ *       a caller names the data it wants instead of naming an operation code.
+ *       Refactoring Rationale: this entry said six sites. Six is the number of OPERATION CODES
+ *       the subprogram declares as condition names, not the number of calls made to it, and the
+ *       sibling charter at
+ *       {@code services/reporting-service/src/main/java/com/carddemo/reporting/repository/package-info.java}
+ *       had already recorded the thirteen-site census -- naming this charter as the one still
+ *       stating six -- so the two files disagreed with each other about a figure both cite the
+ *       same program for. The census is re-measured here from that program directly, and it is the
+ *       load-bearing half of the claim beneath it: thirteen calls with no other file access in
+ *       {@code CBSTM03A.CBL} is what establishes that this one subprogram carries the WHOLE
+ *       statement read path, and therefore that four repositories replace it completely.</li>
  *   <li>{@code app/cpy/CVTRA07Y.cpy}, 73 lines - normative for the 133-column report
  *       layout.</li>
  *   <li>{@code app/cpy/COSTM01.CPY}, 38 lines - the card-re-keyed 350-byte statement input
@@ -82,15 +93,27 @@
  *
  * <p><strong>Delivered inventory.</strong> Assumptions: every class name and count in this
  * charter is now a measurement of the files present in this subtree, and no name below is a
- * forward assignment. The subtree holds <b>53</b> production classes and all <b>10</b> charter
+ * forward assignment. The subtree holds <b>64</b> production classes and all <b>10</b> charter
  * files, distributed as 3 in the root ({@code ReportingApplication}, {@code ReportingTask} and
- * {@code ReportingTaskRunner}), 2 in {@code .api}, 7 in {@code .config}, 7 in {@code .domain},
- * 12 in {@code .dto}, 7 in {@code .mapper}, 5 in {@code .repository}, 3 in {@code .service},
- * 3 in {@code .sink} and 4 in {@code .task}. This is the single place a reader has to look for
+ * {@code ReportingTaskRunner}), 2 in {@code .api}, 7 in {@code .config}, 8 in {@code .domain},
+ * 13 in {@code .dto}, 8 in {@code .mapper}, 6 in {@code .repository}, 8 in {@code .service},
+ * 3 in {@code .sink} and 6 in {@code .task}. This is the single place a reader has to look for
  * that figure; no other charter in the subtree restates it. The same figure is reported in
  * {@code docs/architecture/service-catalog.md}, which measures it the same way -- charters
  * excluded, because a charter is documentation rather than delivery -- and a test compares that
  * document's number against this subtree, so the two cannot drift apart silently.
+
+ * <p>Refactoring Rationale: that inventory read 53 with a breakdown of 3, 2, 7, 7, 12, 7, 5, 3, 3
+ * and 4. Every figure is re-measured above, and six of the ten packages had moved: the
+ * category-balance report of {@code app/jcl/PRTCATBL.jcl} brought a view, a repository, a service,
+ * a layout, a publisher and a request-response pair with it, and the artifact-identity and
+ * object-store work brought the rest. The total is now what the service catalogue already carried,
+ * because a test re-derives the catalogue's figure from this subtree and forced that document
+ * forward while nothing re-derived this paragraph -- so the charter that calls itself "the single
+ * place a reader has to look" was the one place the figure was wrong. The breakdown is kept
+ * alongside the total rather than reduced to the total alone, for the reason the trade-off below
+ * gives: a reader can re-derive ten small counts by inspection and reject the total if it does not
+ * add up, which is what makes the next divergence visible instead of plausible.
 
  * <p>Assumptions: the two packages a reader may not expect to find under a reporting context are
  * {@code .task} and {@code .sink}, and they are this context's BATCH half rather than an extension of
@@ -110,8 +133,20 @@
  * <p><strong>Charter of the ten packages in this context.</strong>
  * <ul>
  *   <li>{@code com.carddemo.reporting} - this charter, the entry point, and the decisions
- *       stated at the foot of this file. Owns no table: the {@code reporting} schema is
- *       dedicated to this context and holds views only.</li>
+ *       stated at the foot of this file. Owns no table, in the precise sense that this module
+ *       authors no data definition and its login role holds read on the eight views and nothing
+ *       else. The {@code reporting} schema is dedicated to this context and is NOT empty of
+ *       tables: it holds exactly one, {@code card_grouping_key}, created and owned outside this
+ *       module by {@code data-migration/sql/V1__reporting_views.sql} under a no-login role, and
+ *       revoked from this context's login role because it holds the secret mixed into the
+ *       per-card statement grouping token. Refactoring Rationale: this entry said the schema
+ *       "holds views only", which is false in a consequential direction -- a maintainer meeting
+ *       the {@code REVOKE} that withholds that table would read it as dead code and could remove
+ *       it, handing this context the ability to recover a card number from a token by hashing
+ *       sixteen digits. The sibling repository charter and
+ *       {@code docs/architecture/data-model-and-schema-mapping.md} both already state the
+ *       three-level distinction; this entry is brought into line with them rather than the other
+ *       way round.</li>
  *   <li>{@code .api} - REST adapters only: transport validation, HTTP status mapping and
  *       delegation. No business rule and no persistence access.</li>
  *   <li>{@code .service} - business behaviour transcribed paragraph by paragraph from the
@@ -158,7 +193,8 @@
  * TABLE, not owning no schema, is what makes this context a pure consumer.
  *
  * <p>Assumptions: "created empty" describes {@code V0} and is not a claim about the schema's
- * final contents. {@code data-migration/sql/V1__reporting_views.sql} later adds the seven views
+ * final contents. {@code data-migration/sql/V1__reporting_views.sql} later adds EIGHT views, one
+ * function {@code resolve_card}
  * AND one table, {@code card_grouping_key}, which holds the secret that keeps the per-card
  * statement grouping token non-invertible; that script assigns the table to the no-login owner
  * and revokes it from this context's login, so this context still owns no table and still cannot
@@ -185,14 +221,27 @@
  * {@code ledger.transactions} cannot precede that table, and no table exists at the point
  * that file runs. They belong to a data-migration step ordered after the per-service
  * migrations, which is {@code data-migration/sql/V1__reporting_views.sql}: it creates the
- * seven views this context reads, {@code v_report_transactions},
+ * EIGHT views this context reads, {@code v_report_transactions},
  * {@code v_statement_transactions}, {@code v_transaction_types},
- * {@code v_transaction_categories}, {@code v_accounts}, {@code v_customers} and
- * {@code v_card_xref}. A view absent at runtime is a defect to report against
- * data-migration, never to work around from here.
+ * {@code v_transaction_categories}, {@code v_accounts}, {@code v_customers},
+ * {@code v_card_xref} and {@code v_transaction_category_balances}. A view absent at runtime is a
+ * defect to report against data-migration, never to work around from here.
+ *
+ * <p>⚠️ Refactoring Rationale: this read "the seven views" and then listed seven names, omitting
+ * {@code v_transaction_category_balances} -- which is not a rounding of a count but a missing
+ * member of an enumerated set, so a reader could not tell that
+ * {@code TransactionCategoryBalanceView} in {@code ..reporting.domain} has a relation behind it at
+ * all. The full set is eight, one per projection in that package. Two FURTHER views exist in this
+ * schema and are deliberately not listed here: {@code v_verification_row_counts} and
+ * {@code v_verification_money_totals}, added by
+ * {@code data-migration/sql/V3__verification_surfaces.sql} and granted to the same login, are
+ * aggregate-only relations the migration's own SQL verification passes read. They are part of what
+ * the login can SELECT -- ten relations in total -- and no part of what this context reads, which
+ * is why they belong in the privilege inventory in {@code ..reporting.repository} and not in this
+ * sentence.
  *
  * <p>Assumptions: that ordering is satisfiable today rather than aspirational, and it is named by
- * file so a reader can check it: {@code V1__reporting_views.sql} declares all seven views, and every
+ * file so a reader can check it: {@code V1__reporting_views.sql} declares all eight views, and every
  * one of the seven per-service migrations it depends on is present -- {@code V1__account.sql},
  * {@code V1__auth.sql}, {@code V1__authorization.sql}, {@code V1__batch.sql}, {@code V1__card.sql},
  * {@code V1__reference.sql} with its {@code V2__seed_reference.sql} companion, and
@@ -218,13 +267,22 @@
  * it exists, and it did not when the list was written. Three files in this module -- this
  * charter, {@code pom.xml} and {@code config/OpenApiConfig.java} -- each asserted it, so the
  * absence was recorded three times as a presence; the repair is the file rather than three
- * retractions. It declares five operations, all beneath {@code /api/v1/reports}, which is the
+ * retractions. It declares eight operations, all beneath {@code /api/v1/reports}, which is the
  * prefix {@code infra/envs/&#123;dev,prod&#125;/main.tf} forwards to this workload at priority
  * 70 and {@code infra/modules/api-gateway-http/variables.tf} publishes at the edge. What keeps
  * the three claims true from here on is
  * {@code src/test/java/com/carddemo/reporting/api/ReportingApiContractTest.java}, which fails
  * the build if that document is absent, unparseable, routed outside that prefix, or disagreeing
  * with the metadata bean about the contract's identity.
+ * Refactoring Rationale: the operation figure here said five, and the same figure had gone stale
+ * inside the document itself, where the document-level security rationale reasoned about "five
+ * times" and "a sixth operation". Both are corrected from a parse of the contract, which publishes
+ * eight paths carrying eight operations; the document's own header and
+ * {@code ReportingApiContractTest} already pinned eight, so the two prose restatements were the
+ * only places the smaller figure survived. What the contract test pins is presence, prefix and
+ * identity rather than an operation count, which is exactly why an operation count written in prose
+ * beside it can rot -- so this sentence keeps the figure only because the routing claim it makes is
+ * about the prefix, and the count is checkable in one parse by anyone who doubts it.
  *
  * <p><strong>Owned contract: the 133-column transaction report.</strong>
  * {@code app/cpy/CVTRA07Y.cpy} is normative and declares seven {@code 01}-levels, at L4,

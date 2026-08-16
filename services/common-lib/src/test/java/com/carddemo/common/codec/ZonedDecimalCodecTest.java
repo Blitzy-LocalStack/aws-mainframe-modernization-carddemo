@@ -67,10 +67,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * amounts a byte sniffer would produce, so the hazard is recorded as an executable fact instead of a
  * caution, and they take the declared geometry from {@link CopybookLayout}, which is the single
  * normative source of record geometry in this migration.</p>
- *
- * <p>Parameters, return values and exceptions at type level: declared inapplicable. A class
- * declaration accepts no parameter, yields no value and raises nothing, so this block carries no
- * parameter, return or exception at-clause.</p>
  */
 class ZonedDecimalCodecTest {
 
@@ -250,7 +246,7 @@ class ZonedDecimalCodecTest {
      * Confirms the twelve-byte credit limit of the live account record decodes to two thousand and
      * sixty-five and re-encodes to the same twelve characters.
      *
-     * <p>Takes no parameters and returns no value. JUnit reports a differing value, a differing scale
+     * <p>JUnit reports a differing value, a differing scale
      * or a differing re-encoded span as a test failure.</p>
      *
      * <p>Assumptions: the span is {@code ACCT-CREDIT-LIMIT}, declared {@code PIC S9(10)V99} at line 8
@@ -264,10 +260,10 @@ class ZonedDecimalCodecTest {
         assertDecodesAndReEncodes(ACCT_CREDIT_LIMIT_SPAN, ACCOUNT_MONEY_INT_DIGITS, MONEY_DEC_DIGITS,
                 SIGNED, "2065.00");
 
-        // WHY : Assumptions: the prefix constant is sliced here rather than the span constant being
-        //       trusted on its own, because the two agreeing is the only thing that shows the span was
-        //       taken from a declared offset of a real record instead of being typed out. If a later
-        //       edit moved either one, this line is where the disagreement surfaces.
+        // Assumptions: the prefix constant is sliced here rather than the span constant being
+        // trusted on its own, because the two agreeing is the only thing that shows the span was
+        // taken from a declared offset of a real record instead of being typed out. If a later
+        // edit moved either one, this line is where the disagreement surfaces.
         assertEquals(ACCT_CREDIT_LIMIT_SPAN, ACCOUNT_RECORD_PREFIX.substring(24, 36),
                 "the credit-limit constant must be exactly zero-based [24:36] of the account record");
     }
@@ -276,7 +272,7 @@ class ZonedDecimalCodecTest {
      * Proves that the overpunch character {@code 'G'} contributes the low-order digit seven as well as
      * the positive sign, so that the live span {@code 0000005047G} is 504.77 and never 50.47.
      *
-     * <p>Takes no parameters and returns no value. JUnit reports the factor-of-ten misreading, or any
+     * <p>JUnit reports the factor-of-ten misreading, or any
      * other differing value, as a test failure.</p>
      *
      * <p>This is the regression case for the single most consequential defect this codec can carry.
@@ -308,11 +304,11 @@ class ZonedDecimalCodecTest {
         assertEquals("5047", new BigDecimal("50.47").unscaledValue().toString(),
                 "the sign-marker-only reading keeps ten digits, which is how it loses the eleventh");
 
-        // WHY : Assumptions: this pair is the sign-independent proof. 'G' and 'H' are adjacent entries
-        //       of the positive table, so if the final byte were a sign marker alone the two spans
-        //       would decode to the same amount; a one-cent difference is only possible if that byte
-        //       also carries a digit. The check is written against the codec's own two decodes rather
-        //       than against a literal, so it holds even if both literals were mistranscribed.
+        // Assumptions: this pair is the sign-independent proof. 'G' and 'H' are adjacent entries
+        // of the positive table, so if the final byte were a sign marker alone the two spans
+        // would decode to the same amount; a one-cent difference is only possible if that byte
+        // also carries a digit. The check is written against the codec's own two decodes rather
+        // than against a literal, so it holds even if both literals were mistranscribed.
         BigDecimal nextDigitUp = ZonedDecimalCodec.decode(OVERPUNCH_BODY + 'H',
                 TRANSACTION_MONEY_INT_DIGITS, MONEY_DEC_DIGITS, SIGNED);
         assertEquals(new BigDecimal("0.01"), nextDigitUp.subtract(decoded),
@@ -322,7 +318,7 @@ class ZonedDecimalCodecTest {
     /**
      * Confirms the third live transaction amount, whose overpunch is {@code 'H'}, decodes to 67.88.
      *
-     * <p>Takes no parameters and returns no value. JUnit reports a differing value, a differing scale
+     * <p>JUnit reports a differing value, a differing scale
      * or a differing re-encoded span as a test failure.</p>
      *
      * <p>Assumptions: the span sits at zero-based offset 132 of the third record of
@@ -340,7 +336,7 @@ class ZonedDecimalCodecTest {
      * Confirms the second live transaction amount, whose overpunch is the closing brace, decodes to
      * minus nine hundred and nineteen.
      *
-     * <p>Takes no parameters and returns no value. JUnit reports a lost sign, a differing magnitude, a
+     * <p>JUnit reports a lost sign, a differing magnitude, a
      * differing scale or a differing re-encoded span as a test failure.</p>
      *
      * <p>Assumptions: the closing brace is the negative table's entry for the digit zero, so this one
@@ -363,7 +359,7 @@ class ZonedDecimalCodecTest {
      * Establishes that the live corpus attests only five of the twenty overpunch characters, and
      * checks every one of those five against its declared value.
      *
-     * <p>Takes no parameters and returns no value. JUnit reports a differing attested set, a differing
+     * <p>JUnit reports a differing attested set, a differing
      * count of characters left unattested, or a differing decoded value as a test failure.</p>
      *
      * <p>Assumptions: the attested set is computed from the live spans themselves rather than asserted
@@ -411,15 +407,15 @@ class ZonedDecimalCodecTest {
         assertEquals(20, POSITIVE_OVERPUNCH_TABLE.length() + NEGATIVE_OVERPUNCH_TABLE.length(),
                 "the two tables together must declare twenty characters, ten signs by ten digits");
 
-        // WHY : Trade-offs: the fifteen characters this loop counts are covered by SYNTHETIC vectors in
-        //       the two table cases below, and that is a deliberate exchange rather than an oversight.
-        //       The alternative was to assert only what live data attests, which would leave three
-        //       quarters of the table unexercised while reading as complete coverage -- and the
-        //       unattested three quarters includes all nine letter entries of the negative table, so a
-        //       transposition anywhere in the negative table would ship undetected. Exhaustive coverage
-        //       of a table whose twenty entries are fixed by the reference implementation is worth more
-        //       than fidelity to a corpus that happens to sample five of them, so the synthetic vectors
-        //       are used and this assertion states exactly how many of them there have to be.
+        // Trade-offs: the fifteen characters this loop counts are covered by SYNTHETIC vectors in
+        // the two table cases below, and that is a deliberate exchange rather than an oversight.
+        // The alternative was to assert only what live data attests, which would leave three
+        // quarters of the table unexercised while reading as complete coverage -- and the
+        // unattested three quarters includes all nine letter entries of the negative table, so a
+        // transposition anywhere in the negative table would ship undetected. Exhaustive coverage
+        // of a table whose twenty entries are fixed by the reference implementation is worth more
+        // than fidelity to a corpus that happens to sample five of them, so the synthetic vectors
+        // are used and this assertion states exactly how many of them there have to be.
         int unattested = 0;
         for (char candidate : (POSITIVE_OVERPUNCH_TABLE + NEGATIVE_OVERPUNCH_TABLE).toCharArray()) {
             if (attested.indexOf(String.valueOf(candidate)) < 0) {
@@ -525,7 +521,7 @@ class ZonedDecimalCodecTest {
      * Reconstructs both trailing-sign tables from the encode direction alone and checks them against
      * the two literal tables this codec is contracted to implement.
      *
-     * <p>Takes no parameters and returns no value. JUnit reports a table whose characters differ, or
+     * <p>JUnit reports a table whose characters differ, or
      * whose characters are in a different order, as a test failure.</p>
      *
      * <p>Assumptions: the two production tables are private constants, so they cannot be read from a
@@ -562,7 +558,7 @@ class ZonedDecimalCodecTest {
     /**
      * Confirms that the sign-preserving pair reproduces a closing-brace zero byte for byte.
      *
-     * <p>Takes no parameters and returns no value. JUnit reports a decoded value other than zero, a
+     * <p>JUnit reports a decoded value other than zero, a
      * mis-reported sign, or a re-encoded span differing from the source in any position as a failure.</p>
      *
      * <p>Assumptions: this is the operation a caller uses when it must write a record back exactly as
@@ -608,7 +604,7 @@ class ZonedDecimalCodecTest {
     /**
      * Confirms that the sign-preserving pair reproduces a non-zero negative span unchanged.
      *
-     * <p>Takes no parameters and returns no value. JUnit reports a differing value, a mis-reported sign
+     * <p>JUnit reports a differing value, a mis-reported sign
      * or a differing span as a failure.</p>
      *
      * <p>Assumptions: a non-zero value carries its own sign, so this vector proves the sign component is
@@ -632,7 +628,7 @@ class ZonedDecimalCodecTest {
     /**
      * Confirms that a pair whose stated sign contradicts a non-zero value is refused.
      *
-     * <p>Takes no parameters and returns no value; the expected exception is captured so none escapes.</p>
+     * <p>The expected exception is captured so none escapes.</p>
      *
      * <p>Assumptions: the two components may disagree only at zero, so a positive magnitude paired with
      * the negative overpunch is not a representable span and is refused at construction. Accepting it
@@ -650,7 +646,7 @@ class ZonedDecimalCodecTest {
     /**
      * Confirms that the PLAIN pair normalises a closing-brace zero to the opening-brace form.
      *
-     * <p>Takes no parameters and returns no value. JUnit reports a non-zero value, a differing scale,
+     * <p>JUnit reports a non-zero value, a differing scale,
      * or a re-encoded span other than the positive-zero form as a test failure.</p>
      *
      * <p>Assumptions: this is the one documented non-byte-identical round trip of the PLAIN pair, and it
@@ -686,9 +682,9 @@ class ZonedDecimalCodecTest {
                         SIGNED),
                 "the closing-brace zero is the one span this codec does not reproduce byte for byte");
 
-        // WHY : Assumptions: the two spans differ in their final character alone, and this line fixes
-        //       that so the divergence above cannot be mistaken for a wider difference. Everything the
-        //       previous assertions describe is caused by one byte.
+        // Assumptions: the two spans differ in their final character alone, and this line fixes
+        // that so the divergence above cannot be mistaken for a wider difference. Everything the
+        // previous assertions describe is caused by one byte.
         assertEquals(POSITIVE_ZERO_SPAN.substring(0, POSITIVE_ZERO_SPAN.length() - 1),
                 NEGATIVE_ZERO_SPAN.substring(0, NEGATIVE_ZERO_SPAN.length() - 1),
                 "the two zero spans must share every character except the overpunch");
@@ -698,7 +694,7 @@ class ZonedDecimalCodecTest {
      * Proves that decoding preserves exactly the fractional width declared by the picture, including
      * trailing zeros that do not change numerical magnitude.
      *
-     * <p>Takes no parameters and returns no value. JUnit reports a differing scale or a plain-text
+     * <p>JUnit reports a differing scale or a plain-text
      * rendering that omits a declared trailing zero as a test failure.</p>
      *
      * <p>Assumptions: the account amount, transaction amount and disclosure-group rate are retained as
@@ -740,7 +736,7 @@ class ZonedDecimalCodecTest {
      * Proves that zoned width is the integer-digit count plus the fractional-digit count because the
      * sign and the implied decimal point consume no separate byte.
      *
-     * <p>Takes no parameters and returns no value. JUnit reports disagreement between the codec width,
+     * <p>JUnit reports disagreement between the codec width,
      * the layout width and any live field descriptor as a test failure.</p>
      *
      * <p>Assumptions: three independent expressions of width are compared deliberately. The codec
@@ -796,7 +792,7 @@ class ZonedDecimalCodecTest {
      * Proves that decoded values are exact decimal text with no binary numeric intermediate, at both
      * the smallest non-zero cent and the largest positive account-picture magnitude.
      *
-     * <p>Takes no parameters and returns no value. JUnit reports a differing plain-text value,
+     * <p>JUnit reports a differing plain-text value,
      * unscaled digit sequence, declared scale or re-encoded span as a test failure.</p>
      *
      * <p>Assumptions: both vectors are SYNTHETIC one-character constructions. {@code 0000000000A}
@@ -837,7 +833,7 @@ class ZonedDecimalCodecTest {
      * Proves that the unsigned eleven-byte account identifier is decoded only within its declared
      * span and leaves the adjacent active-status byte as a separate text field.
      *
-     * <p>Takes no parameters and returns no value. JUnit reports differing layout metadata, a slice
+     * <p>JUnit reports differing layout metadata, a slice
      * crossing the declared boundary, a differing identifier value or a changed status byte as a
      * test failure.</p>
      *
@@ -864,10 +860,10 @@ class ZonedDecimalCodecTest {
         assertEquals(Kind.TEXT, activeStatus.kind(),
                 "the adjacent status byte must remain text rather than a sign carrier");
 
-        // WHY : Assumptions: these slices use descriptor bounds rather than the known literals so the
-        //       test fails if the registry moves either boundary. Decoding a separately declared span
-        //       is the guard; merely comparing the constants would still permit a caller to pass both
-        //       fields to one codec operation.
+        // Assumptions: these slices use descriptor bounds rather than the known literals so the
+        // test fails if the registry moves either boundary. Decoding a separately declared span
+        // is the guard; merely comparing the constants would still permit a caller to pass both
+        // fields to one codec operation.
         String slicedId = ACCOUNT_RECORD_PREFIX.substring(accountId.start(), accountId.end());
         String slicedStatus = ACCOUNT_RECORD_PREFIX.substring(
                 activeStatus.start(), activeStatus.end());
@@ -883,7 +879,7 @@ class ZonedDecimalCodecTest {
      * Proves that declared offset, length and {@link Kind} are the only facts that identify a zoned
      * field, even when an undeclared record substring has valid zoned syntax.
      *
-     * <p>Takes no parameters and returns no value. JUnit reports a differing transaction layout, a
+     * <p>JUnit reports a differing transaction layout, a
      * false field declaration at the straddle offset or a differing amount decode as a test
      * failure.</p>
      *
@@ -908,10 +904,10 @@ class ZonedDecimalCodecTest {
                 "the transaction amount must declare two fractional digits");
         assertTrue(amount.signed(), "the transaction amount picture must carry a leading sign");
 
-        // WHY : Assumptions: asking the registry whether a matching descriptor exists is the decisive
-        //       negative check. Rejecting the substring merely because its decoded value looks absurd
-        //       would encode a business-value heuristic, and a large legitimate amount could then be
-        //       discarded while this false positive happened to pass.
+        // Assumptions: asking the registry whether a matching descriptor exists is the decisive
+        // negative check. Rejecting the substring merely because its decoded value looks absurd
+        // would encode a business-value heuristic, and a large legitimate amount could then be
+        // discarded while this false positive happened to pass.
         assertTrue(transaction.fields().stream().noneMatch(candidate ->
                         candidate.start() == STRADDLE_OFFSET_IN_TRANSACTION
                                 && candidate.length() == amount.length()
@@ -981,9 +977,9 @@ class ZonedDecimalCodecTest {
                                 && candidate.kind() == Kind.ZONED),
                 "the transaction layout must declare no zoned field over the four-field straddle");
 
-        // WHY : Assumptions: decoding here is deliberately the wrong operation, performed to make the
-        //       false positive executable. The following successful round trip is evidence against a
-        //       whole-record syntax scan, not evidence that the substring is a business amount.
+        // Assumptions: decoding here is deliberately the wrong operation, performed to make the
+        // false positive executable. The following successful round trip is evidence against a
+        // whole-record syntax scan, not evidence that the substring is a business amount.
         assertDecodesAndReEncodes(span, TRANSACTION_MONEY_INT_DIGITS, MONEY_DEC_DIGITS, SIGNED,
                 expectedFalseValue);
     }
@@ -1033,9 +1029,9 @@ class ZonedDecimalCodecTest {
         assertDecodesAndReEncodes(identifier, MERCHANT_ID_DIGITS, NO_DEC_DIGITS,
                 UNSIGNED, "800000000");
 
-        // WHY : Assumptions: this deliberate false decode uses the only signed geometry that fits ten
-        //       characters at scale two. Its success proves that length and a valid final overpunch do
-        //       not identify a field; the adjacent descriptors above do.
+        // Assumptions: this deliberate false decode uses the only signed geometry that fits ten
+        // characters at scale two. Its success proves that length and a valid final overpunch do
+        // not identify a field; the adjacent descriptors above do.
         int falseIntDigits = straddle.length() - MONEY_DEC_DIGITS;
         assertEquals(new BigDecimal(expectedFalseValue),
                 ZonedDecimalCodec.decode(straddle, falseIntDigits, MONEY_DEC_DIGITS, SIGNED),
@@ -1046,7 +1042,7 @@ class ZonedDecimalCodecTest {
      * Shows that longer live boundary straddles either decode and round-trip as false zoned values or
      * fail at the first invalid body or overpunch character, neither of which identifies a field.
      *
-     * <p>Takes no parameters and returns no value. The expected failures are exact
+     * <p>The expected failures are exact
      * {@link ZonedDecimalException} instances raised inside assertion lambdas and captured there, so
      * this method itself completes normally; JUnit reports a missing or differently typed exception,
      * a differing validation location or a differing false decode as a test failure.</p>
@@ -1086,7 +1082,7 @@ class ZonedDecimalCodecTest {
     /**
      * Confirms that an absent field span is rejected before any character access is attempted.
      *
-     * <p>Takes no parameters and returns no value. The expected failure is an exact
+     * <p>The expected failure is an exact
      * {@link ZonedDecimalException}, raised inside the assertion lambda and captured there, so this
      * method itself completes normally; JUnit reports a missing or differently typed exception as a
      * test failure.</p>
@@ -1109,7 +1105,7 @@ class ZonedDecimalCodecTest {
     /**
      * Confirms that a span one character shorter than its declared width is rejected without padding.
      *
-     * <p>Takes no parameters and returns no value. The expected failure is an exact
+     * <p>The expected failure is an exact
      * {@link ZonedDecimalException}, raised inside the assertion lambda and captured there, so this
      * method itself completes normally; JUnit reports a missing or differently typed exception as a
      * test failure.</p>
@@ -1136,7 +1132,7 @@ class ZonedDecimalCodecTest {
     /**
      * Confirms that a span one character longer than its declared width is rejected without truncation.
      *
-     * <p>Takes no parameters and returns no value. The expected failure is an exact
+     * <p>The expected failure is an exact
      * {@link ZonedDecimalException}, raised inside the assertion lambda and captured there, so this
      * method itself completes normally; JUnit reports a missing or differently typed exception as a
      * test failure.</p>
@@ -1164,7 +1160,7 @@ class ZonedDecimalCodecTest {
      * Confirms that a non-digit character in the signed field's digit body is rejected at its exact
      * zero-based position.
      *
-     * <p>Takes no parameters and returns no value. The expected failure is an exact
+     * <p>The expected failure is an exact
      * {@link ZonedDecimalException}, raised inside the assertion lambda and captured there, so this
      * method itself completes normally; JUnit reports a missing or differently typed exception or a
      * differing index as a test failure.</p>
@@ -1192,7 +1188,7 @@ class ZonedDecimalCodecTest {
      * Confirms that a final character outside both trailing-sign tables is rejected after its digit
      * body has passed validation.
      *
-     * <p>Takes no parameters and returns no value. The expected failure is an exact
+     * <p>The expected failure is an exact
      * {@link ZonedDecimalException}, raised inside the assertion lambda and captured there, so this
      * method itself completes normally; JUnit reports a missing or differently typed exception or
      * missing table names as a test failure.</p>
@@ -1218,7 +1214,7 @@ class ZonedDecimalCodecTest {
      * Confirms that a plain trailing digit on a signed field is rejected rather than interpreted as
      * an implicit positive sign.
      *
-     * <p>Takes no parameters and returns no value. The expected failure is an exact
+     * <p>The expected failure is an exact
      * {@link ZonedDecimalException}, raised inside the assertion lambda and captured there, so this
      * method itself completes normally; JUnit reports a missing or differently typed exception or an
      * assumed sign as a test failure.</p>
@@ -1230,9 +1226,9 @@ class ZonedDecimalCodecTest {
      */
     @Test
     void plainTrailingDigitOnASignedFieldIsRejectedRatherThanAssumedPositive() {
-        // WHY : Alternatives Considered: decoding this as positive 504.77 was rejected because no
-        //       byte in the span then carries the declared sign. Refusal preserves evidence that the
-        //       producer used the wrong sign convention instead of inventing a sign the bytes omit.
+        // Alternatives Considered: decoding this as positive 504.77 was rejected because no
+        // byte in the span then carries the declared sign. Refusal preserves evidence that the
+        // producer used the wrong sign convention instead of inventing a sign the bytes omit.
         ZonedDecimalException failure = assertThrows(ZonedDecimalException.class,
                 () -> ZonedDecimalCodec.decode(
                         "00000050477", TRANSACTION_MONEY_INT_DIGITS, MONEY_DEC_DIGITS, SIGNED));
@@ -1248,7 +1244,7 @@ class ZonedDecimalCodecTest {
     /**
      * Confirms that encoding a negative value into a declared-unsigned display field is rejected.
      *
-     * <p>Takes no parameters and returns no value. The expected failure is an exact
+     * <p>The expected failure is an exact
      * {@link ZonedDecimalException}, raised inside the assertion lambda and captured there, so this
      * method itself completes normally; JUnit reports a missing or differently typed exception as a
      * test failure.</p>
@@ -1276,7 +1272,7 @@ class ZonedDecimalCodecTest {
      * Confirms that a magnitude needing more digit positions than the declared field is rejected
      * without truncating either end.
      *
-     * <p>Takes no parameters and returns no value. The expected failure is an exact
+     * <p>The expected failure is an exact
      * {@link ZonedDecimalException}, raised inside the assertion lambda and captured there, so this
      * method itself completes normally; JUnit reports a missing or differently typed exception or
      * differing width as a test failure.</p>
@@ -1306,7 +1302,7 @@ class ZonedDecimalCodecTest {
      * Confirms that a value carrying non-zero precision beyond {@code decDigits} is rejected rather
      * than rounded or truncated.
      *
-     * <p>Takes no parameters and returns no value. The expected failure is an exact
+     * <p>The expected failure is an exact
      * {@link ZonedDecimalException}, raised inside the assertion lambda and captured there, so this
      * method itself completes normally; JUnit reports a missing or differently typed exception or
      * any silently encoded result as a test failure.</p>
@@ -1334,7 +1330,7 @@ class ZonedDecimalCodecTest {
     /**
      * Confirms that an absent value is rejected before scale, sign or magnitude processing begins.
      *
-     * <p>Takes no parameters and returns no value. The expected failure is an exact
+     * <p>The expected failure is an exact
      * {@link ZonedDecimalException}, raised inside the assertion lambda and captured there, so this
      * method itself completes normally; JUnit reports a missing or differently typed exception as a
      * test failure.</p>
@@ -1357,7 +1353,7 @@ class ZonedDecimalCodecTest {
     /**
      * Confirms that invalid digit metadata is rejected before an absent span can be examined.
      *
-     * <p>Takes no parameters and returns no value. Both expected failures are exact
+     * <p>Both expected failures are exact
      * {@link ZonedDecimalException} instances raised inside assertion lambdas and captured there, so
      * this method itself completes normally; JUnit reports a missing or differently typed exception,
      * or an absence error winning precedence, as a test failure.</p>
@@ -1391,7 +1387,7 @@ class ZonedDecimalCodecTest {
      * Confirms that a sensitive field diagnostic names safe geometry and never echoes raw field
      * content.
      *
-     * <p>Takes no parameters and returns no value. The expected failure is an exact
+     * <p>The expected failure is an exact
      * {@link ZonedDecimalException}, raised through the production field-aware overload inside the
      * assertion lambda and captured there, so this method itself completes normally; JUnit reports a
      * missing or differently typed exception, missing geometry or disclosed content as a test
@@ -1441,7 +1437,7 @@ class ZonedDecimalCodecTest {
      * Proves the deterministic decode order: width before body, body before final-character
      * classification, and an unrecognised final character before the distinct plain-digit refusal.
      *
-     * <p>Takes no parameters and returns no value. Every expected failure is an exact
+     * <p>Every expected failure is an exact
      * {@link ZonedDecimalException} raised inside an assertion lambda and captured there, so this
      * method itself completes normally; JUnit reports a missing or differently typed exception, a
      * later defect winning precedence or a differing final successful value as a test failure.</p>
@@ -1518,7 +1514,7 @@ class ZonedDecimalCodecTest {
      * Proves the deterministic encode order: fractional precision before unsigned signedness,
      * unsigned signedness before magnitude, and magnitude before successful left padding.
      *
-     * <p>Takes no parameters and returns no value. Every expected failure is an exact
+     * <p>Every expected failure is an exact
      * {@link ZonedDecimalException} raised inside an assertion lambda and captured there, so this
      * method itself completes normally; JUnit reports a missing or differently typed exception, a
      * later defect winning precedence or a differing final encoded span as a test failure.</p>
@@ -1582,7 +1578,7 @@ class ZonedDecimalCodecTest {
     /**
      * Proves the money-typed pair round-trips every attested span byte-identically at both widths.
      *
-     * <p>Takes no parameters and returns no value. JUnit reports a differing amount, a scale other than
+     * <p>JUnit reports a differing amount, a scale other than
      * the money scale, or a re-encoded span that is not byte-identical to the original as a test
      * failure.</p>
      *
@@ -1623,11 +1619,11 @@ class ZonedDecimalCodecTest {
         assertEquals(Money.SCALE, negativeTransactionAmount.amount().scale(),
                 "a negative amount must carry the same declared scale as a positive one");
 
-        // WHY : Assumptions: encoding what was decoded must reproduce the original bytes exactly,
-        //       because byte identity is the property a record rewrite depends on. A value that decoded
-        //       correctly but re-encoded one character differently would rewrite a field that nothing
-        //       changed, and every following field of a fixed-width record would still align, so the
-        //       only place the defect could be observed is a byte comparison like this one.
+        // Assumptions: encoding what was decoded must reproduce the original bytes exactly,
+        // because byte identity is the property a record rewrite depends on. A value that decoded
+        // correctly but re-encoded one character differently would rewrite a field that nothing
+        // changed, and every following field of a fixed-width record would still align, so the
+        // only place the defect could be observed is a byte comparison like this one.
         assertEquals(ACCT_CURR_BAL_SPAN,
                 ZonedDecimalCodec.encodeMoney(accountBalance, ACCOUNT_MONEY_INT_DIGITS, SIGNED),
                 "the twelve-byte account span must survive a decode and encode unchanged");
@@ -1640,10 +1636,10 @@ class ZonedDecimalCodecTest {
                         negativeTransactionAmount, TRANSACTION_MONEY_INT_DIGITS, SIGNED),
                 "the negative eleven-byte transaction span must survive unchanged");
 
-        // WHY : Assumptions: the money form must agree with the general form on identical input. The
-        //       money form is documented as a convenience over the general one at a fixed fractional
-        //       width, so the two must be indistinguishable wherever both apply. Comparing them here is
-        //       what makes that a checked property rather than a description.
+        // Assumptions: the money form must agree with the general form on identical input. The
+        // money form is documented as a convenience over the general one at a fixed fractional
+        // width, so the two must be indistinguishable wherever both apply. Comparing them here is
+        // what makes that a checked property rather than a description.
         assertEquals(
                 ZonedDecimalCodec.decode(
                         ACCT_CURR_BAL_SPAN, ACCOUNT_MONEY_INT_DIGITS, MONEY_DEC_DIGITS, SIGNED),
@@ -1655,7 +1651,7 @@ class ZonedDecimalCodecTest {
      * Proves negative zero normalises through the money pair exactly as it does through the general
      * one.
      *
-     * <p>Takes no parameters and returns no value. JUnit reports a decoded amount other than zero, or
+     * <p>JUnit reports a decoded amount other than zero, or
      * a re-encoded span other than the positive-zero form, as a test failure.</p>
      *
      * <p>Assumptions: this is the one documented span for which the round-trip law does not hold, so
@@ -1665,10 +1661,10 @@ class ZonedDecimalCodecTest {
      * live {@code ACCT-CURR-CYC-CREDIT} span at [78:90]. The two differ in their final character
      * alone, so the normalisation is observable as a single-byte difference and nothing else.</p>
      *
-     * <p>Trade-offs: the asymmetry is accepted rather than repaired, and pinning it here is what keeps
-     * it from being rediscovered as a byte mismatch during a rewrite. The target type has no negative
-     * zero to preserve, so an encoder that emitted the negative form would have to invent a sign the
-     * value does not carry.</p>
+     * <p>Trade-offs: the asymmetry is part of the contract rather than a defect to close, and
+     * pinning it here is what keeps it from being rediscovered as a byte mismatch during a rewrite.
+     * The target type has no negative zero to preserve, so an encoder that emitted the negative form
+     * would have to invent a sign the value does not carry.</p>
      */
     @Test
     void moneyTypedNegativeZeroNormalisesToThePositiveOverpunch() {
@@ -1699,7 +1695,7 @@ class ZonedDecimalCodecTest {
     /**
      * Proves the money form refuses a magnitude the reference money picture cannot hold.
      *
-     * <p>Takes no parameters and returns no value. Both expected failures are captured inside
+     * <p>Both expected failures are captured inside
      * assertion lambdas, so this method completes normally; JUnit reports a missing or differently
      * typed exception, or a general-form decode that also failed, as a test failure.</p>
      *
@@ -1727,9 +1723,9 @@ class ZonedDecimalCodecTest {
                 ZonedDecimalCodec.widthOf(oneIntegerDigitTooMany, MONEY_DEC_DIGITS),
                 "the vector must fill the declared width exactly, so length cannot be the cause");
 
-        // WHY : Assumptions: the general form must accept the very span the money form refuses. Without
-        //       this control the refusal below could equally be a length or a digit-body defect, and
-        //       the test would pass while proving nothing about the domain.
+        // Assumptions: the general form must accept the very span the money form refuses. Without
+        // this control the refusal below could equally be a length or a digit-body defect, and
+        // the test would pass while proving nothing about the domain.
         assertEquals("99999999999.99",
                 ZonedDecimalCodec.decode(
                         thirteenByteSpan, oneIntegerDigitTooMany, MONEY_DEC_DIGITS, SIGNED)
@@ -1750,10 +1746,10 @@ class ZonedDecimalCodecTest {
         assertThat(unsignedRefusal.getMessage())
                 .contains("an amount declaring 11 integer digits");
 
-        // WHY : Assumptions: the widest amount the money picture DOES hold must decode through the
-        //       money form. The pair differs by one integer digit position, which is what a bound
-        //       written one place out would move, so the admitted side is what makes the refusal a
-        //       boundary rather than a blanket ceiling.
+        // Assumptions: the widest amount the money picture DOES hold must decode through the
+        // money form. The pair differs by one integer digit position, which is what a bound
+        // written one place out would move, so the admitted side is what makes the refusal a
+        // boundary rather than a blanket ceiling.
         assertEquals("9999999999.99",
                 ZonedDecimalCodec.decodeMoney("999999999999", ACCOUNT_MONEY_INT_DIGITS, UNSIGNED)
                         .toPlainString(),
@@ -1763,7 +1759,7 @@ class ZonedDecimalCodecTest {
     /**
      * Proves the money encoder refuses an absent amount and an unsigned field it cannot sign.
      *
-     * <p>Takes no parameters and returns no value. Both expected failures are exact
+     * <p>Both expected failures are exact
      * {@link ZonedDecimalException} instances captured inside assertion lambdas, so this method
      * completes normally; JUnit reports a missing or differently typed exception as a test failure.</p>
      *
@@ -1792,7 +1788,7 @@ class ZonedDecimalCodecTest {
     /**
      * Proves the published width helper refuses impossible geometry when called directly.
      *
-     * <p>Takes no parameters and returns no value. All three expected failures are exact
+     * <p>All three expected failures are exact
      * {@link ZonedDecimalException} instances captured inside assertion lambdas, so this method
      * completes normally; JUnit reports a missing or differently typed exception, or a message that
      * does not name the offending counts, as a test failure.</p>
@@ -1833,10 +1829,10 @@ class ZonedDecimalCodecTest {
                 .contains("must declare at least one digit position")
                 .contains("sum to zero");
 
-        // WHY : Assumptions: a single digit position must be admitted, so the zero-sum refusal is a
-        //       boundary. A signed field carries its sign inside its low-order digit, so one digit
-        //       position is genuinely sufficient and a guard written to require two would be wrong. The
-        //       admitted case is what distinguishes the two.
+        // Assumptions: a single digit position must be admitted, so the zero-sum refusal is a
+        // boundary. A signed field carries its sign inside its low-order digit, so one digit
+        // position is genuinely sufficient and a guard written to require two would be wrong. The
+        // admitted case is what distinguishes the two.
         assertEquals(1, ZonedDecimalCodec.widthOf(1, NO_DEC_DIGITS),
                 "one integer digit and no fraction must declare a one-byte field");
         assertEquals(1, ZonedDecimalCodec.widthOf(0, 1),

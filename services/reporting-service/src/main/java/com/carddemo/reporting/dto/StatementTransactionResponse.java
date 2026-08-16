@@ -76,9 +76,9 @@ import jakarta.validation.constraints.Size;
  * place this context permits such a decision to appear. The unreduced primary account number is
  * answered only by the administrative card-detail endpoint, which belongs to another bounded
  * context entirely and is reached by a different authority, matching the shared masking decision at
- * {@code StatementRequest} L212 to L223 and the mapping boundary at
+ * {@code StatementRequest} L248 to L251 and the mapping boundary at
  * {@code services/reporting-service/src/main/java/com/carddemo/reporting/dto/package-info.java}
- * L276 to L279. Two consequences follow and
+ * L12 to L17. Two consequences follow and
  * are stated because neither is visible from the declaration. First, no digits-only constraint is
  * asserted on that component even though its source field holds digits, because the value it
  * actually carries is a mask and a digits-only assertion would reject every legitimate one.
@@ -102,10 +102,11 @@ import jakarta.validation.constraints.Size;
  * be surrendered at the one hop a user actually reads. The margin does not permit it:
  * {@code TRNX-AMT PIC S9(09)V99} at L29 carries 11 significant digits against the roughly 15 to 17
  * that binary64 offers, which leaves nothing once a client chains two operations of its own. The
- * encoding is not applied component by component -- {@code com.carddemo.reporting.ReportingApplication}
- * registers {@code com.carddemo.common.money.MoneyModule} explicitly for the reason recorded at
- * {@code com.carddemo.reporting.dto}, and that one registration is why this component needs no
- * serialisation annotation of its own.
+ * encoding is not applied component by component -- the shared kernel registers
+ * {@code com.carddemo.common.money.MoneyModule} itself, both as an auto-configured bean and through a
+ * Jackson service-provider file, for the reason recorded at {@code com.carddemo.reporting.dto}, and
+ * those registrations are why this component needs no serialisation annotation of its own and why no
+ * class in this module declares the module at all.
  *
  * <p>Assumptions: the plain-text statement renders money three ways, and all three place the sign
  * in the LAST position and group no thousands. {@code ST-CURR-BAL} is
@@ -266,7 +267,7 @@ import jakarta.validation.constraints.Size;
  * <p>Assumptions: no ordinal paging member, parameter or accessor appears here, and no prose here
  * implies one exists, matching
  * {@code services/reporting-service/src/main/java/com/carddemo/reporting/dto/package-info.java}
- * L253 to L260.
+ * L190 to L183.
  * An ordinal cursor loses and repeats rows once a concurrent insert shifts positions between two
  * reads, which is a change in observable behaviour that a key-based browse does not produce -- and
  * that, rather than any claim about speed, is the whole of the reason. Two reference browse fields
@@ -281,7 +282,7 @@ import jakarta.validation.constraints.Size;
  * no first-entry flag and no turn counter. The reference session structure's
  * {@code CDEMO-PGM-CONTEXT} discriminator is eliminated rather than ported, for the reason recorded
  * at {@code services/reporting-service/src/main/java/com/carddemo/reporting/dto/package-info.java}
- * L214 to L226: its value is remembered state that only means anything because a task ends at every
+ * L156 to L166: its value is remembered state that only means anything because a task ends at every
  * screen turn, and a handler answering field errors in a response body has nothing to remember.
  *
  * <p>Assumptions: this record is not an error carrier either. A failure surfaces through
@@ -296,13 +297,13 @@ import jakarta.validation.constraints.Size;
  * <p>Assumptions: this context owns no table, no index and no database schema-migration artifact,
  * and reads read-only cross-schema projections under a role holding read access alone, as recorded
  * at {@code services/reporting-service/src/main/java/com/carddemo/reporting/dto/package-info.java}
- * L90 to L100. So this record carries no version marker for optimistic concurrency and no
+ * L61 to L75. So this record carries no version marker for optimistic concurrency and no
  * identifier a caller is expected to supply, because there is nothing in this context to write.
  *
  * <p>Alternatives Considered: each component's declared width is asserted once, by the
  * {@code @Size} constraint in the header, and the constructor below deliberately does not repeat
  * the check. Repeating it was the alternative, and it is rejected on the ground
- * {@code StatementRequest} L154 to L180 already records for the request half: two executable
+ * {@code StatementRequest} L192 to L220 already records for the request half: two executable
  * positions for one declared width are what let a caller be published one contract and held to
  * another. The constraint is the single authority for width, and the constructor asserts only the
  * three things a constraint cannot express -- that the two components forming the cursor key carry
@@ -457,8 +458,8 @@ public record StatementTransactionResponse(
      * constructor, which is what makes the guarantee hold by construction instead of by every
      * mapping site remembering it.
      *
-     * <p>Alternatives Considered: this constructor throws where {@code StatementRequest} L154 to
-     * L180 deliberately does not, and the asymmetry is intended. That type is bound from a caller's
+     * <p>Alternatives Considered: this constructor throws where {@code StatementRequest} L192 to
+     * L220 deliberately does not, and the asymmetry is intended. That type is bound from a caller's
      * request body, so a violation is the caller's and has to arrive as a per-field entry naming the
      * offending field, which an exception raised during binding cannot do -- it surfaces as an
      * unstructured malformed-body failure instead. This type is constructed by the mapping layer
@@ -469,7 +470,7 @@ public record StatementTransactionResponse(
      *
      * <p>Assumptions: no message raised below quotes the value it rejected. The card number is the
      * {@code X(16)} member at {@code app/cpy/COSTM01.CPY} L22, and the shared masking decision at
-     * {@code StatementRequest} L212 to L223 reveals only its trailing four digits, so naming the
+     * {@code StatementRequest} L248 to L251 reveals only its trailing four digits, so naming the
      * component and withholding its content keeps that discipline from being defeated through a
      * diagnostic.
      *

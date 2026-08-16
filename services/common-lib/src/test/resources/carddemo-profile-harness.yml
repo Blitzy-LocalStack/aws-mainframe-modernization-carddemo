@@ -1,0 +1,49 @@
+# =============================================================================
+# services/common-lib/src/test/resources/carddemo-profile-harness.yml
+# -----------------------------------------------------------------------------
+# Purpose:
+#   The BASE fixture document for ProfileConfigurationTest. It stands in for a
+#   service's application.yml so the harness can be proved against a document
+#   whose contents the test controls, rather than against a real service whose
+#   values are that service's to change.
+#
+#   Assumptions: the base name is `carddemo-profile-harness` and not
+#   `application`, deliberately. This module runs a Spring context test of its
+#   own, and a document at the default base name would be picked up by it -- so
+#   a fixture written to prove the harness works would change the behaviour of
+#   an unrelated test. The harness is asked for this name explicitly.
+#
+#   Trade-offs: the keys below are deliberately NOT the keys any service uses.
+#   Reusing a real key would make a reader think this file configures something,
+#   and a future change to a real key's meaning would look like it had to be
+#   mirrored here. Nothing binds these; the harness reads them as properties.
+# =============================================================================
+carddemo:
+  harness:
+    # Assumptions: overridden by the profile document, so the test can prove the
+    # profile value WINS and can name the document that decided it.
+    overridden: base-value
+
+    # Assumptions: NOT overridden anywhere, so the test can prove an inherited
+    # value survives a profile activation rather than being dropped with the
+    # document it came from.
+    inherited: inherited-value
+
+    # Assumptions: a placeholder with NO default, which is how every service
+    # declares an endpoint or credential. Resolution must therefore FAIL for
+    # this key, and that failure is what unresolvablePlaceholders() reports.
+    platform-supplied: ${CARDDEMO_HARNESS_ABSENT_VARIABLE}
+
+    # Assumptions: a placeholder WITH a default, which must resolve rather than
+    # appear in the unresolvable set -- the distinction the harness draws
+    # between a value the platform must supply and one it may.
+    defaulted: ${CARDDEMO_HARNESS_ABSENT_WITH_DEFAULT:fallback-value}
+
+    # Assumptions: an inline comma-separated list, which binds as ONE scalar
+    # property. The block-sequence form in the profile document binds as indexed
+    # properties instead, and list() must read both.
+    inline-list: alpha,beta,gamma
+
+logging:
+  level:
+    com.carddemo.harness.base: INFO

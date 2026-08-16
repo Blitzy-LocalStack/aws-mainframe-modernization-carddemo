@@ -3,8 +3,17 @@
 > **Purpose.** Pin reject reason **102**: a transaction whose projected cycle balance exceeds the
 > account's credit limit by **one cent** is refused with the message `OVERLIMIT TRANSACTION`, and the
 > run reports the soft-warn tier. This is the exclusive half of the pair whose inclusive half is
-> `posting/boundary_exact_limit`: the two folders differ in six bytes of one field, and between them
-> they fix the comparison at `app/cbl/CBTRN02C.cbl:407` as `>=` rather than `>`.
+> `posting/boundary_exact_limit`: the two folders' `dailytran.txt` files differ in **exactly one byte**
+> -- the sign-overpunch digit of `DALYTRAN-AMT`, at one-based position **143**, where the inclusive half
+> carries `{` (positive `0`, giving `+2065.00`) and this one carries `A` (positive `1`, giving
+> `+2065.01`) -- and between them they fix the comparison at `app/cbl/CBTRN02C.cbl:407` as `>=` rather
+> than `>`. Assumptions: this sentence said "six bytes of one field", which is the difference between
+> either fixture and its SEED row and not the difference between the two fixtures; the seed comparison
+> is stated in its own right in section 9 below. The distinction is load-bearing rather than pedantic,
+> because the pair's entire evidential value is that it is minimal: a reader told the folders differ in
+> six bytes has no reason to believe a failure localises to the amount rather than to five other
+> changed digits, which is exactly what the pair exists to establish. `BatchFixtureContractTest` holds
+> the pair to that single differing position, so the claim is machine-checked and not merely asserted.
 >
 > **Source of truth.** `app/cbl/CBTRN02C.cbl` for the behaviour and `app/jcl/POSTTRAN.jcl` for the
 > dataset contract, both reference-only and both cited below by line; `app/cpy/CVTRA06Y.cpy`,
@@ -474,9 +483,17 @@ posting-validation assertions read directly:
 
 The rows load into the objects the sibling harness declares in
 [`test-harness-schemas-and-foreign-tables.sql`](../../../db/testharness/test-harness-schemas-and-foreign-tables.sql),
-where lines 492 to 494 declare the reject contract by composition -- `raw_record CHAR(350)`,
-`reason_code SMALLINT`, `reason_desc VARCHAR(76)`. That file is the authority for the schema and it is
-deliberately not re-derived here.
+where lines **556 to 558** declare the reject contract by composition -- `raw_record CHAR(350)`,
+`reason_code SMALLINT`, `reason_desc VARCHAR(76)` -- under the rationale at its lines 543 to 544, and
+with the four-digit range check on `reason_code` at its lines 559 to 560. That file is the authority for
+the schema and it is deliberately not re-derived here.
+
+Assumptions: this citation named lines 492 to 494, which the file has since moved past; the sibling
+`../reject_101_acct_missing` and `../reject_103_expired` documents already record that those lines now
+hold unrelated material. A stale line citation is worse than none, because a reader who opens the file
+at the named lines and finds something else has no way to tell whether the contract moved or the claim
+was never true, so the citation is re-measured here and given the neighbouring rationale and constraint
+lines as well -- three anchors are harder to invalidate silently than one.
 
 The graded rubric 0, 4, 8 belongs to the COBOL parity suite alone (master section 7.1.6). The
 warn-tier expectation here is the job's return code, not a build status.
@@ -580,10 +597,17 @@ COBOL baseline or the parity oracle.
 ---
 
 *This README is the mandatory Explainability carrier for the four record files in this directory,
-required by master section 10 and by user-specified Rule 1. `config/rule1/rule1_gate.py` decides the
-form of the rationale labels above, repository-wide and including Markdown, which is why they are
-written plain rather than emphasised. `config/checkstyle/checkstyle.xml` limits its audit set to
-`java`, so no linter reads this prose. Whether each rationale names a real consequence, and whether
+required by master section 10 and by user-specified Rule 1. **No gate reads this prose.**
+`config/checkstyle/checkstyle.xml` limits its audit set to `java`, and `config/rule1/rule1_gate.py`
+excludes every path containing `/src/test/resources/fixtures/` in its `_is_governed` check, which is
+this path -- so neither its `labels` check nor its `what` check ever opens this file. Refactoring
+Rationale: this paragraph previously credited `config/rule1/rule1_gate.py` with deciding the form of
+the rationale labels above "repository-wide and including Markdown". The gate does run
+repository-wide, which is what made the claim plausible, but this path is explicitly outside its
+remit, so the sentence let a green build be read as evidence about a document the gate never opens.
+The canonical label form is used here regardless, because `docs/CODE_DOCUMENTATION_STANDARD.md` fixes
+one written form repository-wide and a Rule 1 audit finds a rationale by literal string search;
+compliance in this path is therefore **review-based** rather than mechanical. Whether each rationale names a real consequence, and whether
 every number and line citation is true, are review obligations no lexical gate can decide.*
 
 ---

@@ -20,23 +20,23 @@
  * aspirational.</p>
  *
  * <p>The second obligation is mechanical, and it is build-fatal. {@code JavadocPackage} is declared
- * at <em>Checker</em> level in {@code config/checkstyle/checkstyle.xml} L245, outside the
- * {@code TreeWalker} that opens at L259, so it is a file-set check: it demands that a
+ * at <em>Checker</em> level in {@code config/checkstyle/checkstyle.xml} L238, outside the
+ * {@code TreeWalker} that opens at L252, so it is a file-set check: it demands that a
  * {@code package-info.java} file <em>exist</em> in any directory holding a processed compilation
  * unit. {@code MissingJavadocPackage} is declared at L378 <em>inside</em> that {@code TreeWalker},
  * and it demands that the file <em>carry</em> Javadoc. A descriptor holding nothing but a bare
  * {@code package} statement satisfies the first and fails the second, which is why neither the
  * omission nor the empty-file shortcut was available. The gate runs on the Maven {@code validate}
- * phase under execution id {@code checkstyle-documentation-gate} at {@code services/pom.xml} L816 to
- * L817, with {@code failOnViolation} true at L906 and {@code violationSeverity} warning at L907, so
+ * phase under execution id {@code checkstyle-documentation-gate} at {@code services/pom.xml} L807 to
+ * L808, with {@code failOnViolation} true at L897 and {@code violationSeverity} warning at L898, so
  * a miss stops every local build before compilation rather than only in continuous integration.
  * Every other record authored in this directory is unbuildable until this file exists.</p>
  *
  * <p>Assumptions: the file-set half of that pairing, {@code JavadocPackage} at
- * {@code config/checkstyle/checkstyle.xml} L245, fires only for a directory that already holds a
+ * {@code config/checkstyle/checkstyle.xml} L238, fires only for a directory that already holds a
  * processed compilation unit, so the necessity of this descriptor is contingent on this package
  * holding at least one record. It is not contingent on which records those are, and it is independent
- * of the tree half at L378, which reads this file's content once the file is reached at all. The
+ * of the tree half at L371, which reads this file's content once the file is reached at all. The
  * contingency is
  * recorded because it names the one circumstance in which this descriptor's absence would go
  * unreported: delete it from a directory holding no other compilation unit and the file-set check has
@@ -179,10 +179,10 @@
  * <p>Members of this package are Java 21 {@code record} types by preference, and that preference
  * carries a documentation consequence better stated here than discovered through a failing build.
  * {@code JavadocType} is configured with {@code allowMissingParamTags} false at
- * {@code config/checkstyle/checkstyle.xml} L413, and {@code MissingJavadocType} lists
- * {@code RECORD_DEF} among its tokens at L311, so a record requires one parameter block tag on the
+ * {@code config/checkstyle/checkstyle.xml} L406, and {@code MissingJavadocType} lists
+ * {@code RECORD_DEF} among its tokens at L304, so a record requires one parameter block tag on the
  * record's own type Javadoc for every component it declares, while
- * {@code NonEmptyAtclauseDescription} at L470 requires each of those descriptions to be non-empty.
+ * {@code NonEmptyAtclauseDescription} at L463 requires each of those descriptions to be non-empty.
  * A shape following the update map, whose named data fields number 54, therefore carries a described
  * tag for every component it declares, and it is the widest shape in this package. That cost is
  * accepted because these are fixed-width contracts, and the tag is the one place a component's
@@ -336,10 +336,19 @@
  *   <li>No locally declared error, validation, pagination, exception or message-catalogue type. Each
  *       of the four contracts named above belongs to the shared kernel, and a local substitute would
  *       give one concept two definitions.</li>
- *   <li>No request record for any read path. Selection context is decomposed into the request path
- *       and query rather than carried in a body, so the account view, the customer reads and the
- *       cross-reference lookups take no request body at all and there is nothing for such a record to
- *       carry.</li>
+ *   <li>No request record beyond the four this package declares. Selection context is carried in a
+ *       request BODY rather than in the request path and query, so the account lookup, the account
+ *       view, the customer reads and the cross-reference searches each take one selection record —
+ *       {@code AccountLookupRequest}, {@code CustomerLookupRequest} and
+ *       {@code CardXrefLookupRequest} — beside the single editing record
+ *       {@code AccountUpdateRequest}. What remains prohibited is a FIFTH shape for the same job: a
+ *       second record carrying one key, or a record carrying a key this context does not select by.
+ *       Refactoring Rationale: this prohibition read "No request record for any read path", on the
+ *       premise that selection was decomposed into the path and query. It is not, and the three
+ *       selection records exist; the transport decision is registered as
+ *       {@code D-ACCOUNT-SELECTION-IN-BODY} in
+ *       {@code docs/architecture/cobol-to-service-traceability.md} §7.4, so the prohibition is
+ *       restated as a bound on DUPLICATION, which is the property this list is for.</li>
  *   <li>No dedicated conflict record. An optimistic-lock failure is rendered as {@code ApiError} by
  *       the shared {@code GlobalExceptionHandler}, which already maps that failure to HTTP 409, so a
  *       second shape for the same response would compete with it.</li>

@@ -8,12 +8,18 @@
 #   disclosure-group interest rates, and the seeded United States address
 #   lookups that address validation reads. This file is the property-key
 #   contract for the whole module. The configuration classes under
-#   com.carddemo.reference.config bind against the keys declared here, and when
-#   application-dev.yml and application-prod.yml are authored they will override
-#   the VALUES of these keys without adding a key, removing a key, or changing the
-#   shape of one. Neither overlay exists yet -- the paragraph headed "State at
-#   this checkpoint" below says so and is the authority; this sentence is written
-#   in the future tense so the two cannot be read as disagreeing.
+#   com.carddemo.reference.config bind against the keys declared here, and the two
+#   overlays -- application-dev.yml and application-prod.yml -- override the
+#   VALUES of these keys without adding a key, removing a key, or changing the
+#   shape of one. Refactoring Rationale: this paragraph was written in the future
+#   tense and said neither overlay existed, deferring to a "State at this
+#   checkpoint" paragraph as the authority. Both overlays are delivered beside
+#   this file, so the tense described a tree that no longer exists -- and the
+#   deferral pointed at a paragraph that is itself now absent, which is the worst
+#   form of a stale claim because a reader cannot even locate what it deferred to.
+#   The present tense is used because the constraint is enforceable now:
+#   ReferenceApiContractTest and the profile's own closing register hold each
+#   overlay to varying values only.
 #
 #   The behaviour being configured is derived from four programs, every one of
 #   which is REFERENCE ONLY and is never modified:
@@ -76,21 +82,7 @@
 #     so only it is required, and none of the three is a deployment input: no
 #     listener key reaches Terraform state, Secrets Manager, a task definition or
 #     an image layer, and no two tasks share one.
-#   AWS_REGION
-#     String. Required for this context to START, not merely to reach AWS; see
-#     WHY 6.
-#   CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE
-#     String. Name of the queue this context's ONE date-inquiry listener consumes,
-#     com.carddemo.reference.service.DateInquiryMessageListener. Assumptions: the
-#     count is stated because it used to be two -- a second consumer was bound to
-#     this same property and the two disagreed on reply width, reply routing,
-#     content type and requester expiry, so which contract a message met depended
-#     on which container polled first. ReferenceQueueConsumerContractTest now fails
-#     the build if a second listener is bound here.
-#   CARDDEMO_REFERENCE_INQUIRY_REPLY_QUEUE
-#     String. Name of the queue replies are published to.
-#   CARDDEMO_REFERENCE_INQUIRY_ERROR_QUEUE
-#     String. Name of the terminal error sink.
+
 #   CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID
 #     String. The app-client identifier a presented token must name.
 #   CARDDEMO_DB_SSL_ROOT_CERT
@@ -105,11 +97,19 @@
 #   Environment yields: one HTTPS listener on the port below; one pooled
 #   DataSource whose every connection pins its schema search path to reference
 #   and requires verified TLS; a Flyway run applying both migrations into that
-#   schema before the JPA EntityManagerFactory is built; one SQS listener
-#   container long-polling the inquiry queue; a JWT resource-server
+#   schema before the JPA EntityManagerFactory is built; a JWT resource-server
 #   configuration; an actuator surface answering GET /actuator/health,
-#   /actuator/info and the metrics scrape path; a served OpenAPI 3.1 document
-#   once the contract lands; and the base log levels the two profiles adjust.
+#   /actuator/info and the metrics scrape path; the served OpenAPI 3.1 document
+#   openapi/reference-api.yaml, which is delivered beside this file; and the base
+#   log levels the two profiles adjust.
+#   Refactoring Rationale: two items are corrected here rather than reworded. This
+#   list promised an SQS listener container long-polling an inquiry queue, and this
+#   module now consumes no queue at all -- the single shared inquiry request queue
+#   of app/app-vsam-mq/README.md L53 has exactly one owning consumer, in the
+#   account context, because a receive hides a message from every other consumer.
+#   It also promised the OpenAPI document "once the contract lands", which had
+#   landed; a conditional tense on a delivered artifact reads as an absent
+#   capability and sends a contributor to author a document that is already there.
 #
 # Exceptions or errors:
 #   Startup failure modes a reader will actually meet, in the order the context
@@ -119,21 +119,15 @@
 #      context refresh with IllegalArgumentException "Could not resolve
 #      placeholder", naming the absent variable. That is the intended outcome and
 #      the reason there is no default; see spring.datasource.
-#   2. Absent region. The SQS client is constructed as the context is built, so an
-#      unset AWS_REGION fails startup even though nothing has yet been sent or
-#      received; see spring.cloud.aws.region.
-#   3. Unreachable database. HikariCP abandons the first connection attempt after
+#   2. Unreachable database. HikariCP abandons the first connection attempt after
 #      connection-timeout and the context fails to start, rather than the task
 #      reporting healthy and then failing every lookup it is sent.
-#   4. Migration that cannot apply. FlywayException aborts startup. The realistic
+#   3. Migration that cannot apply. FlywayException aborts startup. The realistic
 #      causes are a checksum mismatch on an already-applied migration, the login
 #      role lacking CREATE on the reference schema, and a reference schema that
 #      already holds objects but has no Flyway history table, which fails rather
 #      than silently baselining; see spring.flyway.
-#   5. Absent queue. queue-not-found-strategy below is fail, so a queue that does
-#      not exist aborts startup instead of being created unmanaged; see
-#      spring.cloud.aws.sqs.
-#   6. Absent or unreachable issuer. The resource server resolves the issuer's
+#   4. Absent or unreachable issuer. The resource server resolves the issuer's
 #      signing keys during startup, so a wrong or unreachable issuer fails the
 #      context instead of producing a service that rejects every token it is ever
 #      presented.
@@ -141,12 +135,15 @@
 # WHY (non-obvious design decisions):
 #   Every key below carries its own labelled rationale at the key, so the
 #   fail-fast placeholders, the HTTPS listener and its agreed port, the Flyway
-#   scope and its 862-row seed cost, the two independent schema pins, the region
-#   that is a startup requirement, and the SQS poll and queue naming are each
-#   argued there rather than summarised twice here. Four decisions have no key to
-#   sit beside and are recorded together in the closing block: the absent active
-#   profile, and the deliberate absence of any spring.batch key, any
-#   management.metrics.tags block and any Jackson setting.
+#   scope and its 862-row seed cost and the two independent schema pins are each
+#   argued there rather than summarised twice here. Refactoring Rationale: this
+#   summary also named "the region that is a startup requirement" and "the SQS
+#   poll and queue naming"; both sets of keys are withdrawn from this file with
+#   the module's queue consumer, and the withdrawal is argued in the closing
+#   block. Five decisions have no key to sit beside and are recorded together
+#   there: the absent active profile, the withdrawn messaging configuration, and
+#   the deliberate absence of any spring.batch key, any management.metrics.tags
+#   block and any Jackson setting.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -309,128 +306,20 @@ spring:
   #   allows a fixed window between SIGTERM and SIGKILL, and the framework
   #   default for this key coincides with it exactly, so a task can be killed at
   #   the moment it is still draining. Twenty seconds gives up the tail of that
-  #   window to buy the certainty that the listener finishes its in-flight
-  #   message and the JVM flushes its log buffers rather than being terminated
-  #   part-way.
+  #   window to buy the certainty that an in-flight request completes and the JVM
+  #   flushes its log buffers rather than being terminated part-way.
+  #   Refactoring Rationale: this said "the listener finishes its in-flight
+  #   message". This module consumes no queue, so the only work a drain has to
+  #   finish is an HTTP request; naming a listener would send a reader looking for
+  #   a message flow that is not here.
   lifecycle:
     timeout-per-shutdown-phase: 20s
-
-  # -----------------------------------------------------------------------------
-  # Assumptions: this section exists only because
-  #   services/reference-service/pom.xml declares
-  #   io.awspring.cloud:spring-cloud-aws-starter-sqs, which it does because
-  #   app/app-vsam-mq/cbl/CODATE01.cbl is reached asynchronously as well as
-  #   synchronously; (2) no queue URL, no queue name, no key identifier and
-  #   no account identifier appears here or anywhere else in this file --
-  #   those are outputs of infra/modules/sqs, published to Parameter Store
-  #   and injected into the task as the environment variables named in the
-  #   header, which is what keeps this file free of them rather than merely
-  #   short of them.
-  #   -----------------------------------------------------------------------------
-  cloud:
-    aws:
-
-      # Assumptions: a region is required for this module to START,
-      #   not merely to reach AWS, and that is the non-obvious part.
-      #   Declaring the SQS starter puts its auto-configuration on the
-      #   classpath, and the SQS client bean is built as the context is
-      #   constructed rather than on first use. A client cannot be built
-      #   without a region, so a context with no region fails even when no
-      #   message is ever sent or received. Credentials behave differently
-      #   and are NOT needed to start, because they are resolved on first
-      #   call rather than at build time.
-      # Assumptions: no fallback, deliberately, and no region name
-      #   appears in this repository. AWS_REGION is the same variable the
-      #   SDK's own resolution chain consults first, so declaring it here
-      #   changes nothing about how a deployed task resolves its region;
-      #   what it buys is a failure that NAMES the missing variable instead
-      #   of the chain's own message, which reports an inability to reach
-      #   the instance metadata service and sends a reader looking for an
-      #   EC2 problem a Fargate task does not have.
-      # Trade-offs: a baked default such as a single hard-coded region
-      #   would let a JVM with no environment at all start, and is refused.
-      #   The deployment is single-region, so a default that disagreed with
-      #   it would point every queue operation at a region holding none of
-      #   the queues, and the first visible symptom would be a queue-not-
-      #   found abort far from its cause.
-      region:
-        static: ${AWS_REGION}
-
-      sqs:
-
-        # Assumptions: this is the one setting whose DEFAULT is
-        #   actively harmful here, which is why it is declared rather than
-        #   inherited. Verified against the pinned
-        #   spring-cloud-aws-sqs 4.1.0 rather than assumed:
-        #   io.awspring.cloud.sqs.listener.QueueNotFoundStrategy declares
-        #   exactly two constants, FAIL and CREATE, and the container
-        #   options builder defaults to CREATE. Left unset, a listener
-        #   pointed at a queue that does not exist CREATES one -- and the
-        #   queue it creates is not the queue this system is designed
-        #   around. infra/modules/sqs provisions each queue with a
-        #   dead-letter queue at a maxReceiveCount of 5 and SSE-KMS
-        #   encryption; an application-created queue has neither, so a
-        #   poison message loops instead of being parked and the payload
-        #   sits unencrypted at rest.
-        # Trade-offs: the accepted cost is that a developer running
-        #   this service against an empty local emulator must create the
-        #   three queues first, rather than having them appear. That is
-        #   preferred to the alternative failure, which is silent: with
-        #   CREATE the service starts healthy against queues nothing else
-        #   publishes to, and the absence of traffic looks like an idle
-        #   system rather than a misconfigured one.
-        queue-not-found-strategy: fail
-
-        listener:
-
-          # Assumptions: five seconds is transcribed from the
-          #   baseline, not chosen. app/app-vsam-mq/cbl/CODATE01.cbl L286
-          #   reads "MOVE 5000 TO MQGMO-WAITINTERVAL", directly below its
-          #   own comment at L285, "*** ADDED 5000 MS (5 SECS) AS THE WAIT
-          #   INTERVAL FOR GET", and L296 with L299 compute MQGMO-OPTIONS as
-          #   MQGMO-SYNCPOINT + MQGMO-WAIT, so the wait interval is the
-          #   blocking receive the baseline actually performs. 5000 ms is
-          #   WaitTimeSeconds=5 on the target, which preserves the
-          #   baseline's throughput characteristics instead of silently
-          #   changing them: a shorter poll bills more empty receives, and a
-          #   longer one lengthens the shutdown drain bounded above.
-          # Assumptions: poll-timeout is the property that carries
-          #   this value, and the name is not self-evident. Verified
-          #   first-hand against the pinned 4.1.0 artifacts rather than from
-          #   documentation: the published configuration metadata describes
-          #   spring.cloud.aws.sqs.listener.poll-timeout as "The maximum
-          #   amount of time for a poll to SQS", and
-          #   io.awspring.cloud.sqs.listener.source.AbstractSqsMessageSource
-          #   carries getPollTimeout together with waitTimeSeconds, which is
-          #   the ReceiveMessage parameter it becomes. The neighbouring
-          #   max-delay-between-polls is a different quantity -- the pause
-          #   between consecutive polls -- and setting that one instead
-          #   would leave the receive itself short-polling.
-          poll-timeout: 5s
-
-          # Assumptions: ten is the ReceiveMessage maximum the service accepts,
-          #   so this asks for the largest batch a single poll can return rather
-          #   than a tuned number. It stands in for the baseline's own batching
-          #   discipline: CODATE01 processes messages in a bounded loop rather
-          #   than one message per program invocation, and a full-batch receive
-          #   keeps that shape while spending one API call where ten would
-          #   otherwise be billed.
-          max-messages-per-poll: 10
-
-          # Trade-offs: this ceiling is deliberately equal to the batch size
-          #   above and no larger. Each in-flight message occupies a database
-          #   connection from the pool sized below while it resolves a date, so
-          #   a concurrency ceiling above the pool maximum would convert queue
-          #   depth into connection-acquisition waits and time out handlers that
-          #   would otherwise have succeeded. The accepted cost is that a deeper
-          #   backlog drains at this rate instead of faster.
-          max-concurrent-messages: 10
 
 
   # -----------------------------------------------------------------------------
   # Assumptions: every value in this block arrives from outside the
   #   repository. The Aurora writer endpoint, the database credentials, the
-  #   queue names, the issuer URI and the KMS key identifiers are all
+  #   issuer URI and the KMS key identifiers are all
   #   outputs of the Terraform modules, written to AWS Systems Manager
   #   Parameter Store and AWS Secrets Manager and injected into the task as
   #   environment variables, which is the mechanism behind the design's
@@ -591,13 +480,22 @@ spring:
       #   a verified connection. verify-full is named rather than require
       #   because require encrypts without checking who is on the other end,
       #   which stops an eavesdropper and not an impostor; verify-full also
-      #   validates the certificate chain and the hostname. The bundle path
-      #   is the one placeholder in this file with a fallback, and the
-      #   fallback is a filesystem path shipped in the image rather than a
-      #   secret, so defaulting it discloses nothing.
+      #   validates the certificate chain and the hostname.
+      # Refactoring Rationale: the two values are no longer written here.
+      #   They are declared once under carddemo.database.ssl below and
+      #   referenced from both this map and config/DataSourceConfig.java's
+      #   Flyway data source, because this map is HikariCP-specific and
+      #   reached the pooled connections ONLY. Spring Boot builds Flyway a
+      #   separate migration data source whenever spring.flyway.user is set,
+      #   and it copies the URL, the driver, the user and the password and
+      #   nothing else -- so every DDL statement this module applied
+      #   negotiated the driver's default mode, which for PostgreSQL is
+      #   prefer: it accepts an unencrypted session and validates no
+      #   certificate. Two literals in two places is exactly how that
+      #   divergence stayed invisible, so there is now one.
       data-source-properties:
-        sslmode: verify-full
-        sslrootcert: ${CARDDEMO_DB_SSL_ROOT_CERT:/etc/ssl/certs/carddemo-rds-ca-bundle.pem}
+        sslmode: ${carddemo.database.ssl.mode}
+        sslrootcert: ${carddemo.database.ssl.root-cert}
 
   jpa:
 
@@ -1112,6 +1010,41 @@ logging:
 #   -----------------------------------------------------------------------------
 carddemo:
 
+  database:
+    ssl:
+      # Refactoring Rationale: these two keys did not exist, and their absence is
+      #   why schema-owner migrations reached the cluster with weaker transport
+      #   than runtime queries did. The values were written as literals inside
+      #   spring.datasource.hikari.data-source-properties, which is a
+      #   HikariCP-specific map that reaches the POOL alone. Spring Boot builds
+      #   Flyway a separate migration data source whenever spring.flyway.user is
+      #   set -- FlywayAutoConfiguration.getMigrationDataSource in
+      #   spring-boot-flyway 4.1.0, whose applyConnectionDetails copies the URL,
+      #   the driver class, the user and the password and nothing else -- so the
+      #   TLS terms were not among the values carried across and every DDL
+      #   statement negotiated the driver's default mode. For PostgreSQL that
+      #   default is prefer, which accepts an unencrypted session and validates
+      #   no certificate at all.
+      # Assumptions: declaring them HERE, under a neutral key, is what lets the
+      #   two consumers share one value: the Hikari map above references these,
+      #   and config/DataSourceConfig.java's Flyway data source binds the same
+      #   two keys. Leaving the literals in the Hikari map and repeating them in
+      #   Java would have been two places for one deployment fact, which is the
+      #   arrangement that produced the divergence being corrected.
+      # Assumptions: verify-full rather than require, because require encrypts
+      #   without checking who is on the other end -- it stops an eavesdropper
+      #   and not an impostor. verify-full additionally validates the certificate
+      #   chain and the hostname, which is the property that makes an injected
+      #   endpoint fail rather than succeed quietly.
+      mode: verify-full
+
+      # Trade-offs: this is the one placeholder in this file with a fallback, and
+      #   the fallback is a filesystem path shipped in the image rather than a
+      #   secret, so defaulting it discloses nothing. A deployment that mounts
+      #   the bundle elsewhere sets the variable; one that uses the image's own
+      #   copy sets nothing and still verifies.
+      root-cert: ${CARDDEMO_DB_SSL_ROOT_CERT:/etc/ssl/certs/carddemo-rds-ca-bundle.pem}
+
   security:
     jwt:
       # Assumptions: a Cognito user pool issues both access and identity tokens
@@ -1183,88 +1116,9 @@ carddemo:
   #   same conclusion first; the reasoning is repeated rather than cross-referenced because a reader
   #   of this file would otherwise see an undeclared property and add the placeholder that breaks it.
 
-  reference:
-    inquiry:
-      # WHY : (1) Assumptions: all three names arrive from the environment and
-      #       none is written here, and the reason is drawn from the baseline
-      #       rather than from a general preference. app/app-vsam-mq/cbl/
-      #       CODATE01.cbl L146 reads "MOVE MQTM-QNAME TO INPUT-QUEUE-NAME" --
-      #       the baseline takes its INPUT queue from the CICS trigger message
-      #       and does not name it in the program at all, so hard-coding an input
-      #       queue here would be LESS faithful to the baseline, not more.
-      #       (2) Assumptions: the baseline's other two names cannot survive as
-      #       written. L147 reads "MOVE 'CARD.DEMO.REPLY.DATE' TO
-      #       REPLY-QUEUE-NAME" and L243 reads "MOVE 'CARD.DEMO.ERROR' TO
-      #       ERROR-QUEUE-NAME"; SQS permits only alphanumerics, hyphens and
-      #       underscores in a queue name, with a dot appearing solely as the
-      #       ".fifo" suffix, so a dotted uppercase name is not a legal SQS queue
-      #       name. The target names are carddemo-inquiry-request-<env>,
-      #       carddemo-inquiry-reply-<env> and carddemo-error-<env>, they carry
-      #       an environment suffix this file cannot know, and the renaming is
-      #       recorded in docs/architecture/messaging-contracts.md.
-      #       (3) Alternatives Considered: FIFO queues, as the authorization flow
-      #       uses. Rejected because inquiry has no ordering requirement -- each
-      #       date-conversion request is independent, and its reply is routed by
-      #       correlation rather than by position. The authorization flow needs
-      #       FIFO with MessageGroupId set to the card number itself, frozen by
-      #       specification section 0.4.1.8, because authorizations for one card
-      #       must be applied in order and every producer on that queue has to
-      #       compute the same group value; imposing the same discipline here
-      #       would serialise independent requests behind one another and cap
-      #       throughput to no purpose. These three are standard queues,
-      #       each with a dead-letter queue at a maxReceiveCount of 5 and
-      #       SSE-KMS, provisioned by infra/modules/sqs.
-      #       (4) Assumptions: delete-on-success acknowledgement plus the queue's
-      #       visibility timeout is the whole of the delivery contract for this
-      #       flow, and NO transactional outbox is needed. The baseline reads and
-      #       replies inside one unit of work -- CODATE01.cbl L296 with L299
-      #       computes MQGMO-OPTIONS as MQGMO-SYNCPOINT + MQGMO-WAIT, and L379
-      #       and L416 compute MQPMO-OPTIONS as MQPMO-SYNCPOINT -- so there is no
-      #       window in which the work is committed and the reply is lost. That
-      #       is the opposite of the authorization consumer, which reads and
-      #       publishes with MQGMO-NO-SYNCPOINT and MQPMO-NO-SYNCPOINT at
-      #       app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl L389 and L753 and
-      #       therefore does need an outbox to close that window. Reading the two
-      #       flows as one discipline would either add machinery this service has
-      #       no need of or drop machinery that service cannot do without.
-      request-queue: ${CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE}
-      reply-queue: ${CARDDEMO_REFERENCE_INQUIRY_REPLY_QUEUE}
-      error-queue: ${CARDDEMO_REFERENCE_INQUIRY_ERROR_QUEUE}
 
-  messaging:
-    # WHY : (1) Assumptions: these three are read TOGETHER by config/SqsConfig.java and
-    #       are meaningless apart. The first two bound the queue client's own calls --
-    #       the whole call including retries, and one network attempt within it -- and
-    #       the third is the period the queue keeps a received message invisible to
-    #       other consumers. common-lib's QueueClientBudget requires the whole-call
-    #       bound to be STRICTLY shorter than that period, and refuses to start
-    #       otherwise; the property names are published by that type so this file and
-    #       the binding cannot drift apart.
-    #       (2) Assumptions: the software development kit's default for both client
-    #       bounds is NO bound, which is why they are declared at all. Both the reply
-    #       and the diagnostic are published from inside the message handler, before
-    #       the listener returns, so a stalled publish is a stalled handler -- and a
-    #       handler that outlives visibility does not merely run late: the queue makes
-    #       the request visible again, a second consumer takes it, and two handlers
-    #       answer one inquiry. Nothing in a log distinguishes that from ordinary
-    #       redelivery.
-    #       (3) Assumptions: visibility-timeout-seconds is a PROPERTY here rather than
-    #       a value read from the queue, and sixty is what infra/modules/sqs provisions
-    #       through its own visibility_timeout_seconds default. Reading it from the
-    #       queue at startup was the alternative and is rejected twice over: context
-    #       refresh would then require a reachable queue, and the check would silently
-    #       pass in every test and local run where no queue exists. The consequence is
-    #       that lowering the queue's period in Terraform without lowering it here
-    #       leaves the comparison made against a number the queue no longer uses,
-    #       which is why both defaults are the same value and why this names the
-    #       module.
-    #       (4) Assumptions: this property does NOT set the queue's visibility period.
-    #       Nothing in this service can -- the period is a queue attribute owned by the
-    #       infrastructure module. Stating that plainly is the point: a reader who took
-    #       it for the setting would tune it expecting the queue to follow.
-    api-call-timeout-ms: 10000
-    api-call-attempt-timeout-ms: 5000
-    visibility-timeout-seconds: 60
+
+
 
 # =============================================================================
 # Closing notes: five deliberate absences
@@ -1272,6 +1126,45 @@ carddemo:
 #   Each entry is a key a reasonable author would expect to find here. They are
 #   recorded together because an absent key has no line of its own to sit beside,
 #   and each is a choice a reader would otherwise re-litigate.
+#
+#   Refactoring Rationale: this heading read "six deliberate absences", and before
+#   that "seven". Neither was recounted after the entries below were reorganised:
+#   the queue-related absences -- the spring.cloud.aws block, the listener block,
+#   the AWS_REGION placeholder, the inquiry queue-name trio and the messaging
+#   client-budget trio -- share ONE cause and are now argued as one entry rather
+#   than five, so the entry count fell while the key count did not. Five entries
+#   follow, and the WHY summary in the file header names the same five. The number
+#   is stated because a reader uses it to check they have read them all; a heading
+#   that overcounts sends them looking for an entry that is not there.
+#
+# Refactoring Rationale: there is no spring.cloud.aws block, no
+#   spring.cloud.aws.sqs.listener block, no AWS_REGION placeholder, no
+#   carddemo.reference.inquiry queue-name trio and no carddemo.messaging
+#   client-budget trio. All five groups were here and are WITHDRAWN together,
+#   because the consumer that read them is not in this module any more. The
+#   baseline drives BOTH of its inquiry programs from ONE request destination --
+#   DEFINE QLOCAL('CARDDEMO.REQUEST.QUEUE') at app/app-vsam-mq/README.md L53,
+#   aliased to CICS as MQQUEUE(CARDREQ) at L71 -- and the migrated topology
+#   provisions that one queue rather than one per consumer. A queue admits exactly
+#   one OWNING consumer, because a receive hides the message from every other
+#   consumer rather than delivering a copy to each, so two consumers on one queue
+#   is not redundancy: each takes work the other cannot answer. The owner is
+#   com.carddemo.account.service.InquiryMessageListener, which dispatches on the
+#   request's four-character function code and renders the date answer from
+#   com.carddemo.common.codec.DateInquiryReplyCodec. What stays in this module is
+#   the date EVALUATION of app/cbl/CSUTLDTC.cbl on the synchronous endpoint, which
+#   answers a different question and needs no queue.
+#   Alternatives Considered: keeping the keys and the client so that the consumer
+#   could be re-enabled by configuration. Rejected on two grounds. A queue client
+#   nothing injects is not inert -- it keeps a messaging dependency, a mandatory
+#   region and a credential path on a module that needs none of the three, and it
+#   fails startup on an unset AWS_REGION for a capability the module does not have.
+#   And a configuration key with no reader is a claim no test can check: it reads
+#   as a message flow, and the next contributor goes looking for the consumer.
+#   Trade-offs: re-introducing a consumer here would now require the keys, the
+#   client, the starter dependency and a queue receive grant to be restored
+#   together. That is the intended cost: each of those is a decision, and the
+#   previous arrangement let all four be inherited silently.
 #
 # Alternatives Considered: any spring.batch key, and a Spring Batch job repository
 #   in the reference schema. This is the absence most likely to read as an

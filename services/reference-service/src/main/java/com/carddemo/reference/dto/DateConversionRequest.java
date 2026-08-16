@@ -131,7 +131,7 @@ import jakarta.validation.constraints.Size;
  *
  * <p>Assumptions: the queue names that program hard-codes are absent for the same reason. It moves
  * {@code 'CARD.DEMO.REPLY.DATE'} at its line 147 and {@code 'CARD.DEMO.ERROR'} at its line 243, and a
- * destination is a deployment concern that a request never names. The reply-queue literal is worth
+ * destination is a deployment concern that a request never names. The reply-destination literal is worth
  * recording for the messaging documentation as well, because the migration's queue table carries an
  * error sink but no reply destination of that name; noting it belongs to that document, and is not
  * something a shape can settle.</p>

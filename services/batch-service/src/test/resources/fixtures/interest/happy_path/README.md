@@ -67,7 +67,7 @@ directory:**
 
 | Leg | Evidence | Consequence |
 |---|---|---|
-| 1 | `config/checkstyle/checkstyle.xml` line 209 sets `fileExtensions` to `java` on the `Checker` itself | a `.txt` or `.md` file here is outside the audit set before any suppression is consulted |
+| 1 | `config/checkstyle/checkstyle.xml` line 202 sets `fileExtensions` to `java` on the `Checker` itself | a `.txt` or `.md` file here is outside the audit set before any suppression is consulted |
 | 2 | `config/checkstyle/suppressions.xml` line 188 suppresses `[\\/]src[\\/]test[\\/]resources[\\/]fixtures[\\/]` | even a `.java` file generated into this tree is exempt from the Javadoc checks |
 
 Either leg alone would be sufficient; both hold. **Rule 1 nonetheless binds this file in full**

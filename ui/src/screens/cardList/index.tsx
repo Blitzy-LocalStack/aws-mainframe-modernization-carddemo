@@ -18,13 +18,38 @@
  * concurrent inserts an offset skips and repeats rows, which a browse-by-key does not, so using it
  * would change observable behaviour the golden masters fix.
  *
- * Assumptions: PF7 is bound to a SCREEN ORDINAL this component holds, not to any member of the
- * envelope, because that is where the reference holds it too -- `WS-CA-SCREEN-NUM PIC 9(1)` at
- * `app/cbl/COCRDLIC.cbl` L237 with `88 CA-FIRST-PAGE VALUE 1` at L238, incremented on PF8 at L492,
- * decremented on PF7 at L508, and tested at L902 to decide the `NO PREVIOUS PAGES TO DISPLAY` refusal
- * at L903. No backward read is ever issued to answer that question there, and none is here. AAP
- * section 0.7.1 moves exactly this navigation state client-side, so the ordinal lives in this screen
- * and the envelope publishes only `firstKey` -- the POSITION a backward request is issued from.
+ * ⚠️ Refactoring Rationale: the browse state is now held by `ui/src/hooks/usePagedQuery.ts` and NOT by
+ * this component. It was held here as five independent pieces -- the page, the screen ordinal, the
+ * loading flag and the two entries -- and each delivered page moved several of them in sequence with
+ * NOTHING identifying which request it came from. Two paging steps taken while the first was still
+ * outstanding therefore both applied, in whichever order they settled, so PF8 followed by PF7 could
+ * leave the rows of one page beside the ordinal of another; and the ordinal decides the backward
+ * refusal, so the screen would then permit a step back from a page it was not displaying. The shared
+ * hook holds all of it behind one reducer keyed by a started-read sequence, which discards a
+ * settlement belonging to a superseded read without touching a single other member -- and that module's
+ * own overview names this screen as the first of the five browses it exists to serve.
+ *
+ * Assumptions: PF7 is still decided by a SCREEN ORDINAL and not by any member of the envelope, because
+ * that is where the reference decides it -- `WS-CA-SCREEN-NUM PIC 9(1)` at `app/cbl/COCRDLIC.cbl` L237
+ * with `88 CA-FIRST-PAGE VALUE 1` at L238, incremented on PF8 at L492, decremented on PF7 at L508, and
+ * tested at L902 to decide the `NO PREVIOUS PAGES TO DISPLAY` refusal at L903. No backward read is ever
+ * issued to answer that question there, and none is here: the ordinal simply moved from this component
+ * into the hook, which publishes it as `hasPrev`. AAP section 0.7.1 moves exactly this navigation state
+ * client-side, and it remains client-side.
+ *
+ * Narrowing contract
+ * ------------------
+ * Assumptions: the browse carries TWO narrowing fields, as the mapset paints two. The account field is
+ * the `CARDAIX` access path -- `2210-EDIT-ACCOUNT` at `app/cbl/COCRDLIC.cbl` L1003 to L1030 -- and the
+ * card field resolves one card rather than narrowing, for the reason `applyFilters` records. The two are
+ * edited in the reference's own order, account first, and the account refusal wins when both entries are
+ * malformed because that arm writes the message unconditionally while the card arm writes it only while
+ * no message is set.
+ *
+ * Assumptions: eleven ZERO digits are "not supplied" and not a malformed entry, which is the
+ * reference's own reading: L1007 to L1012 treats low values, spaces AND a numeric value of zeros as an
+ * absent filter and moves zeros into the carried account identifier. An entry of `00000000000` therefore
+ * clears the narrowing rather than being refused.
  *
  * Disclosure
  * ----------
@@ -35,20 +60,22 @@
 
 import { Button, Flex, Input, Space, Table, Typography } from 'antd';
 import type { TableColumnsType } from 'antd';
-import { useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useNavigate } from 'react-router';
 
 import { listCards, lookupCard } from '../../api/cards';
 import type { CardSummary, PageDirection, PageResponse } from '../../api/cards';
-import { MessageBand } from '../../layout/MessageBand';
-import { PfKeyBar, UNIFORM_PF_KEY_LABELS } from '../../layout/PfKeyBar';
-import { ScreenHeader } from '../../layout/ScreenHeader';
+import { useShellSlot } from '../../layout/AppShell';
+import { UNIFORM_PF_KEY_LABELS } from '../../layout/PfKeyBar';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { usePfKeys } from '../../layout/usePfKeys';
 import { PROGRAM_MESSAGES, SHARED_MESSAGES, STATUS_MESSAGES } from '../../messages/messages';
 import { cardDetailPath, cardEditPath, isCardNumber } from '../../routes/cards';
 import { MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
+import type { CardListQuery } from '../../api/types';
+import { VISUALLY_HIDDEN_STYLE, fieldAriaProps, fieldErrorId } from '../../layout/fieldHelp';
+import { usePagedQuery } from '../../hooks/usePagedQuery';
 
 /** Paging refusals this screen renders, taken verbatim from the catalog keyed by its program. */
 const CARD_LIST_PAGING_MESSAGES = PROGRAM_MESSAGES.COCRDLIC;
@@ -183,6 +210,81 @@ export const CARD_LIST_PAGE_UNAVAILABLE =
 /** Identifier of the label element the card-number filter control is named by. */
 const CARD_NUMBER_LABEL_ID = 'card-list-card-number-label';
 
+/** Identifier of the label element the account-number filter control is named by. */
+const ACCOUNT_NUMBER_LABEL_ID = 'card-list-account-number-label';
+
+/**
+ * Which of the two filter fields a refusal blames.
+ *
+ * Assumptions: the two names are the fields' own, matching `CARD_LIST_LABELS`, so a reader comparing
+ * this against the source edits sees the paragraph names `2210-EDIT-ACCOUNT` and `2220-EDIT-CARD`
+ * reflected in the vocabulary rather than in an index.
+ */
+type FilterFieldName = 'accountNumber' | 'cardNumber';
+
+/** Identifier of the account-number filter control itself. */
+const ACCOUNT_NUMBER_INPUT_ID = 'card-list-account-number';
+
+/*
+ * WHY : Refactoring Rationale: the card-number control is given an identifier too, matching the account
+ *       control beside it. It had none, and a browser run reported it: Chrome raises "A form field
+ *       element should have an id or name attribute" against it, because a control with neither cannot
+ *       be autofilled reliably. Its accessible NAME was never in doubt -- `aria-labelledby` resolves it
+ *       -- so this is an autofill and hygiene correction rather than an accessibility one.
+ * WHY : Assumptions: the two are named on the same scheme, `card-list-<field>`, so the pair reads as one
+ *       filter group. Leaving one of two sibling controls without an identifier would also invite the
+ *       question of what distinguished them, when nothing did.
+ */
+
+/** Identifier of the card-number filter control itself. */
+const CARD_NUMBER_INPUT_ID = 'card-list-card-number';
+
+/*
+ * WHY : ⚠️ Refactoring Rationale: the account filter is RESTORED to this screen. It is the first of the
+ *       two criteria the source program edits -- `2210-EDIT-ACCOUNT` at `app/cbl/COCRDLIC.cbl` L1003 to
+ *       L1030, ahead of `2220-EDIT-CARD` at L1036 -- and the label for its field was already
+ *       transcribed into `CARD_LIST_LABELS.accountNumberFilter` from `app/bms/COCRDLI.bms` L88 while no
+ *       control ever rendered it. The card detail screen meanwhile documented that this screen "owns the
+ *       account and card filter fields together", so the workflow was described as living here and lived
+ *       nowhere: an operator could not narrow the browse by account on any screen in the tree.
+ * WHY : Assumptions: the narrowing is a real service capability and needs no new contract. `listCards`
+ *       already accepts `accountId` and `CardListQuery` already declares it -- the criterion was
+ *       reachable from the client the whole time -- so what was missing was the control and its edit,
+ *       not the transport.
+ * WHY : Assumptions: the width is eleven because the source field is `ACCTSIDI PIC X(11)` and the
+ *       program's refusal names eleven digits. It is written as a named constant beside the card
+ *       number's sixteen so the two widths read as the field contracts they are.
+ */
+
+/** Declared width of the account-number filter field, `ACCTSID` at `app/bms/COCRDLI.bms` L89 to L93. */
+const ACCOUNT_FILTER_WIDTH = 11;
+
+/** Matches an account filter of exactly the declared width, all digits. */
+/*
+ * WHY : Refactoring Rationale: an `ACCOUNT_FILTER_PATTERN` regular expression stood here and is
+ *       withdrawn. `isAccountFilterAbsent` and `isAccountFilterWellFormed` decide the same two
+ *       questions, and they are the pair applyFilters asks; keeping the regex as well meant one of the
+ *       two would be edited without the other.
+ */
+
+/*
+ * WHY : Assumptions: an all-zeroes entry is NOT SUPPLIED rather than invalid, and that is the source's
+ *       own rule rather than a convenience: `2210-EDIT-ACCOUNT` tests
+ *       `CC-ACCT-ID EQUAL LOW-VALUES OR CC-ACCT-ID EQUAL SPACES OR CC-ACCT-ID-N EQUAL ZEROS` and takes
+ *       the blank exit for all three, and `2220-EDIT-CARD` tests the same three for the card number.
+ *       An operator who clears a filter by typing zeros over it therefore clears the narrowing, and does
+ *       not receive a refusal for a value the terminal accepted.
+ */
+
+/**
+ * Reports whether a filter entry is one the source treats as not supplied.
+ * @param {string} entry - The filter entry exactly as typed, unpadded.
+ * @returns {boolean} `true` when the entry is empty, all spaces or all zeroes.
+ */
+export function isUnsuppliedFilter(entry: string): boolean {
+  return entry.trim() === '' || /^0+$/u.test(entry.trim());
+}
+
 /**
  * Ordinal of the opening page, and the only value at which the backward step is refused.
  *
@@ -194,41 +296,93 @@ const CARD_NUMBER_LABEL_ID = 'card-list-card-number-label';
 export const CARD_LIST_FIRST_PAGE = 1;
 
 /**
- * Computes the screen ordinal a delivered page sits at, given the request that produced it.
+ * How many rows this screen has room for, as the reference program declares it.
  *
- * Assumptions: a request carrying NO cursor is the opening read -- mount, Enter under a cleared filter,
- * or the filter being cleared -- and lands on the opening page, which is why it resets rather than
- * increments. This mirrors the reference, where `WS-CA-SCREEN-NUM` is initialised to one on first entry
- * and only the two paging arms move it: `ADD +1` on PF8 at `app/cbl/COCRDLIC.cbl` L492 and `SUBTRACT 1`
- * on PF7 at L508.
- *
- * Refactoring Rationale: the ordinal is advanced only once a page has actually been DELIVERED, so a
- * failed request leaves the operator's position where the rows on screen say it is. Advancing it at
- * request time would leave the ordinal one page ahead of the rows after any transport failure, and the
- * backward refusal is computed from it -- so the screen would then permit a step back from the page it
- * was still displaying. Trade-offs: the reference moves its ordinal before its read and repairs the
- * mismatch by re-displaying, which a screen holding its own state does not need to do.
- *
- * Assumptions: no ceiling is applied. The reference field is `PIC 9(1)`, so its tenth page truncates to
- * zero, but the ONLY use either side makes of the ordinal is the equality test against one -- and zero
- * fails that test exactly as ten does, so the truncation is unobservable and is not reproduced.
- *
- * Trade-offs: the two paging transitions are written as one signed step rather than as two conditional
- * returns, so the symmetry the reference states as `ADD +1` and `SUBTRACT 1` is visible in one
- * expression instead of being spread across two branches a reader has to compare.
- * @param {number} current - Ordinal of the page currently displayed.
- * @param {string | undefined} cursor - Sealed cursor the delivered page was requested with, or
- *   `undefined` for an opening read.
- * @param {PageDirection} direction - Direction the cursor was replayed in.
- * @returns {number} The ordinal of the delivered page.
+ * Assumptions: seven, from `05 WS-MAX-SCREEN-LINES PIC S9(4) COMP VALUE 7` at
+ * `app/cbl/COCRDLIC.cbl` L177 to L178, which is also the arity of its row array. The paging hook
+ * requires this rather than defaulting it, because the five browses it serves declare five different
+ * arities and a default would render another screen's.
  */
-export function cardListOrdinalAfter(
-  current: number,
-  cursor: string | undefined,
+export const CARD_LIST_PAGE_SIZE = 7;
+
+/** Width of the account filter field, from `CC-ACCT-ID PIC X(11)` and `ACCTSIDI` on the mapset. */
+export const CARD_LIST_ACCOUNT_FILTER_WIDTH = 11;
+
+/*
+ * WHY : ⚠️ Refactoring Rationale: the screen-ordinal helper that stood here is GONE, together with the
+ *       opening-page constant it tested. Both moved into `ui/src/hooks/usePagedQuery.ts`, which holds
+ *       the ordinal in the same reducer as the rows and the cursors so that a delivered page moves all
+ *       of them together or none of them -- the property this screen could not have while the ordinal
+ *       was a separate `useState` advanced in its own callback. The hook's own `FIRST_PAGE_NUMBER` cites
+ *       the same `88 CA-FIRST-PAGE VALUE 1` at `app/cbl/COCRDLIC.cbl` L237 to L238, so nothing about the
+ *       reference's test is lost by the move; what is gained is that a stale settlement can no longer
+ *       advance the ordinal past the rows on display.
+ */
+
+/**
+ * Whether an account entry is "not supplied" in the reference's own sense.
+ *
+ * Assumptions: three conditions, and the third is the one that is easy to miss. `2210-EDIT-ACCOUNT` at
+ * `app/cbl/COCRDLIC.cbl` L1007 to L1012 treats the field as absent when it holds LOW-VALUES, when it
+ * holds SPACES, or when its numeric redefinition holds ZEROS -- so `00000000000` is an absent filter and
+ * not a malformed one, and the arm moves zeros into the carried identifier and leaves without raising a
+ * sentence. A browser has no low-values state, so the empty string stands for the first two and the
+ * all-zeros form is tested exactly as the third.
+ * @param {string} entry - The account entry as the operator left it.
+ * @returns {boolean} True when the entry requests no narrowing at all.
+ */
+export function isAccountFilterAbsent(entry: string): boolean {
+  const trimmed = entry.trim();
+  return trimmed === '' || /^0+$/u.test(trimmed);
+}
+
+/**
+ * Whether a supplied account entry is well formed.
+ *
+ * Assumptions: eleven digits exactly, which is the conjunction of the two conditions the reference's
+ * comment names above its own test -- "Not numeric" and "Not 11 characters" at `app/cbl/COCRDLIC.cbl`
+ * L1015 to L1016. The program can only test the first, because `CC-ACCT-ID PIC X(11)` is eleven
+ * characters by construction and a terminal refused a twelfth keystroke; a browser input needs both
+ * halves stated, and `maxLength` supplies the terminal's half.
+ *
+ * Assumptions: the same shape the service publishes, so a well-formed entry here is one the contract
+ * accepts. `card-api.yaml` declares `CardPageQuery.accountId` with `pattern '^[0-9]{11}$'` and the same
+ * eleven-zero reading, so this predicate refuses locally exactly what that would refuse remotely -- which
+ * is what keeps the reference's own sentence on the band instead of a service problem document.
+ * @param {string} entry - The account entry as the operator left it.
+ * @returns {boolean} True when the entry is eleven digits.
+ */
+export function isAccountFilterWellFormed(entry: string): boolean {
+  return /^[0-9]{11}$/u.test(entry.trim());
+}
+
+/**
+ * Builds one browse request from a position and the narrowing in force.
+ *
+ * Assumptions: members are SPREAD IN on presence rather than assigned as `undefined`, because
+ * `ui/tsconfig.json` enables `exactOptionalPropertyTypes` -- an absent member and a member holding
+ * `undefined` are different types there, and only the first is a state `CardListQuery` has. The two
+ * reach the service identically, since `JSON.stringify` omits a member holding `undefined`, so this is
+ * the compiler being allowed to enforce that an opening read carries no cursor rather than a cursor
+ * whose value is nothing.
+ *
+ * Assumptions: the DIRECTION is spread on the same condition as the cursor. `listCards` refuses a
+ * direction supplied without a cursor -- the combination every contract answers with a 400 keyed on the
+ * direction -- so the opening read must not name one.
+ * @param {string | null} cursor - Sealed cursor, or `null` for the opening read.
+ * @param {PageDirection} direction - Direction that cursor was sealed for.
+ * @param {string} appliedAccountId - Account narrowing in force, or the empty string for none.
+ * @returns {CardListQuery} The query for that step.
+ */
+export function buildCardListQuery(
+  cursor: string | null,
   direction: PageDirection,
-): number {
-  const step = direction === 'previous' ? -1 : 1;
-  return cursor === undefined ? CARD_LIST_FIRST_PAGE : current + step;
+  appliedAccountId: string,
+): CardListQuery {
+  return {
+    ...(cursor === null ? {} : { cursor, direction }),
+    ...(appliedAccountId === '' ? {} : { accountId: appliedAccountId }),
+  };
 }
 
 /**
@@ -257,130 +411,177 @@ export function CardListScreen(): ReactElement {
   //       band displays a PAINT-time instant, which is the property the baseline had because
   //       `POPULATE-HEADER-INFO` re-read the clock on each `SEND MAP` rather than on a timer.
   const paintedAt = useServerInstant();
-  const [page, setPage] = useState<PageResponse<CardSummary> | null>(null);
-  // WHY : Refactoring Rationale: this is the reference's `WS-CA-SCREEN-NUM` (`app/cbl/COCRDLIC.cbl`
-  //       L237), held here because the four-member envelope publishes no backward-availability member
-  //       and the reference never read one either -- it tests this ordinal at L902 and refuses PF7 at
-  //       L903. An earlier revision of this screen gated the backward control on `firstKey` being
-  //       present, which every page carrying rows satisfies, so the control was live on the opening page
-  //       and following it replaced the rows with an empty page.
-  const [screenNumber, setScreenNumber] = useState(CARD_LIST_FIRST_PAGE);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: which FILTER a refusal blames is held as state beside the sentence,
+   *       where the sentence alone was held before. A browser run reported the consequence: a refused
+   *       filter marked no control at all -- no `aria-invalid`, no description, no error border -- so an
+   *       operator who returned focus to the field was told nothing, and the sentence existed only in the
+   *       shared band. The 3270 does not have that gap: `app/cpy/CSSETATY.cpy` moves `DFHRED` into the
+   *       FIELD's attribute byte as well as writing the message line, so the field itself carries the
+   *       refusal. This is the target's spelling of that attribute.
+   * WHY : Assumptions: it names the field rather than holding a per-field message map, because the two
+   *       edits are exclusive -- `2210-EDIT-ACCOUNT` refuses and returns before `2220-EDIT-CARD` runs,
+   *       which is why the account refusal wins when both filters are wrong -- so at most one field is
+   *       ever marked and a map would model a state this screen cannot reach.
+   */
+  const [refusedFilter, setRefusedFilter] = useState<FilterFieldName | null>(null);
   const [cardNumber, setCardNumber] = useState('');
+  const [accountFilter, setAccountFilter] = useState('');
+  // WHY : Assumptions: the ENTRY and the APPLIED narrowing are separate pieces of state, because the
+  //       reference separates them too: `CC-ACCT-ID` is the received map field and `CDEMO-ACCT-ID` is
+  //       what `2210-EDIT-ACCOUNT` moves into the carried area once the edit has passed
+  //       (`app/cbl/COCRDLIC.cbl` L1027). Reading the page from the entry directly would re-narrow the
+  //       browse on every keystroke, and a cursor sealed under one narrowing addresses nothing under
+  //       another.
+  const [appliedAccountId, setAppliedAccountId] = useState('');
   const [resolving, setResolving] = useState(false);
+  /*
+   * WHY : Assumptions: the TYPED entry and the APPLIED narrowing are held separately, because the source
+   *       separates them too -- the map field holds what an operator typed and `CDEMO-ACCT-ID` holds what
+   *       the edit accepted (`app/cbl/COCRDLIC.cbl` L1026), and only the accepted value reaches the
+   *       browse. Reading the browse from the typed entry would re-narrow the list on every keystroke and
+   *       would send a half-typed identifier the contract refuses.
+   */
+  /*
+   * WHY : Refactoring Rationale: an `accountNumber` state pair stood here beside `accountFilter`
+   *       above, and the two were one entry box under two names -- the box was bound to this one while
+   *       the narrowing that reaches the service was read off the other, so a typed account filtered
+   *       nothing. The box now binds to `accountFilter`, which is the value applyFilters validates and
+   *       applies, so what the operator types is what narrows the browse.
+   */
+  /*
+   * WHY : Refactoring Rationale: a SECOND `appliedAccountId` state pair stood here. One entry box has
+   *       one applied narrowing, and two pieces of state for it meant the browse's reset key and the
+   *       value the query carried could disagree -- the list would reload against one narrowing while
+   *       the header described another.
+   */
 
   const enteredNumberIsAddressable = isCardNumber(cardNumber);
 
-  /*
-   * WHY : Assumptions: the source screen has TWO message fields and this tree provides one band, so
-   *       the two collapse onto it with the error field taking precedence. `INFOMSG` is a 45-character
-   *       `COLOR=NEUTRAL` field at row 20 (`app/bms/COCRDLI.bms` L324-L328) and `ERRMSG` a
-   *       78-character `COLOR=RED` field at row 23 (L330-L334); `1400-SETUP-MESSAGE`
-   *       (`app/cbl/COCRDLIC.cbl` L895-L925) populates one or the other on most turns and can set
-   *       both. The error is the one an operator must act on, so it wins when both would be present.
-   * WHY : Alternatives Considered: rendering a second, informational line of its own beside the band.
-   *       Rejected because the band exists to reserve its space at all times -- that is the browser
-   *       form of row 23 always existing -- and a second line that appeared and disappeared would
-   *       move the table beneath it, reintroducing the exact shift the band was composed to prevent.
-   *       The band's severity prop already carries the neutral appearance, so one element serves both
-   *       fields without a colour or a width being written here.
-   * WHY : Assumptions: the informational sentence is the source's `WS-INFORM-REC-ACTIONS`, which
-   *       `1400-SETUP-MESSAGE` sets whenever a page is displayed. It is what defines the `S` and `U`
-   *       codes on the row controls, so it is not decoration -- it is the legend for them.
-   */
-  const bandMessage = error ?? CARD_LIST_STATUS_MESSAGES.WS_INFORM_REC_ACTIONS.text;
-
-  const bandSeverity = error === null ? 'info' : 'error';
-
-  /**
-   * Loads one page and converts all transport failures into a non-sensitive band.
-   * @param {string} [cursor] - Optional sealed service cursor.
-   * @param {PageDirection} direction - Browse direction relative to the cursor.
-   */
-  function loadPage(cursor?: string, direction: PageDirection = 'next'): void {
-    setLoading(true);
-    setError(null);
-
-    /*
-     * WHY : Refactoring Rationale: the cursor is SPREAD IN when it exists rather than assigned as
-     *       `{ cursor, direction }`. `ui/tsconfig.json` enables `exactOptionalPropertyTypes`, so
-     *       `CardListQuery.cursor` is `?: string` and not `?: string | undefined` -- an absent member and
-     *       a member holding `undefined` are different types there, and only the first is a state the
-     *       query has. The two reach the service identically, because `JSON.stringify` omits a member
-     *       holding `undefined`, so this is not a behaviour fix; it is the compiler being allowed to
-     *       enforce that the opening read carries NO cursor rather than a cursor whose value is nothing.
-     * WHY : ⚠️ Refactoring Rationale: the DIRECTION is now spread in on the same condition, and that IS a
-     *       behaviour fix. `listCards` refuses a direction supplied without a cursor -- the combination
-     *       every contract answers with a 400 keyed on the direction -- so the opening read, which has no
-     *       cursor, must not name one either. Sending `direction: 'next'` with no cursor used to be
-     *       accepted and silently dropped by the client; it would now raise, and the screen's first load
-     *       is exactly the call that would have raised.
-     * WHY : Trade-offs: a conditional spread is more to read than an object literal naming both members.
-     *       It is accepted because the alternative is to widen the contract type to admit `undefined`,
-     *       which would turn the setting off for every consumer of that shape in order to shorten one
-     *       call site.
+  const fetchPage = useCallback(
+    /**
+     * Reads one page of cards under the narrowing in force.
+     * @param {object} request - The browse step the paging hook is taking.
+     * @param {string | null} request.cursor - Sealed cursor, or `null` for the opening read.
+     * @param {PageDirection} request.direction - Direction that cursor was sealed for.
+     * @returns {Promise<PageResponse<CardSummary>>} One bounded page.
+     * @throws {Error} The normalised failure from `ui/src/api/client.ts`, which the hook surfaces
+     *   through its own failure state rather than this function handling it.
      */
-    listCards(cursor === undefined ? {} : { cursor, direction }).then(
-      /**
-       * Publishes the retrieved page, including its sealed cursors.
-       * @param {PageResponse<CardSummary>} nextPage - The page the service returned.
-       */
-      (nextPage) => {
-        setPage(nextPage);
-        setScreenNumber(
-          /**
-           * Moves the screen ordinal to the page just delivered.
-           * @param {number} current - Ordinal of the page displayed before this one arrived.
-           * @returns {number} Ordinal of the delivered page.
-           */
-          (current) => cardListOrdinalAfter(current, cursor, direction),
-        );
-        setLoading(false);
-      },
-      /**
-       * Reports a transport failure in the message band, naming the correlation
-       * identifier rather than any card data, so nothing about a row is disclosed.
-       */
-      () => {
-        setError(CARD_LIST_PAGE_UNAVAILABLE);
-        setLoading(false);
-      },
-    );
-  }
-
-  useEffect(
-    /** Loads the first page once, on mount, with no cursor. */
-    () => {
-      loadPage();
-    },
-    [],
+    async (request: {
+      cursor: string | null;
+      direction: PageDirection;
+    }): Promise<PageResponse<CardSummary>> =>
+      listCards(buildCardListQuery(request.cursor, request.direction, appliedAccountId)),
+    [appliedAccountId],
   );
 
+  /*
+   * WHY : Assumptions: the restart key is the APPLIED narrowing, so applying or clearing the account
+   *       filter returns the browse to its opening page. That is the reference's own behaviour: a
+   *       changed filter reaches `2210-EDIT-ACCOUNT`, which rewrites the carried identifier, and the
+   *       paging variables are re-established for the new narrowing rather than a cursor sealed under
+   *       the old one being replayed.
+   * WHY : Alternatives Considered: calling the hook's imperative `reset` from the filter handler.
+   *       Rejected because the hook publishes `resetKey` for exactly this and states that a change to it
+   *       restarts the browse, so the declarative form cannot fall out of step with the applied value
+   *       the way a forgotten call could.
+   */
+  const browse = usePagedQuery<CardSummary>({
+    pageSize: CARD_LIST_PAGE_SIZE,
+    fetchPage,
+    resetKey: appliedAccountId,
+  });
+
+  /*
+   * WHY : Refactoring Rationale: a `loadPage` helper stood here and is withdrawn. It drove the
+   *       browse by hand -- its own loading flag, its own page state, its own screen-number
+   *       arithmetic and its own error arm -- while this screen also composes usePagedQuery, so two
+   *       mechanisms held the same cursor and only one of them was rendered. The hook is retained
+   *       because the keyset contract lives in it: it seals the cursor it was handed, refuses a
+   *       direction it has no cursor for, and is the mechanism every other browse screen uses.
+   */
+
+  /*
+   * WHY : Refactoring Rationale: a `loadPageWith` helper stood here and is withdrawn. It drove the
+   *       browse by hand -- its own loading flag, its own page state, its own screen-number
+   *       arithmetic and its own error arm -- while this screen also composes usePagedQuery, so two
+   *       mechanisms held the same cursor and only one of them was rendered. The hook is retained
+   *       because the keyset contract lives in it: it seals the cursor it was handed, refuses a
+   *       direction it has no cursor for, and is the mechanism every other browse screen uses.
+   */
+
+  /*
+   * WHY : Refactoring Rationale: a mount effect calling the withdrawn loader stood here. usePagedQuery
+   *       loads its own first page and reloads when its resetKey changes, so an effect here fetched the
+   *       first page a second time on every mount.
+   */
+
   /**
-   * Acts on the entered card number, or clears the narrowing when it is blank.
+   * Edits both narrowing entries in the reference's own order and applies or resolves accordingly.
    *
-   * Assumptions: a partially typed number is not sent anywhere. The contract refuses any width but
+   * Assumptions: the ACCOUNT entry is edited first and its refusal wins, which is the reference's
+   * order and its own precedence. `2200-EDIT-INPUTS` performs `2210-EDIT-ACCOUNT` and then
+   * `2220-EDIT-CARD` (`app/cbl/COCRDLIC.cbl` L983 to L996); the account arm moves its sentence into
+   * `WS-ERROR-MSG` unconditionally at L1021 to L1023 while the card arm moves its own only while no
+   * message is set, so an operator who malforms both entries reads the account sentence.
+   *
+   * Assumptions: a partially typed card number is not sent anywhere. The contract refuses any width but
    * sixteen, so acting on four digits would answer HTTP 400 rather than anything useful.
    *
-   * Refactoring Rationale: an entered number RESOLVES to its one card rather than narrowing the page,
-   * and the contract is what settles that: `card-api.yaml` declares no `cardNumber` query parameter, so
-   * `listCards` has nowhere to put one -- and it has nowhere to put one because a query string is
-   * written verbatim into the load balancer's mandatory access log, which is the same reason the number
-   * left every path. `CardApiContractTest.noRequestLineCanCarryACardNumber` fails if either is
-   * reintroduced.
+   * Refactoring Rationale: an entered CARD number RESOLVES to its one card rather than narrowing the
+   * page, and the contract is what settles that: `card-api.yaml` declares no `cardNumber` query
+   * parameter, so `listCards` has nowhere to put one -- and it has nowhere to put one because a query
+   * string is written verbatim into the load balancer's mandatory access log, which is the same reason
+   * the number left every path. `CardApiContractTest.noRequestLineCanCarryACardNumber` fails if either
+   * is reintroduced.
    *
-   * Assumptions: resolving loses nothing the baseline did. `CARDSIDI PIC X(16)` at
+   * ⚠️ Refactoring Rationale: the ACCOUNT number is different and IS sent, as a request-body member. It
+   * is the `CARDAIX` access path -- the alternate index `app/jcl/CARDFILE.jcl` builds and the reference
+   * browses under -- and this screen declared its label without ever rendering a control for it, so the
+   * one narrowing the baseline offers on this screen was unreachable. An eleven-digit account number is
+   * not a primary account number and discloses no card, and it travels in the body rather than the
+   * request line for the same reason everything else on this screen does.
+   *
+   * Assumptions: resolving a card number loses nothing the baseline did. `CARDSIDI PIC X(16)` at
    * `app/cpy-bms/COCRDLI.CPY` L72 narrowed the list by card number, and the card number is the unique
    * primary key, so that narrowing could only ever yield ONE row -- which is the row this opens. The
    * divergence is registered as D-CARD-SELECTOR.
+   * @returns {void} Completion is represented by the screen's own state.
    */
-  function applyCardNumberFilter(): void {
-    if (cardNumber === '') {
-      loadPage();
+  function applyFilters(): void {
+    /*
+     * WHY : ⚠️ Assumptions: a turn arriving while a read is outstanding is IGNORED, and the guard lives
+     *       here rather than being expressed as a disabled control. A disabled binding reports through
+     *       `usePfKeys`' invalid-key channel, and this screen's invalid-key arm coerces an unrecognised
+     *       key back into this very function -- so a disabled Enter would loop. The reference needs no
+     *       such guard because a terminal turn is serialised and a second key could not arrive while the
+     *       first was being processed; a browser has no such serialisation, so pressing Filter twice used
+     *       to issue two reads whose settlements both applied.
+     */
+    if (browse.isLoading || resolving) {
       return;
     }
-    if (!enteredNumberIsAddressable) {
+
+    setError(null);
+    setRefusedFilter(null);
+
+    if (!isAccountFilterAbsent(accountFilter) && !isAccountFilterWellFormed(accountFilter)) {
+      setError(SHARED_MESSAGES.ACCOUNT_FILTER_IF_SUPPLIED_MUST_BE_A_11_DIGIT_NUMBER);
+      /*
+       * WHY : Refactoring Rationale: the refused FIELD is recorded beside the sentence, which the
+       *       version this replaced did not do. The band states what is wrong and this marks WHICH of
+       *       the two entry boxes it is about, so that box carries the error styling and its
+       *       description is announced with it; a message naming "the account filter" beside two
+       *       unmarked boxes leaves a screen-reader user to guess.
+       */
+      setRefusedFilter('accountNumber');
+      return;
+    }
+
+    if (cardNumber !== '' && !enteredNumberIsAddressable) {
       /*
        * WHY : Refactoring Rationale: this is the LIST screen's own refusal, not the detail screen's.
        *       An earlier revision rendered `Card number if supplied must be a 16 digit number`, which
@@ -390,9 +591,38 @@ export function CardListScreen(): ReactElement {
        *       review -- and why the catalog holds both rather than folding them together.
        */
       setError(SHARED_MESSAGES.CARD_ID_FILTER_IF_SUPPLIED_MUST_BE_A_16_DIGIT_NUMBER);
+      setRefusedFilter('cardNumber');
       return;
     }
-    openEnteredCard(cardDetailPath);
+
+    /*
+     * WHY : Assumptions: the account narrowing is applied BEFORE a card entry is resolved, so a turn
+     *       carrying both leaves the list narrowed behind the card the operator opened. The reference
+     *       edits both fields on one turn too, and its account edit writes the carried identifier
+     *       whatever the card field holds.
+     */
+    const narrowing = isAccountFilterAbsent(accountFilter) ? '' : accountFilter.trim();
+
+    setAppliedAccountId(narrowing);
+
+    if (cardNumber !== '') {
+      openEnteredCard(cardDetailPath);
+      return;
+    }
+
+    /*
+     * WHY : ⚠️ Assumptions: the re-read is issued ONLY when the narrowing is unchanged, and the condition
+     *       is load-bearing. A changed narrowing moves the hook's `resetKey`, which the hook documents as
+     *       restarting the browse at its opening page -- so calling `reset` as well would issue a SECOND
+     *       read, and it would issue it during the render that still holds the previous narrowing, so the
+     *       two reads would carry different request bodies and the later-settling one would win. An
+     *       unchanged narrowing moves no key, so nothing would read at all without this call, and Enter
+     *       under an unchanged filter IS a read in the reference: its Enter arm performs
+     *       `9000-READ-FORWARD` and re-sends the map (`app/cbl/COCRDLIC.cbl` L565 to L578).
+     */
+    if (narrowing === appliedAccountId) {
+      browse.reset();
+    }
   }
 
   /**
@@ -408,10 +638,12 @@ export function CardListScreen(): ReactElement {
   function openEnteredCard(buildPath: (selector: string) => string): void {
     if (!enteredNumberIsAddressable) {
       setError(SHARED_MESSAGES.CARD_ID_FILTER_IF_SUPPLIED_MUST_BE_A_16_DIGIT_NUMBER);
+      setRefusedFilter('cardNumber');
       return;
     }
     setResolving(true);
     setError(null);
+    setRefusedFilter(null);
     lookupCard(cardNumber).then(
       /**
        * Navigates to the resolved card.
@@ -446,7 +678,7 @@ export function CardListScreen(): ReactElement {
    * reads.
    *
    * Assumptions: "nowhere to go" means the screen ordinal is still at the opening page. That ordinal is
-   * this component's own state and is not asked of the service, matching the reference, which decides
+   * held by the paging hook rather than being asked of the service, matching the reference, which decides
    * the same refusal from `WS-CA-SCREEN-NUM` alone.
    * @returns {void} Completion is represented by the screen's own state.
    */
@@ -460,22 +692,19 @@ export function CardListScreen(): ReactElement {
      *       first row, and following it replaced the rows with an empty page. Gating on a
      *       service-computed backward flag made the service read backward from a page nobody asked for,
      *       and published an answer already stale by the time an operator acted on it.
-     * WHY : Assumptions: `firstKey` is still checked, because it is the value the request is ISSUED FROM
-     *       rather than the value the availability is read from. Past the opening page a page carrying
-     *       rows always names it, so the second half of this guard is unreachable in practice and is
-     *       kept because `null` is a legitimate member value the type admits and a request cannot be
-     *       issued without a position.
+     * WHY : ⚠️ Assumptions: the ordinal is now the hook's, published as `hasPrev`, which the hook
+     *       documents as derived from that same ordinal AND from a leading cursor existing to read
+     *       from -- the two halves this function used to test separately. The sentence stays here
+     *       because the hook documents a step at a boundary as a silent no-op: it owes a screen the
+     *       boundary STATE and the screen owes the operator the reference's own sentence.
      */
-    if (
-      screenNumber <= CARD_LIST_FIRST_PAGE ||
-      page === null ||
-      page.firstKey === null ||
-      page.firstKey === undefined
-    ) {
+    setError(null);
+
+    if (!browse.hasPrev) {
       setError(CARD_LIST_PAGING_MESSAGES.NO_PREVIOUS_PAGES_TO_DISPLAY);
       return;
     }
-    loadPage(page.firstKey, 'previous');
+    browse.prevPage();
   }
 
   /**
@@ -487,11 +716,13 @@ export function CardListScreen(): ReactElement {
    * @returns {void} Completion is represented by the screen's own state.
    */
   function pageForward(): void {
-    if (page?.hasNext !== true || page.lastKey === null || page.lastKey === undefined) {
+    setError(null);
+
+    if (!browse.hasNext) {
       setError(CARD_LIST_PAGING_MESSAGES.NO_MORE_PAGES_TO_DISPLAY);
       return;
     }
-    loadPage(page.lastKey, 'next');
+    browse.nextPage();
   }
 
   /*
@@ -507,7 +738,7 @@ export function CardListScreen(): ReactElement {
          * performs `9000-READ-FORWARD` and re-sends the map (`app/cbl/COCRDLIC.cbl` L565-L578).
          */
         onInvoke: () => {
-          applyCardNumberFilter();
+          applyFilters();
         },
         label: CARD_LIST_KEY_LABELS.ENTER,
       },
@@ -547,11 +778,69 @@ export function CardListScreen(): ReactElement {
        */
       onInvalidKey: (rejection) => {
         if (rejection.reason === 'unmapped') {
-          applyCardNumberFilter();
+          applyFilters();
         }
       },
     },
   );
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: this screen DELEGATES its title band and its key legend to
+   *       the shell instead of painting them itself. `ui/src/layout/AppShell.tsx` is mounted as
+   *       the authenticated layout route, so the frame is painted once above the outlet rather
+   *       than rebuilt per screen; a screen that also painted them would show two title bands
+   *       and two legends. The message band stays local, because the shell paints a zone only
+   *       when it is delegated and this screen's message is bound to controls in its own body.
+   * WHY : Assumptions: the legend is delegated rather than dropped, so the SCREEN keeps owning
+   *       its keys -- `bindings` and `invoke` come from this screen's own `usePfKeys` call and
+   *       are handed up unchanged. The shell adds its sign-off key beside them only when this
+   *       screen leaves that attention identifier free, which is decided by AID in the shell.
+   */
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the row-23 message line is delegated WITH the title band and the
+   *       legend, where an earlier revision of this delegation withheld it on the stated ground that
+   *       "the message band stays local ... this screen's message is bound to controls in its own
+   *       body". That was true of the revision it was written for and became false when this screen
+   *       stopped composing a band of its own: the sentence had nowhere left to be painted, so a
+   *       browse that found no records, or a filter this screen refused, reported nothing at all. The
+   *       band is the row-23 field and there is one of it per screen, so publishing it here is what
+   *       keeps that field painted -- and reserved -- in every state.
+   * WHY : Assumptions: the source screen has TWO message fields and the frame provides one band, so
+   *       the two collapse onto it with the error field taking precedence. `INFOMSG` is a
+   *       45-character `COLOR=NEUTRAL` field at row 20 (`app/bms/COCRDLI.bms` L324-L328) and `ERRMSG`
+   *       a 78-character `COLOR=RED` field at row 23 (L330-L334); `1400-SETUP-MESSAGE`
+   *       (`app/cbl/COCRDLIC.cbl` L895-L925) populates one or the other on most turns and can set
+   *       both. The error is the one an operator must act on, so it wins when both would be present.
+   * WHY : Assumptions: the informational sentence is the source's `WS-INFORM-REC-ACTIONS`, which
+   *       `1400-SETUP-MESSAGE` sets whenever a page is displayed. It defines the `S` and `U` codes on
+   *       the row controls, so it is the legend for them rather than decoration, and the band's
+   *       severity carries the neutral appearance without a colour being written here.
+   */
+  /*
+   * WHY : ⚠️ Refactoring Rationale: a browse FAILURE is surfaced here rather than in a per-request
+   *       rejection handler this screen used to own. The paging hook holds the failure state, and holds
+   *       it under the same sequence guard as the rows -- so a failure belonging to a superseded request
+   *       cannot put a sentence on the band while a later page is on display, which is exactly what a
+   *       local handler did. The sentence names no card and does not distinguish absence from fault.
+   */
+  const bandMessage =
+    error ??
+    (browse.isFailed
+      ? CARD_LIST_PAGE_UNAVAILABLE
+      : CARD_LIST_STATUS_MESSAGES.WS_INFORM_REC_ACTIONS.text);
+
+  const bandSeverity = error === null && !browse.isFailed ? 'info' : 'error';
+
+  useShellSlot({
+    screen: { transactionId: CARD_LIST_TRANSACTION_ID, programName: CARD_LIST_PROGRAM_NAME },
+    now: paintedAt,
+    message: { text: bandMessage, severity: bandSeverity },
+    pfKeys: {
+      keys: bindings,
+      onInvoke: invoke,
+      legendColor: 'TURQUOISE',
+    },
+  });
 
   /*
    * WHY : Refactoring Rationale: FOUR columns, and an earlier revision of this screen rendered the
@@ -652,11 +941,6 @@ export function CardListScreen(): ReactElement {
        *       not render the band on this screen's behalf; the hook supplies the one value that is
        *       NOT screen-specific without inventing a component to hold it.
        */}
-      <ScreenHeader
-        transactionId={CARD_LIST_TRANSACTION_ID}
-        programName={CARD_LIST_PROGRAM_NAME}
-        now={paintedAt}
-      />
       <Typography.Title level={3}>{CARD_LIST_TITLE}</Typography.Title>
       {/*
         WHY : Assumptions: ONE input serves both narrowing the browse and reaching a single card,
@@ -679,6 +963,67 @@ export function CardListScreen(): ReactElement {
        * moment a value is typed and is not reliably announced -- so the source's own field label is
        * rendered as one, associated with the control by id.
        */}
+      {/*
+       * WHY : ⚠️ Refactoring Rationale: the account-number filter is rendered, in the position the mapset
+       *       paints it -- `ACCTSID` on row 6 at `app/bms/COCRDLI.bms` L89 to L93, under the label at L88,
+       *       ABOVE the card-number field on row 7 at L101 to L105 -- so the two criteria are read in the
+       *       order the program edits them. Its label was already transcribed and had no control to name.
+       * WHY : Assumptions: `autoFocus` is carried here and on no other control on this screen, because
+       *       `ACCTSID` is the ONE field on this map declared `ATTRB=(FSET,IC,NORM,UNPROT)` (L89) -- `IC`
+       *       is the initial-cursor attribute, and `CARDSID` at L101 is `ATTRB=(FSET,NORM,UNPROT)` without
+       *       it. The cursor therefore opens where the terminal opened it, which is also the field the
+       *       first edit reads.
+       * WHY : Assumptions: it is a group of its own rather than a third control inside the card number's
+       *       group, because the two fields are separate rows on the terminal and a compact group renders
+       *       its members as one joined control. Joining an eleven-digit and a sixteen-digit field would
+       *       read as one entry with two parts.
+       */}
+      <Space.Compact>
+        <Typography.Text id={ACCOUNT_NUMBER_LABEL_ID}>
+          {CARD_LIST_LABELS.accountNumberFilter}
+        </Typography.Text>
+        <Input
+          allowClear
+          aria-labelledby={ACCOUNT_NUMBER_LABEL_ID}
+          {...fieldAriaProps(ACCOUNT_NUMBER_INPUT_ID, {
+            invalid: refusedFilter === 'accountNumber',
+            hasError: refusedFilter === 'accountNumber',
+            hasHint: false,
+          })}
+          autoFocus
+          id={ACCOUNT_NUMBER_INPUT_ID}
+          inputMode="numeric"
+          maxLength={ACCOUNT_FILTER_WIDTH}
+          status={refusedFilter === 'accountNumber' ? 'error' : ''}
+          onChange={
+            /**
+             * Records the entered account number.
+             * @param {object} event - The change event antd forwards.
+             * @param {object} event.target - The input element the event came from.
+             * @param {string} event.target.value - The entry as it now stands.
+             * @returns {void} Nothing; the entry is recorded as a side effect.
+             */
+            (event: { target: { value: string } }): void => {
+              setAccountFilter(event.target.value);
+            }
+          }
+          value={accountFilter}
+        />
+      </Space.Compact>
+      {/*
+       * WHY : Assumptions: the refusal sentence is repeated here VISUALLY HIDDEN rather than rendered
+       *       beside the field. The shared band already shows it to a sighted operator, and the row-23
+       *       field is where the source puts it, so printing it twice would add a sentence the mapset
+       *       does not declare; but `aria-describedby` must point at an element that EXISTS, or the
+       *       association is a dangling reference that announces nothing. This element is that target.
+       * WHY : Assumptions: it is rendered only while the field is the refused one, so the description
+       *       cannot outlive the refusal it describes.
+       */}
+      {refusedFilter === 'accountNumber' && error !== null ? (
+        <span id={fieldErrorId(ACCOUNT_NUMBER_INPUT_ID)} style={VISUALLY_HIDDEN_STYLE}>
+          {error}
+        </span>
+      ) : null}
       <Space.Compact>
         <Typography.Text id={CARD_NUMBER_LABEL_ID}>
           {CARD_LIST_LABELS.cardNumberFilter}
@@ -686,8 +1031,15 @@ export function CardListScreen(): ReactElement {
         <Input
           allowClear
           aria-labelledby={CARD_NUMBER_LABEL_ID}
+          {...fieldAriaProps(CARD_NUMBER_INPUT_ID, {
+            invalid: refusedFilter === 'cardNumber',
+            hasError: refusedFilter === 'cardNumber',
+            hasHint: false,
+          })}
+          id={CARD_NUMBER_INPUT_ID}
           inputMode="numeric"
           maxLength={16}
+          status={refusedFilter === 'cardNumber' ? 'error' : ''}
           onChange={
             /**
              * Records the entered card number.
@@ -705,7 +1057,7 @@ export function CardListScreen(): ReactElement {
           onClick={
             /** Narrows the browse to the entered card number, or clears the narrowing. */
             () => {
-              applyCardNumberFilter();
+              applyFilters();
             }
           }
         >
@@ -737,64 +1089,59 @@ export function CardListScreen(): ReactElement {
         </Button>
       </Space.Compact>
       {/*
-       * Refactoring Rationale: the band replaces a conditional raw antd Alert.
-       * On this screen specifically the reserved space matters most of the
-       * three: a failed page load previously shifted the whole table and the
-       * controls beneath it upward, so the control an operator was about to
-       * press moved under the cursor. Row 23 of app/bms/CCRDLIA never moved, and
-       * MessageBand is where that invariant is expressed and tested.
-       * Refactoring Rationale: the severity is now passed rather than defaulted.
-       * This note previously recorded that the default "error" appearance was
-       * taken, which held while the band carried only failures; it carries the
-       * source's informational sentence too, and rendering that in the error
-       * colour would misreport a normal page as a fault. The derivation and the
-       * reason the source's two message fields collapse onto one band are
-       * recorded at `bandMessage` above.
-       * Assumptions: every transport failure this screen surfaces is already
-       * reduced to non-sensitive text before it reaches here, so the band
-       * receives text and a severity and learns nothing about the response --
-       * which is the split the band's own props documentation requires.
+       * WHY : Assumptions: the card filter gets the same visually-hidden description target as the
+       *       account filter above, and for the same reason recorded there -- `aria-describedby` has
+       *       to resolve. Two targets rather than one shared element because only one of the two
+       *       fields is ever the refused one (`2220-EDIT-CARD` writes its sentence only
+       *       `IF WS-ERROR-MSG-OFF`, `app/cbl/COCRDLIC.cbl` L1057), so the id must travel with the
+       *       field that was refused rather than sit on a neutral element both controls point at.
        */}
-      <MessageBand message={bandMessage} severity={bandSeverity} />
+      {refusedFilter === 'cardNumber' && error !== null ? (
+        <span id={fieldErrorId(CARD_NUMBER_INPUT_ID)} style={VISUALLY_HIDDEN_STYLE}>
+          {error}
+        </span>
+      ) : null}
       <Table<CardSummary>
         columns={columns}
-        dataSource={page?.items ?? []}
-        loading={loading}
+        dataSource={browse.items}
+        loading={browse.isLoading}
         pagination={false}
         rowKey={
           /*
-           * WHY : Assumptions: the key is the account paired with the masked rendering, because no
-           *       single member of a row is unique on its own. The masked rendering keeps only four
-           *       digits, so two cards on different accounts can render identically, and an account
-           *       holds more than one card -- the pair is what the contract's own row projection
-           *       makes distinct. A row key is React's reconciliation identity and never travels in a
-           *       request, so pairing two published members costs nothing and discloses nothing.
+           * WHY : ⚠️ Refactoring Rationale: the key is the row's own SELECTOR. It was the account paired
+           *       with the masked rendering, on the reasoning that no single member of a row is unique --
+           *       which was true of the two members that pair named and false of the row, because every
+           *       row carries `key`, the opaque per-card selector both of its controls already address.
+           *       The pair is not unique: the masked rendering keeps four digits, so two cards on ONE
+           *       account that end in the same four collide, and React then reconciles two distinct rows
+           *       as one -- the second row's controls would carry the first row's selector, so acting on
+           *       it would open the wrong card. The selector is unique by construction because it seals
+           *       one card number.
+           * WHY : Assumptions: using it here discloses nothing further. It is already in the row's two
+           *       control targets and in the routes they navigate to, so putting it in React's
+           *       reconciliation identity -- which never travels in a request -- adds no surface.
            */
           /**
-           * Derives a row's reconciliation identity from the two members that distinguish it.
+           * Derives a row's reconciliation identity from its own opaque selector.
            * @param {CardSummary} row - One browse row.
-           * @returns {string} The account paired with the masked rendering.
+           * @returns {string} That row's sealed selector.
            */
-          (row: CardSummary): string => `${row.accountId}:${row.displayCardNumber}`
+          (row: CardSummary): string => row.key
         }
       />
       {/*
-       * Refactoring Rationale: the bespoke `Previous` and `Next` controls are gone, and the key bar
-       * below carries their actions as F7 and F8. Two things are recovered by the move. The source
+       * Refactoring Rationale: the bespoke `Previous` and `Next` controls are gone, and the delegated
+       * key legend carries their actions as F7 and F8. Two things are recovered by the move. The source
        * screen has exactly one paging affordance -- the legend on row 24 -- so a second pair beside
        * the table was an addition, and a pair whose availability test read one envelope member while
        * its handler guard read another was how an earlier revision came to disable a control whose
-       * cursor was present. The bindings above hold one predicate each, and both the key press and
-       * the bar's button run it through the same dispatch path.
+       * cursor was present. The bindings hold one predicate each, and both the key press and the
+       * legend's button run it through the same dispatch path.
        * Assumptions: neither key is bound disabled, which is deliberate rather than an omission. The
        * source refuses neither PF7 nor PF8: the unavailable arms move a sentence into the error field
        * and re-read the current page, so an operator at either end of the browse gets a message.
        * Disabling the key would replace that message with silence.
-       * Assumptions: `legendColor` is passed here and on no other screen in this tree, because
-       * `app/bms/COCRDLI.bms` L336 paints this legend `COLOR=TURQUOISE` -- one of only two mapsets
-       * that depart from the 15-of-17 yellow majority the bar defaults to.
        */}
-      <PfKeyBar keys={bindings} onInvoke={invoke} legendColor="TURQUOISE" />
     </Flex>
   );
 }

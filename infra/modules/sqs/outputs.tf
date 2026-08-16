@@ -2,10 +2,10 @@
 # infra/modules/sqs/outputs.tf
 # -----------------------------------------------------------------------------
 # Purpose:
-#   The complete public contract of the `sqs` module. main.tf declares twelve
-#   queues -- six primary queues and one dead-letter queue for each -- and
+#   The complete public contract of the `sqs` module. main.tf declares ten
+#   queues -- five primary queues and one dead-letter queue for each -- and
 #   nothing about them is visible outside this directory except what this file
-#   publishes: for every one of the twelve, its queue URL, its ARN and its bare
+#   publishes: for every one of the ten, its queue URL, its ARN and its bare
 #   name.
 #
 #   Each of those three forms exists because a different consumer can use only
@@ -22,20 +22,30 @@
 #   The output NAMES below are consequently a one-way contract and not an
 #   implementation detail. infra/envs/dev and infra/envs/prod reference them,
 #   the two policy-owning modules reference them through those roots, and
-#   authorization-service, account-service and reference-service reach their
-#   queues through the parameters those roots write. Renaming one here breaks
-#   every one of those callers at once.
+#   authorization-service and account-service reach their queues through the
+#   parameters those roots write. Renaming one here breaks every one of those
+#   callers at once.
+#
+#   Refactoring Rationale: two output families were WITHDRAWN rather than
+#   renamed -- the six `account_inquiry_request_*` and the six
+#   `date_inquiry_request_*` values -- because the two queues they addressed were
+#   withdrawn with them. A deprecated alias was considered and rejected here: an
+#   alias would keep a caller's `plan` green while the per-consumer split it
+#   assumes no longer exists, so the two roots would go on publishing an
+#   identifier that describes a topology the module does not build. A missing
+#   attribute is the cheaper failure, and both roots were updated in the same
+#   change.
 #
 #   Parameters: none. An `output` block accepts no input. The module's eleven
 #   inputs are declared in variables.tf, which carries the type, the
 #   description and the domain validation of each one.
 #
-#   Return values: the forty outputs below. Thirty-six are a single string
+#   Return values: the thirty-four outputs below. Thirty are a single string
 #   each -- the URL, the ARN and the name of one queue -- and each carries its
 #   own `description` naming which queue it addresses, which baseline IBM MQ
 #   queue that queue replaces, which of the three forms it is and who consumes
 #   it. Three map(string) values carry the same URLs, ARNs and names keyed by
-#   the twelve resource labels main.tf uses, and one object map publishes the
+#   the ten resource labels main.tf uses, and one object map publishes the
 #   exact per-service IAM send/receive boundaries.
 #
 #   Errors:
@@ -137,7 +147,7 @@
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
-# The six dead-letter queues are published too.
+# The five dead-letter queues are published too.
 #
 # WHY : Assumptions: a dead-letter queue whose identifiers are unpublished is a
 #       dead-letter queue nobody can operate, and operating it needs a
@@ -167,7 +177,7 @@
 # WHY : Alternatives Considered: three maps alone -- queue_urls, queue_arns and
 #       queue_names keyed by logical name -- and nothing else. It is a third of
 #       the text and it iterates directly. It is not sufficient on its own
-#       because a map collapses twelve `description` strings into one: the reader
+#       because a map collapses ten `description` strings into one: the reader
 #       of the generated module README would find a single row reading "map of
 #       queue name to URL" where the per-queue rows would have said which
 #       baseline queue each address replaces and who consumes it. That is the
@@ -180,21 +190,20 @@
 #       documents perfectly and iterates not at all. Two consumers genuinely
 #       iterate: the calling root creates one Parameter Store entry per queue
 #       URL, and the observability module creates one dead-letter depth alarm
-#       per queue. With flat outputs only, each of those becomes twelve
-#       near-identical resource blocks in the caller, which is twelve places for
+#       per queue. With flat outputs only, each of those becomes ten
+#       near-identical resource blocks in the caller, which is ten places for
 #       one of them to be forgotten. The maps make each a single `for_each`.
 # WHY : Trade-offs: publishing both means every value appears twice in this
 #       file, and a queue added to main.tf must be added in both places or the
 #       two disagree. The exposure is bounded rather than open-ended: the queue
-#       set is fixed at six plus six by the messaging design, and
+#       set is fixed at five plus five by the messaging design, and
 #       variables.tf refuses a per-queue toggle for the same reason, so "add a
 #       queue" is not a routine edit. The cost is paid once here; the
-#       alternative charges every caller either a lost description or twelve
+#       alternative charges every caller either a lost description or ten
 #       repeated blocks.
 # WHY : Assumptions: the map keys are the resource labels main.tf uses --
 #       pauth_request, pauth_request_dlq, pauth_reply, pauth_reply_dlq,
-#       account_inquiry_request, account_inquiry_request_dlq,
-#       date_inquiry_request, date_inquiry_request_dlq, inquiry_reply,
+#       inquiry_request, inquiry_request_dlq, inquiry_reply,
 #       inquiry_reply_dlq, error and error_dlq -- rather than the composed queue
 #       names. A composed name embeds var.name_prefix and var.environment, so a
 #       caller keying on it would produce configuration whose resource
@@ -212,7 +221,7 @@
 #       it executes. No such edge exists between two outputs, and the reader of
 #       a contract is looking for a queue rather than for its failure path, so
 #       the primary leads here. The cost is that the two files in the same
-#       directory list the same twelve queues in different orders; the benefit is
+#       directory list the same ten queues in different orders; the benefit is
 #       that each file is ordered by what its own reader is looking for.
 #       terraform-docs sorts the generated README alphabetically regardless, so
 #       neither order reaches the documentation.
@@ -290,75 +299,48 @@ output "pauth_reply_dlq_name" {
 
 
 # -----------------------------------------------------------------------------
-# Account inquiry: request. The account-service-exclusive standard queue
-# refining the shared baseline CARDDEMO.REQUEST.QUEUE, and its dead-letter
-# queue.
+# Inquiry: request. The one standard queue replacing the baseline's one shared
+# CARDDEMO.REQUEST.QUEUE, and its dead-letter queue.
+#
+# WHY : Refactoring Rationale: twelve outputs stood here, six for an
+#       account-only request queue and six for a date-only one. Those two queues
+#       were withdrawn in favour of the single shared queue the baseline actually
+#       defines, so the six outputs below replace all twelve. A caller that
+#       referenced either withdrawn name fails at `plan` with an unsupported
+#       attribute, which is the intended way to discover a topology change: the
+#       identifier it used names a queue that no longer exists, and silently
+#       aliasing it to this one would let a root keep describing a per-consumer
+#       split that is gone.
 # -----------------------------------------------------------------------------
 
-output "account_inquiry_request_queue_url" {
-  description = "Queue URL of the standard account-details inquiry request queue consumed only by account-service. It is one of two target queues refining the baseline's shared CARDDEMO.REQUEST.QUEUE; producer-side routing prevents account-service and reference-service competing for a message only the other can process."
-  value       = aws_sqs_queue.account_inquiry_request.url
+output "inquiry_request_queue_url" {
+  description = "Queue URL of the standard inquiry request queue replacing CARDDEMO.REQUEST.QUEUE. It carries BOTH inquiry flows -- the COACCT01 account inquiry and the CODATE01 date-and-time inquiry -- and exactly one service binds a consumer to it, dispatching on the four-character function code in the request's first field."
+  value       = aws_sqs_queue.inquiry_request.url
 }
 
-output "account_inquiry_request_queue_arn" {
-  description = "ARN of the account-details inquiry request queue. The account-service task role receives and deletes only on this ARN, while the producer receives SendMessage on this exact ARN; reference-service receives no permission to it."
-  value       = aws_sqs_queue.account_inquiry_request.arn
+output "inquiry_request_queue_arn" {
+  description = "ARN of the inquiry request queue. Exactly one task role -- the owning consumer's -- receives and deletes on this ARN; a second receiving principal would reintroduce the competing-consumer loss the single-owner rule exists to prevent."
+  value       = aws_sqs_queue.inquiry_request.arn
 }
 
-output "account_inquiry_request_queue_name" {
-  description = "Bare name of the account-details inquiry request queue, used as the CloudWatch QueueName dimension for account-flow depth and age without date-flow traffic obscuring either metric."
-  value       = aws_sqs_queue.account_inquiry_request.name
+output "inquiry_request_queue_name" {
+  description = "Bare name of the inquiry request queue. It is the CloudWatch QueueName dimension for inquiry depth and age, and it is also the identifier form the consuming service is configured with, because that service validates a queue NAME and resolves the address itself."
+  value       = aws_sqs_queue.inquiry_request.name
 }
 
-output "account_inquiry_request_dlq_url" {
-  description = "Queue URL of the dead-letter queue receiving account-details inquiries after max_receive_count failed receives. Its flow-specific destination prevents an operator redriving the message to the date queue."
-  value       = aws_sqs_queue.account_inquiry_request_dlq.url
+output "inquiry_request_dlq_url" {
+  description = "Queue URL of the dead-letter queue receiving inquiry requests after max_receive_count failed receives, whatever function code they carried."
+  value       = aws_sqs_queue.inquiry_request_dlq.url
 }
 
-output "account_inquiry_request_dlq_arn" {
-  description = "ARN of the dead-letter queue serving the account-details inquiry request queue, for exact operator receive and StartMessageMoveTask permissions."
-  value       = aws_sqs_queue.account_inquiry_request_dlq.arn
+output "inquiry_request_dlq_arn" {
+  description = "ARN of the dead-letter queue serving the inquiry request queue, for exact operator receive and StartMessageMoveTask permissions."
+  value       = aws_sqs_queue.inquiry_request_dlq.arn
 }
 
-output "account_inquiry_request_dlq_name" {
-  description = "Bare name of the dead-letter queue serving account-details inquiry requests, used as the QueueName dimension of its flow-specific dead-letter alarm."
-  value       = aws_sqs_queue.account_inquiry_request_dlq.name
-}
-
-# -----------------------------------------------------------------------------
-# Date inquiry: request. The reference-service-exclusive standard queue
-# refining the shared baseline CARDDEMO.REQUEST.QUEUE, and its dead-letter
-# queue.
-# -----------------------------------------------------------------------------
-
-output "date_inquiry_request_queue_url" {
-  description = "Queue URL of the standard date-conversion inquiry request queue consumed only by reference-service. Producer-side routing to this URL prevents an account-service consumer from stealing and hiding a CODATE01-equivalent request."
-  value       = aws_sqs_queue.date_inquiry_request.url
-}
-
-output "date_inquiry_request_queue_arn" {
-  description = "ARN of the date-conversion inquiry request queue. The reference-service task role receives and deletes only on this ARN, while account-service receives no permission to it."
-  value       = aws_sqs_queue.date_inquiry_request.arn
-}
-
-output "date_inquiry_request_queue_name" {
-  description = "Bare name of the date-conversion inquiry request queue, used as the CloudWatch QueueName dimension for date-flow depth and age independently of account inquiries."
-  value       = aws_sqs_queue.date_inquiry_request.name
-}
-
-output "date_inquiry_request_dlq_url" {
-  description = "Queue URL of the dead-letter queue receiving date-conversion inquiries after max_receive_count failed receives. Its flow-specific destination keeps redrive on the reference-service path."
-  value       = aws_sqs_queue.date_inquiry_request_dlq.url
-}
-
-output "date_inquiry_request_dlq_arn" {
-  description = "ARN of the dead-letter queue serving date-conversion inquiry requests, for exact operator receive and StartMessageMoveTask permissions."
-  value       = aws_sqs_queue.date_inquiry_request_dlq.arn
-}
-
-output "date_inquiry_request_dlq_name" {
-  description = "Bare name of the dead-letter queue serving date-conversion inquiry requests, used as the QueueName dimension of its flow-specific dead-letter alarm."
-  value       = aws_sqs_queue.date_inquiry_request_dlq.name
+output "inquiry_request_dlq_name" {
+  description = "Bare name of the dead-letter queue serving inquiry requests, used as the QueueName dimension of its dead-letter alarm."
+  value       = aws_sqs_queue.inquiry_request_dlq.name
 }
 
 # -----------------------------------------------------------------------------
@@ -435,44 +417,40 @@ output "error_dlq_name" {
 }
 
 # -----------------------------------------------------------------------------
-# The same values, keyed for iteration. Each map carries all twelve queues; the
-# keys are the twelve resource labels main.tf uses, and are listed in each
+# The same values, keyed for iteration. Each map carries all ten queues; the
+# keys are the ten resource labels main.tf uses, and are listed in each
 # description so a caller need not read main.tf to know what it may index.
 # -----------------------------------------------------------------------------
 
 output "queue_urls" {
-  description = "Map of logical queue name to queue URL for all twelve queues, keyed by the resource labels main.tf uses. The account_inquiry_request and date_inquiry_request keys are intentionally separate so each consumer resolves only its own work queue."
+  description = "Map of logical queue name to queue URL for all ten queues, keyed by the resource labels main.tf uses. There is ONE inquiry_request key because the baseline defines one shared request destination and exactly one service consumes it."
   value = {
-    pauth_request               = aws_sqs_queue.pauth_request.url
-    pauth_request_dlq           = aws_sqs_queue.pauth_request_dlq.url
-    pauth_reply                 = aws_sqs_queue.pauth_reply.url
-    pauth_reply_dlq             = aws_sqs_queue.pauth_reply_dlq.url
-    account_inquiry_request     = aws_sqs_queue.account_inquiry_request.url
-    account_inquiry_request_dlq = aws_sqs_queue.account_inquiry_request_dlq.url
-    date_inquiry_request        = aws_sqs_queue.date_inquiry_request.url
-    date_inquiry_request_dlq    = aws_sqs_queue.date_inquiry_request_dlq.url
-    inquiry_reply               = aws_sqs_queue.inquiry_reply.url
-    inquiry_reply_dlq           = aws_sqs_queue.inquiry_reply_dlq.url
-    error                       = aws_sqs_queue.error.url
-    error_dlq                   = aws_sqs_queue.error_dlq.url
+    pauth_request       = aws_sqs_queue.pauth_request.url
+    pauth_request_dlq   = aws_sqs_queue.pauth_request_dlq.url
+    pauth_reply         = aws_sqs_queue.pauth_reply.url
+    pauth_reply_dlq     = aws_sqs_queue.pauth_reply_dlq.url
+    inquiry_request     = aws_sqs_queue.inquiry_request.url
+    inquiry_request_dlq = aws_sqs_queue.inquiry_request_dlq.url
+    inquiry_reply       = aws_sqs_queue.inquiry_reply.url
+    inquiry_reply_dlq   = aws_sqs_queue.inquiry_reply_dlq.url
+    error               = aws_sqs_queue.error.url
+    error_dlq           = aws_sqs_queue.error_dlq.url
   }
 }
 
 output "queue_arns" {
-  description = "Map of logical queue name to queue ARN for all twelve queues, keyed identically to queue_urls. Callers pass only the exact per-service subset into ecs-service's sqs_send_queue_arns and sqs_receive_queue_arns; using values(...) for all queues would defeat the confused-deputy boundary."
+  description = "Map of logical queue name to queue ARN for all ten queues, keyed identically to queue_urls. Callers pass only the exact per-service subset into ecs-service's sqs_send_queue_arns and sqs_receive_queue_arns; using values(...) for all queues would defeat the confused-deputy boundary."
   value = {
-    pauth_request               = aws_sqs_queue.pauth_request.arn
-    pauth_request_dlq           = aws_sqs_queue.pauth_request_dlq.arn
-    pauth_reply                 = aws_sqs_queue.pauth_reply.arn
-    pauth_reply_dlq             = aws_sqs_queue.pauth_reply_dlq.arn
-    account_inquiry_request     = aws_sqs_queue.account_inquiry_request.arn
-    account_inquiry_request_dlq = aws_sqs_queue.account_inquiry_request_dlq.arn
-    date_inquiry_request        = aws_sqs_queue.date_inquiry_request.arn
-    date_inquiry_request_dlq    = aws_sqs_queue.date_inquiry_request_dlq.arn
-    inquiry_reply               = aws_sqs_queue.inquiry_reply.arn
-    inquiry_reply_dlq           = aws_sqs_queue.inquiry_reply_dlq.arn
-    error                       = aws_sqs_queue.error.arn
-    error_dlq                   = aws_sqs_queue.error_dlq.arn
+    pauth_request       = aws_sqs_queue.pauth_request.arn
+    pauth_request_dlq   = aws_sqs_queue.pauth_request_dlq.arn
+    pauth_reply         = aws_sqs_queue.pauth_reply.arn
+    pauth_reply_dlq     = aws_sqs_queue.pauth_reply_dlq.arn
+    inquiry_request     = aws_sqs_queue.inquiry_request.arn
+    inquiry_request_dlq = aws_sqs_queue.inquiry_request_dlq.arn
+    inquiry_reply       = aws_sqs_queue.inquiry_reply.arn
+    inquiry_reply_dlq   = aws_sqs_queue.inquiry_reply_dlq.arn
+    error               = aws_sqs_queue.error.arn
+    error_dlq           = aws_sqs_queue.error_dlq.arn
   }
 }
 
@@ -501,7 +479,7 @@ output "queue_arns" {
 #       entry with a receive list would license a consumer this module does not
 #       have and cannot acquire without a code change that would fail review.
 output "service_queue_permissions" {
-  description = "Exact per-service SQS IAM boundaries. authorization-service receives pauth_request and sends only pauth_reply; account-service receives only account_inquiry_request and sends only inquiry_reply/error; reference-service receives only date_inquiry_request and sends only inquiry_reply/error; batch-service receives NOTHING and sends only error. Pass these lists to ecs-service rather than granting values(queue_arns)."
+  description = "Exact per-service SQS IAM boundaries. authorization-service receives pauth_request and sends only pauth_reply; account-service receives inquiry_request -- the ONLY receiving principal on it -- and sends only inquiry_reply/error; batch-service receives NOTHING and sends only error. There is no reference-service entry: that context answers date conversion synchronously and consumes no queue. Pass these lists to ecs-service rather than granting values(queue_arns)."
   value = {
     authorization_service = {
       receive = [aws_sqs_queue.pauth_request.arn]
@@ -530,15 +508,20 @@ output "service_queue_permissions" {
       receive = []
       send    = [aws_sqs_queue.error.arn]
     }
+    # WHY : Refactoring Rationale: this entry receives the SHARED inquiry request
+    #       queue, and it is the only entry that receives it. It previously received an
+    #       account-only request queue while a reference_service entry received a
+    #       date-only one; both queues were withdrawn to hold the queue inventory at the
+    #       five primaries the migration plan fixes. Exactly one receiving principal is
+    #       what keeps the merge safe -- two would compete for one message and either
+    #       could hide the other's work for the visibility timeout.
+    # WHY : Assumptions: the send list is unchanged by the merge. The owning consumer
+    #       answers on the one shared reply queue and reports a failed publication to the
+    #       terminal error sink, which is what CODATE01 and COACCT01 both do with the same
+    #       literal at app/app-vsam-mq/cbl/CODATE01.cbl:243 and
+    #       app/app-vsam-mq/cbl/COACCT01.cbl:294.
     account_service = {
-      receive = [aws_sqs_queue.account_inquiry_request.arn]
-      send = [
-        aws_sqs_queue.inquiry_reply.arn,
-        aws_sqs_queue.error.arn,
-      ]
-    }
-    reference_service = {
-      receive = [aws_sqs_queue.date_inquiry_request.arn]
+      receive = [aws_sqs_queue.inquiry_request.arn]
       send = [
         aws_sqs_queue.inquiry_reply.arn,
         aws_sqs_queue.error.arn,
@@ -548,19 +531,17 @@ output "service_queue_permissions" {
 }
 
 output "queue_names" {
-  description = "Map of logical queue name to bare queue name for all twelve queues, keyed identically to queue_urls. CloudWatch dimensions SQS metrics on QueueName, so the split account/date request keys also split their depth, age and dead-letter signals."
+  description = "Map of logical queue name to bare queue name for all ten queues, keyed identically to queue_urls. CloudWatch dimensions SQS metrics on QueueName, so inquiry depth, age and dead-letter signals are reported for the one shared request queue rather than per flow."
   value = {
-    pauth_request               = aws_sqs_queue.pauth_request.name
-    pauth_request_dlq           = aws_sqs_queue.pauth_request_dlq.name
-    pauth_reply                 = aws_sqs_queue.pauth_reply.name
-    pauth_reply_dlq             = aws_sqs_queue.pauth_reply_dlq.name
-    account_inquiry_request     = aws_sqs_queue.account_inquiry_request.name
-    account_inquiry_request_dlq = aws_sqs_queue.account_inquiry_request_dlq.name
-    date_inquiry_request        = aws_sqs_queue.date_inquiry_request.name
-    date_inquiry_request_dlq    = aws_sqs_queue.date_inquiry_request_dlq.name
-    inquiry_reply               = aws_sqs_queue.inquiry_reply.name
-    inquiry_reply_dlq           = aws_sqs_queue.inquiry_reply_dlq.name
-    error                       = aws_sqs_queue.error.name
-    error_dlq                   = aws_sqs_queue.error_dlq.name
+    pauth_request       = aws_sqs_queue.pauth_request.name
+    pauth_request_dlq   = aws_sqs_queue.pauth_request_dlq.name
+    pauth_reply         = aws_sqs_queue.pauth_reply.name
+    pauth_reply_dlq     = aws_sqs_queue.pauth_reply_dlq.name
+    inquiry_request     = aws_sqs_queue.inquiry_request.name
+    inquiry_request_dlq = aws_sqs_queue.inquiry_request_dlq.name
+    inquiry_reply       = aws_sqs_queue.inquiry_reply.name
+    inquiry_reply_dlq   = aws_sqs_queue.inquiry_reply_dlq.name
+    error               = aws_sqs_queue.error.name
+    error_dlq           = aws_sqs_queue.error_dlq.name
   }
 }

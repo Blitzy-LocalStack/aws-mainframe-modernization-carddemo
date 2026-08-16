@@ -73,51 +73,62 @@ class OperationCensusTest {
     }
 
     /**
-     * Asserts the census covers the eight operations the package charter enumerates.
+     * Asserts the census covers the nine operations the package charter enumerates.
      *
      * <p>Assumptions: this guards the guard. The equality above would be satisfied by an EMPTY document
      * compared against no handlers, so a mistake in the document reader that returned nothing would make
-     * the census vacuously green. Pinning the count to the charter's own figure is what stops that; eight
-     * is the number the charter states and the number the contract's two tags account for, three plus five.
+     * the census vacuously green. Pinning the count to the charter's own figure is what stops that; nine
+     * is the number the charter states and the number the contract's two tags account for, four plus five.
+     *
+     * <p>Assumptions: ⚠️ Refactoring Rationale: the figures moved from eight and three to nine and four
+     * when the sign-out operation was published. They are restated as literals rather than derived from
+     * the document, because deriving them from the same document the equality above reads would restore the
+     * vacuity this case exists to refuse -- a reader returning nothing would then satisfy both sides.
      */
     @Test
-    @DisplayName("the census covers the eight operations the charter enumerates, three open and five admin")
-    void theCensusCoversAllEightPublishedOperations() {
+    @DisplayName("the census covers the nine operations the charter enumerates, four open and five admin")
+    void theCensusCoversAllNinePublishedOperations() {
 
         Map<String, String> published = publishedOperations();
 
         assertThat(published)
-                .as("the contract publishes the eight operations the package charter enumerates")
-                .hasSize(8);
+                .as("the contract publishes the nine operations the package charter enumerates")
+                .hasSize(9);
 
         assertThat(published.values())
-                .as("three operations are reachable without a token and five require the administrator")
+                .as("four operations are reachable without a token and five require the administrator")
                 .filteredOn("none"::equals)
-                .hasSize(3);
+                .hasSize(4);
     }
 
     /**
      * Asserts each adapter carries the operations its charter assigns it, and not the other's.
      *
      * <p>Assumptions: the split is asserted because it is an AUTHORITY boundary and not a preference about
-     * file size. The three token operations are reachable without a token and the five roster operations
+     * file size. The four session operations are reachable without a token and the five roster operations
      * require the administrator, so a handler that migrated from one adapter to the other would sit among
      * rules written for the opposite posture -- which is the mistake most likely to publish an
      * administrative operation without a token.
+     *
+     * <p>Assumptions: the fourth session operation ENDS a session where the other three issue one, and it
+     * sits on this adapter rather than the roster one for the same reason they do: its authority is
+     * possession of a refresh token rather than membership of the administrator group, so it belongs among
+     * rules written for that posture. The asymmetry is deliberate and is argued at the route itself.
      */
     @Test
-    @DisplayName("the token operations and the roster operations sit on the adapters the charter assigns")
+    @DisplayName("the session operations and the roster operations sit on the adapters the charter assigns")
     void eachAdapterCarriesTheOperationsItsCharterAssigns() {
 
         Set<String> signOnRoutes = routesOf(AuthController.class).keySet();
         Set<String> rosterRoutes = routesOf(UserController.class).keySet();
 
         assertThat(signOnRoutes)
-                .as("the sign-on adapter carries exactly the three operations that issue a token")
+                .as("the sign-on adapter carries exactly the four operations that open or close a session")
                 .containsExactlyInAnyOrder(
                         "POST /api/v1/auth/signon",
                         "POST /api/v1/auth/challenge",
-                        "POST /api/v1/auth/refresh");
+                        "POST /api/v1/auth/refresh",
+                        "POST /api/v1/auth/signout");
 
         assertThat(rosterRoutes)
                 .as("the roster adapter carries exactly the five administrative operations")
@@ -304,7 +315,7 @@ class OperationCensusTest {
      * Reports the members of one collection that are absent from another, for a failure message.
      *
      * <p>Assumptions: this exists so a failure names WHICH operations are missing rather than only that the
-     * two sets differ. A census whose failure message lists eight routes on each side leaves a reader
+     * two sets differ. A census whose failure message lists nine routes on each side leaves a reader
      * diffing by eye, which is the work the test was meant to do.
      *
      * @param from the collection to read members from; must not be {@code null}

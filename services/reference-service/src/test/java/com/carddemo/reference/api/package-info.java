@@ -25,9 +25,9 @@
  * at-clause bodies for emptiness through {@code NonEmptyAtclauseDescription}, so an invented empty
  * at-clause would be reported rather than credited.</p>
  *
- * <h2>The nine classes this package holds, and how each one reaches the surface</h2>
+ * <h2>The ten classes this package holds, and how each one reaches the surface</h2>
  *
- * <p>This directory holds this descriptor and nine test classes, and admits no subdirectory. They
+ * <p>This directory holds this descriptor and ten test classes, and admits no subdirectory. They
  * reach the boundary by three different routes, which is the distinction to carry away, because it
  * decides what each one is able to detect:</p>
  *
@@ -48,7 +48,10 @@
  *       start would be skipped on the runs where a surface drift matters most.</li>
  *   <li>{@code DateEvaluationDispatcherTest} answers what a request to a mounted address actually does,
  *       which the census above cannot. It drives the date-evaluation route through a real dispatcher
- *       assembled by {@code MockMvcBuilders.standaloneSetup} over a hand-constructed controller.</li>
+ *       assembled by {@code MockMvcBuilders.standaloneSetup} over a hand-constructed controller.
+ *       Assumptions: this narrow form is deliberate for a class whose whole subject is what ONE handler
+ *       does with a bound request; the four controller classes further down now drive the deployed web
+ *       configuration instead, and the paragraph on the advice below records what that changes.</li>
  *   <li>{@code ReferenceParameterConstraintTest} covers the remaining routes the same way and is a
  *       second dispatcher class rather than more cases in the first, because it drives a different set
  *       of controllers and installs its own message converter. Every constrained query parameter and
@@ -120,18 +123,54 @@
  *       deployed chain the authority a read demands becomes observable. The rate RULES stay in
  *       {@code com.carddemo.reference.service} and the seeded rows stay in
  *       {@code com.carddemo.reference.repository}, so no rule is asserted twice.</li>
- *   <li>{@code LookupControllerTest} drives the three seeded address browses and their three item
- *       reads through the deployed chain, that surface being the only way the area-code, state and
+ *   <li>{@code LookupControllerTest} drives the three address browses and their three item reads
+ *       through the deployed chain, that surface being the only way the area-code, state and
  *       state-and-postal-prefix allow-lists leave this context. It owns the members the page envelope
- *       carries, the three domain sizes reaching a client without loss, the classification arriving as
- *       a total and disjoint two-value partition, the width each key round-trips at, the problem
- *       document an absent code is refused with, and which caller is admitted to a read at all.
- *       Refactoring Rationale: the domain sizes are asserted HERE rather than only where the rows are
- *       stored because a code missing from this surface presents in a DIFFERENT bounded context, as a
- *       valid address being rejected with no defect of its own to point at; the relationship runs over
- *       the published contract and the schema and never through code, so no type of that context is
- *       named in it.</li>
+ *       carries, the classification arriving as a total and disjoint two-value partition, the width
+ *       each key round-trips at, the problem document an absent code is refused with, and which caller
+ *       is admitted to a read at all. It additionally owns a CAPACITY property: that a page holding a
+ *       whole domain -- 490 area codes, 56 states, 240 postal-prefix pairs -- serialises with every
+ *       member intact and no ceiling silently clipping it.
+ *       Refactoring Rationale: that last item previously read "the three domain sizes reaching a
+ *       client without loss", which a reader took, correctly, as a claim that the SEEDED populations
+ *       had been proven to reach the surface. The class cannot prove that: it substitutes the lookup
+ *       collaborator and synthesises every row, so no seed script and no table is read on this path.
+ *       The claim is now stated as the capacity property it is, and the seeded populations are proven
+ *       where the rows live -- {@code PhoneAreaCodeRepositoryIT} in
+ *       {@code com.carddemo.reference.repository} asserts the 490 literals as 410 general-purpose plus
+ *       80 easily-recognisable against the migrated table, with state and prefix counterparts beside
+ *       it. Keeping the two claims apart is what the one-owner-per-rule division above requires: a
+ *       boundary test that overstated itself into the population's territory would leave the weaker of
+ *       two assertions carrying a rule everybody still trusted.</li>
+ *   <li>{@code ReferenceWriteBoundaryDispatcherTest} drives the three write operations that no class
+ *       above reached at all -- the category REPLACE, the category DELETE and the maintenance batch --
+ *       and owns, for each, the success line, the refusals a rejected value and an absent row render,
+ *       the conflict a lost race renders, and the absence of any store diagnostic from a fault body.
+ *       ⚠️ Refactoring Rationale: it exists because this charter claimed the package owned the binding,
+ *       status and error behaviour of the published surface while three of its operations had no
+ *       boundary assertion of any kind. The creation class beside it covers the CREATE and nothing else
+ *       on that controller, and {@code ReferenceMaintenanceController} had no test whatsoever. The gap
+ *       was invisible from inside the package: the census class asserts that every published operation
+ *       is MOUNTED, which all three were, so the surface looked complete while what each of the three
+ *       actually answered was unasserted. Assumptions: three properties in particular had no owner and
+ *       now do -- that a void-returning delete renders a fault as 500 rather than as its declared 204,
+ *       that a replace takes both key halves from the PATH and ignores a key-shaped body member, and
+ *       that the maintenance batch answers 200 for a partly-applied run rather than a failure status,
+ *       which is the published decision a status-only reading would get backwards.</li>
  * </ul>
+ *
+ * <p>⚠️ Refactoring Rationale: the division of labour stated at the top of this charter now HOLDS for
+ * every published operation of this context, and it did not before. Five operations across this
+ * migration had no controller-boundary assertion -- the category replace and delete and the maintenance
+ * batch here, the token renewal in {@code com.carddemo.auth.api} and the transaction copy action in
+ * {@code com.carddemo.transaction.api} -- so a charter claiming this layer's behaviour was owned was
+ * describing an intention rather than a fact. The three in this package are covered by the class above;
+ * the two elsewhere are covered in their own packages, because a boundary belongs to the module that
+ * publishes it. Assumptions: the authority each of these three write routes demands is asserted against
+ * the DEPLOYED chain by {@code com.carddemo.reference.config.SecurityDocumentationAccessTest}, which
+ * exercises all four mutating methods at these exact addresses with a user-only and an administrator
+ * token, rather than in the dispatcher class -- which installs no chain, so a 404 there means the
+ * address and never the caller. One owner per property, as above.</p>
  *
  * <p>Refactoring Rationale: a dispatcher class earns its cost over a direct handler call for one
  * measured reason rather than as a matter of taste. A constraint declared on a request record is only
@@ -145,13 +184,28 @@
  * not-found sentence. The second is the harder of the two to notice, because its status looks like an
  * ordinary outcome rather than a fault.</p>
  *
- * <p>Assumptions: all six names end in {@code Test}, so Surefire collects them at the {@code test}
- * phase of the build. Failsafe collects the {@code IT} names, which in this module means the
+ * <p>Assumptions: all NINE names in this package end in {@code Test}, so Surefire collects every one of
+ * them at the {@code test} phase of the build. Refactoring Rationale: this sentence said "all six", and
+ * the count was wrong rather than the rule -- the package declares nine test classes beside this
+ * descriptor: {@code DateConversionControllerTest}, {@code DateConversionRefusalTest},
+ * {@code DateEvaluationDispatcherTest}, {@code DisclosureGroupControllerTest},
+ * {@code LookupControllerTest}, {@code ReferenceApiRoutingContractTest},
+ * {@code ReferenceParameterConstraintTest}, {@code TransactionCategoryCreationDispatcherTest} and
+ * {@code TransactionTypeControllerTest}. A wrong count in this position is worse than none, because the
+ * claim it makes is that EVERY class here is collected, and a reader checking that against a stated six
+ * would stop three short and take the remainder for a different kind of member.</p>
+ *
+ * <p>Assumptions: Failsafe collects the {@code IT} names, which in this module means the
  * container-backed classes under {@code com.carddemo.reference.repository}, and asserts their result at
  * {@code verify}. The suffix is therefore doing structural work: a container-backed class misnamed
  * {@code Test} runs with no container and fails for the wrong reason, and a boundary test misnamed
  * {@code IT} is passed over by Surefire and appears to succeed by never having run. The second failure
  * mode is the dangerous one, because it is indistinguishable from success in every report.</p>
+ *
+ * <p>Assumptions: the claim above is about THIS package and does not generalise across the module. The
+ * sibling {@code com.carddemo.reference.service} package mixes both suffixes deliberately -- its own
+ * descriptor records that it carries a container-backed {@code ReferenceBatchUpdateServiceIT} beside its
+ * {@code Test} classes -- so a reader must not carry "every class ends in Test" from here to there.</p>
  *
  * <p>Assumptions: both runners keep their default report directories,
  * {@code services/reference-service/target/surefire-reports} and the Failsafe directory beside it. This
@@ -162,17 +216,27 @@
  * into that tree would either be discarded or be mistaken for the other suite's output, and the build
  * would stay green while the collected evidence described the wrong thing.</p>
  *
- * <h2>The shared advice has to be handed to a dispatcher, and cannot be inherited</h2>
+ * <h2>The shared advice reaches a dispatcher two different ways in this package</h2>
  *
  * <p>Assumptions: {@code com.carddemo.common.error.GlobalExceptionHandler} carries
  * {@code @RestControllerAdvice} at line 160 of its own source and is the only such declaration
  * anywhere in this migration. It sits outside the {@code com.carddemo.reference} scan root, which is
- * why the module entry point brings it in explicitly rather than discovering it. A dispatcher built by
- * {@code standaloneSetup} has no context to discover it from at all, so each dispatcher class here
- * registers it by hand through {@code setControllerAdvice}. Omitting that registration does not fail
- * loudly: the dispatcher falls back to the framework's default error handling, the assertions then
- * observe that instead of the real mapping, and a refusal that should render as a conflict reads as
- * green. Every status assertion in this package rests on that registration being present.</p>
+ * why the module entry point brings it in explicitly rather than discovering it. Its absence does not
+ * fail loudly wherever it is missing: the dispatcher falls back to the framework's default error
+ * handling, the assertions then observe that instead of the real mapping, and a refusal that should
+ * render as a conflict reads as green. Every status assertion in this package rests on it being
+ * present.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: it now arrives by TWO routes, and which route a class uses follows from
+ * how that class assembles its dispatcher. The four controller classes -- {@code DateConversion},
+ * {@code DisclosureGroup}, {@code TransactionType} and {@code Lookup} -- drive a servlet MVC test slice
+ * and import the shared kernel's auto-configuration, which is the same route a deployed task receives the
+ * advice by. The remaining dispatcher classes still assemble a dispatcher with
+ * {@code MockMvcBuilders.standaloneSetup}, which has no context to discover the advice from, so they
+ * register it by hand through {@code setControllerAdvice}. This paragraph used to state the hand
+ * registration as the only route available, on the ground recorded further down that the slice annotation
+ * was absent from this module's test class path; that ground no longer holds, and both routes are
+ * described here so that a reader meeting either one knows it is deliberate.</p>
  *
  * <p>Assumptions: no type in this package, and no type in the module's own tree, may declare a second
  * {@code @RestControllerAdvice} or a local handler for a condition the shared one already maps. One
@@ -213,17 +277,29 @@
  *       seven-character group name padded out to the ten characters the receiving field declares, so a
  *       test that writes the unpadded name of that group into an assertion is comparing against its own
  *       transcription rather than against the value the service actually looks up.</li>
- *   <li>{@code AddressLookupController}, which has no domain-service collaborator at all: it reads
- *       {@code UsPhoneAreaCodeRepository}, {@code UsStateRepository} and
- *       {@code UsStateZipPrefixRepository} directly, takes the cursor codec, and assembles the page
- *       envelope itself. No lookup service exists to stand behind it, so a test named for one would
- *       have nothing to exercise.</li>
+ *   <li>{@code AddressLookupController}, which is covered by {@code LookupControllerTest} rather than
+ *       by a class named for a service. ⚠️ Refactoring Rationale: this entry said the controller "has no
+ *       domain-service collaborator at all", read {@code UsPhoneAreaCodeRepository},
+ *       {@code UsStateRepository} and {@code UsStateZipPrefixRepository} directly, and assembled the
+ *       page envelope itself. None of that is true of the delivered controller: it takes exactly one
+ *       collaborator, {@code AddressLookupService}, which owns the walk bound, the position sealing and
+ *       the envelope assembly, and the repository it named in the middle is now
+ *       {@code StateRepository}. The entry is corrected rather than deleted because the ABSENCE it was
+ *       explaining is still real -- there is no {@code AddressLookupServiceTest} -- and the reason is
+ *       now the ordinary one: the service's behaviour is exercised through the controller's own test and
+ *       against the seeded schema by the repository integration tests, so a third class asserting the
+ *       same walks would derive the same coverage twice.</li>
  *   <li>{@code DateConversionController}, over {@code DateConversionService}, which delegates its
  *       edit rules to {@code com.carddemo.common.validation.DateEditValidator} so that one set of rules
- *       serves every context that edits a date. Assumptions: the queue-driven counterpart of this route
- *       is {@code DateInquiryMessageListener}, which is not a controller, publishes {@code onRequest}
- *       and {@code publishError} rather than a request-mapped method, and is asserted in the service
- *       test package. Nothing here may drive it.</li>
+ *       serves every context that edits a date. Refactoring Rationale: this entry named a queue-driven
+ *       counterpart in this module, {@code DateInquiryMessageListener}, and told a reader it was
+ *       asserted in the service test package. There is no queue-driven counterpart HERE any more: the
+ *       baseline drives both inquiry programs from ONE request destination at
+ *       {@code app/app-vsam-mq/README.md} L53, and a queue admits exactly one owning consumer, so that
+ *       route belongs to {@code com.carddemo.account.service.InquiryMessageListener} and is asserted in
+ *       that module. What the service test package here still asserts about it is the withdrawal and
+ *       the shared wire geometry, in {@code DateConversionFlowContractTest}. Nothing in this package
+ *       may drive a queue at all.</li>
  *   <li>{@code ReferenceMaintenanceController}, over {@code ReferenceBatchUpdateService}, which carries
  *       the batched maintenance action.</li>
  * </ul>
@@ -491,10 +567,12 @@
  * {@code TransactionTypeControllerTest} -- carry a name the projection also used, each authored against
  * the measured tree rather than against the projection and holding the subjects listed for it above
  * rather than the per-controller sweep the projection described. The projection described them as
- * context-slicing web tests; that annotation is not on this module's test class path at all, having
- * moved in the framework's fourth generation into a separate servlet slice artifact this module does not
- * declare, so the mechanism is a standalone dispatcher, which is why the advice above is registered by
- * hand rather than imported. The projection described four controllers with the
+ * context-slicing web tests, and on that point the projection was RIGHT while an earlier form of this
+ * descriptor was wrong: it recorded that the annotation was absent from this module's test class path,
+ * having moved in the framework's fourth generation into a separate servlet slice artifact the module did
+ * not declare. The module declares that artifact now, all four are slices, and the advice reaches them
+ * through the shared kernel's auto-configuration rather than by hand -- which is the arrangement the
+ * paragraph above describes. The projection described four controllers with the
  * category surface nested beneath the type; six are mounted and the category surface is a root
  * collection. On the page envelope the projection was RIGHT and an earlier form of this descriptor was
  * wrong: it carries four components and backward availability is inferred from the leading token, as

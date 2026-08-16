@@ -249,13 +249,23 @@ class BatchRunRepositoryIT {
     // WHY : Alternatives Considered: an in-memory engine, which would start in milliseconds instead of
     //       the twenty seconds a container costs. Rejected because every property this class asserts IS
     //       an engine behaviour and none of them survives a substitute. The schema ownership read from
-    //       pg_namespace, the stored predicate text read from pg_constraint, the five constraints that
+    //       pg_namespace, the stored predicate text read from pg_constraint, the SIX constraints that
     //       have to REFUSE a row at the statement that writes it, the search_path the datasource pins
     //       across five schemas and Flyway's own history table are all PostgreSQL facts; an in-memory
     //       engine implements them differently or not at all, so each assertion would either not
     //       compile as written or pass while saying nothing about the engine the nightly chain runs
     //       against. No embedded driver is on this module's classpath, so the substitute is not
     //       reachable even by accident.
+    // WHY : Assumptions: the count above is SIX and is named rather than tallied, because it read
+    //       "five" while db/migration/V1__batch.sql declares six refusable constraints on
+    //       batch.batch_run and this class exercises every one: uq_batch_run_run_step (L447),
+    //       ck_batch_run_attempt (L418), ck_batch_run_status (L457), ck_batch_run_return_code
+    //       (L480), ck_batch_run_lifecycle (L542) and ck_batch_run_finished_after_started (L576).
+    //       pk_batch_run (L410) is deliberately outside the count -- its key is database-generated,
+    //       so no statement this class can write violates it. Naming the six rather than counting
+    //       them is what stops the number drifting again: a seventh constraint added to the
+    //       migration without a case here leaves this list visibly short, whereas a bare numeral
+    //       goes stale silently, which is exactly what happened.
     @Container
     static final PostgreSQLContainer POSTGRES =
             new PostgreSQLContainer(POSTGRES_IMAGE).withInitScript(HARNESS_SCRIPT);

@@ -303,10 +303,16 @@ class OpaqueIdentifierTest {
     /**
      * Confirms a single-character difference in the protected value changes the token.
      *
-     * <p>Assumptions: this is the property the authorization deduplication key depends on. Two adjacent
-     * transaction identifiers must tokenise differently, or exactly-once delivery would discard a
-     * genuinely distinct authorization as a duplicate -- which is the failure the truncation defect in
-     * the wire codec produced before it was fixed.</p>
+     * <p>Assumptions: this is the property any keyed identity derived from a short structured value
+     * depends on. Two adjacent inputs must tokenise differently, or two distinct subjects would share
+     * one token -- which is the failure the truncation defect in the wire codec produced before it was
+     * fixed. Refactoring Rationale: this note named the AUTHORIZATION DEDUPLICATION KEY as the
+     * dependant, and that is no longer one: specification &sect;0.4.1.8 fixes
+     * {@code MessageDeduplicationId} as the literal transaction identifier, so nothing tokenises it and
+     * the tokeniser configuration that would have keyed it is withdrawn. The property under test is
+     * unchanged and still load-bearing for the identities that ARE derived -- the card selector, the
+     * keyset cursor seal and the reporting artifact identity -- so the case is retained and its stated
+     * dependant is generalised rather than replaced with a second specific one.</p>
      */
     @Test
     @DisplayName("a single-character difference changes the token")

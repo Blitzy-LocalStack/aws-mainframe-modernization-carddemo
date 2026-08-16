@@ -84,7 +84,7 @@ import org.junit.jupiter.api.Test;
  * carry a docstring, and a comment byte would break the 200-byte record closure, so the obligation
  * relocates to the Javadoc of the test that consumes it. Prose beside the fixture was rejected for two
  * specific reasons: {@code config/checkstyle/suppressions.xml} lines 250 to 251 exempt everything
- * under the fixtures resource directory from every Javadoc check, and {@code checkstyle.xml} line 185
+ * under the fixtures resource directory from every Javadoc check, and {@code checkstyle.xml} line 178
  * narrows the tool to {@code fileExtensions="java"} in the first place, so documentation carried next
  * to the bytes is policed by nothing whereas this Javadoc is policed mechanically at Maven
  * {@code validate}.</p>

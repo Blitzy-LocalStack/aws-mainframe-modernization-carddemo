@@ -72,6 +72,7 @@
  */
 
 import { getApiClient, keysetPagingMembers, requestPath } from './client';
+import { MASKED_CARD_NUMBER } from './masking';
 import type {
   AdminCardDetail,
   CardDetail,
@@ -199,23 +200,19 @@ export const CARD_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
  *       disclosure this guard exists to stop -- and they reached a table, a log line and a bug report
  *       unremarked, because a test asking "is this sixteen digits" answers no to a value carrying
  *       nineteen characters of which sixteen are digits.
- * WHY : Alternatives Considered: (1) extending `isCardNumber` in `../routes/cards` to strip separators
+ * WHY : Alternatives Considered: extending `isCardNumber` in `../routes/cards` to strip separators
  *       before counting digits. Rejected because it fixes the narrower test rather than replacing it,
  *       and it would still admit a partial mask; the guard's obligation is the contract's pattern, not
- *       a family of near-misses enumerated one at a time. (2) importing a shared masked-rendering
- *       predicate. Rejected for now because the four sibling clients that already check this member --
- *       `./accounts` L161, `./authorization` L234, `./reporting` L144 and `./transactions` L237 --
- *       each declare this exact literal locally, so a fifth local declaration keeps this module
- *       consistent with the folder, whereas hoisting it would be a five-module change outside the
- *       findings this pass resolves.
- * WHY : Trade-offs: the positive form refuses a response the previous one accepted, so a service that
- *       renders the mask differently -- a different mask character, or eleven of them -- now fails the
- *       browse rather than painting a row. That is the intended exchange: the contract's pattern is the
- *       agreement, and a rendering that does not satisfy it is either a service fault or a disclosure,
- *       and neither should be resolved by rendering it.
+ *       a family of near-misses enumerated one at a time.
+ * WHY : ⚠️ Refactoring Rationale: the pattern this module tests against is now IMPORTED from
+ *       `./masking` rather than declared here, and the note that stood in its place rejected exactly
+ *       that move -- on the reasoning that four sibling clients each declared the literal locally, so a
+ *       fifth local copy kept this module consistent with its folder. A review overturned that: five
+ *       owners of one security-critical constant can drift, and a drifted mask pattern fails in the
+ *       PERMISSIVE direction, so the consistency being preserved was consistency in carrying a risk.
+ *       The hoist is a five-module change and was made as one; the pattern's own reasoning, including
+ *       the positive form and the two anchors, now lives with the declaration.
  */
-/** Matches the masked rendering every card row and card detail must carry. */
-const MASKED_CARD_NUMBER = /^[*]{12}[0-9]{4}$/u;
 
 // WHY : Alternatives Considered: the two operations below are the collection-level pair, serving the
 //       browse screen's two entry fields between them -- one page of rows optionally narrowed by

@@ -31,13 +31,14 @@
  * hand-authored OpenAPI 3.1 document at
  * {@code services/auth-service/src/main/resources/openapi/auth-api.yaml}, which settles the paths,
  * the parameter and property names, the response shapes and the error vocabulary. That document
- * declares eight synchronous operations and splits them between the two adapters by its own tags.
+ * declares nine synchronous operations and splits them between the two adapters by its own tags.
  * Each is named below by the operation identifier it carries there, so that a reader can move
  * between this charter and the contract without guessing which entry answers to which.</p>
  *
- * <p>{@code AuthController} carries the three operations the contract tags {@code Sign-On}. Every
- * one of them declares {@code x-required-authority: none}, because between them they are the
- * operations that issue a token and so none of them can require one.</p>
+ * <p>{@code AuthController} carries the four operations the contract tags {@code Sign-On}. Every
+ * one of them declares {@code x-required-authority: none}: three of them are the operations that
+ * issue a token and so none of those can require one, and the fourth REVOKES the credential a
+ * caller presents to it, which is the only authority it could sensibly demand.</p>
  *
  * <ul>
  *   <li>{@code signOn}, the exchange of a user identifier and password for a token set, served by
@@ -46,6 +47,8 @@
  *       challenge, served by {@code POST} on {@code /api/v1/auth/challenge}</li>
  *   <li>{@code refreshTokens}, the exchange of a refresh token for a new token set, served by
  *       {@code POST} on {@code /api/v1/auth/refresh}</li>
+ *   <li>{@code signOut}, the revocation at the pool of the refresh token a session renews from,
+ *       served by {@code POST} on {@code /api/v1/auth/signout} and answered 204 with no body</li>
  * </ul>
  *
  * <p>{@code UserController} carries the five operations the contract tags
@@ -80,7 +83,7 @@
  * because it holds no business rules.</p>
  *
  * <p>Assumptions: sign-on is nevertheless kept apart from user administration, and the seam is the
- * authority boundary rather than a preference about file size. The three sign-on operations are
+ * authority boundary rather than a preference about file size. The four sign-on operations are
  * reachable without a token while the five administrative operations require
  * {@code carddemo-admin}, so putting both groups in one file would place an unauthenticated
  * handler and an administrative handler side by side, where a filter-chain rule added for one is

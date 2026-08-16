@@ -3,17 +3,17 @@
  *
  * <h2>The directory, measured rather than remembered</h2>
  *
- * <p>Eight compilation units sit in this directory: this charter and the seven configuration classes
+ * <p>Seven compilation units sit in this directory: this charter and the six configuration classes
  * {@code DataSourceConfig}, {@code InternalIdentityConfig}, {@code JsonReadConfig},
- * {@code MessagingIdentityConfig}, {@code OpenApiConfig}, {@code SecurityConfig} and
+ * {@code OpenApiConfig}, {@code SecurityConfig} and
  * {@code SqsConfig}. Every class name, file name
  * and count here is a measurement of that directory, and the marker line is re-measured on every
  * build by
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
- * so an eighth class arriving without an entry here fails the build:</p>
+ * so a seventh class arriving without an entry here fails the build:</p>
  *
  * <pre>
- * this directory: 8 java files = 7 classes + 1 charter
+ * this directory: 7 java files = 6 classes + 1 charter
  * </pre>
  *
  * <p>Assumptions: the shared-kernel types named further down, and the profile configuration this
@@ -45,15 +45,20 @@
  * the COBOL parity oracle treats a warning-level aggregate as its green state belongs to that suite
  * alone, and it is never carried into a Maven, Checkstyle, Surefire or Failsafe result on this side.
  *
- * <h2>The seven configuration classes</h2>
+ * <h2>The six configuration classes</h2>
  *
- * <p>Target contract: this package is to hold exactly seven {@code @Configuration} classes, each with
+ * <p>Target contract: this package is to hold exactly six {@code @Configuration} classes, each with
  * a narrow and separately testable responsibility. The enumeration below is the closed set assigned
- * to it, and it is now also a measurement: seven files beside this one carry that annotation.</p>
+ * to it, and it is now also a measurement: six files beside this one carry that annotation.</p>
  *
- * <p>⚠️ Refactoring Rationale: the count reads seven where it read six. {@code JsonReadConfig} was
- * ADDED, and it is recorded as an addition rather than a correction -- six was accurate for the tree it
- * was measured against. It holds the request reader to the character domains the published contract
+ * <p>⚠️ Refactoring Rationale: the count has moved twice and both movements are recorded, because a
+ * bare figure gives a reader no way to tell a deletion from a miscount. It read six, then seven, and
+ * now reads six again. The second movement is {@code MessagingIdentityConfig} being DELETED, which
+ * took it from seven back to six, and that deletion carries its own record two paragraphs below,
+ * beside the entry it replaced. The first movement is {@code JsonReadConfig} being ADDED, which took
+ * it from six to seven, and it is recorded as an addition rather than a correction -- six was accurate
+ * for the tree it was measured against. That class holds the request reader to the
+ * character domains the published contract
  * declares: a JSON number reaching a member the document declares {@code type: string} was CONVERTED
  * and accepted, so a numeric account scope was answered rather than refused. It is a class in this
  * package rather than a key in the sibling {@code application.yml} for one reason, and the reason is
@@ -66,16 +71,19 @@
  * {@code config/JsonReadConfigTest} asserts that the packaged document really sets them, so the half
  * held here and the half held there cannot drift apart unnoticed.</p>
  *
- * <p>Refactoring Rationale: a seventh configuration class, {@code MessagingTokenConfig}, was DELETED
- * from this package rather than repointed, and the deletion is recorded because a reader may find the
- * name in a diff or a message. It was a second tokeniser configuration binding
+ * <p>Refactoring Rationale: a class named {@code MessagingTokenConfig} was DELETED from this package
+ * rather than repointed, and the deletion is recorded because a reader may find the name in a diff or
+ * a message. It was a second tokeniser configuration binding
  * {@code carddemo.security.mask-hmac-key} -- a property the sibling {@code application.yml} does not
  * supply, and which {@code infra/modules/ecs-service} provisions for the extract-transform-load
  * workload alone. It contributed an unqualified bean of the same type as
- * {@link MessagingIdentityConfig}'s and read a property no deployment of this context supplies, so
+ * {@code MessagingIdentityConfig}'s and read a property no deployment of this context supplies, so
  * this context could not start at all under its own declared deployment. Two beans deriving one
  * identity is the condition under which a consumer silently binds the wrong key, which is why one of
- * the two had to go rather than both being kept and disambiguated.</p>
+ * the two had to go rather than both being kept and disambiguated. Assumptions: neither survives now.
+ * The one that was kept in that pass has since been withdrawn in its own right, for the separate
+ * reason recorded below, so a reader chasing either name finds no class and both records explain
+ * why.</p>
  *
  * <ul>
  *   <li>{@code SecurityConfig} builds the resource server filter chain. Every business request
@@ -122,34 +130,47 @@
  * configure a client that nothing can inject.
  *
  * <ul>
- *   <li>{@link MessagingIdentityConfig} supplies the ONE keyed tokeniser this context holds, from
- *       {@code carddemo.messaging.hmac-key}. It is named and injected by qualifier rather than by
- *       type, which is what makes a second tokeniser a compile-time decision at each call site
- *       instead of a silent rebinding. Assumptions: the key is a deployment secret with no default,
- *       delivered as {@code CARDDEMO_MESSAGING_HMAC_KEY}, and it is a DIFFERENT secret from the
- *       extract-transform-load masking key -- the two have different holders and different trust
- *       purposes, so sharing one value would let a migration workload compute values a production
- *       consumer derives. That separation is the whole reason this class exists rather than a method
- *       on {@code SqsConfig}: the tokeniser is a security primitive keyed from the secret store,
- *       while {@code SqsConfig} wires a transport client. Assumptions: the tokeniser is NOT what the
- *       two first-in-first-out queue identities are derived through. Specification &sect;0.4.1.8 freezes
- *       {@code MessageGroupId} as {@code card_num} and {@code MessageDeduplicationId} as
- *       {@code transaction_id}, so both are emitted literally -- a derived group identity is only equal
- *       for equal cards WITHIN one producer, which is not the guarantee the specification describes.
- *       What the tokeniser is, is the keyed primitive the derived-identity surfaces of {@code .mapper}
- *       accept, {@code AuthorizationMessageMapper.businessCorrelationToken} and
- *       {@code MappingDiagnostic.structuredFields(OpaqueIdentifier)}. Trade-offs: no component of this
- *       context injects the bean at present, and it is retained rather than retired because the
- *       deployment contract that delivers its key is asserted by {@code infra/modules/ecs-service} and
- *       provisioned by both environment roots, so retiring the bean would leave a provisioned secret
- *       with no declared consumer.</li>
+ *   <li>⚠️ Refactoring Rationale: a class named {@code MessagingIdentityConfig} stood at the head of
+ *       this list and is WITHDRAWN, together with the {@code carddemo.messaging.hmac-key} property it
+ *       read, the {@code CARDDEMO_MESSAGING_HMAC_KEY} container secret that delivered it, the secret
+ *       resource both environment roots provisioned for it, the task-role grant that read it and the
+ *       {@code infra/modules/ecs-service} validation condition that required the authorization task to
+ *       receive it. It supplied one named {@code OpaqueIdentifier} bean, and the reason it is gone is
+ *       that after the queue identities became literal values there was nothing left for that bean to
+ *       key: no component of this context injected it, and its own documentation said so while
+ *       arguing for its retention on the ground that a provisioned secret would otherwise have no
+ *       declared consumer. That argument is circular -- the secret existed to serve the bean and the
+ *       bean was kept to justify the secret -- and it left a real cost standing: a secret provisioned
+ *       in both environments, injected into a running task, read by a task role and rotated by an
+ *       attended runbook procedure, for a value nothing computed. Withdrawing the whole chain at once
+ *       is what removes that cost rather than relocating it. Assumptions: the two derived-identity
+ *       surfaces of the sibling {@code .mapper} package,
+ *       {@code AuthorizationMessageMapper.businessCorrelationToken} and
+ *       {@code MappingDiagnostic.structuredFields(OpaqueIdentifier)}, are unaffected, because each
+ *       takes the tokeniser as a PARAMETER rather than injecting it -- so they remain callable, and a
+ *       future caller that has a real use for a derived correlation token supplies a tokeniser keyed
+ *       from a secret provisioned in the same change as the caller, which is the order that keeps a
+ *       provisioned secret and its consumer arriving together. Alternatives Considered: wiring a
+ *       consumer instead, so the bean gained the injection point it lacked. Rejected because the only
+ *       candidate consumers are those two surfaces, and neither is called by anything in this context
+ *       -- inventing a call site to justify a secret is the same circularity in the opposite
+ *       direction. Alternatives Considered: keeping the bean and deleting only the infrastructure, or
+ *       keeping the infrastructure and deleting only the bean. Both rejected: either half left
+ *       standing is the failure this entry records, in that a key with no reader and a reader with no
+ *       key are both states in which the deployment contract and the code disagree. The
+ *       {@code OpaqueIdentifier} primitive itself is untouched in the shared kernel, where the card
+ *       selector, the keyset cursor seal and the reporting artifact identity each key it from their
+ *       own separately provisioned secrets.</li>
  *   <li>{@link InternalIdentityConfig} supplies the short-lived bearer identity this context
  *       presents when it reads the card cross-reference and the account master from the context
- *       that owns them, from {@code carddemo.internal-identity.authorization-signing-key}. Assumptions: it is
- *       separate from the messaging tokeniser above for the same reason the two secrets are
- *       separate -- one authenticates this service to a sibling service, the other derives queue
- *       metadata -- so one class holding both would make rotating either require reasoning about
- *       both.</li>
+ *       that owns them, from {@code carddemo.internal-identity.authorization-signing-key}. Assumptions:
+ *       this is now the ONLY secret-keyed class in the package, and its key is the only secret this
+ *       context reads beyond its database credentials. Refactoring Rationale: this entry argued its
+ *       separateness from the withdrawn messaging tokeniser above, on the ground that one secret
+ *       authenticates this service to a sibling service while the other derived queue metadata. That
+ *       comparison no longer has a second term. What survives it is the rule the comparison was making:
+ *       a class that held two keys for two trust purposes would make rotating either require reasoning
+ *       about both, so a second secret arriving here arrives in a class of its own.</li>
  *   <li>{@link JsonReadConfig} refuses a non-textual scalar where the published contract declares a
  *       character field, so {@code {"accountId":10000000101}} is answered as a malformed body rather
  *       than converted into the eleven digits the pattern constraint would then accept. ⚠️ Assumptions:

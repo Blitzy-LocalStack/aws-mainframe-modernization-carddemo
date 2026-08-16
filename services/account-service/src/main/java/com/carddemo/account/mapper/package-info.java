@@ -108,10 +108,10 @@
  *
  * <p>Alternatives Considered: generating the accessors of the types involved with Lombok, rejected
  * for the same reason one layer down and recorded as such in the build rather than only here.
- * {@code services/pom.xml} L812 to L820 records that Lombok was rejected BECAUSE of this
+ * {@code services/pom.xml} L803 to L811 records that Lombok was rejected BECAUSE of this
  * documentation gate: an accessor produced during annotation processing has no source member on
  * which a docstring could sit, and {@code MissingJavadocMethod} is configured with
- * {@code allowMissingPropertyJavadoc} set false at L365 of
+ * {@code allowMissingPropertyJavadoc} set false at L356 of
  * {@code config/checkstyle/checkstyle.xml}, so an undocumented accessor is a violation rather than a
  * tolerated omission. Generation would therefore have to be paired with a weakening of the gate to
  * be viable at all, which is the trade the gate exists to refuse.</p>

@@ -28,8 +28,8 @@ import com.carddemo.reference.dto.TransactionTypeResponse;
 import com.carddemo.reference.mapper.UsPhoneAreaCodeMapper;
 import com.carddemo.reference.mapper.UsStateMapper;
 import com.carddemo.reference.mapper.UsStateZipPrefixMapper;
+import com.carddemo.reference.repository.StateRepository;
 import com.carddemo.reference.repository.UsPhoneAreaCodeRepository;
-import com.carddemo.reference.repository.UsStateRepository;
 import com.carddemo.reference.repository.UsStateZipPrefixRepository;
 import com.carddemo.reference.service.AddressLookupService;
 import com.carddemo.reference.service.DisclosureGroupService;
@@ -179,7 +179,7 @@ class ReferenceParameterConstraintTest {
     @BeforeEach
     void buildDispatcher() {
         UsPhoneAreaCodeRepository areaCodes = mock(UsPhoneAreaCodeRepository.class);
-        UsStateRepository states = mock(UsStateRepository.class);
+        StateRepository states = mock(StateRepository.class);
         UsStateZipPrefixRepository zipPrefixes = mock(UsStateZipPrefixRepository.class);
         this.types = mock(TransactionTypeService.class);
         this.categories = mock(TransactionCategoryService.class);

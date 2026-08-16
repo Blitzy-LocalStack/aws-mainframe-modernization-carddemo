@@ -133,8 +133,16 @@ class CorrelationIdFilterTest {
     }
 
     /**
-     * Confirms a twelve-digit all-numeric identity still conforms, so the rule refuses the card-shaped
-     * class rather than every numeric value a caller might legitimately choose.
+     * Confirms an eight-digit all-numeric identity still conforms, so the rule refuses the shape of a
+     * protected identifier rather than every numeric value a caller might legitimately choose.
+     *
+     * <p>⚠️ Refactoring Rationale: this case asserted TWELVE digits, and twelve is now refused. It was
+     * chosen to sit one below a thirteen-digit floor, and that floor was the defect: it was derived from
+     * the card number alone while the rule it governs protects four identifiers, the shortest of which --
+     * a customer identifier and a national identifier, both {@code PIC 9(09)} -- is nine digits. Eight is
+     * the new one-below value, and it is asserted rather than the boundary itself so that this case and
+     * {@link #protectedIdentifierShapedIdentitiesAreRefused()} together bracket the threshold from both
+     * sides.</p>
      *
      * @throws IOException if the mock chain reports one, which it does not
      * @throws ServletException if the mock chain reports one, which it does not
@@ -143,7 +151,7 @@ class CorrelationIdFilterTest {
     @DisplayName("a short all-numeric identity is still echoed unaltered")
     void shortNumericIdentityIsEchoed() throws IOException, ServletException {
         MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/accounts/11");
-        request.addHeader(CorrelationIdFilter.CORRELATION_ID_HEADER, "123456789012");
+        request.addHeader(CorrelationIdFilter.CORRELATION_ID_HEADER, "12345678");
         MockHttpServletResponse response = new MockHttpServletResponse();
         RecordingChain chain = new RecordingChain();
 
@@ -152,7 +160,62 @@ class CorrelationIdFilterTest {
         assertThat(response.getStatus()).isEqualTo(200);
         assertThat(chain.invoked).isTrue();
         assertThat(response.getHeader(CorrelationIdFilter.CORRELATION_ID_HEADER))
-                .isEqualTo("123456789012");
+                .isEqualTo("12345678");
+    }
+
+    /**
+     * Confirms every protected identifier shape this system holds is refused, not merely the card number.
+     *
+     * <p>Assumptions: three widths are asserted and each is a DIFFERENT identifier, because one rule
+     * covering all three is the whole of the correction and a case naming only one width would pass
+     * against a rule that had been widened by four digits instead of to the measured floor. Nine is a
+     * customer identifier and a national identifier ({@code CUST-ID PIC 9(09)} at line 5 of
+     * {@code app/cpy/CVCUS01Y.cpy}, {@code CUST-SSN PIC 9(09)} at line 16); eleven is an account
+     * identifier ({@code ACCT-ID PIC 9(11)} at line 5 of {@code app/cpy/CVACT01Y.cpy}); and the
+     * separated eleven-digit form is asserted as well, because the rule counts digits after removing
+     * separators and a caller writing an account identifier with a hyphen must not slip past it.</p>
+     *
+     * <p>Assumptions: each refusal asserts BOTH the status and that the supplied value is absent from the
+     * response, because a refusal that echoed the value in its own body or header would have published
+     * exactly what it was refusing. The minted identity in the body is twenty-two uppercase hexadecimal
+     * characters, whose alphabet includes every digit, so the assertion is made against the WHOLE
+     * supplied value rather than any substring of it -- a short window would collide by chance.</p>
+     *
+     * @throws IOException if the mock chain reports one, which it does not
+     * @throws ServletException if the mock chain reports one, which it does not
+     */
+    @Test
+    @DisplayName("nine-digit and eleven-digit identifier shapes are refused, separated or not")
+    void protectedIdentifierShapedIdentitiesAreRefused() throws IOException, ServletException {
+        assertRefused("123456789");
+        assertRefused("00000000011");
+        assertRefused("000-0000-0011");
+    }
+
+    /**
+     * Drives one request through a fresh filter and asserts the supplied identity was refused outright.
+     *
+     * <p>Assumptions: the chain is asserted NOT to have run, because the refusal must happen before the
+     * request reaches anything that logs -- a chain that ran would have published the value to the mapped
+     * diagnostic context, which is the exposure being closed rather than an implementation detail.</p>
+     *
+     * @param identity the correlation identity to supply, which must be refused
+     * @throws IOException if the mock chain reports one, which it does not
+     * @throws ServletException if the mock chain reports one, which it does not
+     */
+    private static void assertRefused(String identity) throws IOException, ServletException {
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/accounts/11");
+        request.addHeader(CorrelationIdFilter.CORRELATION_ID_HEADER, identity);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        RecordingChain chain = new RecordingChain();
+
+        new CorrelationIdFilter().doFilter(request, response, chain);
+
+        assertThat(response.getStatus()).isEqualTo(400);
+        assertThat(chain.invoked).isFalse();
+        assertThat(response.getContentAsString()).doesNotContain(identity);
+        assertThat(response.getHeader(CorrelationIdFilter.CORRELATION_ID_HEADER))
+                .isNotEqualTo(identity);
     }
 
     /**
@@ -199,12 +262,19 @@ class CorrelationIdFilterTest {
     /**
      * Confirms the echo contract survives the widened rule for the identities real callers send.
      *
-     * <p>Assumptions: the widened rule refuses only values built ENTIRELY from digits and accepted
-     * separators whose digits reach the account-number threshold, so the two shapes asserted here are
-     * the ones that prove the rule did not become a blanket refusal: a separated value whose digits stay
-     * under the threshold, and a value of full width that carries a letter. The second is the common
-     * case -- a trace identifier is hexadecimal -- and admitting it on the first non-digit character is
-     * why the rule costs nothing on the conforming path.</p>
+     * <p>Assumptions: the rule refuses only values built ENTIRELY from digits and accepted separators
+     * whose digits reach the protected-identifier threshold, so the two shapes asserted here are the ones
+     * that prove it did not become a blanket refusal: a separated value whose digits stay under the
+     * threshold, and a value of full width that carries a letter. The second is the common case -- a
+     * trace identifier is hexadecimal -- and admitting it on the first non-digit character is why the
+     * rule costs nothing on the conforming path.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the separated value asserted here was {@code 2022-07-18-0930}, twelve
+     * digits, which the widened rule refuses. It is now {@code 2022-07-18}, eight digits, which is the
+     * same kind of value -- a separated date a caller might legitimately correlate on -- kept below the
+     * new floor. The letter-bearing case is unchanged and is the more important of the two: it is what
+     * every platform-minted identity and every hexadecimal trace identifier looks like, so it is the
+     * evidence that the widening costs no internal hop.</p>
      *
      * @throws IOException if the mock chain reports one, which it does not
      * @throws ServletException if the mock chain reports one, which it does not
@@ -212,7 +282,7 @@ class CorrelationIdFilterTest {
     @Test
     @DisplayName("separated short identities and letter-bearing identities are still echoed unaltered")
     void conformingSeparatedAndAlphanumericIdentitiesAreEchoed() throws IOException, ServletException {
-        assertEchoed("2022-07-18-0930");
+        assertEchoed("2022-07-18");
         assertEchoed("a1b2c3d4e5f6a7b8c9d0e1f2");
     }
 

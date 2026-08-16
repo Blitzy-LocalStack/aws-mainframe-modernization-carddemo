@@ -51,6 +51,7 @@ import type {
   InternalAxiosRequestConfig,
 } from 'axios';
 
+import { MASKED_PATH_SEGMENT } from './masking';
 import { runtimeApiBaseUrl } from './runtimeConfig';
 import { recordServerDate } from './serverClock';
 import type {
@@ -79,7 +80,37 @@ import type {
 //       services hold none, which is what lets them scale out behind a load balancer with no sticky
 //       sessions — and it would oblige every mutating request to carry CSRF machinery that a bearer
 //       token in an explicit header does not need.
-const ACCESS_TOKEN_STORAGE_KEY = 'carddemo.access-token';
+// WHY : Assumptions: that alternative was revisited when a review asked for the refresh token to be
+//       moved out of script-readable storage, and the answer changed the STORAGE rather than the
+//       transport: nothing is persisted at all now, so there is no stored credential for a cookie to
+//       protect. An `HttpOnly` cookie would additionally have to be cross-site here -- AAP section
+//       0.4.1.9 puts the SPA behind CloudFront and the API behind API Gateway, which are different
+//       origins by design, and `infra/modules/cloudfront-spa` declares one S3 origin and no API
+//       behaviour -- so it would need `SameSite=None`, which readmits the cross-site request the
+//       header-based scheme cannot be driven by. The full comparison is recorded on the session
+//       holder in `ui/src/hooks/useAuth.ts`.
+/*
+ * WHY : ⚠️ Refactoring Rationale: the bearer token is held in the module variable below and NOT in
+ *       `sessionStorage`, where a `carddemo.access-token` key used to carry it. A review found every
+ *       token this tab held persisted in script-readable Web Storage, and the access token is the worst
+ *       of them to leave there: it is the credential every request carries, it is accepted by every
+ *       resource server without a further exchange, and reading it is the whole of what an attacker
+ *       needs. A refresh token has to be exchanged at the auth service to be worth anything and can be
+ *       revoked; an access token is spendable on arrival and cannot be. Current browser-application
+ *       guidance is explicit that an exposed access token belongs in memory only, and this is that.
+ * WHY : Trade-offs: a module variable does not survive a page reload, so the bearer is gone after one
+ *       and no request carries a credential until a new session is established. That is the intended
+ *       exchange and it is the reason `ui/src/hooks/useAuth.ts` holds the WHOLE session in memory
+ *       rather than persisting a refresh token to re-mint this one -- the reasoning for that decision,
+ *       and the two alternatives the AAP forecloses, are recorded there. Nothing in this module
+ *       persists, reads or writes browser storage as a result.
+ * WHY : Assumptions: it is a single module-scoped variable rather than a per-instance field, because
+ *       there is one axios instance and its request interceptor is the only reader. A second holder
+ *       would be a second answer to "what does the next request carry", which is the drift the single
+ *       writer below exists to prevent.
+ */
+let bearerToken: string | null = null;
+
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MIN_TIMEOUT_MS = 1_000;
 const MAX_TIMEOUT_MS = 60_000;
@@ -190,27 +221,36 @@ const CORRELATION_ID_MAX_LENGTH = 24;
  * `services/common-lib/src/main/java/com/carddemo/common/web/CorrelationIdFilter.java`, reproduced
  * here character for character. It is not decoration and it is not a provenance signal: it is the
  * one thing that guarantees a generated identifier carries a letter, and a value carrying a letter
- * at any position is admitted by that filter's `isAccountNumberShaped` test without its digits
+ * at any position is admitted by that filter's `isProtectedIdentifierShaped` test without its digits
  * being counted at all.
  *
  * Refactoring Rationale: this client used to mint twenty-four BARE hexadecimal characters and the
  * comment here argued the prefix was deliberately not imitated, because "a browser that stamped
  * `CD` would claim that provenance falsely". That argument was answered by the contract it was
  * reasoning about. The filter refuses an inbound identifier consisting only of digits and accepted
- * separators once its digits number thirteen or more — `ACCOUNT_NUMBER_MIN_DIGITS`, the shortest
- * primary account number in circulation — because a conforming identifier is published to the
+ * separators once its digits number nine or more — `PROTECTED_IDENTIFIER_MIN_DIGITS`, the shortest
+ * protected identifier this system holds, a nine-digit customer or national identifier — because a
+ * conforming identifier is published to the
  * mapped diagnostic context and therefore onto every log line. Twelve random bytes rendered as
  * hexadecimal are all digits whenever every byte falls in one of the ten decimal-only ranges, which
  * is (100/256)^12, roughly one generated identifier in seventy-eight thousand. Each of those was
  * answered HTTP 400 before the handler ran, on a request the operator had made correctly, and the
  * failure was indistinguishable at the screen from a rejected payload.
  *
+ * Refactoring Rationale: that floor later moved from thirteen digits to nine, and the rate quoted
+ * above did NOT move with it. The predicate disqualifies a value on its first letter before
+ * counting any digit, so a bare hexadecimal identifier is refused only when all twenty-four of its
+ * characters happen to be digits — and twenty-four clears either floor. The widening therefore
+ * changes nothing about the decision recorded here. It is written down because a reader who saw
+ * the floor move would reasonably expect the rate to move with it, and would then mistrust a
+ * figure that is in fact still exact.
+ *
  * Trade-offs: the cost accepted is that a browser-minted identifier is no longer distinguishable
  * from a service-minted one by inspection. That is a real loss and it is the smaller one: the
  * provenance was only ever readable by a human reading a log, whereas the refusal broke requests.
  * Nothing in the migrated services branches on the prefix — it appears in `CorrelationIdFilter`
  * alone, as the value that mint prepends and as the reason its own identities are never
- * account-number-shaped — so imitating it changes no behaviour beyond removing the refusal.
+ * protected-identifier-shaped — so imitating it changes no behaviour beyond removing the refusal.
  */
 const CORRELATION_ID_PREFIX = 'CD';
 
@@ -274,13 +314,42 @@ function apiBaseUrl(): string {
     );
   }
 
-  const localDevelopment =
-    import.meta.env.DEV &&
+  // Refactoring Rationale: the loopback exemption is decided from the RESOLVED HOST at run time,
+  //       and it used to be decided from `import.meta.env.DEV` at build time. That was a defect
+  //       rather than a preference, and it was measured rather than reasoned about: a production
+  //       bundle inlines that flag as `false`, so the compiler constant-folded the whole exemption
+  //       away and the shipped asset carried an UNCONDITIONAL `if (protocol !== 'https:') throw`.
+  //       Serving the built bundle against the documented local edge — which publishes
+  //       `http://localhost:8000/api/v1` in `config.json` — therefore threw inside this factory
+  //       before any request was dispatched, and every screen rendered its catalogued
+  //       last-resort message instead: sign-on answered 'Unable to verify the User ...' with no
+  //       credential ever leaving the browser. An exemption whose condition cannot be true in the
+  //       artifact it ships in is dead code, and the comment describing it was a false claim about
+  //       the delivered behaviour.
+  // Assumptions: loopback is the only plain-HTTP host admitted, and admitting it costs nothing the
+  //       HTTPS requirement was protecting. Traffic to a loopback address never reaches a network
+  //       interface, so there is no wire to intercept, and a browser cannot be induced to resolve
+  //       these names to anything else — `localhost` is reserved for loopback and the two literal
+  //       addresses are the loopback addresses themselves. Every other host, including a private
+  //       address inside a deployment's own network, still requires HTTPS, which is what carries
+  //       AAP 0.9.1's encryption-in-transit constraint for a body bearing a primary account number.
+  // Assumptions: the bracketed IPv6 form is tested as well as the bare one. `URL` normalises
+  //       `http://[::1]:8000` to a hostname of `[::1]` with the brackets retained, so a check for
+  //       `::1` alone silently fails to admit the address a dual-stack host resolves `localhost` to.
+  // Alternatives Considered: leaving the guard alone and serving the local edge over TLS, or
+  //       building in development mode for local use. Both were rejected as the fix rather than as
+  //       practices: each leaves the exemption this file documents unreachable in a production
+  //       bundle, so the next reader is misled again, and neither makes the delivered artifact
+  //       behave as its own comment describes.
+  const loopbackApi =
     parsed.protocol === 'http:' &&
-    (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1');
-  if (parsed.protocol !== 'https:' && !localDevelopment) {
+    (parsed.hostname === 'localhost' ||
+      parsed.hostname === '127.0.0.1' ||
+      parsed.hostname === '::1' ||
+      parsed.hostname === '[::1]');
+  if (parsed.protocol !== 'https:' && !loopbackApi) {
     throw new Error(
-      'CardDemo API configuration is invalid; only HTTPS is accepted outside local development.',
+      'CardDemo API configuration is invalid; only HTTPS is accepted for any host other than loopback.',
     );
   }
   // WHY : Assumptions: a PATH is permitted here and the other four components are not. The base
@@ -467,7 +536,7 @@ function correlationHeaderName(): string {
  * aborted navigation — would leave nothing to quote to support.
  * @returns {string} Exactly {@link CORRELATION_ID_LENGTH} characters: the two-character
  *   {@link CORRELATION_ID_PREFIX} followed by upper-case hexadecimal, and therefore never a value
- *   the services classify as account-number-shaped.
+ *   the services classify as protected-identifier-shaped.
  */
 export function newCorrelationId(): string {
   const entropy = new Uint8Array(CORRELATION_ID_ENTROPY_BYTES);
@@ -501,13 +570,18 @@ export function newCorrelationId(): string {
  * local copy changes what the browser draws and nothing about what it is permitted to do.
  *
  * Assumptions: an absent token is a NORMAL condition, not an error, so no header is attached at all
- * rather than one carrying an empty or undefined bearer. ⚠️ It is normal because THREE published
- * operations are reached before any token exists — `signOn`, `answerSignOnChallenge` and
- * `refreshTokens`, the only three operations in the whole published surface that declare `security: []`
+ * rather than one carrying an empty or undefined bearer. ⚠️ It is normal because FOUR published
+ * operations are reached without a usable token — `signOn`, `answerSignOnChallenge`, `refreshTokens`
+ * and `signOut`, the only four operations in the whole published surface that declare `security: []`
  * in `services/auth-service/src/main/resources/openapi/auth-api.yaml`, each presenting its credential in
  * the request body instead. A service reading `Authorization: Bearer undefined` would refuse any of them
  * as a malformed credential — reporting a rejected token where the operator has not yet presented one,
- * or, on the refresh, signing an operator out for arriving a moment late.
+ * or, on the renewal and the revocation, refusing the exchange whose whole purpose is to replace or end
+ * the credential that has expired.
+ *
+ * Assumptions: it is normal for a SECOND reason since the bearer moved into memory — a page reload
+ * discards it, so every request between the reload and the next sign-on carries none. That state reads
+ * as anonymous rather than as a fault, which is exactly what the absent header produces.
  *
  * Refactoring Rationale: the stored token is attached CONDITIONALLY on the request's own metadata,
  * and the condition is checked first. A request marked {@link WITHOUT_STORED_SESSION} has the header
@@ -526,11 +600,8 @@ export function newCorrelationId(): string {
 function applyRequestHeaders(config: InternalAxiosRequestConfig): InternalAxiosRequestConfig {
   if (config.carddemoOmitStoredSession === true) {
     config.headers.delete(AUTHORIZATION_HEADER);
-  } else {
-    const token = sessionStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
-    if (token !== null && token.length > 0) {
-      config.headers.set(AUTHORIZATION_HEADER, `Bearer ${token}`);
-    }
+  } else if (bearerToken !== null && bearerToken.length > 0) {
+    config.headers.set(AUTHORIZATION_HEADER, `Bearer ${bearerToken}`);
   }
   config.headers.set(correlationHeaderName(), newCorrelationId());
   return config;
@@ -1335,7 +1406,7 @@ function rememberOperationTemplate(template: string): void {
  * a shape, which is a fact about the contract rather than about the failure, and what a reader needs is
  * that a value stood in that position.
  */
-const MASKED_SEGMENT = '{id}';
+const MASKED_SEGMENT = MASKED_PATH_SEGMENT;
 
 /** Matches a template segment that stands for a value rather than for a published literal. */
 const TEMPLATE_PLACEHOLDER_SEGMENT = /^\{[A-Za-z][A-Za-z0-9]*\}$/u;
@@ -1927,24 +1998,29 @@ export function keysetPagingMembers(
  * writes, so a sign-out has one place to happen and the interceptor cannot observe a token some other
  * module stored under a name of its own.
  *
- * Assumptions: the store is `sessionStorage` rather than `localStorage`, so the token is scoped to the
- * tab and is discarded when it closes; a token surviving in `localStorage` would outlive the operator's
- * session on a shared workstation, which is the setting this application is used in.
- * @param {string | null} token - Access token issued by auth-service, or `null` to sign out.
- * @returns {void} Nothing; the effect is the stored value. A token REPLACES whatever this tab held
- *   under this module's single key, and `null` REMOVES it, so the request interceptor stops attaching
- *   an `Authorization` header from the very next request. Discarding the access token is not by itself
- *   a sign-out: the identity and refresh tokens belong to `ui/src/hooks/useAuth.ts`, which clears them
+ * Assumptions: ⚠️ Refactoring Rationale: the token is held in MEMORY and no browser storage is touched
+ * at all, where this function used to write a `sessionStorage` key. The reasoning is recorded on the
+ * holder's declaration; the consequence for a caller is that the token does not survive a page reload,
+ * and re-establishing a session after one is `ui/src/hooks/useAuth.ts`'s concern rather than this
+ * module's. A caller must therefore not treat the absence of a bearer as evidence that the operator
+ * signed out.
+ * @param {string | null} token - Access token issued by auth-service, or `null` to discard the held one.
+ * @returns {void} Nothing; the effect is the held value. A token REPLACES whatever this tab held, and
+ *   `null` DISCARDS it, so the request interceptor stops attaching an `Authorization` header from the
+ *   very next request. Discarding the access token is not by itself a sign-out: the identity token, the
+ *   identifier and the session generation belong to `ui/src/hooks/useAuth.ts`, which discards them
  *   alongside this one.
- * @throws {RangeError} If a non-null token is blank or contains controls.
+ * @throws {RangeError} If a non-null token is blank or contains controls. The token is rejected and the
+ *   previously held one is left in place, because a service that issued an unusable bearer has not
+ *   replaced the session and discarding the working credential would end one that is still valid.
  */
 export function setAccessToken(token: string | null): void {
   if (token === null) {
-    sessionStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
+    bearerToken = null;
     return;
   }
   if (token.length === 0 || /[\u0000-\u001F\u007F]/u.test(token)) {
     throw new RangeError('Access token must be non-empty and contain no control characters.');
   }
-  sessionStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, token);
+  bearerToken = token;
 }

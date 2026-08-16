@@ -32,6 +32,7 @@ import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.persistence.autoconfigure.EntityScan;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.context.annotation.Bean;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
 import org.springframework.test.context.ActiveProfiles;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -136,5 +137,27 @@ abstract class ReferencePersistenceBase {
     @EntityScan("com.carddemo.reference.domain")
     @EnableJpaRepositories("com.carddemo.reference.repository")
     static class ReferencePersistenceTestApplication {
+
+        /**
+         * Registers the reply ledger, which is a CLASS rather than a Spring Data interface.
+         *
+         * <p>Assumptions: the bean is declared explicitly because {@code @EnableJpaRepositories} above
+         * registers derived interfaces only, and nothing here component-scans -- so without this
+         * declaration the one authored class in the data-access package would be absent from the context
+         * while every interface beside it resolved. Alternatives Considered: adding a component scan over
+         * the repository package. Rejected because that scan would also reach the nested configuration
+         * classes of test files in that package and the duplicate definitions would end context load.</p>
+         *
+         * <p>Assumptions: it is declared on this SHARED base rather than in a nested configuration of the
+         * one class that uses it, so the whole package keeps one cached context and one engine. A second
+         * configuration class would start a second context against the same container, which this base's
+         * own rationale above rejects for the sibling classes and rejects here for the same reason.</p>
+         *
+         * @return the ledger, never {@code null}
+         */
+        @Bean
+        InquiryReplyLedger inquiryReplyLedger() {
+            return new InquiryReplyLedger();
+        }
     }
 }

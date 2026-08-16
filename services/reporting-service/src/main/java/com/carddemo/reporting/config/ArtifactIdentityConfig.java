@@ -45,12 +45,16 @@ import org.springframework.context.annotation.Configuration;
  * no one else. That is what makes an operator able to locate a named cardholder's artifact deliberately,
  * through the same lookup the application performs, rather than by reading it off a key.</p>
  *
- * <p>Assumptions: this configuration is deliberately modelled on
- * {@code com.carddemo.authorization.config.MessagingIdentityConfig} rather than generalised into the
- * shared kernel. The two differ in the property they read and in the purpose they scope tokens under,
- * and a shared factory would have to take both as arguments -- at which point it saves the bean method
- * and nothing else, while making the key each context tokenises under something a reader has to trace
- * through a parameter instead of reading in the context that owns it.</p>
+ * <p>Assumptions: this configuration keeps its key and its purpose scope in the context that owns them
+ * rather than generalising a keyed-tokeniser factory into the shared kernel. Alternatives Considered:
+ * such a factory, taking the property name and the purpose scope as arguments. Rejected because it would
+ * save the bean method and nothing else, while making the key a context tokenises under something a
+ * reader has to trace through a parameter instead of reading in the context that owns it. Refactoring
+ * Rationale: this paragraph cited {@code com.carddemo.authorization.config.MessagingIdentityConfig} as
+ * the sibling this class was modelled on. That class is withdrawn -- nothing injected the bean it
+ * declared once the queue identities became the literal values the specification freezes -- so the
+ * citation is replaced by the reasoning it was standing in for. This is now the only keyed-tokeniser
+ * configuration in the reactor, and the pattern is stated here rather than referred to elsewhere.</p>
  *
  * <p>Assumptions: {@code proxyBeanMethods = false} because no bean method here calls another, so the
  * CGLIB subclass a proxying configuration creates would add start-up cost and no behaviour.</p>

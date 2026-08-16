@@ -18,6 +18,8 @@ import com.carddemo.common.time.TimestampFormatter;
 import com.carddemo.common.validation.DateEditValidator;
 import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.transaction.domain.Transaction;
+import com.carddemo.transaction.dto.CopiedTransactionData;
+import com.carddemo.transaction.dto.CopyLastRequest;
 import com.carddemo.transaction.dto.TransactionAddOutcome;
 import com.carddemo.transaction.dto.TransactionAddPreview;
 import com.carddemo.transaction.dto.TransactionAddRequest;
@@ -552,6 +554,28 @@ class TransactionAddServiceTest {
     }
 
     /**
+     * Builds a copy-last submission, which carries a key and a confirmation and no data members.
+     *
+     * <p>Assumptions: this is a DIFFERENT shape from {@link #submission(String, String, String)} and
+     * deliberately so. {@code app/cbl/COTRN02C.cbl} L473 performs {@code VALIDATE-INPUT-KEY-FIELDS} and
+     * nothing else before the read, and L481 to L492 then FILL the eleven data fields from the copied
+     * record -- so the data members are this action's output rather than its input, and a shape requiring
+     * them made the action reachable only from an already-filled screen.</p>
+     *
+     * @param accountId the account identifier to submit, of type {@code String}, empty to leave the
+     *     account direction unsupplied
+     * @param cardNumber the card number to submit, of type {@code String}, empty to leave the card
+     *     direction unsupplied
+     * @param confirmation the confirmation discriminator to submit, of type {@code String}, empty for
+     *     the never-supplied spelling
+     * @return a {@link CopyLastRequest} carrying its three components, never {@code null}
+     */
+    private static CopyLastRequest copySubmission(String accountId, String cardNumber,
+            String confirmation) {
+        return new CopyLastRequest(accountId, cardNumber, confirmation);
+    }
+
+    /**
      * Builds a submission differing from the original in exactly one text component.
      *
      * <p>Assumptions: the field key must be one of the ten text components a validation block
@@ -956,21 +980,95 @@ class TransactionAddServiceTest {
      * calls where the reference makes one. The seam is a network hop, so the count is a behaviour.</p>
      */
     @Test
-    @DisplayName("both keys supplied: the account direction wins and replaces the submitted card")
-    void theAccountDirectionWinsAndTheSubmittedCardIsSilentlyReplaced() {
+    @DisplayName("both keys supplied: the account direction wins and the resolved card is reported")
+    void theAccountDirectionWinsAndTheSubmittedCardIsReportedAsResolved() {
+        accountResolvesTo(RESOLVED_CARD_NUMBER);
+
+        // WHY : ⚠️ Refactoring Rationale: the replacement is asserted on the PREVIEW turn, where this case
+        //       used to assert it on a confirming turn by reading the appended row. Both readings describe
+        //       the same reference behaviour and only one of them is now reachable. Line 209 overwrites the
+        //       SCREEN field and the reference then re-sends the screen, so the replacement is something the
+        //       operator SEES before confirming -- and the target's equivalent of that re-sent screen is the
+        //       preview's resolved pair. A confirming turn carrying a card the account did not resolve to is
+        //       refused now, precisely because the reference cannot produce one: by the time the affirmative
+        //       character is typed, the field holds the resolved value. Asserting the disclosure is therefore
+        //       asserting the same line of COBOL at the point where the target makes it observable.
+        TransactionAddPreview preview = prompted(
+                this.service.addTransaction(submission(ACCOUNT_ID, SUBMITTED_CARD_NUMBER, "N")));
+
+        assertThat(preview.resolvedCardNumber())
+                .as("line 209 overwrites the card field with the entry's value, and the preview is the"
+                        + " re-sent screen that shows it")
+                .isEqualTo(RESOLVED_CARD_NUMBER)
+                .isNotEqualTo(SUBMITTED_CARD_NUMBER);
+        assertThat(preview.resolvedAccountId())
+                .as("the account the row would be attributed to, on the path that supplied it")
+                .isEqualTo(ACCOUNT_ID);
+        verify(this.accounts).findCardXrefByAccountId(ACCOUNT_ID);
+        verify(this.accounts, never()).findCardXrefByCardNumber(any());
+        verify(this.transactions, never()).saveAndFlush(any());
+    }
+
+    /**
+     * A confirming turn naming a card the account did not resolve to is refused, and writes nothing.
+     *
+     * <p>⚠️ Purpose: this is the other half of the disclosure above, and together they close a defect that
+     * could write one card while the operator confirmed another. The reference cannot reach this state: its
+     * account arm reads the cross-reference at line 208 of {@code app/cbl/COTRN02C.cbl}, line 209 moves the
+     * entry's card number over the screen field, and the screen is re-sent -- so the field the operator
+     * confirms already holds the resolved card and no keystroke sequence confirms a different one.
+     * Splitting one screen turn into two stateless requests is what made the state reachable, so refusing it
+     * restores the property rather than adding one.</p>
+     *
+     * <p>Assumptions: the refusal names the CARD member, because that is the value the operator must
+     * correct -- by re-reading the preview and confirming what it reports. Naming the account would point at
+     * the field that is right.</p>
+     *
+     * <p>Assumptions: the append is asserted never to have happened. A refusal that arrived after the row
+     * was written would report a failure for a capture that succeeded, which is the one outcome worse than
+     * either of the two this pair replaces.</p>
+     *
+     * <p>Trade-offs: the sentence is the target's own, because the reference emits none for a condition it
+     * cannot reach; the divergence is registered as {@code D-CONFIRMED-CARD-BINDING}.</p>
+     */
+    @Test
+    @DisplayName("a confirming turn naming an unresolved card is refused and writes nothing")
+    void aConfirmingTurnNamingAnUnresolvedCardIsRefused() {
+        accountResolvesTo(RESOLVED_CARD_NUMBER);
+
+        assertThatThrownBy(() ->
+                this.service.addTransaction(submission(ACCOUNT_ID, SUBMITTED_CARD_NUMBER, "Y")))
+                .isInstanceOf(ClientInputException.class)
+                .hasMessage(TransactionAddService.MESSAGE_CONFIRM_RESOLVED_CARD);
+
+        verify(this.transactions, never()).allocateTransactionId();
+        verify(this.transactions, never()).saveAndFlush(any());
+    }
+
+    /**
+     * A confirming turn naming the RESOLVED card is admitted, so the binding refuses only a mismatch.
+     *
+     * <p>Purpose: without this case the refusal above is satisfiable by a service that refuses every
+     * confirming turn carrying a card at all, which would break the ordinary card-only capture. The pair
+     * establishes that what is refused is the DISAGREEMENT and not the presence of the member.</p>
+     *
+     * <p>Assumptions: the submission names both keys, as the previous case does, and differs from it in one
+     * value only -- the card it confirms. That is what attributes the difference in outcome to the binding
+     * rather than to anything else about the request.</p>
+     */
+    @Test
+    @DisplayName("a confirming turn naming the resolved card is admitted and writes the row")
+    void aConfirmingTurnNamingTheResolvedCardIsAdmitted() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
         theAllocatorAnswersWith(ALLOCATED_FIRST);
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
-        this.service.addTransaction(submission(ACCOUNT_ID, SUBMITTED_CARD_NUMBER, "Y"));
+        this.service.addTransaction(submission(ACCOUNT_ID, RESOLVED_CARD_NUMBER, "Y"));
 
         assertThat(appendedRow().getCardNum())
                 .as("line 459 stores the field line 209 overwrote, so the entry's value is stored")
-                .isEqualTo(RESOLVED_CARD_NUMBER)
-                .isNotEqualTo(SUBMITTED_CARD_NUMBER);
-        verify(this.accounts).findCardXrefByAccountId(ACCOUNT_ID);
-        verify(this.accounts, never()).findCardXrefByCardNumber(any());
+                .isEqualTo(RESOLVED_CARD_NUMBER);
     }
 
     /**
@@ -1875,7 +1973,14 @@ class TransactionAddServiceTest {
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
-        this.service.addTransaction(submission(ACCOUNT_ID, SUBMITTED_CARD_NUMBER, "Y"));
+        /*
+         * WHY : Assumptions: the submission carries the ACCOUNT alone, where it used to carry a
+         *       disagreeing card as well. Line 459's provenance is the point of this case -- the row's
+         *       card column holds the cross-reference's value -- and an account-only submission
+         *       establishes it without also exercising the confirming-card binding, which has a case of
+         *       its own. A confirming turn naming a card the account did not resolve to is refused.
+         */
+        this.service.addTransaction(submission(ACCOUNT_ID, null, "Y"));
 
         Transaction stored = appendedRow();
         assertThat(stored.getTranId()).as("line 451").isEqualTo(NEXT_IDENTIFIER);
@@ -2352,7 +2457,7 @@ class TransactionAddServiceTest {
                 .thenReturn(Optional.of(storedRow(STORED_MAXIMUM)));
 
         TransactionAddPreview answer =
-                prompted(this.service.copyLastTransactionData(submission(ACCOUNT_ID, "", "N")));
+                prompted(this.service.copyLastTransactionData(copySubmission(ACCOUNT_ID, "", "N")));
 
         assertThat(answer.returnMessage())
                 .as("line 495 re-enters the construct at line 169, which prompts for a refusal")
@@ -2406,7 +2511,7 @@ class TransactionAddServiceTest {
         writeSpanRunsInline();
 
         TransactionAddResponse answer =
-                appended(this.service.copyLastTransactionData(submission(ACCOUNT_ID, "", "Y")));
+                appended(this.service.copyLastTransactionData(copySubmission(ACCOUNT_ID, "", "Y")));
 
         assertThat(answer.transactionId())
                 .as("the allocated value, never the key of the row that was copied")
@@ -2452,7 +2557,7 @@ class TransactionAddServiceTest {
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
-        this.service.copyLastTransactionData(submission(ACCOUNT_ID, "", "Y"));
+        this.service.copyLastTransactionData(copySubmission(ACCOUNT_ID, "", "Y"));
 
         Transaction appended = appendedRow();
         assertThat(appended.getTranTypeCd()).as("line 482").isEqualTo("02");
@@ -2505,11 +2610,106 @@ class TransactionAddServiceTest {
         theCopyProbeFindsNoRow();
 
         assertThatThrownBy(() ->
-                this.service.copyLastTransactionData(submission(ACCOUNT_ID, "", "Y")))
+                this.service.copyLastTransactionData(copySubmission(ACCOUNT_ID, "", "Y")))
                 .isInstanceOf(NoSuchElementException.class)
                 .hasMessage(TransactionAddService.MESSAGE_TRANSACTION_LOOKUP_FAILED);
 
         verify(this.transactions, never()).saveAndFlush(any());
+    }
+
+    /**
+     * The withheld copy turn publishes what it copied, so the confirming turn need not copy again.
+     *
+     * <p>This pins the whole of the copy block's OBSERVABLE effect on a turn that writes nothing. Lines
+     * 480 to 493 of {@code app/cbl/COTRN02C.cbl} move eleven values into the operator's own unprotected
+     * map fields and line 495 then performs {@code PROCESS-ENTER-KEY}, so on a withheld turn the
+     * paragraph's entire product is the screen the operator is left looking at. A browser has no such
+     * screen unless the answer carries it, which is what this case asserts.</p>
+     *
+     * <p>Assumptions: TEN members are asserted here and the eleventh is the {@code amount} the sibling
+     * case above asserts, because the amount is the one copied value the reference TRANSFORMS on its way
+     * to the field -- line 481 renders it through the edited picture and line 485 moves that rendering --
+     * so it is published once, at the top of the body, and is not repeated inside the copied member.</p>
+     *
+     * <p>Assumptions: the source identifier is the key of the row that was copied and NOT the key the
+     * confirming turn would append under. Those are different values by construction, which the sibling
+     * case pins from the other side; asserting the copied key here is what makes the published reference
+     * a stable name for one stored row rather than a restatement of the answer.</p>
+     *
+     * <p>Assumptions: no key member appears in the copied shape, and its absence is asserted as such.
+     * Lines 482 to 492 move nothing into either key field or the confirmation, so a browser adopting this
+     * shape keeps the account it was already working on -- and a shape that carried the copied row's
+     * account would silently move the capture onto a different account.</p>
+     */
+    @Test
+    @DisplayName("the withheld copy turn publishes the ten copied members and the row they came from")
+    void theWithheldCopyTurnPublishesWhatItCopied() {
+        accountResolvesTo(RESOLVED_CARD_NUMBER);
+        theTableMaximumIs(STORED_MAXIMUM);
+        when(this.transactions.findById(STORED_MAXIMUM))
+                .thenReturn(Optional.of(storedRow(STORED_MAXIMUM)));
+
+        TransactionAddPreview answer =
+                prompted(this.service.copyLastTransactionData(copySubmission(ACCOUNT_ID, "", "N")));
+
+        CopiedTransactionData copied = answer.copied();
+        assertThat(copied).as("a withheld copy turn must publish the screen state it produced")
+                .isNotNull();
+        assertThat(copied.sourceTransactionId())
+                .as("the key of the row lines 475 to 478 read, which names it stably")
+                .isEqualTo(STORED_MAXIMUM);
+        assertThat(copied.typeCode()).as("line 482").isEqualTo("02");
+        assertThat(copied.categoryCode()).as("line 483").isEqualTo("0002");
+        assertThat(copied.source()).as("line 484").isEqualTo("ATM TERM");
+        assertThat(copied.description()).as("line 486").isEqualTo("FUEL PURCHASE");
+        assertThat(copied.originDate()).as("line 487, narrowed to the map field's ten characters")
+                .isEqualTo("2026-01-10");
+        assertThat(copied.processDate()).as("line 488, narrowed to the map field's ten characters")
+                .isEqualTo("2026-01-11");
+        assertThat(copied.merchantId()).as("line 489, at the map field's nine positions")
+                .isEqualTo("987654321");
+        assertThat(copied.merchantName()).as("line 490").isEqualTo("FUEL STOP");
+        assertThat(copied.merchantCity()).as("line 491").isEqualTo("TACOMA");
+        assertThat(copied.merchantZip()).as("line 492").isEqualTo("98402");
+
+        assertThat(copied.toString())
+                .as("the diagnostic rendering names the row and none of the values lifted out of it")
+                .contains(STORED_MAXIMUM)
+                .doesNotContain("FUEL PURCHASE", "FUEL STOP", "TACOMA", "98402");
+        verify(this.transactions, never()).saveAndFlush(any());
+    }
+
+    /**
+     * The confirmed copy turn answers with the capture alone, carrying no copied screen state.
+     *
+     * <p>Assumptions: the confirmed arm has already appended the copied capture and answers with the
+     * identifier it assigned, so there is nothing left for a caller to adopt. Publishing the copied row
+     * there as well would put a second identifier on a body whose whole subject is the first, and a
+     * client could not tell which of the two addressed the row it had just created.</p>
+     *
+     * <p>Assumptions: the shape itself carries the distinction, which is why this case reads the outcome
+     * through {@code appended} rather than inspecting a member. The capture shape declares no copied
+     * member at all, so the claim is checked by the compiler as well as by this assertion.</p>
+     */
+    @Test
+    @DisplayName("the confirmed copy turn answers with the capture and no copied screen state")
+    void theConfirmedCopyTurnAnswersWithTheCaptureAlone() {
+        accountResolvesTo(RESOLVED_CARD_NUMBER);
+        theTableMaximumIs(STORED_MAXIMUM);
+        theAllocatorIssues(NEXT_ALLOCATION);
+        when(this.transactions.findById(STORED_MAXIMUM))
+                .thenReturn(Optional.of(storedRow(STORED_MAXIMUM)));
+        theAllocatorAnswersWith(ALLOCATED_NEXT);
+        theAppendEchoesTheRow();
+        writeSpanRunsInline();
+
+        TransactionAddResponse answer =
+                appended(this.service.copyLastTransactionData(copySubmission(ACCOUNT_ID, "", "Y")));
+
+        assertThat(answer.transactionId()).isEqualTo(NEXT_IDENTIFIER);
+        assertThat(this.service.copyLastTransactionData(copySubmission(ACCOUNT_ID, "", "N")))
+                .as("the withheld turn is the only one that publishes copied state")
+                .isInstanceOf(TransactionAddPreview.class);
     }
 
     /**

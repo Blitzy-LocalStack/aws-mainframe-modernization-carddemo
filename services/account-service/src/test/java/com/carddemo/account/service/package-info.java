@@ -2,10 +2,19 @@
  * Unit tests for the service layer of the account bounded context, run against substituted
  * collaborators.
  *
- * <p>TEN classes execute here. Each one owns a rule or an entry point of this context's service
+ * <p>ELEVEN classes execute here. Each one owns a rule or an entry point of this context's service
  * layer, and each states in its own descriptor which COBOL program and which physical line it was
  * transcribed from. The roster is written out rather than summarised as a count, because a count tells
  * a reader that a class is missing without telling them which rule went with it.</p>
+ *
+ * <p>Refactoring Rationale: the roster below is enumerated from the directory rather than from memory,
+ * and it previously said TEN while omitting {@code AddressValidationServiceTest}. A roster that is
+ * short by one is worse than a bare count, because the count at least admits it is a summary whereas an
+ * enumeration reads as exhaustive: a reader auditing the allow-list contract against this list would
+ * have concluded that the five {@code app/cpy/CSLKPCDY.cpy} condition-name lists had no owning class
+ * and either duplicated it or filed it as a gap. The pairing that made the omission easy to miss is
+ * spelled out in the two entries below, because the two address classes assert different halves of the
+ * same rule and the similarity of their names is exactly what hid one of them.</p>
  *
  * <ul>
  *   <li>{@code AccountViewServiceTest} asserts the account view's three-hop composition and the four
@@ -20,7 +29,13 @@
  *       and which stored values it preserves, and that a stale precondition changes nothing, from
  *       {@code app/cbl/COACTUPC.cbl}.</li>
  *   <li>{@code AccountAddressValidationTest} asserts that the same update path actually runs the three
- *       address value-domain edits, whose allow-lists come from {@code app/cpy/CSLKPCDY.cpy}.</li>
+ *       address value-domain edits, whose allow-lists come from {@code app/cpy/CSLKPCDY.cpy}. It proves
+ *       the edits are REACHED; it deliberately does not restate their contents.</li>
+ *   <li>{@code AddressValidationServiceTest} owns those contents: the FIVE condition-name allow-lists
+ *       {@code app/cpy/CSLKPCDY.cpy} declares over THREE targets -- the three telephone area-code lists
+ *       at its L30, L521 and L931, the state list at its L1013 and the four-character state-and-postal
+ *       pairing at its L1073 -- asserted directly against {@code AddressValidationService} rather than
+ *       through the update path, so a single missing list is attributable to the edit that lost it.</li>
  *   <li>{@code AccountViewRevisionTest} pins that the account view and the concurrency revision beside
  *       it are derived from ONE read of the same two rows, from {@code app/cbl/COACTVWC.cbl}.</li>
  *   <li>{@code CustomerMasterReadTest} pins the two customer-master reads the view service performs,
@@ -34,7 +49,28 @@
  *       fixed reply layout is a wire contract rather than a formatting choice.</li>
  *   <li>{@code RestReferenceAddressLookupTest} covers the outbound synchronous adapter that resolves
  *       the three address allow-lists from the reference context.</li>
+ *   <li>{@code AddressValidationServiceTest} pins the three address value-domain edits against the
+ *       FIVE condition-name allow-lists {@code app/cpy/CSLKPCDY.cpy} declares over three targets --
+ *       three telephone-area-code lists at lines 30, 521 and 931, the state list at line 1013, and
+ *       the state-and-first-two-zip-digits combination list at line 1073 -- so no allow-list is left
+ *       without a case. It is distinct from {@code AccountAddressValidationTest}, which asserts that
+ *       the UPDATE path actually runs these edits; this class asserts what the edits themselves
+ *       decide.</li>
  * </ul>
+ *
+ * <h2>What this directory holds</h2>
+ *
+ * <pre>
+ * this directory: 12 java files = 11 tests + 1 charter
+ * </pre>
+ *
+ * <p>Refactoring Rationale: that marker line is machine-checked, and it is here because the prose count
+ * above was allowed to drift once already. {@code PackageCharterInventoryTest} in {@code common-lib}
+ * re-measures the figures against the directory in BOTH directions and holds every enumerated member to
+ * being a file beside this charter, so an added class that nobody lists, and a listed class that nobody
+ * added, each fail the build instead of surviving as an out-of-date sentence. Leaving the count as prose
+ * alone was rejected for exactly the reason this section exists: prose is corrected only when a reader
+ * happens to recount, and the omission it hid here was one entry out of ten.</p>
  *
  * <p>Refactoring Rationale: this test package mirrors the production package one-to-one instead of
  * grouping cases by concern -- one folder of validation tests, one of persistence tests, one of

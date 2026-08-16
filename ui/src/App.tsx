@@ -1,32 +1,32 @@
 /**
- * @file The application shell: the one place the design-system theme is injected and the one
- * place the persistent frame around every screen is declared.
+ * @file The application boundary: the one place the design-system theme is injected and the one
+ * place the persistent frame around every screen is mounted.
  *
  * Purpose
  * -------
- * Own the two concerns that are shared by all 21 migrated screens and belong to none of them: the
- * `ConfigProvider` that carries the BMS-to-antd token bridge, and the header/content/footer frame
- * that replaces the fixed 24x80 terminal frame. The route tree itself is `ui/src/router.tsx`'s;
- * this module renders it inside the frame and adds nothing else.
+ * Own the ONE concern that is shared by all 21 migrated screens and belongs to none of them: the
+ * `ConfigProvider` that carries the BMS-to-antd token bridge. The route tree is `ui/src/router.tsx`'s,
+ * and so is the single mount of the shell in `ui/src/layout/` -- the component that paints the four
+ * persistent zones the baseline showed on every screen -- which that file declares as a layout route.
+ * This module renders the router and adds nothing else.
  *
  * Boundary
  * --------
  * Assumptions: this module holds no state, issues no request and knows no route. Anything a screen
- * needs from the shell it takes from the theme through antd's own components, so a screen cannot
- * acquire a dependency on this file and this file cannot acquire one on a screen.
+ * needs from the frame it delegates through `useShellSlot`, so a screen cannot acquire a dependency
+ * on this file and this file cannot acquire one on a screen.
  */
 
 import type { ReactElement } from 'react';
 
-import { ConfigProvider, Flex, Layout, Typography } from 'antd';
+import { ConfigProvider } from 'antd';
 
-import { APP_ORGANISATION_TITLE_DISPLAY, APP_TITLE_DISPLAY } from './messages/messages';
 import { CardDemoRouter } from './router';
 import { cardDemoTheme } from './theme/antdTheme';
 
 /**
- * Applies the single theme and shared shell around the CardDemo route tree.
- * @returns {ReactElement} The themed application shell.
+ * Applies the single design-system theme around the CardDemo route tree.
+ * @returns {ReactElement} The themed application; the frame is mounted by the route table.
  */
 export function App(): ReactElement {
   return (
@@ -40,27 +40,36 @@ export function App(): ReactElement {
     //   of the answer to "what colour is this".
     <ConfigProvider theme={cardDemoTheme}>
       {/*
-        Assumptions: the shell owns the outlet rather than each screen owning its own frame. Every
-        one of the 17 base BMS mapsets carries the same title band and the same trailing legend, so
-        the frame is a property of the application and not of a screen; declaring it here means a
-        route added later cannot ship without it. Trade-offs: a screen therefore cannot replace the
-        header, which is the intended loss -- the 3270 original had no such affordance either, and
-        a screen that could would be able to hide which transaction an operator was in.
+        Refactoring Rationale: this file used to build a frame of its own out of generic `Layout`,
+        `Layout.Header` and `Layout.Footer` primitives while the shell component was imported by nothing, so the
+        frame an operator actually saw was this file's approximation of it: an application title, no
+        transaction identifier, no program name, no server clock, no message line and no key legend --
+        and the screens already authored to omit their own title band on the ground that the shell
+        supplies it had no band at all. That frame is gone and no replacement is composed here.
+
+        ⚠️ Refactoring Rationale: one remedy for that finding mounted the real shell HERE, as
+        the shell element wrapping the router as its `children`, and it is withdrawn in favour of the
+        layout route in `ui/src/router.tsx`. Both make the shell apply, and it accepts either shape -- `children`
+        when present, otherwise react-router's `Outlet` -- which is exactly why keeping both was not
+        harmless: a shell given `children` never reaches its outlet, so the outer mount rendered the
+        router and the inner layout route rendered the matched screen, and every guarded screen was
+        framed TWICE. Two `app-shell` regions, two banners, two contentinfo landmarks, two skip links,
+        and both shells reading the one publication a screen makes -- so two title bands and two live
+        regions announcing one message.
+
+        Assumptions: the layout route is the mount that survives, for the reason it records: mounted
+        there the shell is instantiated once for the whole tree and renders `<Outlet />`, so the frame
+        persists across navigation between children rather than being remounted per screen, and a route
+        that one day needs a different frame can say so in the table instead of here. What this file
+        keeps is the theme, which genuinely is a property of the whole application and of no route.
+
+        Trade-offs: a screen therefore cannot replace the frame, which is the intended loss -- the 3270
+        original had no such affordance either, and a screen that could would be able to hide which
+        transaction an operator was in. What a screen CAN do is delegate zone content to it through
+        `useShellSlot`, which is how each screen supplies its own identity, message and key legend
+        without composing a second copy of the chrome.
       */}
-      <Layout>
-        <Layout.Header>
-          <Flex align="center" justify="space-between">
-            <Typography.Title level={3}>{APP_TITLE_DISPLAY}</Typography.Title>
-            <Typography.Text>{APP_ORGANISATION_TITLE_DISPLAY}</Typography.Text>
-          </Flex>
-        </Layout.Header>
-        <Layout.Content>
-          <CardDemoRouter />
-        </Layout.Content>
-        <Layout.Footer>
-          <Typography.Text>{APP_TITLE_DISPLAY}</Typography.Text>
-        </Layout.Footer>
-      </Layout>
+      <CardDemoRouter />
     </ConfigProvider>
   );
 }

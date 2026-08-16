@@ -125,19 +125,23 @@ to `JWT` and that an authorizer id is attached, so an edit that detached the
 authorizer fails the apply with a message naming the offending route key and
 redirecting the author to the public route list.
 
-Exactly three route keys are published without the authorizer, and they are the
-operations that issue or renew a token: sign-on, challenge and refresh. That
-set is closed by two input validations. The first admits only those three exact
-method-and-path literals, refusing `ANY` and every greedy matcher. The second
-requires the public and authorized lists to be disjoint, because an HTTP API
-accepts each route key once and a key in both lists would otherwise publish one
-path twice with conflicting protection.
+Exactly four route keys are published without the authorizer. Three of them are
+the operations that issue or renew a token — sign-on, challenge and refresh —
+and the fourth REVOKES one: sign-out asks the pool to invalidate the refresh
+token a session renews from, and possession of that token is the only authority
+a caller could present for revoking it, so demanding a live access token as well
+would refuse the revocation exactly when the session it ends has been abandoned
+rather than closed. That set is closed by two input validations. The first
+admits only those four exact method-and-path literals, refusing `ANY` and every
+greedy matcher. The second requires the public and authorized lists to be
+disjoint, because an HTTP API accepts each route key once and a key in both
+lists would otherwise publish one path twice with conflicting protection.
 
 Alternatives Considered: attaching the authorizer to sign-on as well, so that
 "every route is authorized" would hold with no exception at all. It deadlocks
 the surface — sign-on is the operation that mints the token every other route
 requires, so demanding a token to reach it means no caller can ever obtain one.
-Trade-offs: those three routes are the residual exposure this design accepts,
+Trade-offs: those four routes are the residual exposure this design accepts,
 and it is narrowed rather than waved away — a closed literal allow-list,
 restricted to `POST` on exact paths, each given a per-route throttle an order of
 magnitude tighter than the authorized default, and each forced to emit its own
@@ -429,8 +433,8 @@ the marker. They fall into three groups:
   withdrawn `public_route_keys` reported the unauthenticated surface as a list read
   back from the routes actually created, which an input validation cannot match for
   auditability. The exposure is nonetheless bounded at its source instead:
-  `var.public_route_keys` admits the three exact pre-token `/api/v1/auth`
-  method-and-path keys and nothing else, so no plan can widen it. The VPC Link
+  `var.public_route_keys` admits the four exact `/api/v1/auth` method-and-path
+  keys it allows and nothing else, so no plan can widen it. The VPC Link
   security group's single egress rule and the access-log group's retention and
   encryption are both declared in `main.tf`, where they can be read directly.
 
@@ -503,8 +507,8 @@ a resource, so dropping one requires deleting a visible line.
 ### 8.2 The one declared exception
 
 One scanned property is not met by every route here, and it is declared rather
-than silenced: the check that every route carries an authorizer. The three
-pre-token routes of §1.1 cannot carry one, so [`main.tf`](main.tf) holds a
+than silenced: the check that every route carries an authorizer. The four
+unauthenticated routes of §1.1 cannot carry one, so [`main.tf`](main.tf) holds a
 single scoped `checkov:skip` for that one check, on that one resource, with its
 justification written on the same line.
 
@@ -603,15 +607,15 @@ cites the baseline by path and line and changes nothing in it.
 | <a name="input_private_app_subnet_ids"></a> [private\_app\_subnet\_ids](#input\_private\_app\_subnet\_ids) | Ids of the private application subnets the VPC Link places its network interfaces in, produced by the `network` module. They determine which availability zones the edge can reach the internal ALB from. | `list(string)` | n/a | yes |
 | <a name="input_spa_cors_allow_origins"></a> [spa\_cors\_allow\_origins](#input\_spa\_cors\_allow\_origins) | Exact origins permitted to call this API from a browser: the distribution serving the SPA, produced by the `cloudfront-spa` module. Becomes `cors_configuration.allow_origins`, so an origin outside this list fails the browser's preflight. Shaped `https://<distribution-domain>`. | `list(string)` | n/a | yes |
 | <a name="input_access_log_kms_key_arn"></a> [access\_log\_kms\_key\_arn](#input\_access\_log\_kms\_key\_arn) | ARN of the customer-managed KMS key encrypting the stage's access-log group, produced by the `kms` module. Null selects the CloudWatch Logs service-managed key instead. | `string` | `null` | no |
-| <a name="input_cors_allow_headers"></a> [cors\_allow\_headers](#input\_cors\_allow\_headers) | Request headers a browser may send cross-origin. Becomes `cors_configuration.allow_headers`; every header the SPA sets on an authenticated JSON request has to appear here or the browser withholds the request after the preflight. | `list(string)` | <pre>[<br/>  "authorization",<br/>  "content-type",<br/>  "x-correlation-id"<br/>]</pre> | no |
+| <a name="input_cors_allow_headers"></a> [cors\_allow\_headers](#input\_cors\_allow\_headers) | Request headers a browser may send cross-origin. Becomes `cors_configuration.allow_headers`; every header the SPA sets on an authenticated JSON request has to appear here or the browser withholds the request after the preflight. | `list(string)` | <pre>[<br/>  "authorization",<br/>  "content-type",<br/>  "idempotency-key",<br/>  "if-match",<br/>  "x-correlation-id"<br/>]</pre> | no |
 | <a name="input_cors_allow_methods"></a> [cors\_allow\_methods](#input\_cors\_allow\_methods) | HTTP methods advertised to the browser in the preflight response. Becomes `cors_configuration.allow_methods`; the default is the set the migrated services' contracts expose, plus OPTIONS for the preflight exchange itself. | `list(string)` | <pre>[<br/>  "GET",<br/>  "POST",<br/>  "PUT",<br/>  "DELETE",<br/>  "OPTIONS"<br/>]</pre> | no |
-| <a name="input_cors_expose_headers"></a> [cors\_expose\_headers](#input\_cors\_expose\_headers) | Response headers a browser is permitted to READ cross-origin. Becomes `cors_configuration.expose_headers`. Defaults to the correlation identifier common-lib's CorrelationIdFilter writes on every response and the location header a report submission returns; without an entry here a header is present on the wire and unreadable from script. | `list(string)` | <pre>[<br/>  "x-correlation-id",<br/>  "location"<br/>]</pre> | no |
+| <a name="input_cors_expose_headers"></a> [cors\_expose\_headers](#input\_cors\_expose\_headers) | Response headers a browser is permitted to READ cross-origin. Becomes `cors_configuration.expose_headers`. Defaults to the correlation identifier common-lib's CorrelationIdFilter writes on every response, the entity tag the account view returns as an update precondition, and the location header a report submission returns; without an entry here a header is present on the wire and unreadable from script. | `list(string)` | <pre>[<br/>  "etag",<br/>  "location",<br/>  "x-correlation-id"<br/>]</pre> | no |
 | <a name="input_cors_max_age_seconds"></a> [cors\_max\_age\_seconds](#input\_cors\_max\_age\_seconds) | Upper bound, in seconds, on how long a browser may cache this API's preflight response. Becomes `cors_configuration.max_age`. | `number` | `300` | no |
 | <a name="input_detailed_metrics_enabled"></a> [detailed\_metrics\_enabled](#input\_detailed\_metrics\_enabled) | Whether the stage emits per-route CloudWatch metrics -- count, latency and 4XX/5XX broken out by route key -- in addition to the API-wide aggregates it emits regardless. | `bool` | `true` | no |
 | <a name="input_integration_timeout_milliseconds"></a> [integration\_timeout\_milliseconds](#input\_integration\_timeout\_milliseconds) | Upper bound, in milliseconds, the private integration waits for the internal ALB to respond before the edge abandons the request and returns a gateway timeout. Applied to every integration this module creates. | `number` | `29000` | no |
 | <a name="input_log_retention_days"></a> [log\_retention\_days](#input\_log\_retention\_days) | Retention applied to the stage's access-log group in CloudWatch Logs. One of the narrow set of values on which the dev and prod roots deliberately differ; 0 retains log events indefinitely. | `number` | `30` | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Leading token of every name this module composes, as `<name_prefix>-<environment>-<resource>`: the HTTP API, the VPC Link, the stage and the access-log group. Supplied by the environment root so a second independent copy of the stack can stand up in one account without colliding on a name. | `string` | `"carddemo"` | no |
-| <a name="input_public_route_keys"></a> [public\_route\_keys](#input\_public\_route\_keys) | Route keys created WITHOUT the JWT authorizer, for paths that must be reachable before a usable token exists. Defaults to the THREE pre-token operations of auth-service -- POST /api/v1/auth/signon, POST /api/v1/auth/challenge and POST /api/v1/auth/refresh -- because a caller cannot present the token these operations exist to issue or renew. All three are contracted as public operations in services/auth-service/src/main/resources/openapi/auth-api.yaml -- each declares an empty security requirement and x-required-authority none -- and the same three are the chain's open list in that service's SecurityConfig, which its contract test asserts equals the contract's own public set. The three lists are therefore the same three keys in all three places, and a route published here that is not open in both of the others would be reachable at the edge and refused by the service. The validation below admits those three keys and nothing else. Set to an empty list to publish no unauthenticated route. Every other route on this API comes from var.route\_keys and carries the authorizer. | `list(string)` | <pre>[<br/>  "POST /api/v1/auth/signon",<br/>  "POST /api/v1/auth/challenge",<br/>  "POST /api/v1/auth/refresh"<br/>]</pre> | no |
+| <a name="input_public_route_keys"></a> [public\_route\_keys](#input\_public\_route\_keys) | Route keys created WITHOUT the JWT authorizer, for paths a caller must reach when it holds no usable access token. Defaults to the FOUR token-lifecycle operations of auth-service -- POST /api/v1/auth/signon, POST /api/v1/auth/challenge, POST /api/v1/auth/refresh and POST /api/v1/auth/signout -- because a caller cannot present the token the first three exist to issue or renew, and the fourth is authorised by the very refresh token it revokes. All four are contracted as public operations in services/auth-service/src/main/resources/openapi/auth-api.yaml -- each declares an empty security requirement and x-required-authority none -- and the same four are the chain's open list in that service's SecurityConfig, which its contract test asserts equals the contract's own public set. The three lists are therefore the same four keys in all three places, and a route published here that is not open in both of the others would be reachable at the edge and refused by the service. The validation below admits those four keys and nothing else. Set to an empty list to publish no unauthenticated route. Every other route on this API comes from var.route\_keys and carries the authorizer. | `list(string)` | <pre>[<br/>  "POST /api/v1/auth/signon",<br/>  "POST /api/v1/auth/challenge",<br/>  "POST /api/v1/auth/refresh",<br/>  "POST /api/v1/auth/signout"<br/>]</pre> | no |
 | <a name="input_public_route_throttling_burst_limit"></a> [public\_route\_throttling\_burst\_limit](#input\_public\_route\_throttling\_burst\_limit) | Token-bucket depth for the unauthenticated routes in public\_route\_keys, applied as a per-route override on the stage. Deliberately far below throttling\_burst\_limit because an anonymous route is reachable without any credential. | `number` | `20` | no |
 | <a name="input_public_route_throttling_rate_limit"></a> [public\_route\_throttling\_rate\_limit](#input\_public\_route\_throttling\_rate\_limit) | Steady-state requests per second sustained on the unauthenticated routes in public\_route\_keys, applied as a per-route override on the stage. Deliberately far below throttling\_rate\_limit for the same reason as its burst counterpart. | `number` | `10` | no |
 | <a name="input_route_authorization_scopes"></a> [route\_authorization\_scopes](#input\_route\_authorization\_scopes) | Scopes every route requires in the token's scope claim, applied by main.tf to each route's authorization\_scopes. Defaults to the Cognito user pool's built-in aws.cognito.signin.user.admin scope, which is the scope an interactively signed-in access token carries and which an identity token carries not at all, so the requirement rejects the wrong token kind at the edge. | `list(string)` | <pre>[<br/>  "aws.cognito.signin.user.admin"<br/>]</pre> | no |

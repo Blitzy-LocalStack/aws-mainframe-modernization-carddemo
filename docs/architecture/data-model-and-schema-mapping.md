@@ -975,10 +975,10 @@ statement grouping token and is granted to the schema owner alone.
 | Schema | Owning context | Target tables or views | Authored migration status |
 |---|---|---|---|
 | `auth` | `auth-service` | `users`, `identity_sync_task` | `V1__auth.sql` and `V2__auth_identity_sync.sql` authored |
-| `account` | `account-service` | `accounts`, `customers`, `card_xref` | `V1__account.sql` authored |
+| `account` | `account-service` | `accounts`, `customers`, `card_xref`, plus `inquiry_reply_ledger` — which derives from no copybook and exists so a redelivered account-inquiry request is answered once | `V1__account.sql` and `V2__account_inquiry_reply_ledger.sql` authored |
 | `card` | `card-service` | `cards` | `V1__card.sql` authored |
 | `ledger` | `transaction-service` | `transactions`, `daily_transactions`, `transaction_rejects`, `transaction_category_balances` | `V1__ledger.sql` authored |
-| `reference` | `reference-service` | `transaction_types`, `transaction_categories`, `disclosure_groups`, `us_phone_area_codes`, `us_states`, `us_state_zip_prefixes` | `V1__reference.sql` and `V2__seed_reference.sql` authored |
+| `reference` | `reference-service` | `transaction_types`, `transaction_categories`, `disclosure_groups`, `us_phone_area_codes`, `us_states`, `us_state_zip_prefixes`, plus `inquiry_reply_ledger` — which derives from no copybook and exists so a redelivered date-inquiry request is answered with the FIRST answer rather than a later timestamp | `V1__reference.sql`, `V2__seed_reference.sql` and `V3__reference_inquiry_reply_ledger.sql` authored |
 | `batch` | `batch-service` | `batch_run`, `daily_feed_watermark`, plus the batch framework's own job-repository tables | `V1__batch.sql` and `V2__batch_feed_watermark.sql` authored |
 | `authorization` | `authorization-service` | `pending_auth_summary`, `pending_auth_detail`, `auth_fraud`, `auth_reply_outbox` | `V1__authorization.sql` authored, extended by `V2`, `V3` and `V4` |
 | `reporting` | `reporting-service`, schema owned in the database by `carddemo_reporting_owner` | **no table the service can read** — eight read-only cross-schema views, plus one owner-only key table | `data-migration/sql/V1__reporting_views.sql` authored |
@@ -1211,6 +1211,19 @@ identity the producer supplies, neither of which is authenticated — before it 
 > copybooks**" rather than "the three tables in this schema", and the distinction is
 > stated because a reader counting `\dt account.*` against this document must be able
 > to account for the difference.
+
+Refactoring Rationale: the SAME ruling now applies to a second schema. `reference`
+carries `reference.inquiry_reply_ledger`, created by
+`services/reference-service/src/main/resources/db/migration/V3__reference_inquiry_reply_ledger.sql`,
+and it is likewise absent from the copybook mapping tables because it derives from no
+copybook. Assumptions: its reason for existing is narrower than its account sibling's
+and worth stating separately, because the date-inquiry reply body is the system date
+and time read at the moment of composition — so a redelivery that recomposed would not
+repeat the answer, it would compose a **later** one, and a requester pairing on one
+correlation identifier would hold two replies that disagree about the time. That
+exchange's ledger therefore exists to make the FIRST answer the only answer, where the
+account one exists to stop a second copy being sent at all.
+
 
 > Refactoring Rationale: **this subsection formerly recorded the dependency as
 > UNSATISFIED, and the change is worth stating rather than silently editing away.**

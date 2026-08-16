@@ -25,8 +25,8 @@ import org.springframework.stereotype.Component;
  * deliberately not declared {@code final}, rather than the {@code final} class with a private
  * constructor and static members that the charter fixes for the four entity conversions at its own
  * L213 to L239. The static shape was the alternative and was not taken here. The charter already
- * admits this second shape for {@code DateInquiryReplyMapper} at its L161 to L164, and records at its
- * L238 to L239 that a component is left non-final precisely so that it remains proxyable; both of
+ * admits this second shape for the three seeded-lookup conversions, and records that a component is
+ * left non-final precisely so that it remains proxyable; both of
  * those properties are wanted here. This conversion is reached by constructor injection, which is the
  * dependency-injection pattern the Agent Action Plan fixes for this migration in place of the
  * baseline's static linkage, and an injected bean can be substituted in a slice test where a static
@@ -87,8 +87,8 @@ public class UsStateMapper {
      * Renders one stored state or territory code as the shape the contract publishes.
      *
      * <p>Assumptions: the argument is a loaded, non-null row whose single member is present.
-     * {@code V1__reference.sql} declares {@code state_cd CHAR(2) NOT NULL} at its L438 and makes that
-     * same column the primary key through {@code pk_us_states} at its L440, so the member has no
+     * {@code V1__reference.sql} declares {@code state_cd CHAR(2) NOT NULL} at its L427 and makes that
+     * same column the primary key through {@code pk_us_states} at its L429, so the member has no
      * absent case for this method to substitute a value for. A null in that position means the row
      * was never loaded, and reporting it as a blank code would hide exactly that.</p>
      *
@@ -103,8 +103,8 @@ public class UsStateMapper {
         //       01 US-STATE-CODE-TO-EDIT  PIC X(2), and its L1013 condition name
         //       VALID-US-STATE-CODE carries the admitted literals over that item, every one of them
         //       quoted and compared as two characters. The stored column is CHAR(2) at
-        //       V1__reference.sql L438, so a code fills its whole declared width and there is no
-        //       padding to remove; this package's charter settles at its L325 to L330 that a key of
+        //       V1__reference.sql L427, so a code fills its whole declared width and there is no
+        //       padding to remove; this package's charter settles at its L314 to L319 that a key of
         //       declared width is never altered in a way that could change its value, in either
         //       direction.
         // WHY : Assumptions: the baseline settles that by contrast rather than by assertion, which is
@@ -119,7 +119,7 @@ public class UsStateMapper {
         //       why no normalisation member exists in this file for a caller to reach for.
         // WHY : Assumptions: the consequence of altering the value is silent, which is why it is
         //       recorded at this line rather than left to the column type to imply.
-        //       V1__reference.sql records at its L431 to L437 that bpchar ignores trailing blanks, so
+        //       V1__reference.sql records at its L420 to L426 that bpchar ignores trailing blanks, so
         //       a probe arriving as 'AL ' from a declared-width source still matches its row, whereas
         //       under a varying-width column the same probe returns nothing -- and raises no error
         //       either, because a trailing blank is truncated away rather than rejected. A value
@@ -202,9 +202,9 @@ public class UsStateMapper {
      */
     public List<UsStateResponse> toResponseList(List<UsState> entities) {
         // WHY : Assumptions: the caller's order is preserved and nothing is sorted here. A backward
-        //       page is read in descending key order -- UsStateRepository declares
-        //       findByStateCodeLessThanOrderByStateCodeDesc at its L47 against the ascending
-        //       findByStateCodeGreaterThanOrderByStateCodeAsc at its L38 -- and is reversed by its
+        //       page is read in descending key order -- StateRepository declares
+        //       findByStateCodeLessThanOrderByStateCodeDesc against the ascending
+        //       findByStateCodeGreaterThanOrderByStateCodeAsc -- and is reversed by its
         //       caller before it is rendered, so a sort applied at this point would undo that
         //       reversal silently and hand a backward page back in the wrong direction.
         // WHY : Assumptions: the per-row conversion is delegated to the member above by reference

@@ -3,11 +3,20 @@
  *
  * Purpose
  * -------
- * This is the browser target of the 3270 row-23 `ERRMSG` field. Every screen
- * renders exactly one band. A screen-level outcome — a rejected sign-on, a
- * completed update, an unsupported function key — arrives here as text, a
- * severity and the mapset it stands in, and nothing else about the request
- * reaches this module.
+ * This is the browser target of the 3270 row-23 `ERRMSG` field and, on the two
+ * mapsets that declare a second message line, of the row-22 `INFOMSG` field. A
+ * screen-level outcome — a rejected sign-on, a completed update, an unsupported
+ * function key — arrives here as text, a severity, the mapset it stands in and the
+ * CHANNEL it belongs to, and nothing else about the request reaches this module.
+ *
+ * Refactoring Rationale: a screen renders one band PER CHANNEL, not one band. The
+ * earlier contract said one band per screen and gave every instance the same
+ * `data-testid`, which held while every delivered screen painted only `ERRMSG`; the
+ * account-view mapset declares `INFOMSG` at `POS=(22,23)` as well, so that screen
+ * renders two and the shared identifier appeared twice in one document — ambiguous to
+ * a query and contradicted by the contract it was meant to state. {@link
+ * MessageBandChannel} models the two BMS lines explicitly, so each band carries its
+ * own semantic identifier and the one-per-channel invariant is expressible.
  *
  * The message contract has two halves and this module enforces the second.
  * `CCARD-ERROR-MSG`/`CCARD-RETURN-MSG` are `PIC X(75)`, so 75 is the CONTENT
@@ -48,7 +57,7 @@ import {
 } from '../messages/messages';
 import type { MapsetName } from '../messages/messages';
 import type { AntdTokenName } from '../theme/tokens';
-import { BMS_COLOR_TOKENS, TYPOGRAPHY_TOKENS } from '../theme/tokens';
+import { BMS_TEXT_COLOR_TOKENS, TYPOGRAPHY_TOKENS } from '../theme/tokens';
 
 /*
  * Alternatives Considered: sizing the band to the 75-character work area instead of
@@ -102,16 +111,40 @@ export const MESSAGE_BAND_DEFAULT_DISPLAY_WIDTH = MESSAGE_BAND.displayWidthStand
  * `COLOR=RED` on 21 of 21 mapsets, and a warning tier would therefore be an
  * invention rather than a translation. Screens that need a caution tone use
  * `"info"`; nothing in the baseline is lost by the omission.
+ *
+ * Refactoring Rationale: `"neutral"` IS added, and it is a translation rather than an
+ * invention. The row-22 `INFOMSG` field of `app/bms/COACTVW.bms` is declared
+ * `ATTRB=(PROT) COLOR=NEUTRAL`, and `ui/src/theme/tokens.ts` resolves NEUTRAL to
+ * `colorTextSecondary` while TURQUOISE resolves to `colorInfo` — two measured colours
+ * that the bridge deliberately keeps apart. Rendering that field as `"info"` painted
+ * a de-emphasised line in the informational hue, which is the one substitution the
+ * token bridge's G3 note exists to prevent.
  */
 
 /**
- * The three severities the message band can render.
+ * The four severities the message band can render.
  *
- * Each value maps one-to-one onto an antd `Alert` type and onto a measured BMS
- * colour, so a severity is simultaneously the accessibility signal, the colour
- * decision and the alert variant.
+ * Each value maps onto a measured BMS colour and onto an ARIA role, and onto an antd
+ * `Alert` type through {@link SEVERITY_ALERT_TYPES} — so a severity is simultaneously
+ * the accessibility signal, the colour decision and the alert variant.
  */
-export type MessageBandSeverity = 'error' | 'success' | 'info';
+export type MessageBandSeverity = 'error' | 'success' | 'info' | 'neutral';
+
+/*
+ * Assumptions: the two channels are the two message lines a BMS mapset can declare,
+ * and they are modelled as a closed union rather than as a free-form identifier. A
+ * screen cannot invent a third: `ERRMSGI`/`ERRMSGO` and `INFOMSGI`/`INFOMSGO` are the
+ * only message fields in the 21 symbolic maps, so an open string would admit names no
+ * mapset declares and would put the test-handle vocabulary outside this module.
+ */
+
+/**
+ * The BMS message line a band stands in for.
+ *
+ * `"error"` is the row-23 `ERRMSG` field every mapset declares; `"information"` is the
+ * row-22 `INFOMSG` field the account-view and account-update mapsets add above it.
+ */
+export type MessageBandChannel = 'error' | 'information';
 
 /*
  * Assumptions: the empty band is deliberately contentless, exposing no text, role
@@ -123,10 +156,74 @@ export type MessageBandSeverity = 'error' | 'success' | 'info';
  */
 
 /**
- * Stable `data-testid` on the band's outer element, present in both the empty
- * and populated states so the reserved-space contract can be asserted.
+ * Stable `data-testid` per channel, present in both the empty and populated states so
+ * the reserved-space contract can be asserted for either band.
+ *
+ * Assumptions: the error channel keeps the historical value unchanged. Four existing
+ * suites query it, and renaming it would turn a contract EXTENSION into a breaking
+ * change for every screen that paints one band — which is all of them but account
+ * view.
  */
-export const MESSAGE_BAND_TEST_ID = 'message-band';
+export const MESSAGE_BAND_TEST_IDS = {
+  error: 'message-band',
+  information: 'message-band-information',
+} as const satisfies Record<MessageBandChannel, string>;
+
+/**
+ * Stable `data-testid` of the row-23 error band, which is the band a screen renders
+ * when it declares no channel.
+ */
+export const MESSAGE_BAND_TEST_ID = MESSAGE_BAND_TEST_IDS.error;
+
+/*
+ * Assumptions: the error channel is the default because 21 of 21 mapsets declare
+ * `ERRMSG` and two declare `INFOMSG`, so the band a caller means when it names no
+ * channel is the one every mapset has.
+ */
+
+/** Channel a band renders when the caller names none. */
+const DEFAULT_CHANNEL: MessageBandChannel = 'error';
+
+/**
+ * Stable `data-testid` on a band standing in for the mapsets' INFORMATION line.
+ *
+ * Purpose: five mapsets declare TWO message fields, not one — `app/bms/COACTUP.bms` puts `INFOMSG`
+ * at row 22 inside the screen's own field area and `ERRMSG` at row 23 beneath it — so a screen with
+ * both channels renders this band itself and delegates only the row-23 line to the shell. Both bands
+ * are the same component and must be distinguishable: while they shared one identifier, every screen
+ * carrying two channels published TWO elements under {@link MESSAGE_BAND_TEST_ID}, which made the
+ * shell's single-band contract unassertable and made a query for it match two nodes.
+ *
+ * Assumptions: the row-23 line keeps the original identifier because it is the one every mapset has
+ * and the one the shell owns; the row-22 line is the addition and takes the new name.
+ */
+/*
+ * WHY : Refactoring Rationale: this is an ALIAS into MESSAGE_BAND_TEST_IDS rather than its own literal,
+ *       which it used to be. Two constants named the information band -- this one as 'information-band'
+ *       and that map's `information` entry -- so a case querying one could not find a band rendered
+ *       under the other, which is exactly the mismatch that made a two-band screen untestable. One
+ *       literal per band is what keeps every query and every render naming the same element.
+ */
+export const INFORMATION_BAND_TEST_ID = MESSAGE_BAND_TEST_IDS.information;
+
+/**
+ * Which of the mapsets' two message lines a band is standing in for.
+ *
+ * Assumptions: the vocabulary is the source's, not the target's — `message` is row 23's `ERRMSG` and
+ * `information` is row 22's `INFOMSG` — so a reader comparing a screen against its mapset does not
+ * have to translate. A boolean would have named neither.
+ */
+export type MessageBandLine = 'information' | 'message';
+
+/*
+ * WHY : ⚠️ Assumptions: there is no `DEFAULT_LINE` constant, and the default it expressed is the SAME
+ *       default {@link DEFAULT_CHANNEL} expresses -- the row-23 line every one of the 21 mapsets declares.
+ *       Two names for one message line were authored independently ({@link MessageBandLine}'s `'message'`
+ *       and {@link MessageBandChannel}'s `'error'`), and both are accepted so neither caller vocabulary
+ *       breaks; but only ONE of them can carry the default, or a caller that named nothing would resolve
+ *       through whichever constant the code happened to read. `DEFAULT_CHANNEL` carries it, and `line`
+ *       resolves through it when it is absent -- which is exactly what the resolution below does.
+ */
 
 /*
  * Alternatives Considered: making the always-present band element a live region of
@@ -147,24 +244,87 @@ const SEVERITY_ALERT_ROLES = {
   error: 'alert',
   success: 'status',
   info: 'status',
+  /*
+   * Assumptions: neutral is polite for the same reason success and info are. The
+   * row-22 field it renders carries guidance the operator has not asked to be
+   * interrupted by — `Enter or update id of account to display` is its value on every
+   * turn of the account-view screen — so an assertive region would interrupt a screen
+   * reader with a prompt on every read.
+   */
+  neutral: 'status',
 } as const satisfies Record<MessageBandSeverity, 'alert' | 'status'>;
 
 /*
+ * Refactoring Rationale: the alert VARIANT is a separate table from the severity,
+ * which it did not need to be while every severity happened to be a valid antd `Alert`
+ * type. `"neutral"` is not one of the four the component accepts, so mapping it here is
+ * what lets the measured BMS colour and the component's own chrome differ: the text
+ * takes `colorTextSecondary` from the token bridge below, while the icon and border
+ * take the informational variant, which is the closest chrome the design system offers
+ * for a non-error advisory line.
+ * Alternatives Considered: rendering a neutral band with no `Alert` at all, as a plain
+ * styled run of text. Rejected because the band would then lose the ARIA role and the
+ * reserved geometry the alert brings, so the two channels would announce differently
+ * and be laid out differently for a difference that is only a colour.
+ */
+
+/** antd `Alert` variant each severity renders with. */
+const SEVERITY_ALERT_TYPES = {
+  error: 'error',
+  success: 'success',
+  info: 'info',
+  neutral: 'info',
+} as const satisfies Record<MessageBandSeverity, 'error' | 'success' | 'info'>;
+
+/*
  * Assumptions: these three token names come from the measured BMS colour
- * bridge and not from this file. `RED` resolves to the error token, `GREEN` to
- * the success token and `TURQUOISE` to the informational token, so the only
- * design decision made here is which BMS colour each severity corresponds to;
- * the mapping from BMS colour to design-system token stays in
- * `ui/src/theme/tokens.ts`, where its rationale and measured frequencies live.
- * Naming the token and resolving its value from the live theme is what keeps
- * this component free of colour literals: under CSS-variable theming a literal
- * would not merely duplicate a token, it would opt this element out of the
- * theme silently.
+ * bridge and not from this file. The mapping from BMS colour to design-system
+ * token stays in `ui/src/theme/tokens.ts`, where its rationale and measured
+ * frequencies live. Naming the token and resolving its value from the live theme
+ * is what keeps this component free of colour literals: under CSS-variable
+ * theming a literal would not merely duplicate a token, it would opt this
+ * element out of the theme silently.
+ *
+ * Refactoring Rationale: all three severities now resolve to the TEXT-GRADE
+ * token of the base text role, where each used to resolve to the semantic anchor
+ * of its own hue - RED to the error colour, GREEN to the success colour and
+ * TURQUOISE to the informational one. The three anchors are mid-ramp fill
+ * colours, and this band paints its sentence on the alert's OWN tinted
+ * background, against which they measure 2.99:1, 2.07:1 and 2.02:1 where WCAG AA
+ * asks 4.5:1 for normal text. Nor is the fix a darker shade of each ramp: the
+ * darkest shade any of the three publishes measures 4.22:1, 3.17:1 and 3.25:1
+ * against those same tints, so no in-family value clears the threshold at this
+ * version. The base text role measures 15.36:1 against the error tint and better
+ * against the other two.
+ *
+ * Assumptions: severity is NOT carried by the sentence's colour and does not need
+ * to be, which is what makes the collapse admissible rather than a loss. The
+ * alert's `type` already paints a per-severity background and border, `showIcon`
+ * renders a per-severity icon, and `SEVERITY_ALERT_ROLES` announces error as an
+ * assertive live region and the other two politely - three independent channels,
+ * two of them non-visual. This is also the design system's own treatment: its
+ * alert renders its message in the base text colour and carries severity in the
+ * chrome around it. The map is kept keyed by severity rather than reduced to one
+ * constant so that a future version publishing an AA-capable shade per ramp can
+ * be adopted by editing three token names here.
  */
 const SEVERITY_COLOR_TOKENS = {
-  error: BMS_COLOR_TOKENS.RED,
-  success: BMS_COLOR_TOKENS.GREEN,
-  info: BMS_COLOR_TOKENS.TURQUOISE,
+  /*
+   * WHY : Refactoring Rationale: every severity resolves through BMS_TEXT_COLOR_TOKENS rather than
+   *       BMS_COLOR_TOKENS, and the difference is a measured contrast one rather than a preference.
+   *       This band is a run of PROSE, and five of the eight semantic ramps publish no shade that
+   *       reaches the 4.5:1 AA threshold at normal text size -- the mid-ramp anchor these severities
+   *       would otherwise take measured 2.21:1 for the informational role. The text grade of the same
+   *       ramp is what BMS_TEXT_CONTRAST_AUDIT records each role as having been snapped to.
+   * WHY : Assumptions: `neutral` is present, and its absence was a type error rather than a style one:
+   *       MessageBandSeverity admits four values and this map is declared to cover the Record, so a
+   *       missing key fails the type check. It resolves at the text grade like the other three, for the
+   *       same reason.
+   */
+  error: BMS_TEXT_COLOR_TOKENS.RED,
+  success: BMS_TEXT_COLOR_TOKENS.GREEN,
+  info: BMS_TEXT_COLOR_TOKENS.TURQUOISE,
+  neutral: BMS_TEXT_COLOR_TOKENS.NEUTRAL,
 } as const satisfies Record<MessageBandSeverity, AntdTokenName>;
 
 /*
@@ -238,6 +398,17 @@ export interface MessageBandProps {
    */
   readonly severity?: MessageBandSeverity | undefined;
 
+  /**
+   * BMS message line this band stands in for, which selects its `data-testid`.
+   * Defaults to `"error"`, the row-23 field every mapset declares.
+   *
+   * Assumptions: the channel is independent of the severity, and the two are not
+   * collapsed into one prop. The row-23 field carries a rejection on one turn and the
+   * sign-off acknowledgement on another, so its severity varies while its channel does
+   * not; conversely the row-22 field is `COLOR=NEUTRAL` on every turn.
+   */
+  readonly channel?: MessageBandChannel | undefined;
+
   /*
    * Alternatives Considered: deriving the width from the route instead of taking the
    * mapset as a prop. Declined because a route is a target shape this migration
@@ -253,6 +424,13 @@ export interface MessageBandProps {
    * `COCRDUP`. Omit it to render at {@link MESSAGE_BAND_DEFAULT_DISPLAY_WIDTH}.
    */
   readonly mapset?: MapsetName | undefined;
+
+  /**
+   * Which of the mapsets' two message lines this band stands in for, which selects the
+   * `data-testid` it carries. Defaults to `"message"`, the row-23 line every mapset has and the
+   * one the shell owns; pass `"information"` for the row-22 line a screen renders itself.
+   */
+  readonly line?: MessageBandLine | undefined;
 }
 
 /**
@@ -274,6 +452,9 @@ export interface MessageBandProps {
  *   selecting the display width it is sized to; optional, and when omitted the
  *   band renders at the 78-character width nineteen of the twenty-one mapsets
  *   use.
+ * @param {MessageBandChannel | undefined} props.channel - BMS message line this
+ *   band stands in for, selecting its `data-testid`; optional, defaulting to the
+ *   row-23 error line every mapset declares.
  * @returns {ReactElement} The band element: reserved space alone when there is
  *   no message, otherwise reserved space containing the alert.
  */
@@ -281,7 +462,33 @@ export function MessageBand({
   message,
   severity = DEFAULT_SEVERITY,
   mapset,
+  /*
+   * WHY : Refactoring Rationale: BOTH `line` and `channel` are accepted, and `channel` is the one the
+   *       component reasons in. They are two names for one concept authored independently -- `line`
+   *       distinguishing the reference's row-22 information line from its row-23 message line, and
+   *       `channel` distinguishing the same two bands by what each carries -- and both have call sites
+   *       and both have tests. Resolving to one name only would have silently dropped whichever set of
+   *       call sites lost, so `line` is retained as an alias and mapped onto `channel` below; the
+   *       test-identifier map is keyed by channel alone, so there is still ONE identifier per band.
+   */
+  line,
+  channel = DEFAULT_CHANNEL,
 }: MessageBandProps): ReactElement {
+  /*
+   * WHY : Assumptions: an explicitly supplied `line` WINS over the channel default, and only over the
+   *       default -- a caller that passes `channel` is passing the newer name and is taken at its word.
+   *       'message' is the error/refusal band the reference paints on row 23 and 'information' is the
+   *       row-22 prompt, so the mapping is 'message' -> 'error' and 'information' -> 'information'.
+   */
+  const resolvedChannel: MessageBandChannel =
+    line === undefined ? channel : line === 'information' ? 'information' : 'error';
+  /*
+   * Assumptions: the identifier is resolved once here and used by BOTH returns below, because the
+   * reserved-space contract this component exists to guarantee is that the SAME element is present
+   * whether or not a message is present -- and it stops being the same element if the empty and
+   * populated branches can disagree about what identifies it.
+   */
+  // The band identifier is MESSAGE_BAND_TEST_IDS[resolvedChannel]; see the resolution above.
   /*
    * Alternatives Considered: the `token` member of the same hook, which is the
    * obvious one to reach for. Rejected because it returns RESOLVED values — a hex
@@ -296,9 +503,13 @@ export function MessageBand({
    * style layer appends `px` to a numeric token unless it is on its unitless list,
    * so the control height and font size arrive as lengths while the strong font
    * weight arrives as a bare number, which is what the weight property needs.
-   * Trade-offs: a value obtained this way cannot be inspected in a test with no
-   * browser to resolve the variable, which is why this component's assertions are the
-   * reserved-height and empty-state ones rather than colour equality.
+   * Trade-offs: what a test can assert about a value obtained this way is the
+   * REFERENCE, not the colour. A `var(--…)` declaration survives into the element's
+   * inline style verbatim, so a case can prove the band paints the token the BMS bridge
+   * names for a severity; nothing without a layout engine can resolve that reference to
+   * a hue, so no case can prove the resulting colour. That split is the reason the
+   * severity assertions in `ui/src/layout/MessageBand.test.tsx` compare the declaration
+   * against the same bridge entry this file reads rather than against a literal.
    */
   const { cssVar } = theme.useToken();
 
@@ -441,7 +652,7 @@ export function MessageBand({
       <Flex
         align="center"
         aria-hidden="true"
-        data-testid={MESSAGE_BAND_TEST_ID}
+        data-testid={MESSAGE_BAND_TEST_IDS[resolvedChannel]}
         style={bandStyle}
       />
     );
@@ -529,7 +740,7 @@ export function MessageBand({
   const messageFocusProps: { tabIndex?: 0 } = isMessageTruncated ? { tabIndex: 0 } : {};
 
   return (
-    <Flex align="center" data-testid={MESSAGE_BAND_TEST_ID} style={bandStyle}>
+    <Flex align="center" data-testid={MESSAGE_BAND_TEST_IDS[resolvedChannel]} style={bandStyle}>
       {/*
        * Alternatives Considered: `Typography.Text` alone for the whole band, which
        * the fixed-width source field superficially resembles. Rejected because the
@@ -568,7 +779,7 @@ export function MessageBand({
             </Typography.Text>
           </Tooltip>
         }
-        type={severity}
+        type={SEVERITY_ALERT_TYPES[severity]}
       />
     </Flex>
   );

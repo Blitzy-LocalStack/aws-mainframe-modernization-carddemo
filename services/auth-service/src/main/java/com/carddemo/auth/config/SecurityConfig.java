@@ -65,7 +65,7 @@ import org.springframework.web.util.pattern.PathPatternParser;
  *
  * <p>Refactoring Rationale: the rules below are declared as an inspectable, ordered list and the
  * filter chain is BUILT from it, rather than the chain being the only statement of them. The reason
- * is the defect this class was authored to close: five of this context's eight operations are the
+ * is the defect this class was authored to close: five of this context's nine operations are the
  * user-administration operations the baseline reached from the ADMINISTRATIVE menu only, and their
  * restriction was stated in the published contract's prose and in a tag name with nothing anywhere
  * enforcing or checking it. Prose is not a control. With the table as a value,
@@ -467,7 +467,7 @@ public class SecurityConfig {
      * exchange is for - so this path is open for the same reason sign-on is. It carries its own
      * protection instead: the pool issues a single-use session value bound to the one exchange, so
      * possession of that value, not authentication, is what admits the request. The edge agrees, this
-     * being one of the three deliberately unauthenticated route keys in
+     * being one of the four deliberately unauthenticated route keys in
      * {@code infra/modules/api-gateway-http/variables.tf}.</p>
      */
     public static final String CHALLENGE_PATH = "/api/v1/auth/challenge";
@@ -479,7 +479,7 @@ public class SecurityConfig {
      * token, and the access token it renews may already have expired -- so requiring a valid one here
      * would make renewal reachable only while it was unnecessary. The contract declares the operation
      * with an empty security requirement for the same reason, and the edge agrees, this being the
-     * third of the three deliberately unauthenticated route keys in
+     * third of the four deliberately unauthenticated route keys in
      * {@code infra/modules/api-gateway-http/variables.tf}.</p>
      *
      * <p>Trade-offs: opening a third path widens the unauthenticated surface of this service by one
@@ -491,6 +491,28 @@ public class SecurityConfig {
      * instead of quietly mis-gating it.</p>
      */
     public static final String REFRESH_PATH = "/api/v1/auth/refresh";
+
+    /**
+     * The session-revocation path, reachable without a token.
+     *
+     * <p>Assumptions: this path is open for a reason that reads backwards until it is stated. Signing out
+     * is the one operation whose whole purpose is to make a credential stop working, so gating it behind
+     * a valid access token would refuse it in exactly the case it matters -- a session an operator
+     * abandoned rather than closed, whose access token has since expired while its refresh token has
+     * twenty-nine days left. Authority here is possession of the refresh token, which the provider's
+     * revocation call verifies against the client credentials this service holds; a caller that cannot
+     * produce the token revokes nothing, and one that can produce it could already have used it to mint
+     * a token set. The contract declares the operation with an empty security requirement on the same
+     * reasoning, and the edge agrees, this being the fourth deliberately unauthenticated route key in
+     * {@code infra/modules/api-gateway-http/variables.tf}.</p>
+     *
+     * <p>Trade-offs: this is the fourth open path, and the widening is stated rather than absorbed. What
+     * it admits is a caller that can ask the pool to invalidate a token it already holds, which is the
+     * one request an attacker holding a stolen token has no interest in making; what it buys is that a
+     * sign-out is an event at the pool rather than a change of browser state, which is the difference
+     * between a revoked credential and a discarded copy of a live one.</p>
+     */
+    public static final String SIGNOUT_PATH = "/api/v1/auth/signout";
 
     /**
      * The user collection path, matched exactly.
@@ -563,15 +585,21 @@ public class SecurityConfig {
     /**
      * The paths this chain leaves open, in the order they are applied.
      *
-     * <p>Assumptions: this list is closed at three and every entry is an exact path rather than a
+     * <p>Assumptions: this list is closed at four and every entry is an exact path rather than a
      * pattern. An open path is the one kind of rule whose mistakes are invisible in testing - it
-     * makes requests succeed - so each is named in full and none admits a subtree. The three are
-     * exactly the three operations the contract declares with an empty security requirement, and
-     * exactly the three public route keys the edge publishes; a contract test asserts the two sets
+     * makes requests succeed - so each is named in full and none admits a subtree. The four are
+     * exactly the four operations the contract declares with an empty security requirement, and
+     * exactly the four public route keys the edge publishes; a contract test asserts the two sets
      * agree, so neither can gain a member without the other.</p>
+     *
+     * <p>Refactoring Rationale: the list grew from three to four with the session-revocation path, and
+     * the growth is recorded because an open list gaining a member is exactly the change that should not
+     * pass unremarked. The three that were here all sit BEFORE a usable token exists; the fourth sits
+     * after one has stopped being wanted, and it is open because the credential it revokes is the only
+     * authority a caller could present for revoking it. The argument is on the constant itself.</p>
      */
     private static final List<String> UNAUTHENTICATED_PATHS =
-            List.of(SIGNON_PATH, CHALLENGE_PATH, REFRESH_PATH);
+            List.of(SIGNON_PATH, CHALLENGE_PATH, REFRESH_PATH, SIGNOUT_PATH);
 
     /**
      * The parser that turns a declared pattern into a matcher.
@@ -762,7 +790,7 @@ public class SecurityConfig {
      * absence of an ambient credential rather than an appeal to convention: every authenticated request
      * carries a bearer token that a browser attaches only because this application's own client chose
      * to, never automatically the way a cookie is sent, so the confused-deputy condition the protection
-     * defends against cannot arise. The three open paths carry no ambient credential either -- each is
+     * defends against cannot arise. The four open paths carry no ambient credential either -- each is
      * authorised by a value in the request body -- and the stateless policy above leaves no cookie
      * session for a forged request to ride on. The accepted cost is that introducing any
      * cookie-authenticated route to this service would make this line wrong, so such a route must not
@@ -817,7 +845,7 @@ public class SecurityConfig {
         // WHY : Trade-offs: the forgery protection is disabled because there is no ambient credential
         //       for a forged request to ride on. Authentication is a bearer token this application's
         //       own client attaches deliberately, never a cookie a browser sends on its own, so the
-        //       confused-deputy condition cannot arise; the three open paths are authorised by a value
+        //       confused-deputy condition cannot arise; the four open paths are authorised by a value
         //       in the request body. The cost is that adding any cookie-authenticated route to this
         //       service makes this line wrong and must restore the protection alongside it.
         http.csrf(csrf -> csrf.disable())
@@ -899,8 +927,8 @@ public class SecurityConfig {
                     }
                     // WHY : Assumptions: denyAll and NOT authenticated, so a validly signed token
                     //       carrying neither CardDemo group reaches nothing at all. Every path this
-                    //       contract publishes is granted by a rule above: the three open paths and
-                    //       the two user-administration patterns cover all five published paths, and
+                    //       contract publishes is granted by a rule above: the four open paths and
+                    //       the two user-administration patterns cover all six published paths, and
                     //       AuthApiContractTest asserts that coverage against the contract itself
                     //       rather than against this list.
                     requests.anyRequest().denyAll();

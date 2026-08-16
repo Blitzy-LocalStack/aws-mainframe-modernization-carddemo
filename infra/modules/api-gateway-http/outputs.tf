@@ -259,10 +259,10 @@ output "vpc_link_id" {
 #       read directly. Both access-log-group attributes are derivable from
 #       `api_id`, and the group's own retention and encryption are set in main.tf.
 #       The unauthenticated surface `public_route_keys` reported is bounded at its
-#       source instead: `var.public_route_keys` is validated against the three
-#       exact pre-token `/api/v1/auth` method-and-path keys and admits nothing
-#       else, so the exposure is constrained by the input contract rather than
-#       merely observable in an output.
+#       source instead: `var.public_route_keys` is validated against the four
+#       exact `/api/v1/auth` method-and-path keys it admits and nothing else, so
+#       the exposure is constrained by the input contract rather than merely
+#       observable in an output.
 #       Trade-offs: an output read from the created resources is auditable in a
 #       way an input validation is not -- it reports what exists rather than what
 #       is permitted. That is the real cost of this removal and it is accepted,

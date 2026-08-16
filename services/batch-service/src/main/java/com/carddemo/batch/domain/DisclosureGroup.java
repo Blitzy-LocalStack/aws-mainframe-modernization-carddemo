@@ -16,16 +16,16 @@ import org.hibernate.type.SqlTypes;
  * The interest-rate lookup row that interest accrual reads, and never writes.
  *
  * <p>This is the migrated form of {@code 01 DIS-GROUP-RECORD}, declared at
- * {@code app/cpy/CVTRA02Y.cpy} lines 4 to 10, whose own line 2 describes the record as
+ * {@code app/cpy/CVTRA02Y.cpy} lines 4 to 10, whose own line 2 records the record as
  * {@code RECLN = 50}. Four named fields become four columns; the trailing {@code FILLER} becomes
- * nothing. One baseline program governs what this type has to be able to express:
- * {@code app/cbl/CBACT04C.cbl} accrues interest, and it reaches this record by its three-part key
- * to obtain the one rate the accrual formula multiplies by.</p>
+ * nothing. One baseline program governs what this type must express: {@code app/cbl/CBACT04C.cbl}
+ * accrues interest and reaches this record by its three-part key to obtain the one rate the accrual
+ * formula multiplies by.</p>
  *
  * <h2>The derivation, with the byte arithmetic that checks it</h2>
  *
- * <p>Offsets are zero-based and are recorded because they are the audit trail for the mapping:
- * every column below can be traced back to a byte range of the 50-byte record.</p>
+ * <p>Offsets are zero-based and are the audit trail for the mapping: every column below traces back
+ * to a byte range of the 50-byte record.</p>
  *
  * <pre>
  * offset  bytes  copybook field (line)      PICTURE     column          SQL type
@@ -37,113 +37,68 @@ import org.hibernate.type.SqlTypes;
  * </pre>
  *
  * <p>The last row is what makes the mapping checkable: the named fields end at offset 22, the
- * {@code FILLER} occupies the remaining 28 bytes, and 22 plus 28 is 50, which is the record length
- * the copybook declares. The first three rows together span offsets 0 to 15 and are the group item
- * {@code DIS-GROUP-KEY} at {@code app/cpy/CVTRA02Y.cpy} line 5, so the key is 16 bytes wide.</p>
+ * {@code FILLER} occupies the remaining 28 bytes, and 22 plus 28 is the declared 50. The first three
+ * rows span offsets 0 to 15 and are the group item {@code DIS-GROUP-KEY} at line 5, so the key is 16
+ * bytes wide -- which {@code app/jcl/DISCGRP.jcl} line 40 confirms independently with
+ * {@code KEYS(16 0)}, an operand that balances only if the components are 10, 2 and 4 bytes wide.</p>
  *
- * <p>The same totals are confirmed from two further independent places, which is what allows every
- * offset above to be relied upon rather than recomputed by the next reader. The file description at
- * {@code app/cbl/CBACT04C.cbl} lines 76 to 82 repeats the three key components at the same widths
- * and then collapses the remainder into a single {@code FD-DISCGRP-DATA PIC X(34)}, and 10 plus 2
- * plus 4 plus 34 is also 50. Independently of both, {@code app/jcl/DISCGRP.jcl} line 40 defines the
- * cluster with {@code KEYS(16 0)} -- a 16-byte key at offset zero, which only balances if the three
- * components are 10, 2 and 4 bytes wide -- and its line 41 declares {@code RECORDSIZE(50 50)}.</p>
+ * <p>Assumptions: the copybook rather than the file description is normative, under transformation
+ * rule T1, and here the difference matters. The file description at {@code app/cbl/CBACT04C.cbl}
+ * lines 76 to 82 collapses the remainder into one unnamed {@code FD-DISCGRP-DATA PIC X(34)}, so it
+ * cannot say where the rate ends and the padding begins; only {@code app/cpy/CVTRA02Y.cpy} lines 9
+ * and 10 separate them, which is what fixes the rate at 6 bytes and the padding at 28. The
+ * {@code FILLER} is dropped rather than mapped, also under T1, because trailing padding in a
+ * fixed-length record carries no value a column could hold.</p>
  *
- * <p>Assumptions: the copybook rather than the file description is normative, under the migration
- * plan's transformation rule T1, and the difference between the two is exactly why that matters
- * here. The file description's {@code X(34)} remainder is the rate and the {@code FILLER} fused
- * into one unnamed run of bytes, so it cannot say where the rate ends and the padding begins.
- * Only {@code app/cpy/CVTRA02Y.cpy} lines 9 and 10 separate them, which is what fixes the rate at
- * 6 bytes and the padding at 28.</p>
- *
- * <p>Assumptions: the {@code FILLER} at {@code app/cpy/CVTRA02Y.cpy} line 10 is dropped rather than
- * mapped, under transformation rule T1, because trailing {@code FILLER} in a fixed-length record is
- * padding to the declared length and carries no value a program reads or writes. No statement in
- * the governing program references it. Its width is recorded in the table above anyway, so that a
- * reader who has to reconstruct the 50-byte form can still see how many pad bytes the record needs
- * and where they begin.</p>
- *
- * <h2>The key order is the copybook's order, and the program's MOVE order differs from it</h2>
- *
- * <p>Assumptions: the physical component order of the key is account group, then transaction type,
- * then transaction category -- {@code acct_group_id} of 10 bytes, then {@code tran_type_cd} of 2,
- * then {@code tran_cat_cd} of 4. It is verified twice, independently: {@code app/cpy/CVTRA02Y.cpy}
- * lines 6 to 8 declare that order under the group item at line 5, and the file description at
- * {@code app/cbl/CBACT04C.cbl} lines 79 to 81 repeats it. The migration agrees, declaring
- * {@code pk_disclosure_groups} on {@code (acct_group_id, tran_type_cd, tran_cat_cd)}.</p>
- *
- * <p><b>The order in which the program assigns those three components is not that order, and
- * transcribing the assignments in source order builds the key wrong.</b> Three consecutive
- * statements populate the key before the lookup: {@code app/cbl/CBACT04C.cbl} line 210 moves the
- * account group identifier into the group component, line 211 moves the <b>category</b> code, and
- * line 212 moves the <b>type</b> code. The last two are therefore assigned in the opposite order
- * to the one they occupy. Assignment order is immaterial to the baseline, because each statement
- * names its destination field and the record layout decides where that field sits; it becomes
- * material only to a reader who takes three adjacent statements as a field list. A key built with
- * the two codes transposed would still be 16 bytes wide, would still be accepted by every
- * signature, and would simply never match a row -- which surfaces as the missing-group fallback
- * below rather than as an error naming the transposition.</p>
- *
- * <p>The consequence for this type is that the declaration order of the three components in
- * {@link DisclosureGroupId}, and the parameter order of its constructor, both follow the physical
- * order and never the assignment order.</p>
+ * <p>Assumptions: the physical key order is account group, then transaction type, then transaction
+ * category, so the declaration order of the three components in {@link DisclosureGroupId} and the
+ * parameter order of its constructor both follow it. The program's three adjacent {@code MOVE}
+ * statements assign the last two in the opposite sequence, which is immaterial there because each
+ * statement names its destination field; the reasoning for not transcribing that sequence sits beside
+ * the key components, where a reader with only those statements in view will meet it.</p>
  *
  * <h2>The table is not this module's to own, and this module cannot write it</h2>
  *
- * <p>{@code reference.disclosure_groups} belongs to {@code reference-service}, which creates it and
- * seeds it through its own migrations. This module's reach into that schema is narrower than its
- * reach into any other schema it touches: the migration plan's section 0.4.1.3 scopes this
- * module's cross-schema <b>write</b> grants to the {@code ledger} and {@code account} schemas only,
- * so the database role it connects as holds {@code SELECT} and nothing else on {@code reference}.
- * The grants themselves are created by {@code data-migration/sql/V0__schemas_and_roles.sql}.</p>
+ * <p>{@code reference.disclosure_groups} belongs to {@code reference-service}, which creates and
+ * seeds it through its own migrations. AAP 0.4.1.3 scopes this module's cross-schema <b>write</b>
+ * grants to the {@code ledger} and {@code account} schemas only, so the role it connects as holds
+ * {@code SELECT} and nothing else on {@code reference}; the grants are created by
+ * {@code data-migration/sql/V0__schemas_and_roles.sql}.</p>
  *
- * <p>Assumptions: that grant is the enforcement boundary, and this type is shaped so the boundary
- * is never reached. It declares no mutator of any kind, which turns an attempted write from a
- * runtime permission failure -- one that names a role and a relation, and nothing about the design
- * mistake -- into an expression that does not compile. The package charter in
- * {@code package-info.java} states the same boundary for the package as a whole; it is repeated
- * here because a reader of this type should not have to leave the file to learn that it is the one
- * mapping in the package with no write path at all.</p>
+ * <p>Assumptions: that grant is the enforcement boundary and this type is shaped so the boundary is
+ * never reached. It declares no mutator of any kind, which turns an attempted write from a runtime
+ * permission failure -- naming a role and a relation, and nothing about the design mistake -- into an
+ * expression that does not compile.</p>
  *
  * <h2>A missing DEFAULT row aborts the interest run, and it is not seeded here</h2>
  *
- * <p>The rate lookup has a fallback, and the fallback is narrower than it first appears.
- * {@code app/cbl/CBACT04C.cbl} lines 415 to 440 are {@code 1200-GET-INTEREST-RATE}: the read at
- * line 416 carries an {@code INVALID KEY} branch that displays
- * {@code 'DISCLOSURE GROUP RECORD MISSING'} and then {@code 'TRY WITH DEFAULT GROUP CODE'} at lines
- * 418 and 419, and the status test at line 422 treats both {@code '00'} and {@code '23'} -- found,
- * and not found -- as non-fatal. Line 436 then tests for {@code '23'} specifically, and line 437
- * moves the seven-character literal {@code 'DEFAULT'} into the account-group component <b>alone</b>,
- * leaving the type and category components exactly as they were, before line 438 retries.</p>
- *
- * <p>The retry does not tolerate a miss. {@code app/cbl/CBACT04C.cbl} lines 443 to 460 are
- * {@code 1200-A-GET-DEFAULT-INT-RATE}: the read at line 444 carries <b>no</b> {@code INVALID KEY}
- * clause at all, and the status test at line 446 accepts <b>only</b> {@code '00'}, so a key still
- * absent after the substitution takes the failure arm and reaches the abend at lines 455 to 458,
- * which displays {@code 'ERROR READING DEFAULT DISCLOSURE GROUP'}. There is no third fallback and
- * no default rate compiled into the program. <b>The fallback does not resolve to zero interest; it
- * aborts the run.</b></p>
+ * <p>The rate lookup has a fallback and it is narrower than it first appears. In
+ * {@code 1200-GET-INTEREST-RATE} at {@code app/cbl/CBACT04C.cbl} lines 415 to 440 the status test at
+ * line 422 treats both {@code '00'} and {@code '23'} -- found, and not found -- as non-fatal; line 436
+ * then tests for {@code '23'} specifically and line 437 moves the literal {@code 'DEFAULT'} into the
+ * account-group component <b>alone</b>, leaving type and category as they were, before line 438
+ * retries. The retry tolerates no miss: at lines 443 to 460 the read carries <b>no</b>
+ * {@code INVALID KEY} clause and the status test at line 446 accepts <b>only</b> {@code '00'}, so a key
+ * still absent abends with {@code 'ERROR READING DEFAULT DISCLOSURE GROUP'}. There is no third
+ * fallback and no default rate compiled into the program -- <b>the fallback does not resolve to zero
+ * interest, it aborts the run.</b></p>
  *
  * <p>Assumptions: <b>the seed requirement is therefore not one row.</b> Because the substitution
- * replaces one component of three, the retry key is the padded {@code 'DEFAULT'} group followed by
- * the <i>original</i> type and category codes, so a distinct row is needed for every
- * {@code (tran_type_cd, tran_cat_cd)} pair that any account can present. Reading the requirement as
- * a single row is the common mistake and it leaves the run abending on the first pair that has no
- * default. {@code reference-service} seeds seventeen such rows in its {@code V2__seed_reference.sql},
- * one per pair in use.</p>
+ * replaces one component of three, the retry key is the padded {@code 'DEFAULT'} group followed by the
+ * <i>original</i> type and category codes, so a distinct row is needed for every
+ * {@code (tran_type_cd, tran_cat_cd)} pair any account can present. Reading it as a single row leaves
+ * the run abending on the first pair that has no default. {@code reference-service} seeds seventeen
+ * such rows in its {@code V2__seed_reference.sql}, one per pair in use.</p>
  *
- * <p>Assumptions: those rows are reference data owned elsewhere, and the operational consequence is
- * the whole reason this section exists. An interest run that aborts on a missing disclosure group is
- * <b>not a defect in this module</b>: this type is a read-only mapping over a table in a schema it
- * did not create and does not seed, so time spent reading this package looking for the cause is
- * time spent in the wrong service.</p>
+ * <p>Assumptions: an interest run that aborts on a missing disclosure group is <b>not a defect in this
+ * module</b>. This type is a read-only mapping over a table in a schema it did not create and does not
+ * seed, so time spent here looking for the cause is time spent in the wrong service.</p>
  *
  * <h2>What this type does not do</h2>
  *
- * <p>It holds a rate and does not apply one. The accrual formula lives at
- * {@code app/cbl/CBACT04C.cbl} lines 464 to 465 and belongs in the service layer through
- * {@code com.carddemo.common.money.Money}, which owns the ONE rounding contract this migration needs
- * and is the single place it is expressed. No arithmetic of any kind is performed here, and in
+ * <p>It holds a rate and does not apply one. The accrual formula at {@code app/cbl/CBACT04C.cbl}
+ * lines 464 to 465 belongs in the service layer through {@code com.carddemo.common.money.Money},
+ * which owns the one rounding contract this migration needs. No arithmetic is performed here, and in
  * particular the division that converts an annual percentage into a monthly fraction is not.</p>
  *
  * @see DisclosureGroupId
@@ -181,8 +136,9 @@ import org.hibernate.type.SqlTypes;
 //     the annotations here DESCRIBE that shape rather than request it. An annotation that
 //     requested DDL would be asking a module holding no write grant to create or alter another
 //     service's schema, and it would surface as a permission error naming nothing about the
-//     actual mistake. Seeding is prohibited on the same ground and by name: a missing DEFAULT
-//     row is not repaired from here, not on start-up and not through a migration in this module.
+//     actual mistake. Seeding is prohibited on the same ground and by name: a DEFAULT row absent
+//     from that schema is supplied by reference-service, never from this module, neither on
+//     start-up nor through a migration carried here.
 @Table(name = "disclosure_groups", schema = "reference")
 public class DisclosureGroup {
 

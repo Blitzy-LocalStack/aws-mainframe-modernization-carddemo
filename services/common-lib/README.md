@@ -290,10 +290,10 @@ missing from the tree listing below, so a reader could not have derived the righ
 from this document either. The listing is now re-measured against the module by the same
 test, name by name.
 
-<!-- source-inventory: 44 production classes + 11 charters = 55 compilation units -->
+<!-- source-inventory: 46 production classes + 11 charters = 57 compilation units -->
 **Eleven packages** — a root and ten flat subpackages — each with one
 `package-info.java` under `src/main/java` (see §8, they are mandatory), holding
-**44** production classes for **55** compilation units. That census is machine-checked the
+**45** production classes for **56** compilation units. That census is machine-checked the
 same way the test census in §10.1 is: `ServiceReadmeInventoryTest` parses the
 `source-inventory` comment below and re-measures all three figures against this module's own
 tree, so a class added without a listing edit fails the build instead of ageing quietly in
@@ -328,7 +328,7 @@ step silently. Each caption is now derivable from the listing directly beneath i
 derivable from `find src/main/java -name '*.java'` and its `src/test/java` counterpart, so a
 reader who doubts a number can settle it in one command rather than by trusting this paragraph.
 
-⚠ Assumptions: the test-side caption is **58 `*Test` + 1 `*IT`**, so this module carries 59 test
+⚠ Assumptions: the test-side caption is **61 `*Test` + 1 `*IT`**, so this module carries 62 test
 classes. A second draft of this paragraph stated 56 (55 plus one); that figure was measured
 before `architecture/DiagnosticRenderingRulesTest` and the two codec cases beside it were added,
 and it is not restated here, because the caption below is the copy `ServiceReadmeInventoryTest`
@@ -340,23 +340,24 @@ re-derives the root charter's inventory table from the directory one level deep,
 package would be reported as drift rather than folded into its parent's row. `src/test/java`
 holds twelve directories, each with its own charter.
 
-<!-- source-inventory: 44 production types + 11 charters in 11 packages -->
+<!-- source-inventory: 46 production types + 11 charters in 11 packages -->
 <!-- source-listing:begin -->
 
 ```text
-src/main/java/com/carddemo/common/          11 packages · 44 production types
+src/main/java/com/carddemo/common/          11 packages · 46 production types
   package-info.java
   CardDemoCommonAutoConfiguration.java
   money/          package-info.java · Money.java · MoneyModule.java
   codec/          package-info.java · CopybookLayout.java · FixedWidthCodec.java
                   ZonedDecimalCodec.java · PackedDecimalCodec.java · CsvAuthCodec.java
-                  InquiryRequestCodec.java
+                  InquiryRequestCodec.java · DateInquiryReplyCodec.java
   error/          package-info.java · ApiError.java · GlobalExceptionHandler.java
                   AbendDetail.java · ApiErrorSecurityHandlers.java
                   ClientInputException.java · RecordConflictException.java
                   FieldOrdering.java
   messaging/      package-info.java · MessageExpiry.java · MessagingCorrelationId.java
-                  QueueClientBudget.java · RethrowingDigestErrorHandler.java
+                  QueueClientBudget.java · QueueDestination.java
+                  RethrowingDigestErrorHandler.java
   web/            package-info.java · CorrelationIdFilter.java · PageResponse.java
                   CursorToken.java · RequestBodySizeFilter.java
   security/       package-info.java · JwtRoleConverter.java · CardNumberMasker.java
@@ -377,7 +378,7 @@ src/main/resources/
   META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
   META-INF/services/tools.jackson.databind.JacksonModule
 
-src/test/java/com/carddemo/common/           12 packages · 58 *Test + 1 *IT
+src/test/java/com/carddemo/common/           13 packages · 61 *Test + 1 *IT
   package-info.java · CardDemoCommonAutoConfigurationIT.java
   architecture/   package-info.java · LayeringRulesTest.java            ← pinned, §7
                   ApplicationContextWiringContractTest.java
@@ -395,7 +396,7 @@ src/test/java/com/carddemo/common/           12 packages · 58 *Test + 1 *IT
                   FixedWidthCodecTest.java · ZonedDecimalCodecTest.java
                   PackedDecimalCodecTest.java · CsvAuthCodecTest.java
                   AuthorizationDisclosurePolicyTest.java
-                  InquiryRequestCodecTest.java
+                  InquiryRequestCodecTest.java · DateInquiryReplyCodecTest.java
   error/          package-info.java · AbendDetailTest.java · ApiErrorTest.java
                   ApiErrorSecurityHandlersTest.java · ApiErrorWireShapeTest.java
                   GlobalExceptionHandlerTest.java
@@ -405,6 +406,7 @@ src/test/java/com/carddemo/common/           12 packages · 58 *Test + 1 *IT
                   ProtocolRefusalRenderingTest.java
   messaging/      package-info.java · MessageExpiryTest.java
                   MessagingCorrelationIdTest.java · QueueClientBudgetTest.java
+                  QueueDestinationTest.java
                   RethrowingDigestErrorHandlerTest.java
                   MessageSinkSuppressionTest.java
   web/            package-info.java · CorrelationIdFilterTest.java
@@ -424,6 +426,8 @@ src/test/java/com/carddemo/common/           12 packages · 58 *Test + 1 *IT
                   FieldValidationFlagTest.java
   control/        package-info.java · OnlineWriteGateTest.java
                   OnlineWriteGateInterceptorTest.java
+  profile/        package-info.java · ProfileConfiguration.java
+                  ProfileConfigurationTest.java
 ```
 
 <!-- source-listing:end -->
@@ -489,7 +493,7 @@ its regeneration command beside it can only ever be out of date, never misleadin
 what it is. Assumptions: a reader who measures a different total has added or removed
 tests, which is expected drift -- §2's commands are the authority that cannot go stale, and
 the last re-measurement of this table found each row exactly as printed and the total at
-1382:
+1396:
 
 | Package | Classes | Executions |
 |---|---|---|
@@ -499,12 +503,13 @@ the last re-measurement of this table found each row exactly as printed and the 
 | `security` | `OpaqueIdentifierTest` 30 · `HtmlTextEncoderTest` 24 · `SealedSelectorTest` 18 · `ApprovedOriginPolicyTest` 15 · `CardNumberMaskerTest` 13 · `InternalServiceTokenTest` 12 · `CognitoAccessTokenValidatorTest` 11 · `MaskedCardNumberTest` 9 · `JwtRoleConverterTest` 7 | **139** |
 | `money` | `MoneyTest` 31 · `MoneyModuleTest` 10 | **41** |
 | `web` | `PageResponseTest` 17 · `CursorTokenTest` 16 · `RequestBodySizeFilterTest` 14 · `CorrelationIdFilterTest` 8 | **55** |
-| `messaging` | `MessagingCorrelationIdTest` 16 · `RethrowingDigestErrorHandlerTest` 14 · `MessageExpiryTest` 11 · `QueueClientBudgetTest` 8 · `MessageSinkSuppressionTest` 6 | **55** |
+| `messaging` | `MessagingCorrelationIdTest` 16 · `RethrowingDigestErrorHandlerTest` 14 · `MessageExpiryTest` 11 · `QueueDestinationTest` 11 · `QueueClientBudgetTest` 8 · `MessageSinkSuppressionTest` 6 | **66** |
 | `observability` | `FailureSummaryTest` 17 · `MetricsConfigTest` 12 · `ThrowableDigestTest` 11 · `StructuredLoggingDefaultsTest` 7 · `SensitiveLoggingAndJsonStrictnessDefaultsTest` 7 · `LogSafeTextTest` 5 | **59** |
 | `architecture` | `LayeringRulesTest` 10 · `PublishedContractClosureTest` 8 · `SharedKernelInventoryTest` 12 across 1 `@Nested` group · `RuntimeConfigurationContractTest` 5 · `PackageCharterInventoryTest` 4 across 1 `@Nested` group · `ServiceCatalogInventoryTest` 4 across 1 `@Nested` group · `ServiceReadmeInventoryTest` 6 across 1 `@Nested` group · `ApplicationContextWiringContractTest` 3 · `CrossSchemaPrivilegeContractTest` 3 across 1 `@Nested` group · `DiagnosticRenderingRulesTest` 3 · `RuntimeDeletePrivilegeContractTest` 2 | **60** |
 | `control` | `OnlineWriteGateTest` 16 across 5 `@Nested` groups · `OnlineWriteGateInterceptorTest` 12 across 5 `@Nested` groups | **28** |
 | `time` | `TimestampFormatterTest` 24 | **24** |
-| | **module total** | **1382** |
+| `profile` | `ProfileConfigurationTest` 14 | **14** |
+| | **module total** | **1396** |
 
 Three reconciliation notes, because each looks like a discrepancy until named.
 `DateEditValidatorTest`, both `control` classes, two of the `error` classes and five
@@ -513,7 +518,7 @@ report their executions under `@Nested` or `@DisplayName` labels instead, so a r
 grepping the console output for a class name finds a zero. The table above is
 therefore read from `target/surefire-reports/*.xml`, where each case still carries the
 suite it belongs to, and the console total agrees with it: 1219 executions report
-under a class name and 163 under a display name, summing to 1382.
+under a class name and 177 under a display name, summing to 1396.
 
 **These figures had drifted, and one class was missing from the table entirely.**
 `SensitiveLoggingAndJsonStrictnessDefaultsTest` was absent from the `observability`
@@ -553,8 +558,15 @@ read 1355 -- account for that movement, which is stated rather than smoothed ove
 the reason the paragraph above gives: the table and the total are now read from one source,
 so they can only disagree if that source is not consulted.
 
-The current run measures **1382**, and the whole of the movement from 1373 sits in ONE row:
-`architecture` moves from 51 to **60**. Four of its cases arrived together with the rules they
+The current run measures **1396**, and the movement from 1382 sits in ONE row that did not exist
+before: `profile` arrives at **14**, contributed entirely by `ProfileConfigurationTest`, which holds the
+shared dev-profile resolution harness the eight service modules consume through this module's test
+artifact. Every other row is unchanged from the preceding measurement and was re-read from
+`target/surefire-reports/*.xml`. Refactoring Rationale: the harness lives here rather than in one
+service because eight services resolve their own overlay through it, and a shared test type has exactly
+one home for the same reason a shared production type does. ⚠️ The whole of the movement in the
+measurement BEFORE this one sat in one row too:
+`architecture` moved from 51 to **60**. Four of its cases arrived together with the rules they
 assert -- `LayeringRulesTest` gained the locale rule (nine cases to ten),
 `ServiceReadmeInventoryTest` gained two, and `RuntimeConfigurationContractTest` gained one --
 and `SharedKernelInventoryTest` gained five, which are the cases that hold this very listing and
@@ -567,10 +579,10 @@ the table never gained. A total maintained as "the previous total plus what I be
 reproduces exactly that error, which is why this one is read from the report files -- the same
 argument the paragraph above makes, reached a second time by a second route.
 
-`CardDemoCommonAutoConfigurationIT` contributes **nothing** to the 1382: it is an
+`CardDemoCommonAutoConfigurationIT` contributes **nothing** to the 1396: it is an
 `*IT`, so Failsafe runs it at `verify` and Surefire does not run it at `test`
 (§2.3); it reports its own **13** executions under Failsafe instead, which is why a
-`verify` console shows 1382 and 13 as two separate totals. And a full `mvn -f services/pom.xml clean test` reports
+`verify` console shows 1396 and 13 as two separate totals. And a full `mvn -f services/pom.xml clean test` reports
 `LayeringRulesTest` **nine** times rather than once — once through this module's own
 `default-test` execution, and once in each of the eight service modules through the
 inherited `architecture-rules` execution that scans this module's test artifact. Only
@@ -1436,7 +1448,7 @@ and the build would stay green while asserting nothing.
 
 **The dependency** is `com.tngtech.archunit:archunit-junit5` at **1.4.2**,
 test-scoped, with the **version managed by `services/pom.xml`**
-[lines 649 to 651] and never re-pinned in this module. Re-pinning a version here
+[lines 640 to 642] and never re-pinned in this module. Re-pinning a version here
 would silently diverge this module from the other eight, which is precisely the
 failure the single copybook include path exists to prevent on the COBOL side.
 
@@ -1722,8 +1734,8 @@ need justifying.
 
 ### 10.1 What each suite must cover
 
-<!-- test-inventory: 58 tests + 1 integration tests -->
-**59** test classes: **58** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
+<!-- test-inventory: 61 tests + 1 integration tests -->
+**62** test classes: **61** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
 Failsafe. That census is machine-checked — `ServiceReadmeInventoryTest` in this module parses the
 comment above and re-measures both figures against this module's own test tree, so the count fails
 the build when it drifts rather than ageing quietly in prose.

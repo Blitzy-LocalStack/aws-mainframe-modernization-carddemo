@@ -1,7 +1,7 @@
 # Step Functions batch module
 
 This reusable module provisions four STANDARD Step Functions workflows: the
-twelve-work-state nightly CardDemo batch chain, the smaller ad-hoc report
+eleven-work-state nightly CardDemo batch chain, the smaller ad-hoc report
 workflow started by reporting-service, the operator-invoked dataset
 export/import round trip, and the operator-invoked pending-authorization segment
 export and extract load. It also provisions their shared least-privilege
@@ -97,6 +97,13 @@ module "step_functions_batch" {
   log_group_kms_key_arn         = module.kms.s3_key_arn
   dead_letter_kms_key_arn       = module.kms.sqs_key_arn
 
+  # Required. Bounds all FOUR execution roles this module creates -- each holds
+  # ecs:RunTask, iam:PassRole over the task roles and lambda:InvokeFunction, and
+  # iam:PassRole is a privilege-escalation primitive, so the ceiling matters most here.
+  # The module asserts the ARN names THIS account: a cross-account boundary is accepted
+  # by IAM and then bounds nothing.
+  permissions_boundary_arn = var.permissions_boundary_arn
+
   # The SAME value is set on the resume function's BATCH_TASK_STARTED_BY, which is why
   # the root owns it: the module stamps it on every task and the function filters
   # ListTasks by it, so a second spelling would be a filter that matches nothing.
@@ -116,7 +123,7 @@ earlier revision of this file:
   function serves both the `AnalyzeTables` state and the one-shot schema
   bootstrap, and it is declared as `aws_lambda_function.database_admin`. Copying
   the older spelling produced an unresolvable reference.
-- **`read_only_flag_parameter_name` is required and was omitted.** Sixteen of the
+- **`read_only_flag_parameter_name` is required and was omitted.** Seventeen of the
   inputs above are required -- none carries a default -- so an example missing
   one does not plan. The value must be an ABSOLUTE parameter name: the module
   validates the leading slash because
@@ -129,31 +136,57 @@ earlier revision of this file:
 | # | Work state | Mechanism | Baseline lineage |
 |---|---|---|---|
 | 1 | `QuiesceOnlineWrites` | Lambda invocation | `app/jcl/CLOSEFIL.jcl` |
-| 2 | `StageSeedDatasets` | Map of synchronous data-migration tasks, one full dataset refresh per branch | The `IDCAMS REPRO` copy and the `DEFINE CLUSTER` and load half of the ten master-load jobs, plus `DALYTRAN.PS` |
-| 3 | `VerifyMigration` | Synchronous data-migration task and exit-code Choice | No baseline analogue: the baseline verified nothing |
-| 4 | `PreflightDailyTransactions` | Synchronous batch-service task | `CBTRN01C`, which has no JCL driver |
-| 5 | `PostTransactions` | Synchronous batch-service task and exit-code Choice | `app/jcl/POSTTRAN.jcl` / `CBTRN02C` |
-| 6 | `CalculateInterest` | Synchronous batch-service task | `app/jcl/INTCALC.jcl` / `CBACT04C` |
-| 7 | `BackupTransactions` | Synchronous batch-service task | `app/jcl/TRANBKP.jcl` |
-| 8 | `CombineTransactions` | Synchronous batch-service task | `app/jcl/COMBTRAN.jcl` |
-| 9 | `GenerateStatements` | Synchronous reporting-service task | `app/jcl/CREASTMT.JCL` |
-| 10 | `GenerateReports` | Synchronous reporting-service task | `app/jcl/TRANREPT.jcl` and `app/jcl/PRTCATBL.jcl` |
-| 11 | `AnalyzeTables` | Lambda invocation | Statistics analogue of `app/jcl/TRANIDX.jcl` |
-| 12 | `ResumeOnlineWrites` | Lambda invocation | `app/jcl/OPENFIL.jcl` |
+| 2 | `StageSeedDatasets` | Parallel wrapping one branch: a Map of synchronous data-migration tasks, one full dataset refresh per branch, then the combined verification gate | The `IDCAMS REPRO` copy and the `DEFINE CLUSTER` and load half of the ten master-load jobs, plus `DALYTRAN.PS` |
+| 3 | `PreflightDailyTransactions` | Synchronous batch-service task | `CBTRN01C`, which has no JCL driver |
+| 4 | `PostTransactions` | Synchronous batch-service task and exit-code Choice | `app/jcl/POSTTRAN.jcl` / `CBTRN02C` |
+| 5 | `CalculateInterest` | Synchronous batch-service task | `app/jcl/INTCALC.jcl` / `CBACT04C` |
+| 6 | `BackupTransactions` | Synchronous batch-service task | `app/jcl/TRANBKP.jcl` |
+| 7 | `CombineTransactions` | Synchronous batch-service task | `app/jcl/COMBTRAN.jcl` |
+| 8 | `GenerateStatements` | Synchronous reporting-service task | `app/jcl/CREASTMT.JCL` |
+| 9 | `GenerateReports` | Synchronous reporting-service task | `app/jcl/TRANREPT.jcl` and `app/jcl/PRTCATBL.jcl` |
+| 10 | `AnalyzeTables` | Lambda invocation | Statistics analogue of `app/jcl/TRANIDX.jcl` |
+| 11 | `ResumeOnlineWrites` | Lambda invocation | `app/jcl/OPENFIL.jcl` |
 
-Twelve counts the states that perform business or operational work. Input
-validation, task-exit Choices, warning recording, notification, terminal
-success/failure, and failure-path resume states are additional control states.
+Eleven counts the states that perform business or operational work, and it is the
+count the migration plan's section 0.4.1.7 fixes. Input validation, task-exit
+Choices, warning recording, notification, terminal success/failure, and
+failure-path resume states are additional control states.
 
-State 3 stands between staging an extract and posting against it. It runs the
-combined verification gate -- row counts, then per-record checksums, then exact
-money totals -- on the SELECT-only verification login, and its Choice is the ONLY
-edge into state 4, so business processing cannot be reached over data that does
-not match its source.
+### The verification gate inside state 2
+
+State 2 is a `Parallel` with a single branch, and the branch holds four states in
+sequence: `RefreshEachSeedDataset` (the Map), `VerifyMigration`, its exit-code
+`Choice`, and the branch's own terminal `Succeed` or `Fail`. The gate runs the
+combined verification -- row counts, then per-record checksums, then exact money
+totals -- on the SELECT-only verification login, and it stands between staging an
+extract and posting against it. State 2's single outgoing edge is the ONLY edge
+into state 3, so business processing cannot be reached over data that does not
+match its source.
+
+Refactoring Rationale: the gate is nested rather than promoted to a state of its
+own. Section 0.4.1.7 fixes the nightly chain at ELEVEN top-level work states and
+describes state 2 as "a Map state, one branch per dataset, each a runTask.sync",
+while sections 0.9.2 and 0.7.7 mandate this verification as a first-class
+deliverable with three passes and give it no state to run in. A revision that
+published the gate as a twelfth top-level state resolved that tension by changing
+the frozen topology; nesting it resolves the same tension without changing it, and
+keeps every safety property the gate exists for -- the SELECT-only login, the two
+committed whole-migration queries, and sole control of the edge into state 3.
+The wrapper is what makes the nesting possible: a `Map` cannot hold a state that
+runs once after all its branches, so the Map and the gate are siblings inside one
+branch instead. `VerifyMigration` is therefore a TIMED state without being a
+top-level one, which is why `state_timeout_seconds` carries twelve keys for an
+eleven-state chain. Two consequences are deliberate and are recorded at the states
+themselves in `main.tf`: the wrapper carries no `TimeoutSeconds`, because the
+States Language does not define that field for a `Parallel`, and neither the Map
+nor the gate carries its own `Catch`, because a state inside a branch cannot
+transition out of it -- both raise to the wrapper's `Catch`, which is the shared
+handler that every other work state uses and writes the same `$.failure` path.
 
 Refactoring Rationale: two further states were authored into this position -- a
-`LoadSeedDatasets` Map and a `ReconcileTransactionSequence` task, which would have
-made the chain fourteen work states -- and both are withdrawn. Each was written
+`LoadSeedDatasets` Map and a `ReconcileTransactionSequence` task, which together
+with `VerifyMigration` would have made the chain fourteen work states -- and all
+three are withdrawn; the first two for the reason below. Each was written
 against a state 2 that only staged: an earlier revision of this chain copied an
 extract from a prefix to a retained generation prefix and wrote no row, so nothing
 loaded Aurora and the identifier sequence was never advanced past the loaded rows.
@@ -168,23 +201,28 @@ the first transaction the online service adds collide on the primary key.
 ```mermaid
 flowchart TD
     V[Validate execution input] --> Q[1 QuiesceOnlineWrites]
-    Q --> S[2 StageSeedDatasets]
-    S --> VM[3 VerifyMigration]
-    VM --> VC{clean verdict?}
-    VC -->|no| N[NotifyFailure]
-    VC -->|yes| P[4 PreflightDailyTransactions]
-    P --> T[5 PostTransactions]
+    Q --> S
+    subgraph S["2 StageSeedDatasets (Parallel, one branch)"]
+        direction TB
+        MAP[RefreshEachSeedDataset: Map, one branch per dataset] --> VM[VerifyMigration]
+        VM --> VC{clean verdict?}
+        VC -->|yes| MV[MigrationVerified]
+        VC -->|no| VF[VerificationFailed]
+    end
+    S -->|branch failed| N[NotifyFailure]
+    S --> P[3 PreflightDailyTransactions]
+    P --> T[4 PostTransactions]
     T --> C{exit code}
-    C -->|exactly 0| I[6 CalculateInterest]
+    C -->|exactly 0| I[5 CalculateInterest]
     C -->|exactly 4| W[RecordPostingWarning]
     W --> I
     C -->|any other code| N
-    I --> B[7 BackupTransactions]
-    B --> M[8 CombineTransactions]
-    M --> ST[9 GenerateStatements]
-    ST --> R[10 GenerateReports]
-    R --> A[11 AnalyzeTables]
-    A --> O[12 ResumeOnlineWrites]
+    I --> B[6 BackupTransactions]
+    B --> M[7 CombineTransactions]
+    M --> ST[8 GenerateStatements]
+    ST --> R[9 GenerateReports]
+    R --> A[10 AnalyzeTables]
+    A --> O[11 ResumeOnlineWrites]
     O --> OK[Succeed]
     V -->|refused| NI[NotifyInvalidExecutionInput]
     NI --> F[Fail]
@@ -345,9 +383,9 @@ commits no `TRANSACT` extract, so the registry points that token at
 `AWS.M2.CARDDEMO.DALYTRAN.PS.INIT`, the single 350-byte record `TRANFILE.jcl` `REPRO`s
 to prime the cluster, whose unpopulated fields do not decode as a whole transaction.
 `carddemo_migration.readers.transaction` declares `HAS_COMMITTED_SEED_DATASET = False`
-and state 3's row-count query REQUIRES `ledger.transactions` to hold zero rows after
-the ETL, because posting at state 5 fills it -- so a branch that loaded even one
-record would turn a green Map into a failed gate two states later. `refresh-dataset`
+and the verification gate's row-count query REQUIRES `ledger.transactions` to hold zero
+rows after the ETL, because posting at state 4 fills it -- so a branch that loaded even
+one record would turn a green Map into a failed gate in the same branch. `refresh-dataset`
 reads that same predicate and states the exemption in the branch's log. The token is
 kept in `var.seed_datasets` rather than dropped, because its generation family and
 `LIMIT(5)` retention sweep are real and because that list is asserted equal to the
@@ -490,11 +528,34 @@ owning execution is no longer `RUNNING` and the chain's tasks are terminal. That
 what lets a cadence carry no staleness threshold: a legitimate long night is an
 execution that is still running.
 
-Assumptions: both rules dead-letter to `aws_sqs_queue.finalizer_dlq` and three alarms
-cover the three independent ways a release can fail -- `FailedInvocations` per rule,
-the resume function's `Errors`, and the queue's depth. Before them, an undeliverable
-release was discarded after an hour with nothing recording that it had been attempted,
-which is the condition that made a stranded bracket silent.
+Assumptions: both rules dead-letter to `aws_sqs_queue.finalizer_dlq` and **four** alarms
+cover the three independent ways a release can fail. The count exceeds the number of
+failure modes because the first mode is alarmed PER RULE:
+`aws_cloudwatch_metric_alarm.release_delivery_failed` is declared `for_each` over both
+release rules -- `daily_finalizer` and `bracket_reconciler` -- so it yields two alarms
+watching `FailedInvocations`, one per rule, and `bracket_release_alarm_names` concatenates
+those with `release_function_errors` and `release_dead_letters` for four names in total.
+The four are therefore:
+
+| # | Alarm | Watches | Failure mode |
+|---|---|---|---|
+| 1 | `release_delivery_failed["finalizer"]` | `FailedInvocations` on `daily_finalizer` | the scheduled release was never delivered |
+| 2 | `release_delivery_failed["reconciler"]` | `FailedInvocations` on `bracket_reconciler` | the reconciling release was never delivered |
+| 3 | `release_function_errors` | the resume function's `Errors` | the release was delivered and the function failed |
+| 4 | `release_dead_letters` | the dead-letter queue's depth | a release was abandoned into the queue |
+
+Refactoring Rationale: this paragraph previously said "three alarms cover the three
+independent ways a release can fail" and then listed the modes rather than the alarms, so
+the sentence read as a count of outputs while actually counting causes. A reader sizing an
+alarm-notification subscription, or asserting the length of
+`bracket_release_alarm_names`, would have taken three from it and been wrong by one --
+and wrong in the direction that leaves one delivery rule's failures unsubscribed. Stating
+the per-rule expansion explicitly is what keeps the two numbers from being confused
+again.
+
+Before these alarms, an undeliverable release was discarded after an hour with nothing
+recording that it had been attempted, which is the condition that made a stranded
+bracket silent.
 
 Refactoring Rationale: this rule previously passed **no** expected owner, and an
 absent owner was read as an unconditional release. That reading was forced rather
@@ -811,8 +872,9 @@ scope.
 | <a name="input_dataset_bucket_name"></a> [dataset\_bucket\_name](#input\_dataset\_bucket\_name) | Name of the versioned bucket the staging, backup, combine, statement and report states read and write dataset generations in. Published as an output by infra/modules/s3-datasets and passed in by the environment root. This module only consumes it: the bucket, its ten generation-dataset prefix families and its five-noncurrent-version lifecycle rule all belong to s3-datasets. | `string` | n/a | yes |
 | <a name="input_ecs_cluster_arn"></a> [ecs\_cluster\_arn](#input\_ecs\_cluster\_arn) | ARN of the ECS cluster every task state runs its task in. Published as an output by infra/modules/ecs-cluster and passed in by the environment root; it is also the value of the `ecs:cluster` condition that scopes the execution role's task-stopping and task-describing grants, which is why the full ARN is required rather than a cluster name. | `string` | n/a | yes |
 | <a name="input_environment"></a> [environment](#input\_environment) | Environment name suffixed onto the state machine, its log group and its execution role, so one environment's nightly chain is distinguishable from the other's in the console and in every IAM policy that names it; must be `dev` or `prod`, the two environments that have a Terraform root under infra/envs/. | `string` | n/a | yes |
-| <a name="input_notification_topic_arn"></a> [notification\_topic\_arn](#input\_notification\_topic\_arn) | ARN of the SNS topic every state's catch handler publishes to before the execution reaches its terminal failure state. Published as an output by infra/modules/observability and passed in by the environment root. It replaces the baseline's job-card NOTIFY and job log; routing all twelve states through one topic is what makes a failure in any of them reach the same place rather than failing silently. | `string` | n/a | yes |
+| <a name="input_notification_topic_arn"></a> [notification\_topic\_arn](#input\_notification\_topic\_arn) | ARN of the SNS topic every state's catch handler publishes to before the execution reaches its terminal failure state. Published as an output by infra/modules/observability and passed in by the environment root. It replaces the baseline's job-card NOTIFY and job log; routing every catch handler in the chain through one topic is what makes a failure anywhere in it reach the same place rather than failing silently. | `string` | n/a | yes |
 | <a name="input_pass_role_arns"></a> [pass\_role\_arns](#input\_pass\_role\_arns) | IAM role ARNs each state machine's execution role may pass to ECS, keyed by machine: `daily` takes the task role AND task execution role of the batch, data-migration and reporting task definitions (six entries), `adhoc` those of reporting, `dataset` those of batch, and `authz` those of authorization (two entries each). The environment root assembles each list from the ecs-service outputs it already holds; the per-machine split is the least-privilege boundary of what THAT machine may run a task as, and omitting an entry fails at run-task with an access-denied error on iam:PassRole. | `map(list(string))` | n/a | yes |
+| <a name="input_permissions_boundary_arn"></a> [permissions\_boundary\_arn](#input\_permissions\_boundary\_arn) | Same-account customer-managed IAM policy ARN used as the permissions boundary on each of the four state-machine execution roles this module creates. Required so no capability this module composes can exceed the account's deployment boundary. Supplied by the caller; never created here. | `string` | n/a | yes |
 | <a name="input_private_app_subnet_ids"></a> [private\_app\_subnet\_ids](#input\_private\_app\_subnet\_ids) | Private application subnet identifiers the state machine places each task into -- the application tier, not the public tier that carries the load balancer and NAT gateways and not the isolated data tier that carries the database. Published as an output by infra/modules/network and passed in by the environment root; tasks reach the database through these subnets and reach AWS APIs through that VPC's interface endpoints, so they need no public address. | `list(string)` | n/a | yes |
 | <a name="input_quiesce_function_arn"></a> [quiesce\_function\_arn](#input\_quiesce\_function\_arn) | ARN of the function the first state invokes to set the online read-only flag, opening the batch window. Declared by the environment root, which owns these functions and the parameter they toggle. This is the migrated form of app/jcl/CLOSEFIL.jcl, which closed five CICS files with an operator command; the target sets a parameter the online services read, so the mechanism changes while the bracket does not. | `string` | n/a | yes |
 | <a name="input_read_only_flag_parameter_name"></a> [read\_only\_flag\_parameter\_name](#input\_read\_only\_flag\_parameter\_name) | Name of the SSM Parameter Store parameter the first and last states toggle, passed to the quiesce and resume functions in their invocation payload so the execution history records which flag the bracket controls. Declared by the environment root alongside the functions. It replaces the operator-command mechanism of app/jcl/CLOSEFIL.jcl and app/jcl/OPENFIL.jcl, which issued five CEMT SET FIL commands each; the bracket is scoped to the write path, because the baseline's read-only unload jobs opened their files shared. | `string` | n/a | yes |
@@ -828,13 +890,13 @@ scope.
 | <a name="input_cancellation_max_attempts"></a> [cancellation\_max\_attempts](#input\_cancellation\_max\_attempts) | How many passes of the residual-task cancellation loop the daily failure path will make before it gives up and fails WITHOUT releasing the online-write bracket. The product of this value and cancellation\_poll\_seconds is the total drain allowance; exhausting it is treated as an operator-visible failure rather than an excuse to release, because releasing while a batch task may still be writing is the corruption the bracket exists to prevent. | `number` | `10` | no |
 | <a name="input_cancellation_max_concurrency"></a> [cancellation\_max\_concurrency](#input\_cancellation\_max\_concurrency) | How many residual tasks the cancellation sub-chain stops and confirms in parallel. Bounded rather than unlimited so that a failure which left many tasks running cannot answer with a burst of StopTask and DescribeTasks calls large enough to be throttled, which would turn a cleanup into a second failure. | `number` | `5` | no |
 | <a name="input_cancellation_poll_seconds"></a> [cancellation\_poll\_seconds](#input\_cancellation\_poll\_seconds) | Seconds the daily failure path waits between passes of the residual-task cancellation loop. The default matches the Amazon ECS container stop timeout, which is the shortest interval after which a task asked to stop can plausibly have exited, so a smaller value spends DescribeTasks calls observing a container that cannot yet be gone. | `number` | `30` | no |
-| <a name="input_cancellation_state_timeout_seconds"></a> [cancellation\_state\_timeout\_seconds](#input\_cancellation\_state\_timeout\_seconds) | Ceiling on each individual state of the residual-task cancellation sub-chain: the ListTasks discovery call and the two Map states that stop and then confirm the tasks. Held separately from state\_timeout\_seconds because that map's validation asserts exactly the eleven names of the nightly work chain, and these states are failure-path recovery rather than work. | `number` | `60` | no |
+| <a name="input_cancellation_state_timeout_seconds"></a> [cancellation\_state\_timeout\_seconds](#input\_cancellation\_state\_timeout\_seconds) | Ceiling on each individual state of the residual-task cancellation sub-chain: the ListTasks discovery call and the two Map states that stop and then confirm the tasks. Held separately from state\_timeout\_seconds because that map's validation asserts exactly the twelve timed names of the nightly work chain, and these states are failure-path recovery rather than work. | `number` | `60` | no |
 | <a name="input_data_migration_container_name"></a> [data\_migration\_container\_name](#input\_data\_migration\_container\_name) | Name of the container inside the data-migration task definition whose command each staging branch overrides, matched by name exactly as the batch container name is, and published by the data-migration ecs-service instance. | `string` | `"data-migration"` | no |
 | <a name="input_data_migration_sql_root"></a> [data\_migration\_sql\_root](#input\_data\_migration\_sql\_root) | Absolute path inside the data-migration container of the directory holding the sql tree, passed to the verification state as --sql-root. Matches the WORKDIR that data-migration/Dockerfile copies sql/ beneath, so the two committed verification queries -- whose digests the passes pin -- are found where the image actually places them. | `string` | `"/opt/carddemo"` | no |
 | <a name="input_dataset_roundtrip_timeout_seconds"></a> [dataset\_roundtrip\_timeout\_seconds](#input\_dataset\_roundtrip\_timeout\_seconds) | Ceiling on a single dataset round-trip execution, applied at the top level of that state machine's definition. Separate from the two per-state ceilings because a per-state TimeoutSeconds does not bound an execution that stalls between states or inside the service's own bookkeeping. | `number` | `7800` | no |
 | <a name="input_dataset_source_extract_prefix"></a> [dataset\_source\_extract\_prefix](#input\_dataset\_source\_extract\_prefix) | S3 key prefix inside the dataset bucket holding the exported baseline extracts the seed-refresh state READS. Passed to the data-migration container as --extract-prefix; the container joins each dataset's registered source file name to it. Owned and provisioned by the s3-datasets module, which publishes it as source\_extract\_prefix. Populating it is an operator action documented in docs/runbooks/data-migration.md. | `string` | `"migration/source/EBCDIC/"` | no |
 | <a name="input_dataset_staging_root"></a> [dataset\_staging\_root](#input\_dataset\_staging\_root) | Optional override for the location the data-migration container resolves seed extracts from, replacing the composed `s3://dataset_bucket_name/dataset_source_extract_prefix` value. Accepts an absolute filesystem path for a mounted or local source, or an `s3://bucket/prefix` URI to read a different bucket. Leave null in both environment roots. | `string` | `null` | no |
-| <a name="input_dataset_state_timeout_seconds"></a> [dataset\_state\_timeout\_seconds](#input\_dataset\_state\_timeout\_seconds) | Per-state ceiling for the two work states of the operator-invoked dataset round trip, keyed by state name: ExportDataset and ImportDataset. Held in its own map rather than merged into state\_timeout\_seconds because that variable's validation asserts exactly the twelve names of the nightly chain, and widening it would weaken the check that catches a missing or misspelled nightly ceiling. | `map(number)` | <pre>{<br/>  "ExportDataset": 3600,<br/>  "ImportDataset": 3600<br/>}</pre> | no |
+| <a name="input_dataset_state_timeout_seconds"></a> [dataset\_state\_timeout\_seconds](#input\_dataset\_state\_timeout\_seconds) | Per-state ceiling for the two work states of the operator-invoked dataset round trip, keyed by state name: ExportDataset and ImportDataset. Held in its own map rather than merged into state\_timeout\_seconds because that variable's validation asserts exactly the eleven names of the nightly chain, and widening it would weaken the check that catches a missing or misspelled nightly ceiling. | `map(number)` | <pre>{<br/>  "ExportDataset": 3600,<br/>  "ImportDataset": 3600<br/>}</pre> | no |
 | <a name="input_dead_letter_kms_key_arn"></a> [dead\_letter\_kms\_key\_arn](#input\_dead\_letter\_kms\_key\_arn) | ARN of the customer-managed key encrypting the bracket-release dead-letter queue, published as an output by infra/modules/kms and passed in by the environment root. Null leaves the queue on SQS-managed encryption. | `string` | `null` | no |
 | <a name="input_log_group_kms_key_arn"></a> [log\_group\_kms\_key\_arn](#input\_log\_group\_kms\_key\_arn) | ARN of the customer-managed key both execution log groups are encrypted with, published as an output by infra/modules/kms and passed in by the environment root. Null leaves the log groups on CloudWatch's own service-managed encryption. | `string` | `null` | no |
 | <a name="input_log_include_authorization_execution_data"></a> [log\_include\_authorization\_execution\_data](#input\_log\_include\_authorization\_execution\_data) | Whether the authorization-extract machine's logged events carry state input and output as well as the transition. Governed separately from log\_include\_execution\_data because this machine's load mode accepts two extract locations from the operator's request; those locations are constrained by the graph to objects under the deployment's own authorization/extract/ prefix before any transition, which is what makes logging them safe. Setting this to false withholds the payload and fails Checkov CKV\_AWS\_285, which requires execution-data logging on a state machine. | `bool` | `true` | no |
@@ -849,20 +911,20 @@ scope.
 | <a name="input_retry_max_attempts"></a> [retry\_max\_attempts](#input\_retry\_max\_attempts) | Retry attempts each state makes after its first failure, before its catch handler runs. This is the per-state half of the durable retry tier; the other half is that a failed execution can be redriven from the state that failed, and that the batch run ledger makes a step which already completed a no-op when it is retried. | `number` | `3` | no |
 | <a name="input_seed_datasets"></a> [seed\_datasets](#input\_seed\_datasets) | Dataset names the seed-staging state iterates over, one Map branch and one data-migration task per name. The default is the eleven registered seed masters, one per declared Aurora load target. Ten of them stage, load and verify; transactions stages a generation only and reports success, because no committed TRANSACT extract exists and ledger.transactions must stay empty until posting fills it. daily\_transactions IS loaded, because ledger.daily\_transactions is a declared load target whose amount column the committed money-total query totals, so verification pass 3 refuses the whole run without a DALYTRAN source total. An environment may pass a subset to restage one master without a module edit. | `list(string)` | <pre>[<br/>  "accounts",<br/>  "cards",<br/>  "customers",<br/>  "card_xref",<br/>  "transactions",<br/>  "daily_transactions",<br/>  "disclosure_groups",<br/>  "transaction_category_balances",<br/>  "transaction_types",<br/>  "transaction_categories",<br/>  "users"<br/>]</pre> | no |
 | <a name="input_stage_datasets_max_concurrency"></a> [stage\_datasets\_max\_concurrency](#input\_stage\_datasets\_max\_concurrency) | Maximum number of seed-staging Map branches allowed to run at once. The environment root may lower it to fit Aurora connection and Fargate task quotas; the default permits parallel loads without starting all eleven branches simultaneously. A sizing value, so it is one of the few a root may legitimately differ on. | `number` | `3` | no |
-| <a name="input_state_machine_timeout_seconds"></a> [state\_machine\_timeout\_seconds](#input\_state\_machine\_timeout\_seconds) | Ceiling on a single daily-batch execution, applied at the top level of the state machine definition rather than to any one state. It bounds the whole chain: an execution that stalls where no individual state's timeout applies would otherwise wait indefinitely, holding the online read-only flag set, because the resume state runs only after the chain finishes or fails. The ceiling caps how long the flag can be held rather than releasing it -- a timed-out execution runs no further state -- so release on that path comes from the out-of-execution watchdog rule, and this same value is published to the quiesce call as the bracket's lease length. The default is validated against the aggregate SEQUENTIAL budget of the twelve work states rather than against the largest single one, because the chain runs them one after another. | `number` | `61200` | no |
-| <a name="input_state_timeout_seconds"></a> [state\_timeout\_seconds](#input\_state\_timeout\_seconds) | Ceiling on each of the twelve work states, keyed by the state name exactly as main.tf spells it. The default puts the migration verification gate at the top ceiling because it re-reads every staged record and runs both committed whole-migration queries, then the four next-longest states -- seed staging, posting, interest and statements -- below it, the three dataset-writing states in the middle, and the three states that only toggle a flag or refresh statistics at the bottom. Every key must be present, so a state can never be left without a timeout: a state with no ceiling waits indefinitely, which holds the whole chain open and leaves the online read-only flag set until an operator intervenes. | `map(number)` | <pre>{<br/>  "AnalyzeTables": 1800,<br/>  "BackupTransactions": 3600,<br/>  "CalculateInterest": 7200,<br/>  "CombineTransactions": 3600,<br/>  "GenerateReports": 3600,<br/>  "GenerateStatements": 7200,<br/>  "PostTransactions": 7200,<br/>  "PreflightDailyTransactions": 1800,<br/>  "QuiesceOnlineWrites": 300,<br/>  "ResumeOnlineWrites": 300,<br/>  "StageSeedDatasets": 7200,<br/>  "VerifyMigration": 10800<br/>}</pre> | no |
+| <a name="input_state_machine_timeout_seconds"></a> [state\_machine\_timeout\_seconds](#input\_state\_machine\_timeout\_seconds) | Ceiling on a single daily-batch execution, applied at the top level of the state machine definition rather than to any one state. It bounds the whole chain: an execution that stalls where no individual state's timeout applies would otherwise wait indefinitely, holding the online read-only flag set, because the resume state runs only after the chain finishes or fails. The ceiling caps how long the flag can be held rather than releasing it -- a timed-out execution runs no further state -- so release on that path comes from the out-of-execution watchdog rule, and this same value is published to the quiesce call as the bracket's lease length. The default is validated against the aggregate SEQUENTIAL budget of the twelve timed states rather than against the largest single one, because the chain runs them one after another. | `number` | `61200` | no |
+| <a name="input_state_timeout_seconds"></a> [state\_timeout\_seconds](#input\_state\_timeout\_seconds) | Ceiling on each of the twelve TIMED states of the nightly chain -- the eleven top-level work states AAP section 0.4.1.7 fixes, plus VerifyMigration, which is not a twelfth top-level state but runs inside the StageSeedDatasets branch and still needs its own ceiling -- keyed by the state name exactly as main.tf spells it. The default puts the migration verification gate at the top ceiling because it re-reads every staged record and runs both committed whole-migration queries, then the four next-longest states -- seed staging, posting, interest and statements -- below it, the three dataset-writing states in the middle, and the three states that only toggle a flag or refresh statistics at the bottom. Every key must be present, so a state can never be left without a timeout: a state with no ceiling waits indefinitely, which holds the whole chain open and leaves the online read-only flag set until an operator intervenes. | `map(number)` | <pre>{<br/>  "AnalyzeTables": 1800,<br/>  "BackupTransactions": 3600,<br/>  "CalculateInterest": 7200,<br/>  "CombineTransactions": 3600,<br/>  "GenerateReports": 3600,<br/>  "GenerateStatements": 7200,<br/>  "PostTransactions": 7200,<br/>  "PreflightDailyTransactions": 1800,<br/>  "QuiesceOnlineWrites": 300,<br/>  "ResumeOnlineWrites": 300,<br/>  "StageSeedDatasets": 7200,<br/>  "VerifyMigration": 10800<br/>}</pre> | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Tags merged onto both state machines and both log groups, layered on top of the common tag set the calling root already applies through its provider's `default_tags`; defaults to none, because the baseline tags arrive from the root rather than from this module. | `map(string)` | `{}` | no |
 
 ### Outputs
 
 | Name | Description |
 |------|-------------|
-| <a name="output_adhoc_report_log_group_arn"></a> [adhoc\_report\_log\_group\_arn](#output\_adhoc\_report\_log\_group\_arn) | ARN of the encrypted CloudWatch log group receiving ad-hoc report execution events, for a metric filter or subscription an environment root attaches without reaching into this module. |
-| <a name="output_adhoc_report_log_group_name"></a> [adhoc\_report\_log\_group\_name](#output\_adhoc\_report\_log\_group\_name) | Name of the CloudWatch log group receiving ad-hoc report execution events, for report-operations dashboards and log queries. |
+| <a name="output_adhoc_report_log_group_arn"></a> [adhoc\_report\_log\_group\_arn](#output\_adhoc\_report\_log\_group\_arn) | ARN of the encrypted CloudWatch log group receiving ad-hoc report execution events. Discovery only in the sense that matters here: no module or root reads this ARN, because modules/observability takes the group by NAME. A metric filter and an execution-failure alarm ARE attached to the group itself through that path, so this value is the identity a further consumer would scope to rather than evidence the group is unwatched. |
+| <a name="output_adhoc_report_log_group_name"></a> [adhoc\_report\_log\_group\_name](#output\_adhoc\_report\_log\_group\_name) | Name of the CloudWatch log group receiving ad-hoc report execution events. Both environment roots pass this name to modules/observability as the `adhoc` entry of state\_machine\_log\_group\_names, which attaches a metric filter counting terminal ExecutionFailed and ExecutionTimedOut events and an alarm on that metric, so the group is a consumed contract rather than a discovery value. |
 | <a name="output_adhoc_report_state_machine_arn"></a> [adhoc\_report\_state\_machine\_arn](#output\_adhoc\_report\_state\_machine\_arn) | ARN of the ad-hoc report machine. The environment root asserts the ARN it composes for reporting-service against this output, publishes that copy to Parameter Store, and grants states:StartExecution on this exact resource in reporting-service's own runtime policy. |
 | <a name="output_adhoc_report_state_machine_name"></a> [adhoc\_report\_state\_machine\_name](#output\_adhoc\_report\_state\_machine\_name) | Name of the ad-hoc report machine, used in execution-history queries and report-operations diagnostics. |
-| <a name="output_authorization_extract_log_group_arn"></a> [authorization\_extract\_log\_group\_arn](#output\_authorization\_extract\_log\_group\_arn) | ARN of the log group the authorization-extract state machine writes its execution history to, for a metric filter or subscription an environment root attaches without reaching into this module. |
-| <a name="output_authorization_extract_log_group_name"></a> [authorization\_extract\_log\_group\_name](#output\_authorization\_extract\_log\_group\_name) | Name of the log group the authorization-extract state machine writes its execution history to, which is the stream an operator reads when an export produced no rows. |
+| <a name="output_authorization_extract_log_group_arn"></a> [authorization\_extract\_log\_group\_arn](#output\_authorization\_extract\_log\_group\_arn) | ARN of the log group the authorization-extract state machine writes its execution history to. Discovery only in the sense that matters here: no module or root reads this ARN, because modules/observability takes the group by NAME. A metric filter and an execution-failure alarm ARE attached to the group itself through that path, so this value is the identity a further consumer would scope to rather than evidence the group is unwatched. |
+| <a name="output_authorization_extract_log_group_name"></a> [authorization\_extract\_log\_group\_name](#output\_authorization\_extract\_log\_group\_name) | Name of the log group the authorization-extract state machine writes its execution history to. Both environment roots pass this name to modules/observability as the `authz` entry of state\_machine\_log\_group\_names, which attaches a metric filter counting terminal ExecutionFailed and ExecutionTimedOut events and an alarm on that metric, so the group is a consumed contract rather than a discovery value. |
 | <a name="output_authorization_extract_state_machine_arn"></a> [authorization\_extract\_state\_machine\_arn](#output\_authorization\_extract\_state\_machine\_arn) | ARN of the operator-invoked authorization-extract state machine, which runs the pending-authorization segment export and the extract load. The environment root publishes it under its authorization parameter path for discovery and grants states:StartExecution on this exact resource to the principal that starts it. |
 | <a name="output_authorization_extract_state_machine_name"></a> [authorization\_extract\_state\_machine\_name](#output\_authorization\_extract\_state\_machine\_name) | Name of the operator-invoked authorization-extract state machine, which is what an operator passes to start-execution. |
 | <a name="output_bracket_finalizer_rule_arn"></a> [bracket\_finalizer\_rule\_arn](#output\_bracket\_finalizer\_rule\_arn) | ARN of the EventBridge rule that releases the online write quiesce bracket when a daily execution terminates without having released it in-graph. Consumers scope failed-invocation alarms to this exact rule. |
@@ -872,14 +934,15 @@ scope.
 | <a name="output_bracket_release_alarm_names"></a> [bracket\_release\_alarm\_names](#output\_bracket\_release\_alarm\_names) | Names of every alarm guarding the out-of-execution bracket release: one per release rule's failed invocations, one for the resume function's errors and one for the dead-letter queue's depth. |
 | <a name="output_bracket_release_dead_letter_queue_arn"></a> [bracket\_release\_dead\_letter\_queue\_arn](#output\_bracket\_release\_dead\_letter\_queue\_arn) | ARN of the queue retaining bracket-release invocations that EventBridge could not deliver. Operators read it to find which execution's bracket was never released; nothing consumes it automatically. |
 | <a name="output_bracket_release_dead_letter_queue_url"></a> [bracket\_release\_dead\_letter\_queue\_url](#output\_bracket\_release\_dead\_letter\_queue\_url) | URL of the bracket-release dead-letter queue, for the receive-message and purge commands the batch-operations runbook publishes. |
-| <a name="output_daily_log_group_arn"></a> [daily\_log\_group\_arn](#output\_daily\_log\_group\_arn) | ARN of the encrypted CloudWatch log group receiving daily-machine execution events, for the metric filters, subscription filters and log-based alarms observability attaches to this exact group. |
-| <a name="output_daily_log_group_name"></a> [daily\_log\_group\_name](#output\_daily\_log\_group\_name) | Name of the CloudWatch log group receiving daily-machine execution events, for observability dashboards and log queries. |
-| <a name="output_daily_state_machine_arn"></a> [daily\_state\_machine\_arn](#output\_daily\_state\_machine\_arn) | ARN of the twelve-work-state daily batch machine. The EventBridge Scheduler module targets this value and observability scopes the batch-failure alarm to it. |
+| <a name="output_daily_log_group_arn"></a> [daily\_log\_group\_arn](#output\_daily\_log\_group\_arn) | ARN of the encrypted CloudWatch log group receiving daily-machine execution events. Discovery only in the sense that matters here: no module or root reads this ARN, because modules/observability takes the group by NAME. A metric filter and an execution-failure alarm ARE attached to the group itself through that path, so this value is the identity a further consumer would scope to rather than evidence the group is unwatched. It is the identity a future consumer would scope one to, or that an operator names in a Logs Insights query. |
+| <a name="output_daily_log_group_name"></a> [daily\_log\_group\_name](#output\_daily\_log\_group\_name) | Name of the CloudWatch log group receiving daily-machine execution events. Both environment roots pass this name to modules/observability as the `daily` entry of state\_machine\_log\_group\_names, which attaches a metric filter counting terminal ExecutionFailed and ExecutionTimedOut events and an alarm on that metric, so the group is a consumed contract rather than a discovery value. |
+| <a name="output_daily_state_machine_arn"></a> [daily\_state\_machine\_arn](#output\_daily\_state\_machine\_arn) | ARN of the eleven-work-state daily batch machine. The EventBridge Scheduler module targets this value and observability scopes the batch-failure alarm to it. |
 | <a name="output_daily_state_machine_name"></a> [daily\_state\_machine\_name](#output\_daily\_state\_machine\_name) | Name of the daily batch machine, used in operator commands, execution-history queries and dashboard dimensions. |
-| <a name="output_dataset_roundtrip_log_group_arn"></a> [dataset\_roundtrip\_log\_group\_arn](#output\_dataset\_roundtrip\_log\_group\_arn) | ARN of the CloudWatch log group the dataset round-trip machine writes its execution history to. Published so a root can attach a subscription or a metric filter without reaching into the module. |
-| <a name="output_dataset_roundtrip_log_group_name"></a> [dataset\_roundtrip\_log\_group\_name](#output\_dataset\_roundtrip\_log\_group\_name) | Name of the CloudWatch log group the dataset round-trip machine writes to, for a console link or a logs query. |
+| <a name="output_dataset_roundtrip_log_group_arn"></a> [dataset\_roundtrip\_log\_group\_arn](#output\_dataset\_roundtrip\_log\_group\_arn) | ARN of the CloudWatch log group the dataset round-trip machine writes its execution history to. Discovery only in the sense that matters here: no module or root reads this ARN, because modules/observability takes the group by NAME. A metric filter and an execution-failure alarm ARE attached to the group itself through that path, so this value is the identity a further consumer would scope to rather than evidence the group is unwatched. |
+| <a name="output_dataset_roundtrip_log_group_name"></a> [dataset\_roundtrip\_log\_group\_name](#output\_dataset\_roundtrip\_log\_group\_name) | Name of the CloudWatch log group the dataset round-trip machine writes to. Both environment roots pass this name to modules/observability as the `dataset` entry of state\_machine\_log\_group\_names, which attaches a metric filter counting terminal ExecutionFailed and ExecutionTimedOut events and an alarm on that metric, so the group is a consumed contract rather than a discovery value. |
 | <a name="output_dataset_roundtrip_state_machine_arn"></a> [dataset\_roundtrip\_state\_machine\_arn](#output\_dataset\_roundtrip\_state\_machine\_arn) | ARN of the operator-invoked dataset export/import round-trip machine. An operator or automation starts it with a single `businessDate` input; the environment root grants states:StartExecution on exactly this resource to any principal that needs it. |
 | <a name="output_dataset_roundtrip_state_machine_name"></a> [dataset\_roundtrip\_state\_machine\_name](#output\_dataset\_roundtrip\_state\_machine\_name) | Name of the dataset round-trip state machine, for a console link or a CLI invocation that addresses it by name. |
+| <a name="output_dataset_source_extract_prefix"></a> [dataset\_source\_extract\_prefix](#output\_dataset\_source\_extract\_prefix) | DEPRECATED, retained for one compatibility window and removed in the next major revision of this module's output contract. S3 key prefix inside the dataset bucket holding the exported baseline extracts the seed-refresh state reads, echoed verbatim from this module's identically named input. It reports the COMPOSED DEFAULT and cannot see the dataset\_staging\_root override, so it does not necessarily name the location the tasks read. Replace it with source\_extract\_prefix from the roots' datasets output, which infra/modules/s3-datasets owns and decides, or with dataset\_staging\_root above where the location the tasks actually resolve is what is wanted. |
 | <a name="output_dataset_staging_root"></a> [dataset\_staging\_root](#output\_dataset\_staging\_root) | Resolved location the data-migration container reads seed extracts from, as passed to every staging and load task in CARDDEMO\_DATASET\_STAGING\_ROOT. Either an s3 URI over the dataset bucket and the source extract prefix or, where an operator overrides it, an absolute filesystem path. The data-migration runbook reads it from each root's batch\_orchestration output to confirm the nightly chain and the operator commands resolve the same place. |
 | <a name="output_execution_role_arns"></a> [execution\_role\_arns](#output\_execution\_role\_arns) | ARN of each state machine's execution role, keyed by machine (daily, adhoc, dataset, authz), for IAM inventory and policy auditing by the environment root. |
 | <a name="output_execution_role_names"></a> [execution\_role\_names](#output\_execution\_role\_names) | Name of each state machine's execution role, keyed by machine (daily, adhoc, dataset, authz), used by operator and compliance queries that address IAM roles by name. |

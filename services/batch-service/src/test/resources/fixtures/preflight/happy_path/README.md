@@ -16,11 +16,17 @@
 >
 > **Label form.** Rationales below are tagged `Alternatives Considered:`, `Assumptions:` and
 > `Trade-offs:` -- plain, plural, colon retained, no emphasis markup, per
-> `docs/CODE_DOCUMENTATION_STANDARD.md` and master section 1.4. That spelling is not cosmetic:
-> `config/rule1/rule1_gate.py` is a build-failing gate whose canonical label set covers `.md` and
-> rejects parenthesised, singular, colon-dropped and emphasis-wrapped variants, so an emphasised
-> label here would fail the build as well as escape the literal search the audit depends on. This
-> whole file is pure ASCII for the reason master section 1.4 gives.
+> `docs/CODE_DOCUMENTATION_STANDARD.md` and master section 1.4. That spelling is not cosmetic, and
+> the reason is the literal search rather than a gate: `config/rule1/rule1_gate.py` is a
+> build-failing gate whose canonical label set does cover `.md` and does reject parenthesised,
+> singular, colon-dropped and emphasis-wrapped variants, but it excludes every path containing
+> `/src/test/resources/fixtures/`, so **it does not read this file**. An emphasised label here would
+> therefore pass the build and still escape the audit's literal search, which is the outcome the
+> plain form exists to prevent. Assumptions: the exclusion is stated because the earlier wording --
+> "so an emphasised label here would fail the build" -- offered the wrong assurance: it invited a
+> reader to treat a green build as evidence that this file's labels are well formed, when nothing
+> mechanical inspects them and review is the only check. This whole file is pure ASCII for the
+> reason master section 1.4 gives.
 
 **This README is the mandatory Explainability carrier for the three record files beside it.** Master
 section 1.2 records why: a fixed-width record file cannot carry a comment of any kind, because every
@@ -471,8 +477,14 @@ contracts constrain what this folder may expect:
 The rows land in the objects the sibling harness declares in
 [`test-harness-schemas-and-foreign-tables.sql`](../../../db/testharness/test-harness-schemas-and-foreign-tables.sql)
 under the `test` profile of `application-test.yml`: `ledger.daily_transactions` for the feed,
-`account.card_xref` (`card_num CHAR(16)` primary key) and `account.accounts` (`acct_id BIGINT` primary
-key) for the two lookups. Decoding on the Java side is done by `DailyTransactionMapper`,
+`account.card_xref` (`card_num CHAR(16)` primary key) and `account.accounts` (`account_id BIGINT`
+primary key) for the two lookups. Assumptions: the column is `account_id` and not `acct_id`, which
+this sentence previously named. The harness table declares `account_id BIGINT NOT NULL` and the
+owning migration `services/account-service/src/main/resources/db/migration/V1__account.sql` declares
+the same, so `acct_id` named nothing that exists -- it was the copybook field `ACCT-ID` lower-cased
+rather than the mapped column. The distinction is worth keeping straight in a document that also
+cites copybook field names throughout: the copybook name is normative for the BYTES and the
+migration is normative for the COLUMN, and a query written from the wrong one fails at execution. Decoding on the Java side is done by `DailyTransactionMapper`,
 `CardXrefRecordMapper` and `AccountRecordMapper` over the `common-lib` codecs `CopybookLayout`,
 `FixedWidthCodec` and `ZonedDecimalCodec`, which are the only sanctioned decoders for these bytes. A
 scenario owns only its own rows and never seeds another service's schema, per master section 11.3.
@@ -565,23 +577,53 @@ only at review time.
 
 `BatchFixtureContractTest` reads the folder as well, enumerating this scenario among all sixteen in the
 tree and holding every file here to its declared geometry, its line endings, a successful decode under
-its declared layout, and the discriminating relationships this scenario turns on. Between the two, an
-edit to any of these three files is detected -- by the contract test for all three, and by the job test
-for the feed record specifically.
+its declared layout, its committed SHA-256 and the discriminating relationships this scenario turns on.
+Between the two, an edit to any of these three files is detected -- by the contract test for all three,
+including a same-width change to a field no assertion names, and by the job test for the feed record
+specifically.
 
 Assumptions: the distinction between the three domains in this tree is deliberate and is stated rather
 than left to inference, because master section 1.5 is explicit that most of the tree is mirrored and
 only part of it is driven. `preflight/**` and `posting/**` are driven, the latter by
-`PostTransactionsJobParityIT` against `tests/golden/posting/<scenario>`; `interest/**` is a mirror,
-because `CalculateInterestJobTest` resolves its inputs from the reference tree under the repository
-root instead. The consequence for a maintainer is that editing a byte in this folder changes what a run
-asserts, so it is not a documentation-only change and cannot be reviewed as one.
+`PostTransactionsJobParityIT` against `tests/golden/posting/<scenario>`; and `interest/**` is driven
+too, by `CalculateInterestJobTest`, which resolves its inputs under the classpath prefix
+`fixtures/interest/` -- this tree -- and not under the repository root as this paragraph used to claim.
+The consequence for a maintainer is that editing a byte in this folder changes what a run asserts, so it
+is not a documentation-only change and cannot be reviewed as one; and the same now holds for the two
+sibling families, so no directory in this tree may be edited on the assumption that nothing reads it.
+
+Assumptions: this section exists because two record files sitting in the same tree can differ in
+whether a job opens them, and the difference is invisible from the layout. Master section 1.5 holds the
+measurement, taken from the resource root each consuming class declares rather than from prose: all four
+files in every one of the NINE `posting/**` scenarios are opened -- by `PostTransactionsJobTest` under
+the classpath prefix `fixtures/posting/` and by `PostTransactionsJobParityIT` under `/fixtures/posting/`
+-- all four files in every one of the THREE `interest/**` scenarios are opened by
+`CalculateInterestJobTest` under `fixtures/interest/`, and `PreflightDailyTransactionsJobTest` opens the
+three `preflight/**` feed files plus `preflight/unmatched_card/acctdata.txt` under
+`fixtures/preflight/`. **53 of the 62 record files in this tree are live job input**; master section 1.5
+names the nine that are not.
+
+Assumptions: this paragraph previously said the sibling `preflight/**` and `interest/**` families were
+mirrors that no test in this module read, and that `CalculateInterestJobTest` resolved its inputs from
+the repository-root `tests/fixtures/interest/` tree. Both claims were false. That class declares
+`FIXTURE_INTEREST_ROOT` as the classpath prefix `fixtures/interest/` and loads through
+`getClassLoader().getResourceAsStream(...)`, so it reads this tree; it DISCUSSES the reference oracle
+tree in its prose, and the two were conflated -- a path named in a docstring is not a path being opened.
+The correction matters in exactly the direction the paragraph was warning about: a reader told that a
+sibling directory was inert would carry that belief into it and edit a live job input believing the
+change was free.
 
 ---
 
 *This README is the mandatory Explainability carrier for the three record files in this directory,
-required by master section 10 and by user-specified Rule 1. `config/rule1/rule1_gate.py` decides the
-written form of the rationale labels above, repository-wide and including Markdown, which is why they
-are plain rather than emphasised. `config/checkstyle/checkstyle.xml` limits its audit set to `java`, so
-no linter reads this prose. Whether each rationale names a real consequence, and whether every number
-and line citation is true, are review obligations no lexical gate can decide.*
+required by master section 10 and by user-specified Rule 1. **No gate reads this prose.**
+`config/checkstyle/checkstyle.xml` limits its audit set to `java`, and `config/rule1/rule1_gate.py`
+excludes every path containing `/src/test/resources/fixtures/` in its `_is_governed` check, which is
+this path -- so neither its `labels` check nor its `what` check ever opens this file. Refactoring
+Rationale: this paragraph previously said the gate "decides the written form of the rationale labels
+above, repository-wide and including Markdown", which credited a build-failing gate with cover it does
+not provide here, so a green build could be misread as evidence about this document. The canonical
+label form is used regardless, because `docs/CODE_DOCUMENTATION_STANDARD.md` fixes one written form
+repository-wide and a Rule 1 audit finds a rationale by literal string search; compliance in this path
+is therefore a **review** obligation. Whether each rationale names a real consequence, and whether
+every number and line citation is true, are review obligations no lexical gate can decide.*

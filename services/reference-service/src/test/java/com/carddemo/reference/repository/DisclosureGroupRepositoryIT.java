@@ -68,6 +68,7 @@ import com.carddemo.common.codec.CopybookLayout;
 import com.carddemo.common.codec.FixedWidthCodec;
 import com.carddemo.common.codec.ZonedDecimalCodec;
 import com.carddemo.reference.domain.DisclosureGroup;
+import com.carddemo.reference.dto.DisclosureGroupRateResponse;
 import com.carddemo.reference.service.DisclosureGroupService;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
@@ -177,6 +178,34 @@ class DisclosureGroupRepositoryIT extends ReferencePersistenceBase {
 
     /** The type component of a pair the seed loads at an explicit zero rate. */
     private static final String ZERO_RATED_TYPE_CD = "02";
+
+    /**
+     * The third seeded account group, which prices the rated pair at zero where the fallback does not.
+     *
+     * <p>Assumptions: ten characters with three trailing blanks, the same padding every group id in this
+     * column carries. It is named here because it is the only seeded group whose rate for
+     * {@link #RATED_TYPE_CD} and {@link #RATED_CAT_CD} DIFFERS from the fallback group's, and a
+     * substitution case needs exactly that -- a requested group that answers from its own row with a
+     * value the fallback would not have supplied. {@link #SEEDED_GROUP} cannot serve: measured across the
+     * seeded table it prices all seventeen pairs identically to the fallback group.</p>
+     */
+    private static final String ZERO_RATE_GROUP_ID = "ZEROAPR   ";
+
+    /** The rate {@link #ZERO_RATE_GROUP_ID} carries for the rated pair, as the column stores it. */
+    private static final String ZERO_RATE_GROUP_RATE = "0.00";
+
+    /**
+     * The rate the FALLBACK group carries for that same rated pair, as the seeded column stores it.
+     *
+     * <p>Assumptions: this is a different fact from {@link #EBCDIC_EXTRACT_RATE} even though the two
+     * spell the same number. That constant is the fallback group's rate at the ONE pair where the two
+     * baseline extracts disagree, {@code ('07','0001')}, and exists to pin the encoding-authority
+     * decision; this one is its rate at {@code ('01','0001')}, where both extracts agree and where the
+     * discrimination against {@link #ZERO_RATE_GROUP_ID} comes from. Sharing one constant between the
+     * two would tie an assertion about the substitution to a decision about which extract to trust, so
+     * that re-deciding the second would silently change what the first proves.</p>
+     */
+    private static final String FALLBACK_RATED_PAIR_RATE = "15.00";
 
     // WHY : Assumptions: the dataset ships in TWO baseline extracts and they are byte-identical except
     //       at one field of one record. app/data/EBCDIC/AWS.M2.CARDDEMO.DISCGRP.PS record 34 -- the
@@ -446,7 +475,7 @@ class DisclosureGroupRepositoryIT extends ReferencePersistenceBase {
                         .isEqualByComparingTo(decodedRate);
             }
             assertThat(row.getInterestRate().scale())
-                    .as("V1__reference.sql line 337 declares interest_rate NUMERIC(6,2)")
+                    .as("V1__reference.sql line 326 declares interest_rate NUMERIC(6,2)")
                     .isEqualTo(DisclosureGroup.INTEREST_RATE_SCALE);
             assertNoOverpunchReachedTheColumns(row);
 
@@ -545,7 +574,7 @@ class DisclosureGroupRepositoryIT extends ReferencePersistenceBase {
 
         BigDecimal rate = zeroRated.get().getInterestRate();
         assertThat(rate)
-                .as("V1__reference.sql line 337 declares interest_rate NOT NULL")
+                .as("V1__reference.sql line 326 declares interest_rate NOT NULL")
                 .isNotNull()
                 .isEqualByComparingTo("0.00");
         assertThat(rate.scale())
@@ -572,6 +601,79 @@ class DisclosureGroupRepositoryIT extends ReferencePersistenceBase {
                 UNSEEDED_GROUP_ID, UNSEEDED_TYPE_CD, UNSEEDED_CAT_CD)))
                 .as("the substitution at app/cbl/CBACT04C.cbl line 437 is the service's decision")
                 .isEmpty();
+    }
+
+    /**
+     * Confirms the substitution fires against the REAL seeded table and answers a DISCRIMINATING rate.
+     *
+     * <p>Purpose. This is the only case in the module that forces a genuine first miss against a
+     * database and observes which row answered. Everything else that exercises the substitution --
+     * {@code DisclosureGroupServiceTest} and {@code DisclosureGroupControllerTest} -- substitutes the
+     * repository or the service, so what those cases witness is the branch structure and not the data;
+     * with the real read stubbed, deleting the substitution and stubbing its result are
+     * indistinguishable. Here the read is real, so the fallback either finds the seeded row or it does
+     * not.</p>
+     *
+     * <p>Assumptions: the pair is chosen so the two routes answer DIFFERENT money, which is what makes
+     * the case able to fail. {@link #RATED_TYPE_CD} with {@link #RATED_CAT_CD} is
+     * priced at {@link #ZERO_RATE_GROUP_RATE} under {@link #ZERO_RATE_GROUP_ID}, which holds a row of
+     * its own, and at {@link #FALLBACK_RATED_PAIR_RATE} under the fallback group. So the requested
+     * group answers from itself and reports no substitution, while an unseeded group answers the
+     * fallback's rate and reports one -- and an assertion on the value alone would already separate the
+     * two. Both halves are driven, because a case that only drove the miss would pass against a table in
+     * which every group carried the same rate, and that is exactly the state the pair this file's
+     * earlier constants describe is in.</p>
+     *
+     * <p>Alternatives Considered: driving this at {@code ('07','0001')}, which the sibling boundary test
+     * used for the same purpose. Rejected on measurement against the DEPLOYED table: the seed is taken
+     * from the authoritative EBCDIC extract, where the fallback group prices that pair at
+     * {@link #EBCDIC_EXTRACT_RATE} -- identically to {@link #SEEDED_GROUP} -- so a substitution
+     * assertion there passes whether or not the substitution fired, and would keep passing if the branch
+     * were deleted. The pair only discriminates in the ASCII convenience copy, which this table is
+     * deliberately NOT seeded from. That is the same divergence D-SEED-ENCODING-AUTHORITY records, seen
+     * from the other side: it decides which pair a test can use, not only which rate a column holds.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the substitution fires against the seeded table and answers a discriminating rate")
+    void theSubstitutionFiresAgainstTheSeededTableAndDiscriminates() {
+        DisclosureGroupService rates = new DisclosureGroupService(this.groups);
+
+        DisclosureGroupRateResponse ownRow = rates.resolveRate(
+                ZERO_RATE_GROUP_ID, RATED_TYPE_CD, RATED_CAT_CD);
+        assertThat(ownRow.defaultGroupApplied())
+                .as("%s holds its own row for (%s,%s), so no substitution may be reported",
+                        ZERO_RATE_GROUP_ID, RATED_TYPE_CD, RATED_CAT_CD)
+                .isFalse();
+        assertThat(ownRow.appliedAcctGroupId()).isEqualTo(ZERO_RATE_GROUP_ID);
+        assertThat(ownRow.interestRate().amount())
+                .isEqualByComparingTo(new BigDecimal(ZERO_RATE_GROUP_RATE));
+
+        DisclosureGroupRateResponse substituted = rates.resolveRate(
+                UNSEEDED_GROUP_ID, RATED_TYPE_CD, RATED_CAT_CD);
+        assertThat(substituted.defaultGroupApplied())
+                .as("an unseeded group must reach the fallback read at app/cbl/CBACT04C.cbl line 437")
+                .isTrue();
+        assertThat(substituted.requestedAcctGroupId())
+                .as("the group asked for is reported unaltered, so a caller can tell it was substituted")
+                .isEqualTo(UNSEEDED_GROUP_ID);
+        assertThat(substituted.appliedAcctGroupId())
+                .isEqualTo(DisclosureGroupService.DEFAULT_ACCT_GROUP_ID);
+        assertThat(substituted.interestRate().amount())
+                .as("the fallback row's own rate must answer, not the requested group's and not a zero")
+                .isEqualByComparingTo(new BigDecimal(FALLBACK_RATED_PAIR_RATE));
+
+        // WHY : Assumptions: the two rates are asserted UNEQUAL as a separate statement, because the two
+        //       value assertions above are each satisfied by a table in which both groups carry the same
+        //       number -- which is the precise condition that made the sibling boundary test's chosen
+        //       pair unable to fail. Stating the inequality means a future re-seed that flattened this
+        //       pair would fail HERE, naming the seed, rather than quietly removing the discrimination
+        //       and leaving the substitution branch unprotected again.
+        assertThat(substituted.interestRate().amount())
+                .as("the pair driving this case must price differently under the two groups, or the "
+                        + "substitution assertion above cannot fail")
+                .isNotEqualByComparingTo(ownRow.interestRate().amount());
     }
 
     /**

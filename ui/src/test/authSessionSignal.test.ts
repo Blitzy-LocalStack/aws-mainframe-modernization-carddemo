@@ -24,42 +24,38 @@
  */
 
 // Assumptions: every test API is imported rather than taken from an ambient global, because
-// ui/vitest.config.ts records `globals` as a per-project contract, and admitting them here would make
-// `expect` and `vi` visible to production screens as well, where a stray call would compile.
+// ui/tsconfig.json keeps `types` EMPTY, and DECLARING them here would make `expect` and `vi`
+// visible to production screens as well, where a stray call would compile. (ui/vitest.config.ts
+// sets `globals: true`; an injected global is not a declared one, so the import still carries the
+// compiler's side of this.)
 import { act, renderHook } from '@testing-library/react';
 import { AxiosError } from 'axios';
 import type { AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { getApiClient, resetApiClient, setAccessToken } from '../api/client';
+import { getApiClient } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
-
-/** Base URL the client is configured with for this file; no request leaves the process. */
-const API_BASE_URL = 'https://api.carddemo.example/api/v1';
-
-/** The session-storage key the shared client owns the access token under. */
-const ACCESS_TOKEN_KEY = 'carddemo.access-token';
-
-/** The session-storage key the auth hook owns the identity token under. */
-const ID_TOKEN_KEY = 'carddemo.id-token';
-
-/** The session-storage key the auth hook retains the signed-on identifier under. */
-const USER_ID_KEY = 'carddemo.user-id';
-
-/** The session-storage key the auth hook owns the refresh token under. */
-const REFRESH_TOKEN_KEY = 'carddemo.refresh-token';
+import { installApiHarness, removeApiHarness } from '../test/apiHarness';
+import { SESSION_USER_ID, endAnySession, establishSession } from '../test/sessionHarness';
 
 /** Status a service answers when the token a request carried is no longer accepted. */
 const UNAUTHORIZED = 401;
 
-/**
- * An identity token whose claim segment decodes to one group.
- *
- * Assumptions: it is not signed, and does not need to be. The hook decodes the claim to decide which
- * routes to OFFER and every service revalidates the token itself, so a case about session teardown is
- * unaffected by the signature it does not check.
+/** Status the probe request that observes the attached bearer is answered with. */
+const OK = 200;
+
+/** The single group the operator whose session each case establishes belongs to. */
+const OPERATOR_GROUP = 'carddemo-user';
+
+/*
+ * WHY : ⚠️ Refactoring Rationale: this file used to name four session-storage keys and read each of them
+ *       directly. They no longer exist -- a review found every credential this application held in
+ *       script-readable Web Storage, and the session moved into memory as one frozen record behind an
+ *       installer that validates the whole token set. The four values are now observed where they became
+ *       observable: three of them through the hook's published reading, and the bearer through the header
+ *       the next request carries. Reading a key was never the property under assertion; what the file
+ *       exists to prove is that a listener EXISTS in production and that it empties the session.
  */
-const ID_TOKEN = `header.${btoa(JSON.stringify({ 'cognito:groups': ['carddemo-user'] }))}.signature`;
 
 /**
  * Answers every dispatched request with a 401 carrying a complete problem document.
@@ -97,22 +93,28 @@ async function unauthorizedAdapter(config: AxiosRequestConfig): Promise<AxiosRes
   );
 }
 
-/** Installs the client configuration and a complete held session for one case. */
-function stubSignedOnSession(): void {
-  vi.stubEnv('VITE_API_BASE_URL', API_BASE_URL);
-  resetApiClient();
-  sessionStorage.clear();
-  setAccessToken('a-held-access-token');
-  sessionStorage.setItem(ID_TOKEN_KEY, ID_TOKEN);
-  sessionStorage.setItem(USER_ID_KEY, 'ADMIN001');
-  sessionStorage.setItem(REFRESH_TOKEN_KEY, 'a-held-refresh-token');
+/**
+ * Installs the shared request harness, which supplies the client's configuration and answers the
+ * exchange each case's arrangement performs.
+ *
+ * Refactoring Rationale: ⚠️ this replaces a hand-rolled stub of one build-time variable plus a direct
+ * seeding of the session. The harness already owns the configuration and the local answering, and a
+ * session can now be arranged only by exchanging for one — so a second definition of the client's
+ * configuration in this file would be a second definition that could fall behind.
+ * @returns {void} Nothing; no session is held and the harness is installed.
+ */
+function installTheHarness(): void {
+  endAnySession();
+  installApiHarness();
 }
 
-/** Discards the configuration, the client and the session so no later file inherits any of them. */
-function restoreSignedOnSession(): void {
-  vi.unstubAllEnvs();
-  resetApiClient();
-  sessionStorage.clear();
+/**
+ * Removes the harness and discards any session, so no later file inherits either.
+ * @returns {void} Nothing; the harness is removed and no session is held.
+ */
+function removeTheHarness(): void {
+  removeApiHarness();
+  endAnySession();
 }
 
 /**
@@ -155,41 +157,108 @@ async function refuseOneRequest(): Promise<void> {
   await Promise.resolve();
 }
 
-/** Asserts a refused session leaves no credential and no signed-on state behind. */
+/**
+ * Asserts a refused session leaves no credential and no signed-on state behind.
+ *
+ * Assumptions: all four values the session consisted of are covered, three from the hook's reading and
+ * the bearer from the header the next request carries. The enumeration is the point rather than a
+ * flourish: the defect this file exists for was a SPLIT session, so an assertion covering one value
+ * would have passed against it.
+ * @returns {Promise<void>} Resolves once every observation holds.
+ */
 async function discardsEverySessionValueOnRefusal(): Promise<void> {
-  const { result } = renderHook(useAuth);
+  const { result } = await establishSession({ groups: [OPERATOR_GROUP] });
   expect(result.current.signedOn).toBe(true);
 
   await dispatchRefusedRequest();
 
-  expect(sessionStorage.getItem(ACCESS_TOKEN_KEY)).toBeNull();
-  expect(sessionStorage.getItem(ID_TOKEN_KEY)).toBeNull();
-  expect(sessionStorage.getItem(USER_ID_KEY)).toBeNull();
-  expect(sessionStorage.getItem(REFRESH_TOKEN_KEY)).toBeNull();
   expect(result.current.signedOn).toBe(false);
   expect(result.current.userId).toBeNull();
   expect(result.current.groups).toStrictEqual([]);
   expect(result.current.isAdmin).toBe(false);
+  expect(await bearerOnTheNextRequest(), 'no bearer may survive the refusal').toBeUndefined();
 }
 
-/** Asserts an unmounted hook is no longer told, so nothing updates state after teardown. */
+/**
+ * Dispatches one request and reports whatever bearer the client's interceptor attached to it.
+ *
+ * Assumptions: the bearer is observed through a REQUEST rather than read from a variable, because it is
+ * deliberately unreachable from outside `ui/src/api/client.ts` — and what a request carries is the
+ * property that matters in any case, since that is what a service sees.
+ * @returns {Promise<string | undefined>} The `Authorization` header value, or `undefined` when the
+ *   request carried none.
+ */
+async function bearerOnTheNextRequest(): Promise<string | undefined> {
+  attachedBearer = undefined;
+  getApiClient().defaults.adapter = bearerRecordingAdapter;
+  await getApiClient().get('/cards');
+  return attachedBearer;
+}
+
+/** The `Authorization` header the last probe request carried, or `undefined` when it carried none. */
+let attachedBearer: string | undefined;
+
+/**
+ * Answers one probe request successfully, recording whatever bearer the interceptor attached.
+ *
+ * Assumptions: a module-level function writing a module-level variable rather than a closure, because
+ * `ui/eslint.config.js` selects a function in every position for `jsdoc/require-jsdoc` and a documented
+ * declaration is the shape this tree uses for it.
+ * @param {AxiosRequestConfig} config - The request configuration after the client's interceptors ran.
+ * @returns {Promise<AxiosResponse>} An empty success.
+ */
+async function bearerRecordingAdapter(config: AxiosRequestConfig): Promise<AxiosResponse> {
+  const headers: unknown = config.headers;
+  if (typeof headers === 'object' && headers !== null) {
+    for (const [name, value] of Object.entries(headers as Record<string, unknown>)) {
+      if (name.toLowerCase() === 'authorization' && typeof value === 'string') {
+        attachedBearer = value;
+      }
+    }
+  }
+  return Promise.resolve({
+    data: {},
+    status: OK,
+    statusText: '',
+    headers: {},
+    config,
+  } as AxiosResponse);
+}
+
+/**
+ * Asserts an unmounted hook is no longer told, so nothing changes the session after teardown.
+ *
+ * Assumptions: the arrangement's OWN probe is unmounted too, and that is what makes the case
+ * meaningful. The subscription to the signal is shared and released with the LAST listener, so a case
+ * that left any listener mounted would be asserting nothing about teardown.
+ *
+ * Refactoring Rationale: ⚠️ the surviving value is observed by mounting the hook AGAIN, where this case
+ * used to read a storage key. The session is module state and outlives every component, so a fresh
+ * mount reports whatever is still held — which is precisely the state a real remount would find.
+ * @returns {Promise<void>} Resolves once the assertion holds.
+ */
 async function stopsListeningOnceUnmounted(): Promise<void> {
-  const { unmount } = renderHook(useAuth);
-  unmount();
+  const established = await establishSession({ groups: [OPERATOR_GROUP] });
+  established.unmount();
 
   await dispatchRefusedRequest();
 
   // WHY : the access token is discarded by the transport itself, which is unaffected by unmounting, so
-  //       the observable consequence of the subscription having been removed is that the keys the HOOK
-  //       owns are left as they were. Asserting one of those rather than the token is what makes this
-  //       case about the teardown instead of about the interceptor.
-  expect(sessionStorage.getItem(ID_TOKEN_KEY)).toBe(ID_TOKEN);
+  //       the observable consequence of the subscription having been removed is that the half the HOOK
+  //       owns is left as it was. Asserting that rather than the bearer is what makes this case about
+  //       the teardown instead of about the interceptor.
+  const { result } = renderHook(useAuth);
+  expect(result.current.signedOn, 'the identity half must survive an unsubscribed refusal').toBe(
+    true,
+  );
+  expect(result.current.userId).toBe(SESSION_USER_ID);
+  expect(result.current.groups).toStrictEqual([OPERATOR_GROUP]);
 }
 
 /** Groups the assertions that fix what a refused session does to held state. */
 function sessionSignalCases(): void {
-  beforeEach(stubSignedOnSession);
-  afterEach(restoreSignedOnSession);
+  beforeEach(installTheHarness);
+  afterEach(removeTheHarness);
   it(
     'discards every session value when the services refuse the session',
     discardsEverySessionValueOnRefusal,

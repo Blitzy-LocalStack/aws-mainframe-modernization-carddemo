@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -16,6 +17,7 @@ import com.carddemo.auth.dto.SignOnChallengeRequest;
 import com.carddemo.auth.dto.SignOnOutcome;
 import com.carddemo.auth.dto.SignOnRequest;
 import com.carddemo.auth.dto.SignOnResponse;
+import com.carddemo.auth.dto.SignOutRequest;
 import com.carddemo.auth.dto.TokenRefreshRequest;
 import com.carddemo.auth.repository.UserRepository;
 import com.carddemo.common.error.ApiError;
@@ -23,7 +25,9 @@ import com.carddemo.common.error.ClientInputException;
 import java.lang.reflect.Field;
 import java.lang.reflect.RecordComponent;
 import java.net.ConnectException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Base64;
 import java.util.Locale;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
@@ -42,13 +46,19 @@ import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityPr
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AuthFlowType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AuthenticationResultType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.ChallengeNameType;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.GetTokensFromRefreshTokenRequest;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.GetTokensFromRefreshTokenResponse;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.InitiateAuthRequest;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.InitiateAuthResponse;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.InternalErrorException;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.InvalidPasswordException;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.NotAuthorizedException;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.RefreshTokenReuseException;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.RespondToAuthChallengeRequest;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.RespondToAuthChallengeResponse;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.RevokeTokenRequest;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.RevokeTokenResponse;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.UnsupportedTokenTypeException;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.UserNotFoundException;
 
 /**
@@ -146,6 +156,12 @@ class CognitoIdentityServiceTest {
     /** A submission that is blank rather than absent, matching the reference test for spaces. */
     private static final String BLANK = "   ";
 
+    /** The pool client identifier every case builds the service over. */
+    private static final String CLIENT_ID = "test-client-id";
+
+    /** The confidential client's secret, which the renewal and revocation operations both carry. */
+    private static final String CLIENT_SECRET = "test-client-secret";
+
     private CognitoIdentityProviderClient provider;
 
     private UserRepository users;
@@ -176,7 +192,7 @@ class CognitoIdentityServiceTest {
         //       one, because the confidential-client proof is computed over it and every assertion below
         //       is about the request SHAPE rather than about the digest's value. A blank secret is
         //       refused by the constructor, so it could not reach the key-initialisation path at all.
-        service = new CognitoIdentityService(provider, users, "test-client-id", "test-client-secret");
+        service = new CognitoIdentityService(provider, users, CLIENT_ID, CLIENT_SECRET);
     }
 
     /**
@@ -347,8 +363,11 @@ class CognitoIdentityServiceTest {
      * Asserts the nullable renewal token is passed through as the pool supplied it, including absent.
      *
      * <p>Assumptions: this is asserted alongside the completeness checks above precisely because it is
-     * the ONE required-looking member that must not be checked: the pool never reissues a renewal token
-     * on the renewal flow, so refusing an absent one would refuse every renewal.</p>
+     * the ONE required-looking member that must not be checked. Rotation is enabled on the pool client,
+     * so a renewal normally DOES carry a replacement token -- the case immediately below pins that -- but
+     * the retry grace period is a pool-side setting rather than a compile-time one, and an answer without
+     * a replacement is a pool telling this service the submitted token remains current. Refusing it would
+     * turn a supported pool configuration into a refused session.</p>
      *
      * <p>This case takes no parameter and yields no value.</p>
      */
@@ -356,8 +375,8 @@ class CognitoIdentityServiceTest {
     @DisplayName("an absent renewal token is passed through rather than refused")
     void anAbsentRenewalTokenIsPassedThrough() {
         when(users.existsById(USER_ID)).thenReturn(true);
-        when(provider.initiateAuth(any(InitiateAuthRequest.class)))
-                .thenReturn(InitiateAuthResponse.builder()
+        when(provider.getTokensFromRefreshToken(any(GetTokensFromRefreshTokenRequest.class)))
+                .thenReturn(GetTokensFromRefreshTokenResponse.builder()
                         .authenticationResult(completeResult().refreshToken(null).build())
                         .build());
 
@@ -365,6 +384,140 @@ class CognitoIdentityServiceTest {
 
         assertThat(renewed.refreshToken()).isNull();
         assertThat(renewed.accessToken()).isEqualTo("access-token");
+    }
+
+    /**
+     * Asserts a rotated renewal token reaches the caller instead of the one that was submitted.
+     *
+     * <p>Purpose: this is the contract test the infrastructure's own refusal demands. The pool client is
+     * provisioned with rotation enabled and a zero-second retry grace period, and
+     * {@code infra/modules/cognito/variables.tf} REFUSES to add {@code ALLOW_REFRESH_TOKEN_AUTH} to the
+     * client's authentication flows while that is so -- which means the legacy renewal flow is not merely
+     * discouraged here, it is rejected by the pool. The two artifacts are only in step if this service
+     * calls the rotation-compatible operation AND surfaces the replacement it returns, because a caller
+     * that keeps submitting the token it first received would be refused on its second renewal.</p>
+     *
+     * <p>Assumptions: the assertion is on the value reaching the caller rather than on the SDK type
+     * alone, because calling the right operation and then dropping its replacement would leave the same
+     * defect the finding describes. The captured request is asserted too, so a future change that keeps
+     * the return shape while reverting the operation cannot pass.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a rotated renewal token replaces the submitted one")
+    void aRotatedRenewalTokenReachesTheCaller() {
+        when(users.existsById(USER_ID)).thenReturn(true);
+        when(provider.getTokensFromRefreshToken(any(GetTokensFromRefreshTokenRequest.class)))
+                .thenReturn(GetTokensFromRefreshTokenResponse.builder()
+                        .authenticationResult(completeResult().refreshToken("rotated-refresh-token").build())
+                        .build());
+
+        SignOnResponse renewed = service.refresh(new TokenRefreshRequest(USER_ID, "submitted-refresh-token"));
+
+        assertThat(renewed.refreshToken())
+                .as("a rotated token that never reaches the caller is a session that dies on its "
+                        + "second renewal")
+                .isEqualTo("rotated-refresh-token");
+
+        ArgumentCaptor<GetTokensFromRefreshTokenRequest> sent =
+                ArgumentCaptor.forClass(GetTokensFromRefreshTokenRequest.class);
+        verify(provider).getTokensFromRefreshToken(sent.capture());
+        assertThat(sent.getValue().refreshToken()).isEqualTo("submitted-refresh-token");
+        assertThat(sent.getValue().clientId()).isEqualTo(CLIENT_ID);
+        assertThat(sent.getValue().clientSecret())
+                .as("the client is confidential, so the operation is refused without its secret")
+                .isEqualTo(CLIENT_SECRET);
+    }
+
+    /**
+     * Asserts a renewal naming an identifier other than the token's own subject is refused.
+     *
+     * <p>Purpose: the rotation-compatible operation takes no user name, so the keyed digest that used to
+     * bind the submitted identifier to the token is gone. Without a replacement binding, a caller holding
+     * one user's token could name any other still-present identifier, satisfy the membership probe with
+     * that name, and be handed a session minted for the first user. The refusal below is that
+     * replacement, and it is asserted rather than assumed because nothing else in the flow would notice.
+     * </p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a renewal naming another identifier than the token's subject is refused")
+    void aRenewalForAnotherSubjectIsRefused() {
+        when(provider.getTokensFromRefreshToken(any(GetTokensFromRefreshTokenRequest.class)))
+                .thenReturn(GetTokensFromRefreshTokenResponse.builder()
+                        .authenticationResult(completeResult().idToken(identityTokenFor("USER9999")).build())
+                        .build());
+
+        assertThatThrownBy(() -> service.refresh(new TokenRefreshRequest(USER_ID, "refresh-token")))
+                .isInstanceOf(CognitoIdentityService.SessionRefusedException.class)
+                .hasMessage(SESSION_REFUSED);
+
+        verifyNoInteractions(users);
+    }
+
+    /**
+     * Asserts an identity token this service cannot read a subject from is unevaluable, not a 200.
+     *
+     * <p>Assumptions: the binding above is only worth having if an unreadable token fails closed. A token
+     * with too few segments, one whose claim segment is not base-64url, one whose claims are not an
+     * object, and one carrying no user name claim are each pinned, because each is a different way for the
+     * reader to come back empty and any of them silently yielding a session would reopen the hole the
+     * binding closes.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("an unreadable identity token is unevaluable rather than a renewed session")
+    void anUnreadableIdentityTokenIsUnevaluable() {
+        String[] unreadable = {
+            "not-a-token",
+            "header.payload",
+            "header.!!!not-base64url!!!.signature",
+            "header." + Base64.getUrlEncoder().withoutPadding()
+                    .encodeToString("[]".getBytes(StandardCharsets.UTF_8)) + ".signature",
+            "header." + Base64.getUrlEncoder().withoutPadding()
+                    .encodeToString("{\"token_use\":\"id\"}".getBytes(StandardCharsets.UTF_8))
+                    + ".signature",
+        };
+
+        for (String idToken : unreadable) {
+            when(provider.getTokensFromRefreshToken(any(GetTokensFromRefreshTokenRequest.class)))
+                    .thenReturn(GetTokensFromRefreshTokenResponse.builder()
+                            .authenticationResult(completeResult().idToken(idToken).build())
+                            .build());
+
+            assertThatThrownBy(() -> service.refresh(new TokenRefreshRequest(USER_ID, "refresh-token")))
+                    .as("an identity token whose subject cannot be read cannot bind the submitted "
+                            + "identifier, so it cannot be renewed")
+                    .isExactlyInstanceOf(IllegalStateException.class)
+                    .hasMessage(UNABLE_TO_VERIFY);
+        }
+    }
+
+    /**
+     * Asserts a replayed renewal token is refused as a dead session rather than reported unevaluable.
+     *
+     * <p>Purpose: rotation gives the pool a distinct fault for a token that was already exchanged, and it
+     * is the one a caller submitting a stale copy will actually see. It has to land on the refused-session
+     * sentence and its 401, because reporting a replay as a 500 would tell a browser to retry an exchange
+     * that can never succeed instead of returning the user to the sign-on screen.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a replayed renewal token is a refused session rather than a fault")
+    void aReplayedRenewalTokenIsARefusedSession() {
+        when(provider.getTokensFromRefreshToken(any(GetTokensFromRefreshTokenRequest.class)))
+                .thenThrow(RefreshTokenReuseException.builder().message("Refresh Token has been revoked")
+                        .build());
+
+        assertThatThrownBy(() -> service.refresh(new TokenRefreshRequest(USER_ID, "refresh-token")))
+                .isInstanceOf(CognitoIdentityService.SessionRefusedException.class)
+                .hasMessage(SESSION_REFUSED);
+
+        verifyNoInteractions(users);
     }
 
     /**
@@ -387,13 +540,25 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("a store failure on the local probe carries the reference unevaluable sentence")
     void aStoreFailureOnTheProbeIsUnevaluable() {
+        // WHY : ⚠️ Refactoring Rationale: the pool is stubbed to ACCEPT here, where this case used to
+        //       assert the pool was never touched. The probe now runs after the credential exchange, so
+        //       the only way to reach it at all is to let the exchange succeed first. What the case pins
+        //       is unchanged -- a probe that cannot answer is unevaluable rather than either a refusal or
+        //       a 200 -- and it is now pinned on the path the service actually takes.
+        when(provider.initiateAuth(any(InitiateAuthRequest.class)))
+                .thenReturn(InitiateAuthResponse.builder()
+                        .authenticationResult(completeResult().build())
+                        .build());
         when(users.existsById(USER_ID)).thenThrow(new QueryTimeoutException("statement timed out"));
 
         assertThatThrownBy(() -> service.authenticate(new SignOnRequest(USER_ID, "Passw0rd!")))
                 .isExactlyInstanceOf(IllegalStateException.class)
                 .hasMessage(UNABLE_TO_VERIFY);
 
-        verifyNoInteractions(provider);
+        // WHY : Assumptions: the probe is asserted to have been consulted, because a case whose stub
+        //       never fires would pass for the wrong reason -- it would prove the exchange succeeded and
+        //       nothing about the translation this case exists for.
+        verify(users).existsById(USER_ID);
     }
 
     /**
@@ -426,74 +591,91 @@ class CognitoIdentityServiceTest {
     }
 
     /**
-     * Asserts both refusal paths take at least the floor, so neither can be told from the other by time.
+     * Asserts both refusal paths perform the same provider work, so neither is faster than the other.
      *
-     * <p>Assumptions: the merged refusal sentence closes the WORDING channel only. The locally-refused
-     * path performs one indexed probe while the pool-refused path performs a network round trip, so
-     * without the floor the two remain distinguishable by duration and an unauthenticated caller can
-     * still enumerate identifiers by timing them. The floor is what closes that second channel, and it
-     * is behaviour no compiler can observe, so it is asserted here.</p>
+     * <p>Purpose: the merged refusal sentence closes the WORDING channel only. What closes the DURATION
+     * channel is that a locally-unknown identifier costs the same network round trip a known one does,
+     * and the property that delivers it is the ORDER of the two steps: the credential exchange runs
+     * first, unconditionally, and the membership probe is consulted only after the pool has answered.
+     * Both legs below therefore reach the pool, and the case asserts they reach it identically.</p>
      *
-     * <p>Assumptions: the assertion is a FLOOR and not an equality, because a floor is the property that
-     * closes the channel: what must hold is that neither path can complete faster than the other's
-     * minimum. Asserting an upper bound as well would make the case fail on a loaded runner for a reason
-     * that has nothing to do with the behaviour under test.</p>
+     * <p>Assumptions: ⚠️ Refactoring Rationale: this case replaces one that timed each leg and asserted
+     * each exceeded a 500 ms floor produced by a deliberate sleep. The sleep is gone, and the assertion
+     * had to go with it, because a MINIMUM equalises only the fast side of a comparison -- a probe that
+     * happened to exceed the floor, on a cold index or a loaded database, lengthened one leg and left the
+     * other at the floor, so the very condition that made the two legs differ was the condition the floor
+     * stopped covering. Equal WORK has no such hole and costs no honest caller latency, which a floor
+     * charged to every refusal. Asserting equal DURATION directly was also rejected: two network round
+     * trips on a shared runner differ by more than any tolerance worth writing, so such a case would fail
+     * for reasons unrelated to the behaviour.</p>
      *
-     * <p>The refusal each timed leg expects is {@link BadCredentialsException}, which the timing helper
-     * catches and whose absence it reports as an assertion failure.</p>
+     * <p>The refusal expected on both legs is {@link BadCredentialsException} carrying the one merged
+     * sentence, which is asserted alongside the call shape so a change that reordered the steps could not
+     * pass by keeping the wording.</p>
      *
      * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
-    @DisplayName("both refusal paths take at least the padding floor")
-    void bothRefusalPathsTakeAtLeastTheFloor() {
-        when(users.existsById(USER_ID)).thenReturn(false);
+    @DisplayName("both refusal paths perform the same provider work")
+    void bothRefusalPathsPerformTheSameProviderWork() {
+        when(provider.initiateAuth(any(InitiateAuthRequest.class)))
+                .thenThrow(NotAuthorizedException.builder().message("Incorrect username or password")
+                        .build());
 
-        long localElapsed = elapsedNanosOfRefusal();
+        when(users.existsById(USER_ID)).thenReturn(false);
+        assertThatThrownBy(() -> service.authenticate(new SignOnRequest(USER_ID, ACCEPTED_CREDENTIAL)))
+                .isInstanceOf(BadCredentialsException.class)
+                .hasMessage(CREDENTIAL_REFUSED);
 
         when(users.existsById(USER_ID)).thenReturn(true);
-        when(provider.initiateAuth(any(InitiateAuthRequest.class)))
-                .thenThrow(NotAuthorizedException.builder().message("refused").build());
+        assertThatThrownBy(() -> service.authenticate(new SignOnRequest(USER_ID, ACCEPTED_CREDENTIAL)))
+                .isInstanceOf(BadCredentialsException.class)
+                .hasMessage(CREDENTIAL_REFUSED);
 
-        long providerElapsed = elapsedNanosOfRefusal();
-
-        // WHY : Assumptions: the floor asserted is a fraction of the configured one rather than the whole
-        //       of it, because a coarse system timer can report a sleep as marginally shorter than it was
-        //       asked for and this case is about the channel being closed rather than about the sleep's
-        //       precision. Two thirds is far above the unpadded local path, which completes in
-        //       microseconds, so the assertion still fails if the padding is removed.
-        long asserted = Duration.ofMillis(500).toNanos();
-        assertThat(localElapsed)
-                .as("a locally-refused sign-on must not complete faster than the floor")
-                .isGreaterThan(asserted);
-        assertThat(providerElapsed)
-                .as("a pool-refused sign-on must not complete faster than the floor")
-                .isGreaterThan(asserted);
+        // WHY : Assumptions: the two captured requests are compared to each other rather than to a
+        //       literal, because the property is that they are INDISTINGUISHABLE. Comparing each against
+        //       an expected shape would pass if both drifted together; comparing them with one another
+        //       fails the moment local knowledge changes what is sent, which is the leak being excluded.
+        ArgumentCaptor<InitiateAuthRequest> sent = ArgumentCaptor.forClass(InitiateAuthRequest.class);
+        verify(provider, times(2)).initiateAuth(sent.capture());
+        assertThat(sent.getAllValues())
+                .as("a locally-unknown identifier that skipped the round trip would be timeable")
+                .hasSize(2);
+        InitiateAuthRequest unknownLeg = sent.getAllValues().get(0);
+        InitiateAuthRequest knownLeg = sent.getAllValues().get(1);
+        assertThat(unknownLeg.authFlow()).isEqualTo(knownLeg.authFlow());
+        assertThat(unknownLeg.clientId()).isEqualTo(knownLeg.clientId());
+        assertThat(unknownLeg.authParameters().keySet())
+                .isEqualTo(knownLeg.authParameters().keySet());
     }
 
     /**
-     * Asserts a successful sign-on is NOT padded, so the floor costs no healthy request any latency.
+     * Asserts no exchange pays a deliberate delay, on the refusal path least of all.
      *
-     * <p>Assumptions: the first exchange of the run is discarded and only the second is timed, because
-     * the quantity this case is about is the padding and the first exchange also pays one-off costs that
-     * have nothing to do with it. Resolving the digest algorithm through the security provider,
-     * initialising the request builders and inflating the stubbing machinery all happen once, and
-     * together they were measured at over half a second on this runner -- enough to exceed the budget
-     * below on their own, and enough to make the case pass or fail on where the method happened to fall
-     * in the execution order rather than on whether a success is padded. Discarding one exchange removes
-     * that term from the measurement entirely.</p>
+     * <p>Purpose: ⚠️ Refactoring Rationale: this case used to assert that a SUCCESS was not padded, while
+     * a refusal deliberately was. The padding is gone -- the enumeration channel it half-closed is closed
+     * by equal work instead, asserted above -- so the property worth guarding inverted: what must hold now
+     * is that NO path sleeps, and the refusal path is the one to assert it on, because that is where a
+     * reintroduced floor would be put. A refusal is timed here and a success alongside it, so a floor
+     * added to either fails this case immediately.</p>
      *
-     * <p>Trade-offs: the budget asserted is roughly half the configured floor rather than a tight bound
-     * on a warmed call, which a warmed call clears by three orders of magnitude. A tight bound would
-     * fail on a loaded runner for a reason unrelated to the behaviour, while a budget at half the floor
-     * still fails immediately if the padding is ever extended to the success path -- which is the only
-     * regression this case exists to catch.</p>
+     * <p>Assumptions: one exchange of each kind is discarded before timing begins, because the first
+     * exchange of a run pays one-off costs -- resolving the digest algorithm through the security
+     * provider, inflating the stubbing machinery, initialising the request builders -- that were measured
+     * at over half a second on this runner. Timing the first exchange would make the case pass or fail on
+     * where the method fell in the execution order rather than on the behaviour.</p>
+     *
+     * <p>Trade-offs: the budget is generous rather than tight, at a fifth of the floor that used to be
+     * configured, because a tight bound on a shared runner fails for reasons unrelated to the behaviour.
+     * A generous budget still catches the one regression this case exists for, since any deliberate delay
+     * worth adding as an enumeration defence would have to be an order of magnitude larger than a warmed
+     * call to accomplish anything at all.</p>
      *
      * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
-    @DisplayName("a successful sign-on is not padded")
-    void aSuccessfulSignOnIsNotPadded() {
+    @DisplayName("neither a refusal nor a success pays a deliberate delay")
+    void noExchangePaysADeliberateDelay() {
         when(users.existsById(USER_ID)).thenReturn(true);
         when(provider.initiateAuth(any(InitiateAuthRequest.class)))
                 .thenReturn(InitiateAuthResponse.builder()
@@ -502,13 +684,26 @@ class CognitoIdentityServiceTest {
 
         service.authenticate(new SignOnRequest(USER_ID, ACCEPTED_CREDENTIAL));
 
-        long startedAt = System.nanoTime();
+        long acceptedStartedAt = System.nanoTime();
         service.authenticate(new SignOnRequest(USER_ID, ACCEPTED_CREDENTIAL));
-        long elapsed = System.nanoTime() - startedAt;
+        long acceptedElapsed = System.nanoTime() - acceptedStartedAt;
 
-        assertThat(elapsed)
-                .as("padding a success would slow every healthy sign-on for no disclosure it prevents")
-                .isLessThan(Duration.ofMillis(400).toNanos());
+        when(users.existsById(USER_ID)).thenReturn(false);
+        assertThatThrownBy(() -> service.authenticate(new SignOnRequest(USER_ID, ACCEPTED_CREDENTIAL)))
+                .isInstanceOf(BadCredentialsException.class);
+
+        long refusedStartedAt = System.nanoTime();
+        assertThatThrownBy(() -> service.authenticate(new SignOnRequest(USER_ID, ACCEPTED_CREDENTIAL)))
+                .isInstanceOf(BadCredentialsException.class);
+        long refusedElapsed = System.nanoTime() - refusedStartedAt;
+
+        long budget = Duration.ofMillis(100).toNanos();
+        assertThat(acceptedElapsed)
+                .as("delaying a success would slow every healthy sign-on for no disclosure it prevents")
+                .isLessThan(budget);
+        assertThat(refusedElapsed)
+                .as("a deliberate floor on a refusal equalises only the fast side of the comparison")
+                .isLessThan(budget);
     }
 
     /**
@@ -692,34 +887,48 @@ class CognitoIdentityServiceTest {
     }
 
     /**
-     * Asserts the renewal selects the refresh flow and carries the token and the client proof only.
+     * Asserts the renewal uses the rotation-compatible operation rather than the legacy refresh flow.
      *
-     * <p>Assumptions: the absence of a user-name parameter is asserted as well as the presence of the
-     * token, because the renewal flow does not accept one -- the token identifies its own subject -- while
-     * the confidential-client proof still has to be computed over the submitted identifier. That pairing
-     * is the whole reason this operation requires an identifier at all.</p>
+     * <p>Purpose: ⚠️ Refactoring Rationale: this case asserted the legacy {@code REFRESH_TOKEN_AUTH} flow
+     * on the generic authentication operation, with a keyed digest over the submitted identifier. That
+     * flow cannot be used against this pool at all: rotation is enabled on the client, and
+     * {@code infra/modules/cognito/variables.tf} refuses to add {@code ALLOW_REFRESH_TOKEN_AUTH} to the
+     * client's flows while it is, so every renewal was refused by the pool and every signed-on user was
+     * returned to the sign-on screen one access-token lifetime after signing on. The dedicated operation
+     * asserted below is the rotation-compatible one, and the two artifacts are only in step if this is
+     * what the service calls.</p>
+     *
+     * <p>Assumptions: the absence of an authentication-flow selector is not asserted, because the
+     * dedicated operation has no such member to omit -- selecting the wrong operation is now a compile
+     * error rather than a runtime refusal, which is a strictly better place for it. What replaces the
+     * withdrawn keyed digest is the client secret asserted here plus the subject binding asserted in its
+     * own case above; the digest is gone because this operation takes no user name to compute one over.
+     * </p>
      *
      * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
-    @DisplayName("the renewal selects the refresh flow and sends the token with the client proof")
-    void theRenewalSelectsTheRefreshFlow() {
+    @DisplayName("the renewal uses the rotation-compatible operation with the client secret")
+    void theRenewalUsesTheRotationCompatibleOperation() {
         when(users.existsById(USER_ID)).thenReturn(true);
-        when(provider.initiateAuth(any(InitiateAuthRequest.class)))
-                .thenReturn(InitiateAuthResponse.builder()
+        when(provider.getTokensFromRefreshToken(any(GetTokensFromRefreshTokenRequest.class)))
+                .thenReturn(GetTokensFromRefreshTokenResponse.builder()
                         .authenticationResult(completeResult().refreshToken(null).build())
                         .build());
 
         service.refresh(new TokenRefreshRequest(USER_ID, "refresh-token"));
 
-        ArgumentCaptor<InitiateAuthRequest> sent =
-                ArgumentCaptor.forClass(InitiateAuthRequest.class);
-        verify(provider).initiateAuth(sent.capture());
-        assertThat(sent.getValue().authFlow()).isEqualTo(AuthFlowType.REFRESH_TOKEN_AUTH);
-        assertThat(sent.getValue().authParameters())
-                .containsEntry("REFRESH_TOKEN", "refresh-token")
-                .containsKey("SECRET_HASH")
-                .doesNotContainKey("USERNAME");
+        ArgumentCaptor<GetTokensFromRefreshTokenRequest> sent =
+                ArgumentCaptor.forClass(GetTokensFromRefreshTokenRequest.class);
+        verify(provider).getTokensFromRefreshToken(sent.capture());
+        assertThat(sent.getValue().refreshToken()).isEqualTo("refresh-token");
+        assertThat(sent.getValue().clientId()).isEqualTo(CLIENT_ID);
+        assertThat(sent.getValue().clientSecret()).isEqualTo(CLIENT_SECRET);
+
+        // WHY : Assumptions: the legacy operation is asserted UNUSED as well, because a service that
+        //       called both -- the new one for the token and the old one for anything else -- would still
+        //       be refused by the pool on the second call, and the positive assertion above cannot see it.
+        verify(provider, never()).initiateAuth(any(InitiateAuthRequest.class));
     }
 
     /**
@@ -734,7 +943,7 @@ class CognitoIdentityServiceTest {
     @DisplayName("a refused refresh token reports the sign-on-again sentence")
     void aRefusedRefreshTokenReportsItsOwnSentence() {
         when(users.existsById(USER_ID)).thenReturn(true);
-        when(provider.initiateAuth(any(InitiateAuthRequest.class)))
+        when(provider.getTokensFromRefreshToken(any(GetTokensFromRefreshTokenRequest.class)))
                 .thenThrow(NotAuthorizedException.builder().message("Refresh Token has expired")
                         .build());
 
@@ -744,11 +953,125 @@ class CognitoIdentityServiceTest {
     }
 
     /**
-     * Asserts a locally-unknown identifier is refused on both new exchanges without reaching the pool.
+     * Asserts signing out revokes the submitted token at the pool, carrying the confidential secret.
+     *
+     * <p>Purpose: discarding a token in a browser ends nothing -- the renewal token is provisioned with a
+     * thirty-day life, so a copy taken from a browser store or a synchronised profile keeps minting access
+     * tokens for a month after the user believed the session was over. What makes a sign-out an event at
+     * the pool rather than a gesture in a tab is the revocation asserted here, and it is asserted on the
+     * request shape because a revocation the pool refuses to process for want of the client secret would
+     * look identical from the caller's side.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("signing out revokes the submitted token at the pool")
+    void signingOutRevokesTheTokenAtThePool() {
+        when(provider.revokeToken(any(RevokeTokenRequest.class)))
+                .thenReturn(RevokeTokenResponse.builder().build());
+
+        service.signOut(new SignOutRequest("refresh-token"));
+
+        ArgumentCaptor<RevokeTokenRequest> sent = ArgumentCaptor.forClass(RevokeTokenRequest.class);
+        verify(provider).revokeToken(sent.capture());
+        assertThat(sent.getValue().token()).isEqualTo("refresh-token");
+        assertThat(sent.getValue().clientId()).isEqualTo(CLIENT_ID);
+        assertThat(sent.getValue().clientSecret())
+                .as("the pool refuses a revocation for a confidential client that omits its secret")
+                .isEqualTo(CLIENT_SECRET);
+
+        // WHY : Assumptions: the local store is asserted untouched because this operation carries no
+        //       identifier and needs none -- authority is possession of the token, which is all the pool's
+        //       revocation accepts. A probe here would add a failure mode to an operation whose whole
+        //       purpose is to succeed.
+        verifyNoInteractions(users);
+    }
+
+    /**
+     * Asserts a token the pool will not accept is a completed sign-out rather than a reported failure.
+     *
+     * <p>Purpose: a caller signing out has already decided the session is over, and the states the pool
+     * reports for a token it cannot revoke -- already revoked, expired, not a revocable type -- all
+     * describe a token that cannot mint anything. Reporting them as failures would tell a browser its
+     * sign-out did not happen when the only outcome sign-out exists to produce is already true, and would
+     * additionally distinguish a live token from a dead one for an unauthenticated caller.</p>
+     *
+     * <p>Assumptions: the two vectors are the two distinct pool faults this classification covers, and
+     * both are pinned because they arrive as different SDK types and a catch clause naming only one would
+     * let the other escape as a 500.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a token the pool will not accept still completes the sign-out")
+    void anUnacceptableTokenStillCompletesTheSignOut() {
+        when(provider.revokeToken(any(RevokeTokenRequest.class)))
+                .thenThrow(UnsupportedTokenTypeException.builder()
+                        .message("Revoking is not supported for this token").build())
+                .thenThrow(NotAuthorizedException.builder().message("Invalid Refresh Token").build());
+
+        service.signOut(new SignOutRequest("unsupported-token"));
+        service.signOut(new SignOutRequest("already-revoked-token"));
+
+        verify(provider, times(2)).revokeToken(any(RevokeTokenRequest.class));
+    }
+
+    /**
+     * Asserts an unreachable pool is reported rather than swallowed, because the token is still live.
+     *
+     * <p>Purpose: this is the one sign-out outcome that must NOT be reported as done. Every other refusal
+     * describes a token that cannot mint anything, but a pool that could not be reached has revoked
+     * nothing -- the token remains usable for the rest of its thirty days, and a caller told the sign-out
+     * succeeded would have no reason to retry. The sentence is this service's unevaluable one, which its
+     * shared advice renders as a 500, so a browser sees a transport failure and can retry.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("an unreachable pool fails the sign-out rather than reporting it done")
+    void anUnreachablePoolFailsTheSignOut() {
+        when(provider.revokeToken(any(RevokeTokenRequest.class)))
+                .thenThrow(SdkClientException.create("connection refused", new ConnectException()));
+
+        assertThatThrownBy(() -> service.signOut(new SignOutRequest("refresh-token")))
+                .isExactlyInstanceOf(IllegalStateException.class)
+                .hasMessage(UNABLE_TO_VERIFY);
+    }
+
+    /**
+     * Asserts a sign-out with no token is refused before the pool, blaming the token's own field.
+     *
+     * <p>Assumptions: the guard is asserted at the service rather than left to the transport constraints
+     * the request record declares, because a caller inside the application reaches this method without an
+     * argument resolver having run. Sending a blank token to the pool would spend a round trip to be told
+     * what is knowable locally.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a sign-out with no token is refused before the pool")
+    void aSignOutWithNoTokenIsRefused() {
+        assertThatThrownBy(() -> service.signOut(new SignOutRequest(BLANK)))
+                .isInstanceOf(ClientInputException.class);
+        assertThrows(NullPointerException.class, () -> service.signOut(null));
+
+        verifyNoInteractions(provider, users);
+    }
+
+    /**
+     * Asserts a locally-unknown identifier is refused on both new exchanges, after the pool has answered.
      *
      * <p>Assumptions: the probe is not redundant on the challenge answer just because the caller holds a
      * session this service issued: a row deleted between the sign-on and the answer must not be able to
-     * complete an exchange that ends in a usable token set.</p>
+     * complete an exchange that ends in a usable token set. The same holds for a renewal, where the row
+     * may have been removed at any point in the token's thirty-day life.</p>
+     *
+     * <p>Assumptions: ⚠️ Refactoring Rationale: this case asserted the pool was NEVER reached, and now
+     * asserts it was reached first. The gate itself is unchanged -- an identifier with no local row still
+     * cannot obtain a token set -- but a gate applied before the network call made the two states
+     * distinguishable by duration on operations that need no credential to invoke, so the order was
+     * inverted. Both halves of the property are asserted here: the pool IS consulted, and the exchange is
+     * STILL refused.</p>
      *
      * <p>The refusal expected on both exchanges is
      * {@link CognitoIdentityService.SessionRefusedException}.</p>
@@ -756,9 +1079,17 @@ class CognitoIdentityServiceTest {
      * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
-    @DisplayName("a locally-unknown identifier is refused on both new exchanges before the pool")
-    void aLocallyUnknownIdentifierIsRefusedBeforeThePool() {
+    @DisplayName("a locally-unknown identifier is refused on both new exchanges, after the pool")
+    void aLocallyUnknownIdentifierIsRefusedAfterThePool() {
         when(users.existsById(USER_ID)).thenReturn(false);
+        when(provider.respondToAuthChallenge(any(RespondToAuthChallengeRequest.class)))
+                .thenReturn(RespondToAuthChallengeResponse.builder()
+                        .authenticationResult(completeResult().build())
+                        .build());
+        when(provider.getTokensFromRefreshToken(any(GetTokensFromRefreshTokenRequest.class)))
+                .thenReturn(GetTokensFromRefreshTokenResponse.builder()
+                        .authenticationResult(completeResult().build())
+                        .build());
 
         assertThatThrownBy(() -> service.answerChallenge(
                         new SignOnChallengeRequest(USER_ID, SESSION, "Perm4nentPassw0rd!")))
@@ -769,8 +1100,12 @@ class CognitoIdentityServiceTest {
                 .isInstanceOf(CognitoIdentityService.SessionRefusedException.class)
                 .hasMessage(SESSION_REFUSED);
 
-        verify(provider, never()).respondToAuthChallenge(any(RespondToAuthChallengeRequest.class));
-        verify(provider, never()).initiateAuth(any(InitiateAuthRequest.class));
+        // WHY : Assumptions: the pool calls are asserted to HAVE happened, because a refusal alone cannot
+        //       show which step produced it. Without this, an implementation that reverted to probing
+        //       first would keep every sentence and every status this case asserts while reopening the
+        //       timing channel the ordering exists to close.
+        verify(provider).respondToAuthChallenge(any(RespondToAuthChallengeRequest.class));
+        verify(provider).getTokensFromRefreshToken(any(GetTokensFromRefreshTokenRequest.class));
     }
 
     /**
@@ -940,16 +1275,29 @@ class CognitoIdentityServiceTest {
      * <p>Trade-offs: the merge gives up a diagnostic the reference gave the caller, namely whether the
      * identifier or the credential was at fault. What it buys is that an unauthenticated caller can no
      * longer harvest valid identifiers one request at a time, which the reference's two distinguishable
-     * sentences made possible for anyone able to reach the sign-on screen. The duration floor asserted
-     * elsewhere in this class closes the same channel in the timing dimension, and the pair of them is
-     * why the diagnostic is given up rather than kept.</p>
+     * sentences made possible for anyone able to reach the sign-on screen. The equal-work property
+     * asserted elsewhere in this class closes the same channel in the timing dimension, and the pair of
+     * them is why the diagnostic is given up rather than kept.</p>
+     *
+     * <p>Assumptions: ⚠️ Refactoring Rationale: this case asserted the credential never reached the pool,
+     * on the reasoning that relaying it would present a third party with a credential for a subject this
+     * context does not own. That reasoning was withheld from the wrong side of the trade: the pool is the
+     * party that owns the credential in the first place -- it is where the value was set and where it is
+     * verified -- so relaying it discloses nothing to anyone who does not already hold it, while WITHHOLDING
+     * it made a locally-absent identifier answer measurably faster than a present one. The exchange is now
+     * relayed unconditionally and the row is required afterwards, so the sentence and the refusal are
+     * unchanged and the duration is not.</p>
      *
      * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
-    @DisplayName("a locally-absent row is refused before the credential reaches the pool")
-    void aLocallyAbsentRowIsRefusedBeforeTheCredentialReachesThePool() {
+    @DisplayName("a locally-absent row is refused after the credential has reached the pool")
+    void aLocallyAbsentRowIsRefusedAfterTheCredentialReachesThePool() {
         when(users.existsById(USER_ID)).thenReturn(false);
+        when(provider.initiateAuth(any(InitiateAuthRequest.class)))
+                .thenReturn(InitiateAuthResponse.builder()
+                        .authenticationResult(completeResult().build())
+                        .build());
 
         BadCredentialsException refused = assertThrows(BadCredentialsException.class,
                 () -> service.authenticate(new SignOnRequest(USER_ID, ACCEPTED_CREDENTIAL)));
@@ -959,11 +1307,12 @@ class CognitoIdentityServiceTest {
                 .hasMessage(CREDENTIAL_REFUSED)
                 .hasNoCause();
 
-        // WHY : Assumptions: the pool is asserted untouched because relaying a credential for an
-        //       identifier this context holds no row for would present that credential to a third party
-        //       on behalf of a subject this context does not own, which is the exposure the ownership
-        //       probe exists to prevent. The sentence alone cannot show which of the two steps ran first.
-        verifyNoInteractions(provider);
+        // WHY : Assumptions: both steps are asserted, in the order the service performs them, because the
+        //       sentence alone cannot show either that the pool WAS consulted -- which is what makes the
+        //       two local states indistinguishable by duration -- or that the row was STILL required
+        //       afterwards, which is what stops a pool-accepted credential for a removed user becoming a
+        //       usable token set.
+        verify(provider).initiateAuth(any(InitiateAuthRequest.class));
         verify(users).existsById(USER_ID);
     }
 
@@ -1174,7 +1523,7 @@ class CognitoIdentityServiceTest {
         assertThat(tokens.outcome()).isEqualTo("AUTHENTICATED");
         assertThat(tokens.userId()).isEqualTo(USER_ID);
         assertThat(tokens.accessToken()).isEqualTo("access-token");
-        assertThat(tokens.idToken()).isEqualTo("id-token");
+        assertThat(tokens.idToken()).isEqualTo(identityTokenFor(USER_ID));
         assertThat(tokens.refreshToken()).isEqualTo("refresh-token");
         assertThat(tokens.tokenType()).isEqualTo("Bearer");
         assertThat(tokens.expiresIn()).isEqualTo(3600);
@@ -1235,39 +1584,6 @@ class CognitoIdentityServiceTest {
     }
 
     /**
-     * Times one refused sign-on.
-     *
-     * <p>This helper takes no parameter; the substituted collaborators the enclosing case arranged are
-     * what decide which of the two refusal paths is measured.</p>
-     *
-     * <p>Assumptions: the interval is read from the monotonic timer rather than from the wall clock,
-     * because the wall clock can be stepped by a time synchroniser mid-measurement and would then report
-     * an interval that never elapsed, in either direction. The service's own padding helper reads the
-     * same timer, so the two measure against one source and the floor cannot appear breached by a clock
-     * adjustment the padding never saw.</p>
-     *
-     * <p>Alternatives Considered: returning a sentinel interval when the sign-on was not refused, so the
-     * caller could branch on it. Rejected because the two callers assert a LOWER bound, and any sentinel
-     * large enough to be recognisable would also clear that bound -- so an exchange that stopped being
-     * refused at all would read as a passing measurement. Raising instead makes the wrong path
-     * impossible to measure silently.</p>
-     *
-     * @return the elapsed nanoseconds the refusal took, measured on the monotonic timer for the reason
-     *     the service's own padding helper records
-     * @throws AssertionError if the sign-on was not refused, which would mean the case was measuring a
-     *     path other than the one it names
-     */
-    private long elapsedNanosOfRefusal() {
-        long startedAt = System.nanoTime();
-        try {
-            service.authenticate(new SignOnRequest(USER_ID, "Passw0rd!"));
-        } catch (BadCredentialsException expected) {
-            return System.nanoTime() - startedAt;
-        }
-        throw new AssertionError("the sign-on was expected to be refused");
-    }
-
-    /**
      * Builds a complete authentication result, for a case to then remove one member from.
      *
      * <p>This factory takes no parameter.</p>
@@ -1285,9 +1601,37 @@ class CognitoIdentityServiceTest {
     private static AuthenticationResultType.Builder completeResult() {
         return AuthenticationResultType.builder()
                 .accessToken("access-token")
-                .idToken("id-token")
+                .idToken(identityTokenFor(USER_ID))
                 .refreshToken("refresh-token")
                 .tokenType("Bearer")
                 .expiresIn(3600);
+    }
+
+    /**
+     * Builds a compact-serialised identity token carrying one pool user name and nothing else.
+     *
+     * <p>Purpose: the renewal exchange reads the {@code cognito:username} claim out of the identity token
+     * the pool returns, so a stub answer whose identity token is an arbitrary string cannot exercise that
+     * path at all. This produces the shape the pool produces -- three dot-separated segments, the middle
+     * one base-64url without padding -- so the service's own reader is what is exercised rather than a
+     * test-only shortcut around it.</p>
+     *
+     * <p>Assumptions: the signature segment is a fixed placeholder and the header names no algorithm that
+     * is honoured, because the service deliberately does not verify a token it received as the body of its
+     * own outbound call -- provenance comes from the call, and the reasoning is recorded on the reader.
+     * Producing a genuinely signed token would therefore assert nothing this does not, while requiring a
+     * key this test has no reason to hold.</p>
+     *
+     * @param userName the pool user name to place in the {@code cognito:username} claim; must not be
+     *     {@code null}
+     * @return the three-segment token; never {@code null}
+     */
+    private static String identityTokenFor(String userName) {
+        Base64.Encoder encoder = Base64.getUrlEncoder().withoutPadding();
+        String header = encoder.encodeToString(
+                "{\"alg\":\"RS256\",\"kid\":\"test\"}".getBytes(StandardCharsets.UTF_8));
+        String claims = encoder.encodeToString(("{\"cognito:username\":\"" + userName
+                + "\",\"token_use\":\"id\"}").getBytes(StandardCharsets.UTF_8));
+        return header + "." + claims + ".c2lnbmF0dXJl";
     }
 }

@@ -5,13 +5,18 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.Properties;
 import javax.sql.DataSource;
 import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.flyway.autoconfigure.FlywayDataSource;
+import org.springframework.boot.jdbc.DataSourceBuilder;
 import org.springframework.boot.jdbc.autoconfigure.DataSourceProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.datasource.SimpleDriverDataSource;
 
 /**
  * Builds the HikariCP data source of the reference-data context and proves its schema pin took effect.
@@ -73,6 +78,20 @@ public class DataSourceConfig {
      * The query that reports the first existing schema on the connection's effective search path.
      */
     private static final String EFFECTIVE_SCHEMA_QUERY = "SELECT current_schema()";
+
+    /**
+     * The driver property naming the transport-security mode a connection must negotiate.
+     *
+     * <p>Assumptions: this is the PostgreSQL driver's own property name, not a Spring one, which is why it
+     * is written without separators. It is declared here so that the pooled data source and the migration
+     * data source below cannot come to spell it differently.</p>
+     */
+    private static final String SSL_MODE_PROPERTY = "sslmode";
+
+    /**
+     * The driver property naming the certificate bundle the server's chain is validated against.
+     */
+    private static final String SSL_ROOT_CERT_PROPERTY = "sslrootcert";
 
     /**
      * Builds the HikariCP data source from the core datasource properties and the pool properties.
@@ -154,6 +173,107 @@ public class DataSourceConfig {
         return properties.initializeDataSourceBuilder()
                 .type(HikariDataSource.class)
                 .build();
+    }
+
+    /**
+     * Builds the data source Flyway migrates through, carrying the same verified TLS terms as the pool.
+     *
+     * <p>Purpose: schema-owner migrations must reach the cluster over a connection whose certificate chain
+     * and hostname are verified, exactly as runtime queries do. This bean is what makes that true, and it
+     * exists because nothing else does it.</p>
+     *
+     * <p>Refactoring Rationale: this bean did not exist, and its absence silently weakened the transport of
+     * every DDL statement this module applies. {@code spring.flyway.user} is set, which makes Spring Boot
+     * build Flyway a separate migration data source of its own -- verified against
+     * {@code FlywayAutoConfiguration.getMigrationDataSource} in {@code spring-boot-flyway} 4.1.0, whose
+     * {@code applyConnectionDetails} copies the URL, the driver class name, the user and the password and
+     * NOTHING else. The {@code sslmode: verify-full} and {@code sslrootcert} terms are bound under
+     * {@code spring.datasource.hikari.data-source-properties}, which is a HikariCP-specific map, so they were
+     * not among the values copied. The configuration comment beside those keys asserted that "the URL, driver
+     * and TLS terms are inherited"; the first two were and the third was not, so migrations negotiated
+     * whatever the driver's default mode is -- {@code prefer} for PostgreSQL, which will silently accept an
+     * unencrypted session and validates no certificate at all. The runtime path was never affected, which is
+     * precisely why the gap was invisible: a deployment could verify every query and verify none of its DDL.</p>
+     *
+     * <p>Alternatives Considered: appending the TLS parameters to the shared JDBC URL instead, which would fix
+     * every consumer of that URL at once. Rejected for the same reason recorded above against pinning the
+     * schema through the URL: the URL is environment-owned, arriving as {@code SPRING_DATASOURCE_URL} from the
+     * deployment, so an operator edit could drop the terms with nothing in this repository changing -- and a
+     * dropped {@code verify-full} is not a visible failure, it is a quietly downgraded connection.</p>
+     *
+     * <p>Alternatives Considered: setting {@code spring.flyway.url} together with
+     * {@code spring.flyway.jdbc-properties}, which reads like the purpose-built mechanism. Rejected because it
+     * is not: Boot hands Flyway a {@code DataSource} in every branch of {@code getMigrationDataSource}, and
+     * Flyway applies {@code jdbcProperties} only when it constructs its own connection from a URL, so the
+     * properties would have been accepted, carried and ignored -- the same class of silent no-op this bean is
+     * correcting.</p>
+     *
+     * <p>Assumptions: this is deliberately NOT a pooled data source. Migrations run once during context
+     * refresh and then never again, so a pool would hold connections open for the life of the task under the
+     * migration credential -- a credential that, unlike the runtime one, holds DDL authority over the tables
+     * it created. A driver-backed source opens a connection when Flyway asks and closes it when Flyway is
+     * done, which is the whole of the lifetime the work needs.</p>
+     *
+     * <p>Assumptions: the bean is declared with {@code defaultCandidate = false} and is found through the
+     * {@link FlywayDataSource} qualifier alone. Without that, this context would hold two beans of type
+     * {@code DataSource}: the JPA autoconfiguration resolves one by type and would fail to choose, and the
+     * actuator's datasource health contributor -- which collects every {@code DataSource} bean -- would open a
+     * validation connection under the migration credential on every health poll. Excluding it from default
+     * candidacy states that this data source has exactly one consumer, which is the fact.</p>
+     *
+     * <p>Assumptions: the bean is conditional on {@code spring.flyway.user}, which is the exact condition that
+     * makes Boot build a migration data source of its own. Where no separate migration credential is
+     * configured -- the integration-test profile, which drives an ephemeral container under one credential --
+     * Boot hands Flyway the application data source itself, so the pooled TLS terms already apply and a second
+     * source would only be a second thing to keep in agreement. Declaring the condition rather than always
+     * publishing the bean is also what keeps this type usable in a profile that sets no migration credential
+     * at all, where the mandatory placeholders below could not resolve.</p>
+     *
+     * @param properties the {@link DataSourceProperties} carrying the JDBC URL and driver class the runtime
+     *     pool also uses, so migrations and queries cannot address different clusters; must not be
+     *     {@code null}
+     * @param migrationUser the migration login read from {@code spring.flyway.user}, distinct from the runtime
+     *     login so that DDL authority is not held by the credential every request runs under; must not be
+     *     blank
+     * @param migrationPassword the credential for that login, read from {@code spring.flyway.password}; must
+     *     not be blank
+     * @param sslMode the transport-security mode read from {@code carddemo.database.ssl.mode}, the same key
+     *     the pool's driver properties are bound from; must not be blank
+     * @param sslRootCert the certificate-bundle path read from {@code carddemo.database.ssl.root-cert}, the
+     *     same key the pool's driver properties are bound from; must not be blank
+     * @return a {@link SimpleDriverDataSource} addressing the configured cluster as the migration login with
+     *     verified transport security, never {@code null}
+     * @throws IllegalStateException if the configured driver class cannot be loaded, raised by the builder,
+     *     which is a packaging fault rather than a configuration one
+     */
+    @Bean(defaultCandidate = false)
+    @FlywayDataSource
+    @ConditionalOnProperty(name = "spring.flyway.user")
+    public SimpleDriverDataSource flywayDataSource(DataSourceProperties properties,
+            @Value("${spring.flyway.user}") String migrationUser,
+            @Value("${spring.flyway.password}") String migrationPassword,
+            @Value("${carddemo.database.ssl.mode}") String sslMode,
+            @Value("${carddemo.database.ssl.root-cert}") String sslRootCert) {
+
+        SimpleDriverDataSource migrationDataSource = DataSourceBuilder.create()
+                .type(SimpleDriverDataSource.class)
+                .url(properties.determineUrl())
+                .driverClassName(properties.determineDriverClassName())
+                .username(migrationUser)
+                .password(migrationPassword)
+                .build();
+
+        // WHY : Assumptions: the properties are set as DRIVER connection properties rather than appended to
+        //   the URL, so a URL that already carries a query string cannot be corrupted by concatenation and a
+        //   URL that carries a conflicting ssl term is overridden rather than silently duplicated. This is
+        //   the same mechanism the pool uses through spring.datasource.hikari.data-source-properties, applied
+        //   to the one connection Flyway opens.
+        Properties connectionProperties = new Properties();
+        connectionProperties.setProperty(SSL_MODE_PROPERTY, sslMode);
+        connectionProperties.setProperty(SSL_ROOT_CERT_PROPERTY, sslRootCert);
+        migrationDataSource.setConnectionProperties(connectionProperties);
+
+        return migrationDataSource;
     }
 
     /**

@@ -45,10 +45,22 @@
 --     requires is stated at the column itself rather than left to inference.
 --
 -- Post-state established (what exists after this file has been applied):
---   - One table, batch.batch_run, with seven columns and five named
---     constraints: a surrogate identity primary key, a composite uniqueness
---     constraint over (run_id, step_name), a lifecycle-state domain check, an
---     exit-status tier check, and a state-versus-timestamp coherence check.
+--   - One table, batch.batch_run, with EIGHT columns and SEVEN named
+--     constraints. The columns are id, run_id, step_name, status, started_at,
+--     finished_at, return_code and attempt. The constraints are pk_batch_run,
+--     a surrogate identity primary key; uq_batch_run_run_step, a composite
+--     uniqueness constraint over (run_id, step_name); ck_batch_run_status, a
+--     lifecycle-state domain check; ck_batch_run_return_code, an exit-status
+--     tier check; ck_batch_run_lifecycle, a state-versus-timestamp coherence
+--     check; ck_batch_run_finished_after_started, an ordering check on the two
+--     timestamps; and ck_batch_run_attempt, the floor on the redrive counter.
+--     Refactoring Rationale: this post-state said seven columns and five
+--     constraints, which was the shape before the redrive counter and the
+--     timestamp-ordering check were added below. It is corrected rather than
+--     softened to a range because BatchRunRepositoryIT asserts both figures
+--     exactly against the live catalog, so the description and the assertion
+--     are two halves of one contract and a reader who trusted the smaller
+--     figures would conclude the attempt column was undeclared here.
 --   - Table and column comments carrying the contract into the database itself,
 --     so an operator inspecting the table sees the reasoning without this file.
 --   - Six job-repository tables and three named sequences, all prefixed BATCH_

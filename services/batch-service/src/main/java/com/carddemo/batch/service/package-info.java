@@ -24,7 +24,7 @@
  * <p>Assumptions: the documentation duty is enforced mechanically rather than
  * aspirationally, which is why the block below is long rather than a sentence. Two checks
  * in {@code config/checkstyle/checkstyle.xml} reach this directory and they are distinct:
- * {@code JavadocPackage}, configured at line 245, is a file-set check asserting that a
+ * {@code JavadocPackage}, configured at line 238, is a file-set check asserting that a
  * {@code package-info.java} EXISTS wherever a processed compilation unit does, while
  * {@code MissingJavadocPackage}, configured at line 378, asserts that the file carries
  * real Javadoc rather than merely existing. The plugin is bound to Maven's

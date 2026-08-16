@@ -167,7 +167,7 @@ output "public_subnet_ids" {
 }
 
 output "private_app_subnet_ids" {
-  description = "Ordered list of the private application subnet identifiers, one per availability zone, and the most widely consumed output here. Read by ecs-service for task placement, by step-functions-batch for its Fargate task network configuration, and by api-gateway-http for its VPC Link. NOT read by alb: per AAP 0.4.1.9 the load balancer belongs to the public tier, and the roots place it there. The tier also holds the interface VPC endpoint ENIs, which is how a task reaches ECR, CloudWatch Logs, Secrets Manager, KMS, SQS, Step Functions and SSM without its traffic leaving the VPC."
+  description = "Ordered list of the private application subnet identifiers, one per availability zone, and the most widely consumed output here. Read by ecs-service for task placement, by step-functions-batch for its Fargate task network configuration, and by api-gateway-http for its VPC Link. NOT read by alb: per AAP 0.4.1.9 the load balancer belongs to the public tier, and the roots place it there. The tier also holds the interface VPC endpoint ENIs, which is how a task reaches ECR, CloudWatch Logs, Secrets Manager, KMS, SQS, Step Functions, SSM, X-Ray and the Cognito identity provider without its traffic leaving the VPC."
   value = [
     for zone in local.availability_zones :
     aws_subnet.private_app[zone].id
@@ -185,21 +185,22 @@ output "isolated_data_subnet_ids" {
 # -----------------------------------------------------------------------------
 # Security groups - the three a sibling module attaches to
 #
-# Alternatives Considered: publishing the fourth group as well, the one main.tf
-# creates for the interface-endpoint ENIs, so that the set of published groups
-# mirrored the set of created groups. Rejected because nothing outside this
-# module attaches to it: the endpoints that carry it are created here, and its
-# only rule pair is the 443 flow from the application group, declared here too.
-# Publishing it would widen the contract with a value no consumer reads.
-# Trade-offs: a reader comparing this file against main.tf will notice the
-# omission, which is why it is recorded here rather than left to inference. The
-# omission is also protective. An identifier that is reachable invites a future
+# Refactoring Rationale: this recorded a deliberate omission -- main.tf created a
+# FOURTH group for the interface-endpoint ENIs and this file published only three,
+# and the paragraph explained why the fourth was withheld. There is no longer a
+# fourth group to withhold. The frozen plan specifies three (AAP section 0.5.1.12),
+# the ENIs carry the application group, and the created and published sets are now
+# identical -- so a reader comparing this file against main.tf finds no discrepancy
+# to explain. The reasoning is replaced rather than deleted because the omission it
+# described was real for a period, and a reader of an older revision needs to know
+# it ended rather than that it was never there.
+# Trade-offs: the note below is retained on its own merits. An identifier that is reachable invites a future
 # caller to attach something to that group, and whatever is attached inherits
-# every outbound path the application tier holds - the eight private AWS service
-# endpoints, the internal listener on 443, the S3 prefix list and the identity
-# provider; leaving it unpublished keeps that group's membership decided in one
-# file. The set of inherited paths grew when those last three were added, which
-# makes the omission worth more now than it was, not less.
+# every outbound path the application tier holds - the ten private AWS service
+# endpoints, the internal listener on 443 and the S3 prefix list; leaving it
+# unpublished keeps that group's membership decided in one file. The set of
+# inherited paths grew when the last two were added, which makes the omission
+# worth more now than it was, not less.
 # -----------------------------------------------------------------------------
 
 output "alb_security_group_id" {
@@ -208,7 +209,7 @@ output "alb_security_group_id" {
 }
 
 output "app_security_group_id" {
-  description = "Identifier (string) of the application-tier security group, attached by ecs-service to its task ENIs and by step-functions-batch to its Fargate task network configuration. Its permitted flows are exactly five, each a separately named rule: ingress from the load-balancer group on app_container_port; egress to the data group on database_port; egress to the interface-endpoint group on 443 for the eight private AWS service endpoints; egress on 443 to the S3 gateway endpoint's managed prefix list, which needs a prefix-list rule because a gateway endpoint places no ENI and so has no group to reference; and egress on 443 to identity_provider_egress_cidrs for the Cognito JWK set every service fetches at start-up, which has no interface endpoint in the specified eight-service set. Egress is enumerated rather than left as a new group's implicit allow-all, so a further outbound dependency has to arrive as a named rule visible in a plan diff."
+  description = "Identifier (string) of the application-tier security group, attached by ecs-service to its task ENIs and by step-functions-batch to its Fargate task network configuration. Its permitted flows are exactly five, each a separately named rule: ingress from the load-balancer group on app_container_port; egress to the data group on database_port; egress to the endpoint ENIs on 443 for the ten private AWS service endpoints, which include the identity provider and the trace collector -- a SELF reference, because those ENIs carry this same group rather than a fourth one; egress to the load-balancer group on 443 for service-to-service calls; and egress on 443 to the S3 gateway endpoint's managed prefix list, which needs a prefix-list rule because a gateway endpoint places no ENI and so has no group to reference. There is NO rule to a public destination: the identity-provider egress rule that admitted 0.0.0.0/0 on 443 is withdrawn, because the cognito-idp endpoint in the set above carries the same calls inside the VPC. Egress is enumerated rather than left as a new group's implicit allow-all, so a further outbound dependency has to arrive as a named rule visible in a plan diff."
   value       = aws_security_group.app.id
 }
 
@@ -285,7 +286,7 @@ output "nat_gateway_public_ips" {
 #   consumer ask for the endpoint it actually means, and it is why widening the
 #   set from eight names to ten changed nothing for any consumer of this output.
 output "interface_vpc_endpoint_ids" {
-  description = "Map from short AWS service name to that service's interface VPC endpoint identifier, keyed exactly as var.interface_endpoint_services is written: ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs, states, ssm, xray and cognito-idp. Its consumer is the environment root, which needs a specific endpoint's identity to attach a metric or an endpoint policy to it; no sibling module reads it today. Each endpoint places an ENI in the private application subnets, which is how a task reaches these services without egressing the VPC."
+  description = "Map from short AWS service name to that service's interface VPC endpoint identifier, keyed exactly as var.interface_endpoint_services is written: ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs, states and ssm. Its consumer is the environment root, which needs a specific endpoint's identity to attach a metric or an endpoint policy to it; no sibling module reads it today. Each endpoint places an ENI in the private application subnets, which is how a task reaches these services without egressing the VPC."
   value = {
     for service, endpoint in aws_vpc_endpoint.interface :
     service => endpoint.id

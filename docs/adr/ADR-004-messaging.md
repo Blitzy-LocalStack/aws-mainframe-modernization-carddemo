@@ -49,52 +49,65 @@ the online transactions. The flows are described from the source that defines
 them, because a transport chosen without reference to the semantics it must carry
 is a preference rather than a decision.
 
-### The five baseline queues become six target queues, and what each one carries
+### The five baseline queues become five target queues, and what each one carries
 
-Assumptions: **the two counts differ by one and the difference is deliberate.** The
-baseline names FIVE queues, but one of them — `CARDDEMO.REQUEST.QUEUE` — is shared by
-two unrelated flows read by two different programs, and the target gives each flow its
-own source queue so that one context's consumer cannot receive the other's request. The
-target therefore provisions **six source queues and six dead-letter queues**, and every
-count in this record is stated against six. The per-queue contracts are specified in
+Assumptions: **the two counts are equal, one target queue per baseline queue.** The
+target provisions **five source queues and five dead-letter queues** — ten in total —
+and every count in this record is stated against five. The per-queue contracts are
+specified in
 [`docs/architecture/messaging-contracts.md`](../architecture/messaging-contracts.md).
+
+⚠️ Refactoring Rationale: this section stated SIX source queues, fanning
+`CARDDEMO.REQUEST.QUEUE` out into one request queue per consumer "so that one context's
+consumer cannot receive the other's request". The fan-out is **withdrawn**, on two
+grounds. First, AAP §0.4.1.8 fixes five target queues and the AAP is the agreed source
+of truth; a sixth primary is a topology change rather than a refinement of the same
+decision, however it is described. Second — and this is what makes the withdrawal
+correct rather than merely compliant — the hazard the split was reaching for is not
+resolved by splitting. A receive HIDES a message from every other consumer rather than
+delivering a copy to each, so a queue is answerable by exactly one OWNING consumer, and
+the owner dispatches on content it already decodes: the four-character function code is
+the first field of every request, single-sourced by `common-lib`'s
+`InquiryRequestCodec`. Splitting instead required an external producer to know which of
+two addresses carried which flow, for a discriminator its own payload already states,
+and left a producer holding one address unable to reach the other flow at all.
 
 | Baseline queue | Declared at | Target queue | Type |
 |---|---|---|---|
 | `AWS.M2.CARDDEMO.PAUTH.REQUEST` | [`app/app-authorization-ims-db2-mq/README.md`](../../app/app-authorization-ims-db2-mq/README.md) **L278** | `carddemo-pauth-request-<env>.fifo`, with `carddemo-pauth-request-<env>-dlq.fifo` | FIFO |
 | `AWS.M2.CARDDEMO.PAUTH.REPLY` | [`app/app-authorization-ims-db2-mq/README.md`](../../app/app-authorization-ims-db2-mq/README.md) **L279** | `carddemo-pauth-reply-<env>.fifo`, with `carddemo-pauth-reply-<env>-dlq.fifo` | FIFO |
-| `CARDDEMO.REQUEST.QUEUE`, account-detail traffic | [`app/app-vsam-mq/README.md`](../../app/app-vsam-mq/README.md) **L53**, **L71** | `carddemo-account-inquiry-request-<env>` + `-dlq` | standard |
-| `CARDDEMO.REQUEST.QUEUE`, date-conversion traffic | [`app/app-vsam-mq/README.md`](../../app/app-vsam-mq/README.md) **L53**, **L71** | `carddemo-date-inquiry-request-<env>` + `-dlq` | standard |
+| `CARDDEMO.REQUEST.QUEUE`, both inquiry flows | [`app/app-vsam-mq/README.md`](../../app/app-vsam-mq/README.md) **L53**, **L71** | `carddemo-inquiry-request-<env>` + `-dlq` | standard |
 | `CARDDEMO.RESPONSE.QUEUE` | [`app/app-vsam-mq/README.md`](../../app/app-vsam-mq/README.md) **L54**, **L72** | `carddemo-inquiry-reply-<env>` + `-dlq` | standard |
 | `CARD.DEMO.ERROR` | [`app/app-vsam-mq/cbl/CODATE01.cbl`](../../app/app-vsam-mq/cbl/CODATE01.cbl) **L243**, [`COACCT01.cbl`](../../app/app-vsam-mq/cbl/COACCT01.cbl) **L294** | `carddemo-error-<env>` + `-dlq` | standard |
 
-Trade-offs: splitting one baseline queue into two target queues costs one more queue
-pair to provision and one more URL to inject. The alternative — one shared request queue
-with a discriminator on the message — was rejected because either consumer would then
-receive and have to re-queue the other's messages, which turns a routing decision into a
-redelivery loop and makes each context's dead-letter queue carry the other's failures.
-The single reply queue is NOT split, because a reply is routed by the requester's own
-reply-to attribute rather than by the flow it belongs to.
+Trade-offs: one shared request queue with a discriminator on the message costs the
+owning consumer a dispatch on its first field, and it costs a reader the expectation
+that a queue name states its flow. What it buys is the property the alternative could
+not have: exactly one consumer able to take a message, so no message is received by a
+context that must then put it back. The single reply queue is likewise NOT split,
+because a reply is routed by the requester's own reply-to attribute rather than by the
+flow it belongs to.
 
-**Five baseline queues become six primary queues, each with its own dead-letter
-queue — twelve provisioned queues in total.** Row three is the only row that fans
-out, and it fans out for the reason given in
-[One baseline request queue serves two future owners](#one-baseline-request-queue-serves-two-future-owners).
-The five rows above are the granularity at which AAP §0.4.1.8 fixes the decision;
-the delivered resource count is the granularity at which
-[`infra/modules/sqs/README.md`](../../infra/modules/sqs/README.md) records it, and
-that module README is the authority for provisioned names. Assumptions: the two FIFO
-dead-letter names are spelled out in full rather than abbreviated to a `-dlq` suffix,
-because a FIFO queue's name must END in `.fifo` — so the dead-letter name is
-`…-<env>-dlq.fifo` and not `…-<env>.fifo-dlq`, and a suffix notation would have
-implied the second. The four standard rows keep the suffix notation because for them
-it is exact. Refactoring Rationale:
-this record previously named a single `carddemo-inquiry-request-<env>` queue that
-is not provisioned under that name, so a reader reconciling the document against
-the module would have found a queue that does not exist and two that were
-undocumented. Stating both counts — five logical flows, six primary queues —
-removes the contradiction without reopening the decision, because the fan-out
-changes no flow's semantics.
+**Five baseline queues become five primary queues, each with its own dead-letter queue —
+ten provisioned queues in total.** No row fans out. The five rows above are the
+granularity at which AAP §0.4.1.8 fixes the decision AND the granularity at which
+[`infra/modules/sqs/README.md`](../../infra/modules/sqs/README.md) records what is
+provisioned; that module README is the authority for provisioned names, and the two now
+agree row for row. Assumptions: the two FIFO dead-letter names are spelled out in full
+rather than abbreviated to a `-dlq` suffix, because a FIFO queue's name must END in
+`.fifo` — so the dead-letter name is `…-<env>-dlq.fifo` and not `…-<env>.fifo-dlq`, and a
+suffix notation would have implied the second. The three standard rows keep the suffix
+notation because for them it is exact.
+
+⚠️ Refactoring Rationale: this paragraph has been corrected twice in opposite
+directions, and both corrections are recorded because the second reverses the first.
+The record originally named a single `carddemo-inquiry-request-<env>` queue; that was
+changed to two per-flow queues, on the ground that the module provisioned two and the
+document should match. The document was right and the module was not: the shared queue
+is what the baseline defines and what AAP §0.4.1.8 fixes, and reconciling a document to
+an implementation is the wrong direction when the specification is the agreed source of
+truth. The module now provisions one request queue, this record names one, and the name
+`carddemo-inquiry-request-<env>` is the provisioned name again.
 
 None of the three flows drives a screen. The repository's own transaction
 inventory records `CP00` → `COPAUA0C` as "MQ trigger, request and response; Insert
@@ -183,21 +196,44 @@ resolve the error destination to the same literal `CARD.DEMO.ERROR`.
 ### One baseline request queue serves two future owners
 
 `CARDDEMO.REQUEST.QUEUE` is declared once, for the group, and serves **both**
-inquiry transactions. In the target those two flows are owned by two different
-bounded contexts: account inquiry by `account-service` and date conversion by
-`reference-service`, per [ADR-007](ADR-007-service-boundaries.md).
+inquiry transactions. The two flows answer different questions — account inquiry in
+`COACCT01.cbl`, a date-and-time reply in `CODATE01.cbl` — and
+[ADR-007](ADR-007-service-boundaries.md) assigns the account data to
+`account-service` and the reference data to `reference-service`.
 
-Refactoring Rationale: a single queue polled by two independent services is a
-competing-consumer arrangement in which each service's poller receives and deletes
-messages intended for the other, because a standard queue delivers a message to
-whichever consumer asks first and has no per-consumer filter. The detailed contract
-in
-[`docs/architecture/messaging-contracts.md`](../architecture/messaging-contracts.md)
-therefore fans the one baseline request queue out into **two per-flow request
-queues**, each consumed by exactly one service, with a configured shared reply
-destination. The mapping table above records the decision of record at the
-granularity AAP §0.4.1.8 fixes it; the fan-out is a refinement of the same
-decision, not a departure from it, and the two documents agree.
+**The queue has ONE owner: `account-service`, which answers both function codes on
+it.** A single queue polled by two independent services is a competing-consumer
+arrangement in which each poller receives and deletes messages intended for the
+other, because a standard queue delivers a message to whichever consumer asks first
+and has no per-consumer filter. That observation is correct and it argues for one
+owner, not for two queues: the owning consumer dispatches on the request's own
+four-character function code — `INQA` to the account inquiry, `DATE` to the
+date-and-time reply — which is a field the payload already carries and
+`common-lib`'s `InquiryRequestCodec` already decodes.
+
+Assumptions: the date answer does not reach across a context boundary at run time.
+It is a clock reading in a fixed layout, rendered by `common-lib`'s
+`DateInquiryReplyCodec` beside the request codec of the same wire, so no reference
+data is involved and nothing is fetched. `reference-service` keeps the date
+EVALUATION rules of `CSUTLDTC` and answers them on its synchronous route — a
+different question, which the baseline also keeps separate: a search for `CSUTLDTC`
+across all 524 lines of `CODATE01.cbl` returns zero occurrences.
+
+Alternatives Considered: making `reference-service` the dispatcher instead and having
+it call `account-service` for an account inquiry. Rejected on cost and blast radius —
+it would add a third pairwise machine-identity signing key with its own rotation
+obligation, its IAM grants and a cross-context network hop on the message path, where
+the chosen direction adds a clock reading.
+
+⚠️ Refactoring Rationale: this section previously concluded that the one baseline
+queue should fan out into **two per-flow request queues**. That conclusion is
+withdrawn for the reasons above and because AAP §0.4.1.8 fixes five target queues.
+Trade-offs: one behavioural divergence follows and is registered as
+`D-INQUIRY-UNRECOGNISED-FUNCTION` in
+[`docs/architecture/cobol-to-service-traceability.md`](../architecture/cobol-to-service-traceability.md)
+— a request whose function code is neither `INQA` nor `DATE` receives `COACCT01`'s
+invalid-parameters reply, where `CODATE01`, which reads no field of its request,
+would have answered it with the date.
 
 ### What the transport has to carry
 
@@ -1034,9 +1070,9 @@ split is therefore a **cost-motivated design choice** and not only a semantic on
 | Flow | Queue type | Why that type | Cost consequence |
 |---|---|---|---|
 | Authorization request and reply | FIFO | Per-card ordering and duplicate suppression are observable baseline behaviour | The higher FIFO rate is paid **only** on the flow that needs it |
-| Account inquiry, date inquiry, error sink | Standard | No ordering relationship exists between requests | The lower standard rate applies to the remaining flows |
+| Inquiry request and reply, error sink | Standard | No ordering relationship exists between requests | The lower standard rate applies to the remaining flows |
 
-Alternatives Considered: uniform FIFO across all six queues, for a single
+Alternatives Considered: uniform FIFO across all five queues, for a single
 configuration and one fewer distinction to document. Rejected on both axes at once —
 it would pay the higher rate on every inquiry and error message for a guarantee
 those flows do not require, and it would impose grouped throughput on flows that can
@@ -1116,7 +1152,7 @@ and because no throughput measurement exists for this workload
 
 The queue set is **identical in topology** between `dev` and `prod`. AAP §0.4.1.6
 parameterises environments on sizing and retention only, and messaging has almost
-nothing to size: the same six logical queues, the same types, the same
+nothing to size: the same five logical queues, the same types, the same
 `maxReceiveCount` 5, the same attributes.
 
 Assumptions: **this makes the messaging tier one of the few components with no `dev`
@@ -1289,12 +1325,12 @@ are stated so that nothing here is read as more than it is.
 
 ## Consequences
 
-### Six logical queues become twelve provisioned queues with dead-letter queues
+### Five logical queues become ten provisioned queues with dead-letter queues
 
-The `sqs` infrastructure module provisions **six source queues** — the FIFO pair for
-authorization, the two standard request queues for the split inquiry flows, their
+The `sqs` infrastructure module provisions **five source queues** — the FIFO pair for
+authorization, the one shared standard request queue both inquiry flows arrive on, the
 shared standard reply queue and the terminal error sink — and **a dead-letter queue
-for each of the six**, for twelve queues in total, with encryption at rest under a
+for each of the five**, for ten queues in total, with encryption at rest under a
 customer-managed key per
 
 [ADR-008](ADR-008-security-and-identity.md). Queue names follow the
@@ -1317,8 +1353,12 @@ Downstream obligations this creates:
   and fraud tables, which is what
   [ADR-003](ADR-003-datastore-targets.md#2-the-one-genuinely-multi-record-unit-of-work-stays-a-single-local-transaction)
   makes a single local transaction.
-- Consumers of the inquiry flows — `account-service` and `reference-service` per
-  [ADR-007](ADR-007-service-boundaries.md) — each poll exactly one request queue.
+- The inquiry flows have ONE consumer: `account-service` polls the single shared
+  request queue and dispatches on the request's four-character function code, rendering
+  the date answer from `common-lib`'s `DateInquiryReplyCodec`. `reference-service`
+  polls nothing and keeps the date evaluation of `CSUTLDTC` on its synchronous route.
+  Refactoring Rationale: this bullet named both contexts as pollers of one request
+  queue each, which followed from the withdrawn per-consumer split above.
 - Correlation identity travels as a message attribute and is joined to the HTTP
   correlation identifier in logs, per
   [`docs/architecture/observability.md`](../architecture/observability.md).

@@ -29,7 +29,8 @@
  * that it carries Javadoc. A {@code package-info.java} holding nothing but a package
  * statement satisfies the first and fails the second, which is why both are wired. Both fire
  * from the plugin execution the parent aggregator binds to the Maven {@code validate} phase,
- * documented at {@code services/reporting-service/pom.xml} L552-L558, and that phase runs
+ * documented in the {@code <plugins>} preamble of {@code services/reporting-service/pom.xml}
+ * -- the note beginning "the documentation gate is INHERITED" -- and that phase runs
  * ahead of compilation, so deleting this file breaks the build before a single class is
  * compiled. {@code config/checkstyle/suppressions.xml} carries exactly two entries, reaching
  * generated sources at its L213-L214 and test fixtures at its L250-L251; {@code src/main/java}
@@ -69,7 +70,7 @@
  *
  * <p>Refactoring Rationale: this inventory formerly declared itself a <b>target contract</b>
  * rather than a measurement, on the ground that a role named in it with no file beside this one
- * was planned rather than missing. That caveat is spent: all five interfaces are authored, so the
+ * was planned rather than missing. That caveat is spent: all six interfaces are authored, so the
  * inventory below is now a target contract <em>and</em> a measurement of this directory at the same
  * time, and a reader can take it in the present tense without qualification. The caveat is
  * recorded rather than deleted because the sibling charters still carry the same wording where
@@ -80,6 +81,14 @@
  * Refactoring Rationale: that count was 6 and is now 7.
  * {@code CategoryBalanceReportRepository} arrived with the category-balance report of
  * {@code app/jcl/PRTCATBL.jcl}, so the closed set is seven and the defect an eighth.
+ * Refactoring Rationale: the sentence retiring the caveat said "all five interfaces are authored"
+ * while the same addition had already moved the heading above it to six, the file total to seven and
+ * the list below to six named roles. Five was the interface count before
+ * {@code CategoryBalanceReportRepository} arrived, and it survived the addition because it is prose
+ * about a withdrawn caveat rather than one of the figures the enumeration re-derives -- so the
+ * paragraph announcing the inventory was a measurement contradicted the measurement three lines
+ * later. It now says six, taken from this directory: six interface files beside this charter, each
+ * named in the list below.
  *
  * <p>Seven files, and an eighth is a defect rather than an addition:
  * <ul>
@@ -119,25 +128,31 @@
  * Three consequences follow and are stated plainly so that a subsequent author reads an
  * absence as a design decision rather than as an omission.
  *
- * <p>Refactoring Rationale: the sentence above formerly read that the design "records that
- * there is no owned schema and therefore no migration directory", and the first half of that
- * was false. The {@code reporting} schema is this context's own -- it is the eighth of eight,
- * created by {@code data-migration/sql/V0__schemas_and_roles.sql} and dedicated to this
- * context -- and what makes the module carry no migration directory is that the schema's
- * contents are authored OUTSIDE it, by {@code data-migration/sql/V1__reporting_views.sql}
- * under a no-login owner role. Stating it as "no owned schema" put the absence in the wrong
- * place and left the eight-schema post-state reading as seven schemas plus a footnote.
+ * <p>Assumptions: the {@code reporting} schema IS this context's own -- the eighth of eight,
+ * created by {@code data-migration/sql/V0__schemas_and_roles.sql} and dedicated to it -- and what
+ * makes the module carry no migration directory is that the schema's contents are authored OUTSIDE
+ * it, by {@code data-migration/sql/V1__reporting_views.sql} under a no-login owner role. Reading
+ * the absence as "no owned schema" would put it in the wrong place and leave the eight-schema
+ * post-state reading as seven schemas plus a footnote.
  *
- * <p>Refactoring Rationale: "owns no table" is a statement about this module and about the
- * login role, and NOT a statement that the {@code reporting} schema is empty of tables. An
- * earlier revision of this charter made only the first claim and left a reader to infer the
- * second, which is false and consequential in both directions: a reader would conclude the
- * schema held nothing but views, and a maintainer meeting the {@code REVOKE} that withholds one
- * table from this context's login would read it as dead code and could remove it. The
- * distinction has three levels and they are not interchangeable. First, this module owns no
+ * <p>Assumptions: "owns no table" is a statement about this module and about the login role, and
+ * NOT a statement that the {@code reporting} schema is empty of tables. The difference is
+ * consequential in both directions: a reader taking the narrower claim for the wider one concludes
+ * the schema holds nothing but views, and a maintainer meeting the {@code REVOKE} that withholds
+ * one table from this context's login reads it as dead code and could remove it. The distinction
+ * has three levels and they are not interchangeable. First, this module owns no
  * table: it carries no data-definition script, no migration artifact and no
- * {@code db/migration} directory, and the login role it authenticates as holds schema usage plus
- * read on the seven views and nothing else. Second, the schema itself holds exactly one table,
+ * {@code db/migration} directory, and the login role it authenticates as holds schema usage,
+ * {@code SELECT} on TEN views and {@code EXECUTE} on ONE function -- and nothing else.
+ * ⚠️ Refactoring Rationale: that read "read on the seven views and nothing else", which
+ * understated the login's reach by three relations and omitted its only executable privilege
+ * outright. {@code V1__reporting_views.sql} creates eight views and grants {@code SELECT} on each
+ * by name, {@code V3__verification_surfaces.sql} adds {@code v_verification_row_counts} and
+ * {@code v_verification_money_totals} and grants both to the same login, and V1 revokes
+ * {@code reporting.resolve_card(character varying)} from {@code PUBLIC} and grants
+ * {@code EXECUTE} on it to this login alone. A charter is where a reviewer checks a
+ * least-privilege claim, so an undercount here is the kind of error that gets a privilege audit
+ * signed off. Second, the schema itself holds exactly one table,
  * {@code card_grouping_key}, created by {@code data-migration/sql/V1__reporting_views.sql} and
  * owned by the no-login role {@code carddemo_reporting_owner}. Third, this context cannot read
  * that table -- both that file and {@code V0__schemas_and_roles.sql} revoke it from the login
@@ -152,7 +167,7 @@
  *
  * <p>First, no schema-migration tooling is on this module's classpath. The two migration
  * artifacts the six table-owning services declare are deliberately absent from
- * {@code services/reporting-service/pom.xml}, which documents that omission at its L440. No
+ * {@code services/reporting-service/pom.xml}, which documents that omission at its L431. No
  * {@code db/migration} directory exists anywhere in this module, and one appearing under it
  * would itself be a defect.
  *
@@ -165,31 +180,52 @@
  * <p>Third, the relations this package reads and the read privileges over them belong to the
  * data-migration package and are cited here by path rather than reproduced.
  * {@code data-migration/sql/V0__schemas_and_roles.sql} establishes the {@code reporting}
- * schema and the two roles at its L588-L589, conveys the cross-schema read privileges to the
- * no-login owner role at its L865 through L885, and withdraws every base-table privilege from
- * the service login role at its L937-L942 while leaving it schema usage at L944.
- * {@code data-migration/sql/V1__reporting_views.sql} declares the seven view definitions at
- * its L234, L295, L358, L387, L423, L469 and L513, assigns each to the owner role, and
- * conveys read on each by name to the service role at its L545-L551. Both files are another
+ * schema and its two roles, conveys the cross-schema read privileges to the no-login owner role,
+ * and withdraws every base-table privilege from the service login role while leaving it schema
+ * usage. {@code data-migration/sql/V1__reporting_views.sql} declares the EIGHT production view
+ * definitions -- {@code v_report_transactions}, {@code v_statement_transactions},
+ * {@code v_transaction_types}, {@code v_transaction_categories}, {@code v_accounts},
+ * {@code v_customers}, {@code v_card_xref} and {@code v_transaction_category_balances} --
+ * assigns each to the owner role, and conveys read on each BY NAME to the service role.
+ * {@code data-migration/sql/V3__verification_surfaces.sql} adds the two aggregate-only
+ * verification relations and grants those by name as well. Both files are another
  * agent's ownership. The operating rule is therefore blunt: <b>a view missing at run time is
  * a data-migration defect to report, and never something to create from here.</b> V0 states
- * that same instruction directly at its L565-L567.
+ * that same instruction directly.
+ *
+ * <p>⚠️ Refactoring Rationale: those citations named a file and a LINE NUMBER each, and every one
+ * of the nine had drifted -- the view definitions were cited at L234, L295, L358, L387, L423,
+ * L469 and L513 and stand at L288, L360, L423, L452, L488, L550, L611 and L660, the per-view
+ * grants were cited at L545-L551 and stand at L800-L807, and the four V0 citations pointed at
+ * unrelated comment prose. A stale line number is worse than none, because a reader who follows
+ * one and finds unrelated text concludes the claim is wrong rather than the pointer. These
+ * citations therefore name the FILE and the OBJECT, which are stable under editing, and the
+ * counts are derivable in one command: {@code grep -c '^CREATE VIEW reporting\.'} and
+ * {@code grep -c '^GRANT SELECT ON reporting\.'} over {@code data-migration/sql/}.
  *
  * <p>Assumptions: the privilege shape is a view-owner indirection and not a direct read, and
  * mistaking one for the other would make the whole arrangement look redundant. The service
- * login role this module authenticates as holds usage on the {@code reporting} schema, conveyed
- * at V0 L944, and no privilege whatsoever on the four schemas holding data, every base-table
- * and schema-level privilege having been withdrawn from it at V0 L937-L942. The no-login owner
- * role holds the cross-schema read privileges instead, at V0 L865 and L870, L875, L880 and
- * L885, and the views execute with the owner's rights behind a security barrier, so a view
- * reads what its caller cannot. That is why the schema resolution path names one schema rather
+ * login role this module authenticates as holds usage on the {@code reporting} schema, conveyed by
+ * V0's {@code GRANT USAGE ON SCHEMA reporting TO carddemo_reporting}, and no privilege whatsoever on
+ * the four schemas holding data: V0 issues a {@code REVOKE ALL ON ALL TABLES} against each of
+ * {@code ledger}, {@code account}, {@code card} and {@code reference} and then a
+ * {@code REVOKE ALL ON SCHEMA} covering the same four. The no-login owner
+ * role holds the cross-schema read privileges instead -- a {@code GRANT USAGE ON SCHEMA} over those
+ * four schemas followed by a {@code GRANT SELECT ON ALL TABLES} per schema -- and the views execute
+ * with the owner's rights behind a security barrier, so a view
+ * reads what its caller cannot.
+ * ⚠️ Refactoring Rationale: these five citations were line numbers too -- V0 L944, L937-L942, and
+ * L865 with L870, L875, L880 and L885 -- and every one of them had drifted into unrelated comment
+ * prose, for the reason recorded above. They now name the STATEMENT, which is greppable and does not
+ * move; retiring nine pointers on the ground that line numbers drift while leaving five more in the
+ * next paragraph would have been the same defect with a smaller count. That is why the schema resolution path names one schema rather
  * than four, and why a query here that names a base relation directly fails at the database
  * rather than returning rows.
  *
  * <h2>Cross-schema reach is by privilege, never by a module dependency</h2>
  *
  * <p>The only intra-reactor dependency this module declares is the shared kernel, at
- * {@code services/reporting-service/pom.xml} L133 for the main artifact and L428 for its test
+ * {@code services/reporting-service/pom.xml} L124 for the main artifact and L428 for its test
  * artifact. No module in the reactor declares a dependency on another service module.
  *
  * <p>A type in this package may depend on a projection under this context's own root, so
@@ -240,23 +276,10 @@
  *
  * <h2>Decision register</h2>
  *
- * <p>What follows discharges Rule 1's inline-comment requirement at L27-L34 for the choices
- * in this package a reasonable alternative could have gone the other way on. L40 forbids
- * leaving such a choice undocumented and L41 forbids a rationale without specific
- * justification, naming two vague phrasings verbatim as examples of what is not accepted, so
- * every entry below carries a concrete anchor: a line number, a declared width or a byte
- * count. The register is authored here once, and the five interfaces cite a row by its
- * identifier rather than restating it.
- *
- * <p>Assumptions: the four category labels are written character for character as Rule 1
- * writes them at L31-L34, which is also the one permitted written form
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md} fixes at its L209-L212. Four properties of that
- * form are load-bearing and each has been got wrong in practice: plural where the rule writes
- * it plural, unparenthesised, colon retained, and no emphasis markup, since the emphasis
- * around the labels in the rule text is that document's own presentation and not part of the
- * label. The hyphen in the fourth label is ASCII hyphen-minus, byte {@code 0x2d}. The labels
- * were retyped from the rule rather than copied from the reference suite for a measured
- * reason recorded at R14.
+ * <p>Each row below records one choice in this package a reasonable alternative could have gone
+ * the other way on, and carries a concrete anchor for it: a line number, a declared width or a byte
+ * count. The register is authored here once, and the interfaces beside it cite a row by its
+ * identifier rather than restating it, so one decision has one text.
  *
  * <h3>R1 -- keyset positioning, not addressing a window by row ordinal</h3>
  *
@@ -542,9 +565,12 @@
  * {@code data-migration/sql/V1__reporting_views.sql}, both owned by another agent. The
  * compromise is real and is stated rather than worked around: when a relation this package
  * needs is absent at run time, the only correct action from here is to report a defect against
- * the data-migration package, which V0 instructs directly at its L565-L567, because creating it
+ * the data-migration package, which V0's own section-2 note instructs directly -- "a view missing at
+ * run time is a data-migration defect to report rather than something for a service to create for
+ * itself" -- because creating it
  * from here would put the same object under two owners and the two would drift -- and this role
- * could not create it in any case, holding only the schema usage conveyed at V0 L944. What is
+ * could not create it in any case, holding only the schema usage V0's
+ * {@code GRANT USAGE ON SCHEMA reporting} conveys. What is
  * bought in exchange is that a write issued from this
  * package fails at the database rather than succeeding against data another context is
  * accountable for, which no amount of care inside this package could guarantee on its own.
@@ -574,32 +600,16 @@
  * optional, or an empty item list inside the shared envelope -- and never a half-filled
  * instance a caller has to inspect field by field to find out whether the read succeeded.
  *
- * <h3>R14 -- the plural label register, and why the labels were retyped</h3>
+ * <h3>R14 -- one written form for the four rationale labels</h3>
  *
- * <p>Alternatives Considered: the singular register that predominates in the reference trees
- * was evaluated and rejected. {@code .github/workflows/tests.yml} L19-L43 tags its
- * design-decision bullets in the singular, and the reference test tree carries the
- * parenthesised singular form 68 times across 19 files against 5 occurrences of the plural
- * colon-terminated form -- better than 13 to 1 against the register chosen here. Both figures
- * are measured over immutable trees with the C locale, so the citation does not decay. The
- * plural wins for one specific reason and not on taste: Rule 1 writes the four categories in
- * the plural at L31-L34, and its Validation Gate at L43 makes that wording the sentence this
- * tree is audited against, so matching the majority idiom would read more consistently with
- * the reference tree while failing to match the rule actually enforced.
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md} records the same reasoning at its L236-L245.
- * The two registers are never mixed inside one file.
- *
- * <p>Assumptions: the labels in this file were retyped from the rule text and not copied from
- * {@code tests/README.md}, for a byte-level reason. That member is the repository's principal
- * carrier of the non-breaking hyphen U+2011 -- 106 occurrences across 77 lines, measured with
- * the C locale, because a UTF-8 locale reports a misleading zero for a byte-pattern search --
- * and the mandatory paragraph at its L544-L549 renders the fourth category as the letters
- * {@code Trade}, then that non-breaking hyphen, then {@code offs)}. A byte dump of L548 shows
- * {@code 64 65 e2 80 91 6f 66 66 73 29}. Copying it would diverge three ways at once: a
- * non-ASCII hyphen codepoint where the rule uses ASCII hyphen-minus, a closing parenthesis
- * where the rule uses a colon, and an inline-list position where the rule's form opens the
- * rationale. None of the three is visible on screen, which is exactly why the byte dump is
- * cited rather than the rendering.
+ * <p>Alternatives Considered: the singular, parenthesised label form that also appears in the
+ * reference trees was evaluated and rejected. The plural, unparenthesised, colon-terminated form is
+ * the one {@code docs/CODE_DOCUMENTATION_STANDARD.md} fixes for every language in the migration
+ * trees, and a rationale is located by a literal string search before it is read, so a second
+ * spelling of one category makes that search quietly partial. The two forms are never mixed inside
+ * one file. Assumptions: the hyphen in the fourth label is ASCII hyphen-minus; the reference suite
+ * spells it with a non-breaking hyphen, which no literal search for the ASCII form will find, so a
+ * label is taken from the standard and never copied from there.
  *
  * <h3>R15 -- the privileged schema set is wider than the baseline evidence, and that is
  * stated rather than smoothed over</h3>
@@ -607,8 +617,8 @@
  * <p>Assumptions: the read privileges the view owner holds reach four schemas while the direct
  * data-definition evidence in the two baseline members exercises only three, and the gap is
  * recorded here rather than reconciled by quietly narrowing one of the two.
- * {@code data-migration/sql/V0__schemas_and_roles.sql} conveys usage at its L865 and read on
- * all tables in four schemas at its L870, L875, L880 and L885 -- {@code ledger},
+ * {@code data-migration/sql/V0__schemas_and_roles.sql} conveys usage at its L1578 and read on
+ * all tables in four schemas at its L1583, L1588, L1593 and L1598 -- {@code ledger},
  * {@code account}, {@code card} and {@code reference}. Against that,
  * {@code app/jcl/CREASTMT.JCL} L83-L86 resolves to the transaction store plus three
  * account-side stores, and {@code app/jcl/TRANREPT.jcl} L65-L72 resolves to the transaction

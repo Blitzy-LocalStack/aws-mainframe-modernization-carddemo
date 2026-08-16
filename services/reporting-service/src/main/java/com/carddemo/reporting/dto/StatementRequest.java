@@ -24,19 +24,15 @@ import jakarta.validation.constraints.Size;
  * account to its cards through the cross-reference {@code app/cbl/CBSTM03B.CBL} opens as its
  * {@code XREF-FILE} at L65.
  *
- * <p>Refactoring Rationale: this charter formerly described a THIRD state -- neither component
- * present, standing for every card the prepared input holds, on the strength of the whole-file
- * behaviour at {@code app/jcl/CREASTMT.JCL} L79. That reading is withdrawn, and withdrawing it is a
- * correction rather than a narrowing. The whole-run scope is real and is still delivered, but it is
- * delivered by {@code com.carddemo.reporting.task.GenerateStatementsTask}, which walks every
- * cross-reference row in bounded chunks and writes the two run-wide datasets the reference produces.
- * Reaching that scope through an HTTP request instead was never sound: the response shape of this
- * surface is one statement's summary and one pair of artifact locations, so a request selecting the
- * whole portfolio has no answer to return, and the handler would have had to hold every card's
- * transactions to compose one. The published contract says so too -- {@code reporting-api.yaml}
- * declares exactly one of the two as required at its {@code StatementRequest} schema -- so an empty
- * body was admitted by this record and refused by the contract, which is the disagreement this
- * revision removes.
+ * <p>Assumptions: there is no third state in which NEITHER component is present. The whole-run scope
+ * the reference reaches at {@code app/jcl/CREASTMT.JCL} L79 is real and is delivered by
+ * {@code com.carddemo.reporting.task.GenerateStatementsTask}, which walks every cross-reference row
+ * in bounded chunks and writes the two run-wide datasets; it is not reachable through this surface.
+ * The response shape here is one statement's summary and one pair of artifact locations, so a request
+ * selecting the whole portfolio would have no answer to return and the handler would have to hold
+ * every card's transactions to compose one. {@code reporting-api.yaml} declares exactly one of the
+ * two as required at its {@code StatementRequest} schema, so admitting an empty body here would put
+ * this record and the published contract in disagreement.
  *
  * <p>Assumptions: whether the two components may be supplied TOGETHER is still not settled here. A
  * rule relating one component to another decides how a run is composed, which is business logic, and
@@ -122,24 +118,19 @@ public record StatementRequest(
      * prose of this file as well, in the component descriptions, and that is documentation rather
      * than a second executable source: nothing reads those sentences to decide anything.
      *
-     * <p>Refactoring Rationale: this width now has exactly ONE executable position, the
-     * {@code @Size} constraint in the header above. It formerly had two, because the constructor
-     * also held a throwing guard against the same number, and two executable positions for one
-     * declared width is what lets a caller be published one contract and held to another -- the
-     * guard fired first and answered with a body the constraint would have described per field. The
-     * guard is gone and the constraint is the single authority.
+     * <p>Assumptions: this width has exactly ONE executable position, the {@code @Size} constraint in
+     * the header above. A second executable position for one declared width is what lets a caller be
+     * published one contract and held to another, because whichever check fires first decides the
+     * shape of the answer.
      *
-     * <p>Refactoring Rationale: this constant now bounds the MINIMUM as well as the maximum, and the
-     * change is a correctness fix rather than a tightening for its own sake. Sixteen is a fixed
-     * width, not a ceiling: {@code TRNX-CARD-NUM} is {@code PIC X(16)} and every stored card number
-     * occupies all sixteen positions, so a shorter value cannot match a stored row under any
-     * circumstances. Admitting one meant a four-digit value passed validation, reached the exact
-     * resolution query, matched nothing, and came back as "this card is not cross-referenced" -- a
-     * caller reading that would conclude a real card was missing when it had in fact sent something
-     * that is not a card number. Worse, before the resolution path was rewritten the same short
-     * value reached a tail-extraction step and failed there, so the caller received a server fault
-     * for its own malformed input. Bounding the minimum answers 400 naming the component instead.
-     * The identical reasoning, in the identical words, is recorded on
+     * <p>Assumptions: this constant bounds the MINIMUM as well as the maximum, because sixteen is a
+     * fixed width and not a ceiling: {@code TRNX-CARD-NUM} is {@code PIC X(16)} and every stored card
+     * number occupies all sixteen positions, so a shorter value cannot match a stored row under any
+     * circumstances. Admitting one would let a four-digit value pass validation, reach the exact
+     * resolution query, match nothing and come back as "this card is not cross-referenced", from
+     * which a caller would conclude a real card was missing when it had in fact sent something that
+     * is not a card number. Bounding the minimum answers 400 naming the component instead. The
+     * identical reasoning, in the identical words, is recorded on
      * {@code com.carddemo.account.dto.CardXrefLookupRequest}, which is the house precedent this
      * follows rather than a second invention.
      */
@@ -198,27 +189,26 @@ public record StatementRequest(
      * the two it holds. An instance cannot come into being without passing through here, which is
      * what makes the contract hold by construction rather than by every caller remembering it.
      *
-     * <p>Refactoring Rationale: this constructor previously also refused an over-width component by
-     * throwing, and that guard has been removed. It defeated the one outcome the charter at
-     * {@code com.carddemo.reporting.dto} requires: a rejection has to name the component it
-     * concerns. An exception raised while a request body is being bound does not arrive as a
-     * per-field entry -- it surfaces as a generic malformed-body failure -- so a caller that sent a
-     * 17-character card number was told the body was unreadable rather than which of its two fields
-     * was too long. Width is now asserted by the {@code @Size} constraint on each component in the
-     * header above, exactly as the digits-only shape already was, so both kinds of malformed input
-     * take the same route and both name their field.
+     * <p>Assumptions: this constructor normalises and does not refuse. Width and shape are both
+     * asserted by the {@code @Size} and pattern constraints on each component in the header above, so
+     * both kinds of malformed input take one route and both name their field. A throwing guard here
+     * would defeat the one outcome the charter at {@code com.carddemo.reporting.dto} requires -- that
+     * a rejection names the component it concerns -- because an exception raised while a request body
+     * is being bound surfaces as a generic malformed-body failure rather than as a per-field entry, so
+     * a caller sending a 17-character card number would be told the body was unreadable rather than
+     * which of its two fields was too long.
      *
-     * <p>Alternatives Considered: keeping the guard alongside the constraint, on the reasoning that
-     * the annotations are evaluated only when something asks a validator to evaluate them -- which
-     * the transport boundary does and a caller constructing this record directly does not.
-     * Rejected, because the two mechanisms answer to different consumers and cannot be made to
-     * agree on an outcome: for a request arriving over HTTP the guard fires first and replaces the
-     * structured per-field response with an unstructured one, so keeping it does not add a check to
-     * that path, it degrades the check already there. A caller constructing the record in process is
-     * a caller inside this service, and the charter's obligation to name the failing field is owed
-     * to the client across the boundary.
+     * <p>Alternatives Considered: a guard here alongside the constraints, on the reasoning that
+     * annotations are evaluated only when something asks a validator to evaluate them -- which the
+     * transport boundary does and a caller constructing this record directly does not. Rejected,
+     * because the two mechanisms answer to different consumers and cannot be made to agree on an
+     * outcome: for a request arriving over HTTP the guard fires first and replaces the structured
+     * per-field response with an unstructured one, so it does not add a check to that path, it
+     * degrades the check already there. A caller constructing the record in process is a caller inside
+     * this service, and the charter's obligation to name the failing field is owed to the client
+     * across the boundary.
      *
-     * <p>Assumptions: width and shape are therefore now enforced identically and in one place. A
+     * <p>Assumptions: width and shape are therefore enforced identically and in one place. A
      * value of legal length carrying something other than a digit fits its field perfectly -- an
      * {@code X(16)} picture holds any 16 characters -- and what rejects it is the numeric overlay
      * discipline that {@code app/cpy/CVCRD01Y.cpy} L37 and L39 declare. A value longer than its
@@ -248,13 +238,12 @@ public record StatementRequest(
     /**
      * Renders this request for a log or a diagnostic with the primary account number masked.
      *
-     * <p>Refactoring Rationale: the rendering a record generates for itself names every component
-     * verbatim, and one of this record's two components is a primary account number. Every refusal
-     * message in this file was already written to withhold that value, but the generated rendering
-     * defeated all of that care through one path nobody has to write on purpose: a request object
-     * interpolated into a log statement, an assertion message or a framework's own request trace. This
-     * override closes that path, so the masking is a property of the type rather than of every place
-     * the type is mentioned.</p>
+     * <p>Assumptions: this override exists because the rendering a record generates for itself names
+     * every component verbatim, and one of this record's two components is a primary account number.
+     * Withholding the value in every refusal message is not sufficient on its own: a request object
+     * interpolated into a log statement, an assertion message or a framework's request trace reaches
+     * the generated rendering by a path nobody writes on purpose. Overriding it makes the masking a
+     * property of the type rather than of every place the type is mentioned.</p>
      *
      * <p>Assumptions: the mask reveals the trailing four digits and no more, which is the same
      * concession the migration's mapping layer makes on every response except the administrative
@@ -266,40 +255,32 @@ public record StatementRequest(
      * declares, so it distinguishes nothing, and a diagnostic that cannot tell two statement runs apart
      * is of no use in the one situation it exists for.</p>
      *
-     * <p>Refactoring Rationale: THE ACCOUNT IDENTIFIER IS NOW OMITTED, and an earlier revision rendered
-     * it and argued against masking it, on the grounds that "that identifier is a system key rather than
-     * protected data" because "it addresses the resource in a request path and in the correlation of a
-     * run", so withholding it would "make a log unusable while withholding nothing the path had not
-     * already carried". Both halves fail. The sensitive-data logging contract in
-     * {@code docs/architecture/observability.md} names account and customer identifiers in a clause of
-     * their own, so the value was protected however it is used; and the appeal to what the path already
-     * carried compares two different surfaces -- a request path is seen by the one authenticated caller
-     * making the request and is not retained, whereas a log line is retained, aggregated and readable by
-     * every holder of log access.</p>
+     * <p>Assumptions: THE ACCOUNT IDENTIFIER IS OMITTED rather than rendered, because the
+     * sensitive-data logging contract in {@code docs/architecture/observability.md} names account and
+     * customer identifiers in a clause of their own, so the value is protected however it is used. The
+     * fact that a request path also carries it is not a licence to log it: a request path is seen by
+     * the one authenticated caller making the request and is not retained, whereas a log line is
+     * retained, aggregated and readable by every holder of log access.</p>
      *
-     * <p>Assumptions: this record's two components are the two alternative selectors of one statement
-     * run, so exactly one of them is supplied on any given request, and OMITTING the identifier rather
-     * than masking it is what keeps the rule honest. Masking is not available for it: masking a
-     * card-number-shaped value has one owner, {@code com.carddemo.common.security.CardNumberMasker},
-     * and nothing owns a masking rule for an eleven-digit account identifier in this context -- so a
-     * mask invented here would be a second, unreviewed rule of exactly the kind the paragraph below
-     * describes having already gone wrong once in this very file.</p>
+     * <p>Alternatives Considered: masking the identifier instead of omitting it. Rejected because
+     * masking a card-number-shaped value has one owner,
+     * {@code com.carddemo.common.security.CardNumberMasker}, and nothing owns a masking rule for an
+     * eleven-digit account identifier in this context, so a mask invented here would be a second,
+     * unreviewed rule of the kind the shared owner exists to prevent.</p>
      *
-     * <p>Trade-offs: on an account-selected run the rendering now names no selector at all, and that is
+     * <p>Trade-offs: on an account-selected run the rendering names no selector at all, and that is
      * accepted. It is not silent about the run: {@code com.carddemo.common.web.CorrelationIdFilter}
      * publishes a correlation identifier on every request-scoped line, which ties a statement request to
      * its own log entries without naming the account. What is bought is that no log line written from
      * this type can carry either identifier of a statement run in a usable form.</p>
      *
-     * <p>Refactoring Rationale: the masking arithmetic used to live in a private method here and now
-     * comes from the shared kernel. It was moved because a second site needed the same rule -- the
-     * shared advice masks a card-number-shaped run out of the request target it echoes -- and because
-     * the local rule and the published contract had already begun to disagree: the local one rendered
-     * a fixed four-character mask followed by the tail, which is shorter than the number it stands
-     * for, while every masked example in the published contracts renders at the number's own width. A
-     * reader cannot tell a short rendering from a truncated value, so the shared rule keeps the width
-     * and this rendering changes with it. Nothing parses this string, so the change of width is
-     * confined to what an operator reads.</p>
+     * <p>Assumptions: the masking arithmetic comes from the shared kernel rather than from a private
+     * method here, because a second site applies the same rule -- the shared advice masks a
+     * card-number-shaped run out of the request target it echoes -- and because a local rule drifts
+     * from the published contract. The shared rule renders a mask at the number's own width, which is
+     * what every masked example in the published contracts shows; a rendering shorter than the number
+     * it stands for cannot be told apart from a truncated value. Nothing parses this string, so the
+     * width matters only to what an operator reads.</p>
      *
      * @return the request with its card number reduced to a mask and its last four digits, and no
      *     account identifier; an absent card number renders as {@code null}

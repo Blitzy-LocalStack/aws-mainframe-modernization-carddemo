@@ -6,8 +6,9 @@
 #   value a caller may depend on passes through this file, and nothing else
 #   does: the four workflow entry points, the four per-machine execution roles,
 #   the four execution-log groups, the two out-of-execution bracket-release
-#   rules with their dead-letter queue and alarm inventory, and the resolved
-#   seed-extract staging location this module composes. Anything else a consumer
+#   rules with their dead-letter queue and alarm inventory, the resolved
+#   seed-extract staging location this module composes, and one DEPRECATED alias
+#   kept for a compatibility window. Anything else a consumer
 #   wants is module internals, and each deliberate omission is recorded at the
 #   foot of this file rather than left looking like a gap.
 #
@@ -15,8 +16,9 @@
 #   None. An outputs.tf declares no input, and this module's input contract is
 #   variables.tf. Every value below is an attribute of a resource declared in
 #   main.tf, or the one staging location main.tf composes from several of its
-#   inputs -- never an input read straight back out; see the withdrawal
-#   recorded below.
+#   inputs, with the single exception of the deprecated alias in group 7, which is
+#   an input read straight back out and says so at its own declaration; see the
+#   deprecation recorded below.
 #
 # Return values:
 #   Every value is a string unless stated otherwise, and none is sensitive.
@@ -29,19 +31,30 @@
 #     2. Execution roles -- two `map(string)` values keyed `daily`, `adhoc`,
 #        `dataset` and `authz`, so an environment root can inventory or extend
 #        one machine's role without a change to shared module code.
-#     3. Execution log groups -- an ARN and a name for each of the four, for the
-#        metric filters, subscription filters and log-based alarms
-#        infra/modules/observability builds over them.
+#     3. Execution log groups -- an ARN and a name for each of the four,
+#        published for operator discovery and for a Logs Insights query. NO module
+#        or root consumes any of the eight today, and the Refactoring Rationale in
+#        the WHY section below records why they are published anyway rather than
+#        described as something they are not.
 #     4. Bracket-release rules -- an ARN and a name for the terminal-status
 #        finalizer rule and for the scheduled reconciler rule, so an operator
 #        can tell which of the two released a quiesce bracket that no state in
 #        the execution history released.
 #     5. Bracket-release dead letter -- the queue's ARN and its URL, the two
 #        forms docs/runbooks/batch-operations.md reads, plus a `list(string)` of
-#        the three alarm names guarding that release path.
+#        the FOUR alarm names guarding that release path -- the two EventBridge
+#        delivery alarms, the finalizer function's own error alarm and the dead-letter
+#        queue's depth alarm. Refactoring Rationale: this said THREE, and the value
+#        returns four; the count was written before the queue-depth alarm was added
+#        and was never re-derived. An operator who reads a count instead of the list
+#        would have looked for a missing alarm that is in fact present.
 #     6. Seed-extract staging location -- the location every staging and load
 #        task receives, read from each root's `batch_orchestration` output by
 #        docs/runbooks/data-migration.md.
+#     7. One DEPRECATED alias, `dataset_source_extract_prefix`, echoing this
+#        module's identically named input for one compatibility window. Its
+#        replacement and its removal boundary are stated at its declaration, and
+#        it is the only value here that may be removed without a further window.
 #
 # Exceptions or errors:
 #   Three things a consumer must not read into a value being published here.
@@ -58,18 +71,27 @@
 #   publishing a composed guess.
 #
 # WHY (non-obvious design decisions):
-#   - Refactoring Rationale: an output that re-exported an input has been
-#     WITHDRAWN. `dataset_source_extract_prefix` returned this module's
-#     identically named INPUT verbatim -- a value infra/modules/s3-datasets owns
-#     and already publishes as `source_extract_prefix`, and that the environment
-#     roots merely pass in -- so one string had two publishers and a reader could
-#     not tell which module decided it. It was justified in place by the claim that the data-migration
-#     runbook needed the bare prefix to build a key without parsing a URI in
-#     shell; that runbook reads `source_extract_uri` from the roots' `datasets`
-#     output and the resolved root from `batch_orchestration` instead, so the
-#     justification described a consumer that does not exist. The composed
-#     `dataset_staging_root` stays, because that value is this module's own
-#     decision rather than a caller's.
+#   - Refactoring Rationale: an output that re-exported an input is DEPRECATED
+#     rather than withdrawn, and the two-step is the decision.
+#     `dataset_source_extract_prefix` returns this module's identically named
+#     INPUT verbatim -- a value infra/modules/s3-datasets owns and already
+#     publishes as `source_extract_prefix`, and that the environment roots merely
+#     pass in -- so one string has two publishers and a reader cannot tell which
+#     module decided it. That is why it is deprecated. It was justified in place by
+#     the claim that the data-migration runbook needed the bare prefix to build a
+#     key without parsing a URI in shell; that runbook reads
+#     `source_extract_uri` from the roots' `datasets` output and the resolved root
+#     from `batch_orchestration` instead, so the justification described a consumer
+#     that does not exist. It was briefly REMOVED on that ground, and the removal
+#     was the error: the paragraph below declares these names an external contract
+#     reaching past this repository's Terraform, and no repository search can prove
+#     that no remote-state or automation consumer addresses this key of the roots'
+#     `batch_orchestration` object. So the name is kept for one compatibility
+#     window with the replacement and the removal boundary stated at its own
+#     declaration, which is a deprecation an owner can act on rather than an
+#     unresolvable reference in somebody else's plan. The composed
+#     `dataset_staging_root` stays on its own terms, because that value is this
+#     module's own decision rather than a caller's.
 #   - Refactoring Rationale: this file grew from one machine's identity to four
 #     as main.tf did. The dataset round trip and the authorization extract are
 #     operator-invoked rather than nightly, and the batch jobs behind them had
@@ -97,7 +119,7 @@
 #       ever added, whereas a published attribute cannot. Argued here once and
 #       not repeated at each pair below.
 output "daily_state_machine_arn" {
-  description = "ARN of the twelve-work-state daily batch machine. The EventBridge Scheduler module targets this value and observability scopes the batch-failure alarm to it."
+  description = "ARN of the eleven-work-state daily batch machine. The EventBridge Scheduler module targets this value and observability scopes the batch-failure alarm to it."
   value       = aws_sfn_state_machine.daily.arn
 }
 
@@ -210,56 +232,68 @@ output "execution_role_names" {
 # Execution log groups
 # -----------------------------------------------------------------------------
 
-# WHY : Alternatives Considered: letting infra/modules/observability find these
-#       groups by naming convention -- each is /aws/vendedlogs/states/ followed
-#       by its machine's name -- was rejected. It would make the group name an
-#       implicit contract that nothing validates, so a rename inside this module
-#       would leave a dashboard or a metric filter addressing a group that no
-#       longer exists and reporting nothing rather than failing. Publishing the
-#       identities makes the dependency explicit, so the same rename fails at
-#       plan time in the root that wires the two together.
+# WHY : Refactoring Rationale: these eight values are DISCOVERY contracts, and the
+#       descriptions below used to describe them as inputs to work that does not
+#       exist -- "the metric filters, subscription filters and log-based alarms
+#       observability attaches to this exact group". No metric filter, subscription
+#       filter or log-based alarm is attached to any of these four groups anywhere in
+#       this repository, and NO module or environment root reads any of the eight
+#       outputs. A description that names a consumer which does not exist is worse
+#       than one that names none: a reader wires nothing because they believe it is
+#       already wired, and an auditor reads the alarm coverage as broader than it is.
+#       Each description below now states what the value IS and what an operator or a
+#       future root may do with it, in the conditional, and claims no current reader.
+# WHY : Assumptions: they are published rather than deleted, and that is a choice with
+#       a reason. The alternative -- letting a consumer find these groups by naming
+#       convention, since each is /aws/vendedlogs/states/ followed by its machine's
+#       name -- would make the group name an implicit contract that nothing validates,
+#       so a rename inside this module would leave a future dashboard or filter
+#       addressing a group that no longer exists and reporting nothing rather than
+#       failing. Publishing the identities means the same rename fails at plan time in
+#       whichever root wires the two together. Trade-offs: eight outputs with no
+#       current reader, accepted because output names are a contract this file states
+#       is external, so adding one later is cheap and removing one is not.
 # WHY : Assumptions: this module owns these four log groups and nothing else in
 #       the observability tier. Dashboards, the notification topic and every
-#       alarm except the three guarding the out-of-execution bracket release
-#       belong to infra/modules/observability, which consumes what is published
-#       here.
+#       alarm except the four guarding the out-of-execution bracket release
+#       belong to infra/modules/observability.
 output "daily_log_group_arn" {
-  description = "ARN of the encrypted CloudWatch log group receiving daily-machine execution events, for the metric filters, subscription filters and log-based alarms observability attaches to this exact group."
+  description = "ARN of the encrypted CloudWatch log group receiving daily-machine execution events. Discovery only in the sense that matters here: no module or root reads this ARN, because modules/observability takes the group by NAME. A metric filter and an execution-failure alarm ARE attached to the group itself through that path, so this value is the identity a further consumer would scope to rather than evidence the group is unwatched. It is the identity a future consumer would scope one to, or that an operator names in a Logs Insights query."
   value       = aws_cloudwatch_log_group.daily.arn
 }
 
 output "daily_log_group_name" {
-  description = "Name of the CloudWatch log group receiving daily-machine execution events, for observability dashboards and log queries."
+  description = "Name of the CloudWatch log group receiving daily-machine execution events. Both environment roots pass this name to modules/observability as the `daily` entry of state_machine_log_group_names, which attaches a metric filter counting terminal ExecutionFailed and ExecutionTimedOut events and an alarm on that metric, so the group is a consumed contract rather than a discovery value."
   value       = aws_cloudwatch_log_group.daily.name
 }
 
 output "adhoc_report_log_group_arn" {
-  description = "ARN of the encrypted CloudWatch log group receiving ad-hoc report execution events, for a metric filter or subscription an environment root attaches without reaching into this module."
+  description = "ARN of the encrypted CloudWatch log group receiving ad-hoc report execution events. Discovery only in the sense that matters here: no module or root reads this ARN, because modules/observability takes the group by NAME. A metric filter and an execution-failure alarm ARE attached to the group itself through that path, so this value is the identity a further consumer would scope to rather than evidence the group is unwatched."
   value       = aws_cloudwatch_log_group.adhoc.arn
 }
 
 output "adhoc_report_log_group_name" {
-  description = "Name of the CloudWatch log group receiving ad-hoc report execution events, for report-operations dashboards and log queries."
+  description = "Name of the CloudWatch log group receiving ad-hoc report execution events. Both environment roots pass this name to modules/observability as the `adhoc` entry of state_machine_log_group_names, which attaches a metric filter counting terminal ExecutionFailed and ExecutionTimedOut events and an alarm on that metric, so the group is a consumed contract rather than a discovery value."
   value       = aws_cloudwatch_log_group.adhoc.name
 }
 
 output "dataset_roundtrip_log_group_arn" {
-  description = "ARN of the CloudWatch log group the dataset round-trip machine writes its execution history to. Published so a root can attach a subscription or a metric filter without reaching into the module."
+  description = "ARN of the CloudWatch log group the dataset round-trip machine writes its execution history to. Discovery only in the sense that matters here: no module or root reads this ARN, because modules/observability takes the group by NAME. A metric filter and an execution-failure alarm ARE attached to the group itself through that path, so this value is the identity a further consumer would scope to rather than evidence the group is unwatched."
   value       = aws_cloudwatch_log_group.dataset_roundtrip.arn
 }
 
 output "dataset_roundtrip_log_group_name" {
-  description = "Name of the CloudWatch log group the dataset round-trip machine writes to, for a console link or a logs query."
+  description = "Name of the CloudWatch log group the dataset round-trip machine writes to. Both environment roots pass this name to modules/observability as the `dataset` entry of state_machine_log_group_names, which attaches a metric filter counting terminal ExecutionFailed and ExecutionTimedOut events and an alarm on that metric, so the group is a consumed contract rather than a discovery value."
   value       = aws_cloudwatch_log_group.dataset_roundtrip.name
 }
 
 output "authorization_extract_log_group_arn" {
-  description = "ARN of the log group the authorization-extract state machine writes its execution history to, for a metric filter or subscription an environment root attaches without reaching into this module."
+  description = "ARN of the log group the authorization-extract state machine writes its execution history to. Discovery only in the sense that matters here: no module or root reads this ARN, because modules/observability takes the group by NAME. A metric filter and an execution-failure alarm ARE attached to the group itself through that path, so this value is the identity a further consumer would scope to rather than evidence the group is unwatched."
   value       = aws_cloudwatch_log_group.authorization_extract.arn
 }
 
 output "authorization_extract_log_group_name" {
-  description = "Name of the log group the authorization-extract state machine writes its execution history to, which is the stream an operator reads when an export produced no rows."
+  description = "Name of the log group the authorization-extract state machine writes its execution history to. Both environment roots pass this name to modules/observability as the `authz` entry of state_machine_log_group_names, which attaches a metric filter counting terminal ExecutionFailed and ExecutionTimedOut events and an alarm on that metric, so the group is a consumed contract rather than a discovery value."
   value       = aws_cloudwatch_log_group.authorization_extract.name
 }
 
@@ -339,11 +373,46 @@ output "bracket_release_alarm_names" {
 #       composed from, so an operator reading it sees the effect of the optional
 #       override -- the value the tasks actually receive. Reading the inputs back
 #       instead would report the composed default even where an override is in
-#       force, and it would republish a value another module owns; that second
-#       cost is why the bare source prefix is no longer an output here.
+#       force.
 output "dataset_staging_root" {
   description = "Resolved location the data-migration container reads seed extracts from, as passed to every staging and load task in CARDDEMO_DATASET_STAGING_ROOT. Either an s3 URI over the dataset bucket and the source extract prefix or, where an operator overrides it, an absolute filesystem path. The data-migration runbook reads it from each root's batch_orchestration output to confirm the nightly chain and the operator commands resolve the same place."
   value       = local.dataset_staging_root
+}
+
+# WHY : (1) Refactoring Rationale: this output is DEPRECATED and is republished
+#       rather than deleted. It was withdrawn outright on the ground that it
+#       re-exported an input another module owns, which remains true and is why it
+#       is deprecated -- but a removal is a breaking change to a name this file
+#       itself declares to be an external contract, and both environment roots
+#       expose this module whole as `batch_orchestration`, so a consumer of that
+#       object may address this key from remote state or from an operator command
+#       outside this repository. A repository search cannot prove such a consumer
+#       absent, and the failure mode of guessing wrong is an unresolvable
+#       reference in somebody else's plan rather than anything this repository's own
+#       gates would catch. Keeping the name for a compatibility window costs one
+#       string and converts that class of breakage into a deprecation an owner can
+#       act on.
+# WHY : (2) Assumptions: the MIGRATION BOUNDARY is stated here rather than left to
+#       a changelog, because a deprecation with no stated end is indistinguishable
+#       from a permanent output. A consumer needing the prefix reads
+#       `source_extract_prefix` from the roots' `datasets` output, which is
+#       infra/modules/s3-datasets's own publication of the value it decides; a
+#       consumer needing the location the tasks actually read reads
+#       `dataset_staging_root` above, which honours the optional override this
+#       key cannot see. This alias is removed in the next MAJOR revision of this
+#       module's output contract, and it is the one output here that may be removed
+#       without a further deprecation window because this block is the window.
+# WHY : (3) Trade-offs: the value is read back from the input rather than from a
+#       resource, so it reports the composed default even where
+#       `dataset_staging_root` is overridden -- which is exactly the defect that
+#       motivated the withdrawal and is restated in the description so a reader
+#       cannot adopt it unaware. It is deliberately NOT redefined to return the
+#       resolved root instead: an alias that answered a different question under the
+#       same name would break the consumers it exists to protect, silently, which is
+#       worse than the breakage it is standing in for.
+output "dataset_source_extract_prefix" {
+  description = "DEPRECATED, retained for one compatibility window and removed in the next major revision of this module's output contract. S3 key prefix inside the dataset bucket holding the exported baseline extracts the seed-refresh state reads, echoed verbatim from this module's identically named input. It reports the COMPOSED DEFAULT and cannot see the dataset_staging_root override, so it does not necessarily name the location the tasks read. Replace it with source_extract_prefix from the roots' datasets output, which infra/modules/s3-datasets owns and decides, or with dataset_staging_root above where the location the tasks actually resolve is what is wanted."
+  value       = var.dataset_source_extract_prefix
 }
 
 # -----------------------------------------------------------------------------

@@ -111,8 +111,15 @@
  * duplicate is not an accident and it is the whole reason one projection appears in both
  * joins: {@code XREFFILE} at CREASTMT.JCL L84 and {@code CARDXREF} at TRANREPT.jcl L67-L68
  * name the identical dataset, {@code AWS.M2.CARDDEMO.CARDXREF.VSAM.KSDS}, under two different
- * data-definition names. Seven distinct datasets and seven projections is not a coincidence
- * either; it is the mapping this package implements.
+ * data-definition names.
+ * <p>⚠️ Refactoring Rationale: this read "Seven distinct datasets and seven projections is not a
+ * coincidence either", and the second half of that pairing is no longer true. Seven distinct
+ * datasets is right and is the arithmetic above; EIGHT projections is the present count, because
+ * {@code TransactionCategoryBalanceView} was added with the category-balance report of
+ * {@code app/jcl/PRTCATBL.jcl} -- a third job, whose inputs are not among the nine entries these
+ * two members declare. The correction is recorded rather than the sentence deleted, because a
+ * reader who counts eight types against seven datasets should find the extra one accounted for
+ * here instead of concluding the mapping has a spare.
  *
  * <p>The participation matrix below is stated in full because a projection written as though
  * it joined where it does not is a substantive defect and not a cosmetic one.
@@ -139,7 +146,7 @@
  * declared width settles the column type, the Java type and the byte position of a field, and
  * nothing else does. Every record length below was re-derived by summing the declared
  * {@code PICTURE} widths of the record, and the sibling projections cite this table rather
- * than repeating that derivation seven times.
+ * than repeating that derivation eight times.
  * <ul>
  *   <li>{@code StatementTransactionView} from {@code app/cpy/COSTM01.CPY}, whose
  *       {@code 01 TRNX-RECORD} sits at L20 and whose record length is 350; its trailing
@@ -187,8 +194,8 @@
  *
  * <h2>Type mapping</h2>
  *
- * <p>These rules are stated once, in this charter, so that seven projections apply one mapping
- * instead of seven. A {@code PIC 9(n)} field acting as a key or an identifier becomes
+ * <p>These rules are stated once, in this charter, so that eight projections apply one mapping
+ * instead of eight. A {@code PIC 9(n)} field acting as a key or an identifier becomes
  * {@code BIGINT} and a {@code Long}. A {@code PIC X(n)} field acting as a key or a fixed code
  * becomes {@code CHAR(n)} and a {@code String}, because its width is part of the contract. A
  * descriptive {@code PIC X(n)} field becomes {@code VARCHAR(n)} and a {@code String}, because
@@ -298,7 +305,7 @@
  * far from the assignment that caused it. A failure that names the offending type is worth
  * more than a mutability neither this context nor its baseline ever uses.
  *
- * <p>Alternatives Considered: these seven types map views, and this context declares no table
+ * <p>Alternatives Considered: these eight types map views, and this context declares no table
  * of its own. Two other shapes were evaluated and both were rejected. Declaring base tables
  * here was rejected because every store the report and the statement read is already owned
  * elsewhere -- the two job control members declare nine input entries between them at
@@ -364,10 +371,15 @@
  * and a reader who cannot find a {@code card} read in either program has not overlooked one.
  *
  * <p>Assumptions: each record's trailing {@code FILLER} is dropped, and each dropped field is
- * recorded per record, which is what the plan's normative-copybook rule requires. The seven
+ * recorded per record, which is what the plan's normative-copybook rule requires. The EIGHT
  * lines are {@code COSTM01.CPY} L36, {@code CVTRA05Y.cpy} L18, {@code CVACT03Y.cpy} L8,
- * {@code CVACT01Y.cpy} L17, {@code CUSTREC.cpy} L23, {@code CVTRA03Y.cpy} L7 and
- * {@code CVTRA04Y.cpy} L9. {@code FILLER} is padding to a fixed record length and carries
+ * {@code CVACT01Y.cpy} L17, {@code CUSTREC.cpy} L23, {@code CVTRA03Y.cpy} L7,
+ * {@code CVTRA04Y.cpy} L9 and {@code CVTRA01Y.cpy} L10.
+ * ⚠️ Refactoring Rationale: the list held seven and omitted {@code CVTRA01Y.cpy} L10, the 22-byte
+ * trailing {@code FILLER} of the category-balance record that {@code TransactionCategoryBalanceView}
+ * drops -- which that type's own header states. An enumeration that is short by one is worse here
+ * than a wrong total, because the whole purpose of naming the lines is that a dropped field stays
+ * auditable, and an unlisted drop is exactly the invisible one the sentence promises against. {@code FILLER} is padding to a fixed record length and carries
  * nothing a reader of a report or a statement could act on, so mapping it would add a column
  * whose only content is blanks; naming the line each one came from is what keeps its removal
  * auditable instead of invisible.

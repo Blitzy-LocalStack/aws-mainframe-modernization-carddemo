@@ -138,7 +138,7 @@ import org.springframework.stereotype.Repository;
  * {@code existsById} answers whether a code is a code some row carries, which is the question a
  * category's parent reference raises, and the inherited keyed {@code delete} is what a removal goes
  * through so that the declared foreign key is the thing that refuses a restricted removal.
- * {@code V1__reference.sql} declares that key across lines 266 to 268 as
+ * {@code V1__reference.sql} declares that key across lines 255 to 257 as
  * {@code FOREIGN KEY (type_cd) REFERENCES reference.transaction_types (type_cd) ON DELETE RESTRICT},
  * transcribed from {@code app/app-transaction-type-db2/ddl/TRNTYCAT.ddl} lines 6 to 7. The engine
  * refuses with SQLSTATE 23503, the framework translates that into a data-integrity exception, and
@@ -230,7 +230,7 @@ import org.springframework.stereotype.Repository;
  * is meeting it as a puzzling failure in a case whose query and envelope are both right.</p>
  *
  * <p>Assumptions: the identity of this repository is {@code String}. Four sources carry the code as
- * characters of declared width two -- {@code V1__reference.sql} line 106 declares
+ * characters of declared width two -- {@code V1__reference.sql} line 99 declares
  * {@code type_cd CHAR(2) NOT NULL}, {@code app/app-transaction-type-db2/ddl/TRNTYPE.ddl} line 2
  * declares {@code TR_TYPE CHAR(2) NOT NULL}, {@code app/app-transaction-type-db2/dcl/DCLTRTYP.dcl}
  * line 38 generates the host variable as {@code PIC X(2)}, and {@code app/cpy/CVTRA03Y.cpy} line 5
@@ -276,7 +276,7 @@ public interface TransactionTypeRepository extends JpaRepository<TransactionType
      * the six read alike.</p>
      *
      * @param typeCd the code to read, exactly as stored: two characters including a leading zero,
-     *     because {@code V1__reference.sql} line 106 declares {@code type_cd CHAR(2) NOT NULL} and the
+     *     because {@code V1__reference.sql} line 99 declares {@code type_cd CHAR(2) NOT NULL} and the
      *     seeded codes at {@code V2__seed_reference.sql} lines 113 to 119 run from {@code 01} to
      *     {@code 07}
      * @return the row, or empty when no row carries that code, which is the condition from which the
@@ -562,7 +562,7 @@ public interface TransactionTypeRepository extends JpaRepository<TransactionType
      * rows match, so a search for a description containing a percent sign would return rows that do not
      * contain one, and the caller would receive a plausible page rather than an error. A scan argument
      * is deliberately not offered as the reason, because it does not hold: {@code V1__reference.sql}
-     * declares only the primary key on this table at its line 164, so no pattern on the description
+     * declares only the primary key on this table at its line 153, so no pattern on the description
      * could have used an ordered index range in the first place.</p>
      *
      * <p>Trade-offs: what is given up is the ability to hand a crafted pattern through the published

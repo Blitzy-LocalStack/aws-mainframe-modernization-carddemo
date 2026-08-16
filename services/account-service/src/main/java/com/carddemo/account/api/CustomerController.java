@@ -33,9 +33,13 @@ import org.springframework.web.bind.annotation.RestController;
  * map, and both are read directly. The file is declared {@code ORGANIZATION IS INDEXED} at L30 with
  * {@code ACCESS MODE IS SEQUENTIAL} at L31 over {@code RECORD KEY IS FD-CUST-ID} at L32, and the loop at
  * L74 through L81 walks it end to end, writing each record out at L78 between an open at L72 and a close
- * at L83. Two operations follow from that and are what this adapter publishes: a read positioned by the
- * key of L32, and an ascending scan standing in for the sweep of L74 through L81. A presence probe sits
- * beside them, serving the neighbouring pending-authorization context.</p>
+ * at L83. Two access paths follow from that: a read positioned by the key of L32, and an ascending scan
+ * standing in for the sweep of L74 through L81. This adapter publishes FOUR operations over them — the
+ * keyed read, a second keyed read projecting the screen's display fields, a presence probe serving the
+ * neighbouring pending-authorization context, and the scan. Refactoring Rationale: this sentence said
+ * "two operations", counting access paths rather than operations and leaving the display projection and
+ * the probe unaccounted for; the count is corrected and the two quantities are now named separately,
+ * because it is the operation count a reader checks this class against.</p>
  *
  * <p>Assumptions: the record layout rather than the file description fixes the published fields. The file
  * description carves the record into a nine-digit key at L39 and four hundred and ninety-one opaque bytes
@@ -52,21 +56,33 @@ import org.springframework.web.bind.annotation.RestController;
  * refuses a web type inside a domain package, and this adapter accepts and returns transfer records only,
  * so no stored row appears in a signature, a local or an import here.</p>
  *
- * <p>Refactoring Rationale: no operation below accepts a caller identity in any form. The reference
- * carried one in the communication area the terminal echoed back -- {@code CDEMO-USER-ID PIC X(08)} at
- * L25 of {@code app/cpy/COCOM01Y.cpy} and {@code CDEMO-USER-TYPE PIC X(01)} at L26, whose two admitted
- * values are declared at L27 and L28 -- which means a client was in a position to assert its own user
- * type. Here the same distinction arrives as a signed group claim converted by
+ * <p>Assumptions: no operation below accepts a caller identity in any form. The reference carried one
+ * in the communication area the terminal echoed back -- {@code CDEMO-USER-ID PIC X(08)} at L25 of
+ * {@code app/cpy/COCOM01Y.cpy} and {@code CDEMO-USER-TYPE PIC X(01)} at L26, whose two admitted values
+ * are declared at L27 and L28 -- which put a client in a position to assert its own user type. Here the
+ * same distinction arrives as a signed group claim converted by
  * {@code com.carddemo.common.security.JwtRoleConverter}, so it cannot be asserted by the caller at all.
- * Which authority governs which route is settled by {@code config/SecurityConfig.java} and
- * {@code config/InternalApiSecurityConfig.java}, and no authority is named in this file.</p>
+ * Which authority governs which route is settled by {@code com.carddemo.account.config.SecurityConfig} and
+ * {@code com.carddemo.account.config.InternalApiSecurityConfig}, and no authority is named in this file.</p>
  *
  * <p>Assumptions: the selection context travels in the request rather than in server-held state. The
- * reference kept it at L33 of {@code app/cpy/COCOM01Y.cpy} as {@code CDEMO-CUST-ID PIC 9(09)}; here it is
- * a path variable, which is what makes each request self-describing and independently authorizable. The
- * full account of how that structure decomposes is in this package's charter and is not restated here.
+ * reference kept it at L33 of {@code app/cpy/COCOM01Y.cpy} as {@code CDEMO-CUST-ID PIC 9(09)}; here it
+ * arrives as a {@link CustomerLookupRequest} in the request BODY of the three operations that select one
+ * customer, which is what makes each request self-describing and independently authorizable. The scan
+ * operation selects nothing and takes only a cursor and a page size as query parameters.
+ * ⚠️ Refactoring Rationale: this said the identifier "is a path variable", and this controller declares
+ * no {@code @PathVariable} at all -- its three selecting operations are {@code @PostMapping}s taking
+ * {@code @Valid @RequestBody CustomerLookupRequest}. The move is the one
+ * {@link CustomerLookupRequest} argues at length: a customer identifier in a request line is written
+ * verbatim into the load balancer's access log before any application code can redact it, and this
+ * migration's sensitive-data contract names customer identifiers among the values a durable diagnostic
+ * may not hold. So the retired sentence did not merely misdescribe a mechanism; it described the
+ * disclosure the mechanism was chosen to prevent, in the paragraph a reader consults to learn how
+ * selection reaches this controller. The full account of how that structure decomposes is in this
+ * package's charter and is not restated here.
  * Nothing below holds a session, a re-entry discriminator or a next-program field, and the correlation
- * filter is registered and ordered by {@code config/SecurityConfig.java} rather than here.</p>
+ * filter is registered and ordered by {@code com.carddemo.account.config.SecurityConfig} rather than
+ * here.</p>
  *
  * <p>Assumptions: parity for these operations rests on the transcribed access path and the copybook
  * contract, and on no golden master, because none exists for this reference. Its own suite records at
@@ -81,12 +97,13 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping(CustomerController.BASE_PATH)
 @OnlineWriteGateExempt(reason =
-        "Both operations this controller publishes are READS. Each is a POST only so that the"
-        + " nine-digit customer identifier travels in a request body instead of a path segment,"
-        + " where the load balancer composes it into an access record no application code can"
-        + " withdraw it from. Refusing either during the batch window would stop an internal caller"
-        + " resolving a customer context while the chain runs, and this migration's quiesce closes"
-        + " writes rather than reads.")
+        "All four operations this controller publishes are READS. The three that select one customer"
+        + " are POSTs only so that the nine-digit customer identifier travels in a request body"
+        + " instead of a path segment, where the load balancer composes it into an access record no"
+        + " application code can withdraw it from; the fourth selects nothing, so it is a GET"
+        + " carrying only a cursor and a page size. Refusing any of them during the batch window"
+        + " would stop an internal caller resolving a customer context while the chain runs, and"
+        + " this migration's quiesce closes writes rather than reads.")
 public class CustomerController {
 
     /**
@@ -123,20 +140,20 @@ public class CustomerController {
      * {@code DISPLAY CUSTOMER-RECORD} at L78, over the group item {@code 01 CUSTOMER-RECORD.} declared at
      * L4 of {@code app/cpy/CVCUS01Y.cpy}.</p>
      *
-     * <p>Refactoring Rationale: the segment was {@code /{customerId}/record} and the path variable is gone.
-     * The reason is recorded on {@link CustomerLookupRequest} and applies to the whole of this controller's
-     * keyed surface rather than to one operation of it.</p>
+     * <p>Assumptions: the segment carries no path variable, the identifier travelling in the request body
+     * instead. The reason is recorded on {@link CustomerLookupRequest} and applies to the whole of this
+     * controller's keyed surface rather than to one operation of it.</p>
      */
     public static final String RECORD_PATH = "/record";
 
     /**
      * The sub-path of the nine-field screen display read, beneath {@link #BASE_PATH}.
      *
-     * <p>Refactoring Rationale: this address is new, and it exists because a neighbouring context's screen
-     * had no operation to read its display fields from. It read them from the response of the EXISTENCE check
-     * at {@value #LOOKUP_PATH}, which carries no body at all by contract, so those fields rendered as absent
-     * on every request and nothing failed while they did. The two available shapes before this address existed
-     * were a status with no body and the whole record, and neither is a screen's field list.</p>
+     * <p>Assumptions: this address exists because a neighbouring context's screen needs a field list and
+     * neither of the other two shapes is one. The EXISTENCE check at {@value #LOOKUP_PATH} carries no body at
+     * all by contract, so reading display fields from it renders every one of them absent with nothing
+     * failing, and {@value #RECORD_PATH} answers with the whole record. A screen's field list is a third
+     * shape, and this is where it is served.</p>
      *
      * <p>Assumptions: exposed as a constant for the same reason the two above are -- {@code
      * InternalApiSecurityConfig} builds its request matcher from this value, so the authority the operation
@@ -187,17 +204,15 @@ public class CustomerController {
      * reference's own use of the record is limited to whether the read succeeded, and the eighteen fields
      * the copybook declares at L5 through L22 include two identifiers there is no reason to move.</p>
      *
-     * <p>Refactoring Rationale: this check was reachable as {@code GET} and {@code HEAD} on
-     * {@code /api/v1/customers/{customerId}} and is now a single {@code POST} on {@value #LOOKUP_PATH}
-     * carrying the identifier in a body. Two facts made the move necessary rather than tidy. The
-     * consuming context had ALREADY moved -- {@code authorization-service}'s
-     * {@code RestAccountContextClient} addresses {@code /api/v1/customers/lookup} with a JSON body -- so
-     * while this controller published only the keyed form, every existence check reached this service as a
-     * dispatcher 404, which the caller cannot distinguish from "no such customer" and would read as a
-     * legitimate decision input. And the reason the caller moved is the one {@link CustomerLookupRequest}
-     * records: the load balancer composes its access record from the request line before any application
-     * code runs, so a customer identifier in a path segment lands in a durable log that nothing inside a
-     * service can withdraw it from.</p>
+     * <p>Assumptions: this check is a single {@code POST} on {@value #LOOKUP_PATH} carrying the identifier
+     * in a body rather than a {@code GET} on a keyed path, and two facts fix it there. The consuming context
+     * addresses exactly this operation -- {@code authorization-service}'s
+     * {@code RestAccountContextClient} calls {@code /api/v1/customers/lookup} with a JSON body -- and a
+     * keyed form would answer it as a dispatcher 404, which the caller cannot distinguish from "no such
+     * customer" and would read as a legitimate decision input. And the body is what
+     * {@link CustomerLookupRequest} records the reason for: the load balancer composes its access record
+     * from the request line before any application code runs, so a customer identifier in a path segment
+     * lands in a durable log that nothing inside a service can withdraw it from.</p>
      *
      * <p>Assumptions: the two methods collapse into ONE operation and nothing is lost. Both were already
      * served by this single handler -- the framework answers a {@code HEAD} from a {@code GET} mapping by
@@ -220,7 +235,7 @@ public class CustomerController {
      */
     @PostMapping(path = LOOKUP_PATH, consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Void> lookup(@Valid @RequestBody CustomerLookupRequest request) {
-        // WHY : Assumptions: this handler answers with a ResponseEntity rather than throwing the
+        // Assumptions: this handler answers with a ResponseEntity rather than throwing the
         //   not-found exception the sibling operations throw, and the difference is required rather
         //   than stylistic. The shared advice renders a not-found as a problem DOCUMENT, and this
         //   operation is bodyless by contract -- a consumer that reads the status alone would receive a
@@ -255,8 +270,8 @@ public class CustomerController {
      * with a whole card number belongs to the card context rather than to this one.</p>
      *
      * <p>Assumptions: every numeric field of this record travels as digits-only TEXT rather than as a
-     * numeric member, including the identifier in the path echoed back in the body, the national
-     * identifier and the credit score. The reference holds exactly that separation itself: at L671 of
+     * numeric member, including the identifier the request body carried and this response echoes, the
+     * national identifier and the credit score. The reference holds exactly that separation itself: at L671 of
      * {@code app/cbl/COACTUPC.cbl} it declares {@code ACUP-OLD-ACCT-ID-X PIC X(11)} and at L672 with L673
      * redefines the same storage as {@code PIC 9(11)}, so the screen value is characters and the numeric
      * reading is an overlay on it. The two symbolic maps disagree on the same field and the stricter form
@@ -270,23 +285,20 @@ public class CustomerController {
      * from the other side: {@code app/cbl/COACTUPC.cbl} declares the validation condition
      * {@code 88 FLG-CITY-NOT-OK} at L301 for a field its record layout never declares.</p>
      *
-     * <p>Refactoring Rationale: this read moved from {@code GET /api/v1/customers/{customerId}/record} to
-     * {@code POST} on {@value #RECORD_PATH} with the identifier in a body, for the reason
-     * {@link CustomerLookupRequest} records for the existence check beside it -- an identifier in a path
-     * segment is composed into the load balancer's access record before any application code runs. The
-     * request record is shared with that check rather than duplicated, because the two constrain the same
+     * <p>Assumptions: this read is a {@code POST} on {@value #RECORD_PATH} with the identifier in a body,
+     * for the reason {@link CustomerLookupRequest} records for the existence check beside it -- an identifier
+     * in a path segment is composed into the load balancer's access record before any application code runs.
+     * The request record is shared with that check rather than duplicated, because the two constrain the same
      * nine-digit key to the same range and a second record would be the same three constraints in a second
      * place.</p>
      *
-     * <p>Refactoring Rationale: this operation and the master scan beside it now require
-     * {@link com.carddemo.common.security.InternalServiceToken#SCOPE_CUSTOMER_MASTER_READ}, where both
-     * previously answered to the same
-     * {@link com.carddemo.common.security.InternalServiceToken#SCOPE_CUSTOMER_READ} as the
-     * single-key decision reads. That was an escalation rather than an imprecision: the two contexts that
-     * hold the decision scope mint it in order to resolve one card number, and while this read shared it,
-     * a token issued for that lookup could return all eighteen fields of any customer record. The scope
-     * boundary is drawn by what a token can read, and the reasoning is recorded once on the scope constant
-     * rather than restated at each operation it governs.</p>
+     * <p>Assumptions: this operation and the master scan beside it require
+     * {@link com.carddemo.common.security.InternalServiceToken#SCOPE_CUSTOMER_MASTER_READ} rather than the
+     * {@link com.carddemo.common.security.InternalServiceToken#SCOPE_CUSTOMER_READ} the single-key decision
+     * reads answer to. The boundary is drawn by what a token can read: the two contexts holding the decision
+     * scope mint it in order to resolve one card number, and a token issued for that lookup must not be able
+     * to return all eighteen fields of any customer record. The reasoning is recorded once on the scope
+     * constant rather than restated at each operation it governs.</p>
      *
      * @param request the lookup request carrying the customer identifier, the key {@code CUST-ID} declares
      *     at L5 of {@code app/cpy/CVCUS01Y.cpy}; must satisfy its declared constraints
@@ -304,7 +316,7 @@ public class CustomerController {
             consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE)
     public CustomerResponse readRecord(@Valid @RequestBody CustomerLookupRequest request) {
-        // WHY : Assumptions: the transaction boundary and the not-found decision both sit on the service
+        // Assumptions: the transaction boundary and the not-found decision both sit on the service
         //   method this handler calls, so neither is restated here. The reference's own terminal failure
         //   path is a language-environment abend -- Z-ABEND-PROGRAM. at L154 of app/cbl/CBCUS01C.cbl
         //   calling CEE3ABD at L158 -- which in the target is an ordinary exception propagating to the
@@ -331,13 +343,12 @@ public class CustomerController {
      * one consumer's presentation as though it were the layout, and the country code at L13 would then have
      * to be either included, which no line renders, or explained away.</p>
      *
-     * <p>Refactoring Rationale: this operation is new because the consumer had nowhere to read those fields
-     * from and was reading them from the wrong place. It issued the existence check at {@value #LOOKUP_PATH}
-     * and deserialised its response, and that operation answers 204 or 404 with NO body -- deliberately, so
-     * that an absence cannot return a customer identifier in a problem document that is itself logged. Its
-     * seam record additionally declared a composed name member that this contract does not publish and no
-     * column exists for. So the screen's display fields were absent on every request, and nothing anywhere
-     * failed while they were: a bodiless 204 deserialises to nothing rather than to an error.</p>
+     * <p>Assumptions: this operation exists so that the consumer has somewhere to read those fields from.
+     * The existence check at {@value #LOOKUP_PATH} answers 204 or 404 with NO body -- deliberately, so that
+     * an absence cannot return a customer identifier in a problem document that is itself logged -- so
+     * deserialising display fields from it yields nothing on every request and fails nowhere, a bodiless 204
+     * deserialising to nothing rather than to an error. Nor does this contract publish a composed name
+     * member: no column exists for one.</p>
      *
      * <p>Assumptions: this address requires the DECISION-read authority and not the customer-master one, and
      * that is the whole reason it exists rather than the consumer being pointed at {@value #RECORD_PATH}.
@@ -346,10 +357,10 @@ public class CustomerController {
      * granting it to a context that renders nine fields would be the escalation the scope split was
      * introduced to prevent.</p>
      *
-     * <p>Trade-offs: this contract now carries a field list belonging to another context's screen, which is
-     * coupling accepted deliberately -- widening that screen later requires a change here. What it buys is
-     * that the exposure is a decision this context takes and can refuse, which is what owning the customer
-     * master means; the alternative left the consumer choosing between no fields and every field.</p>
+     * <p>Trade-offs: this contract carries a field list belonging to another context's screen, which is
+     * coupling accepted deliberately -- widening that screen requires a change here. What it buys is that
+     * the exposure is a decision this context takes and can refuse, which is what owning the customer master
+     * means; the alternative leaves the consumer choosing between no fields and every field.</p>
      *
      * <p>Assumptions: no protected value appears in the response at all, so nothing here is masked. The two
      * encrypted identifiers and the credit score are ABSENT rather than masked, because a masked member is
@@ -448,7 +459,7 @@ public class CustomerController {
             @Max(AccountViewService.CUSTOMER_SCAN_MAX_PAGE_SIZE)
             Integer size) {
 
-        // WHY : Assumptions: the default page size is READ from the service rather than restated here as
+        // Assumptions: the default page size is READ from the service rather than restated here as
         //   a request-parameter default, because the ceiling and the default are one decision and a
         //   second copy at this edge could be changed without the bound moving with it. Passing the
         //   service's own constant is what keeps the two in step.
@@ -475,7 +486,7 @@ public class CustomerController {
                 ? FieldValidationFlag.BLANK
                 : FieldValidationFlag.VALID;
 
-        // WHY : Assumptions: the accepted value is TRIMMED before it travels on, because a position is
+        // Assumptions: the accepted value is TRIMMED before it travels on, because a position is
         //   carried in a query string and a caller that reflects a whitespace-padded copy of what it
         //   received would otherwise present a token the sealer cannot verify. Trimming is safe only on
         //   this arm: the blank arm has already been folded into the opening page above, so no value

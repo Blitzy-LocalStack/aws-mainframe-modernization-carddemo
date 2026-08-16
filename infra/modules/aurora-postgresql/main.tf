@@ -921,5 +921,23 @@ resource "aws_rds_cluster_instance" "this" {
   preferred_maintenance_window = var.preferred_maintenance_window
   apply_immediately            = var.apply_immediately
 
+  # WHY : Trade-offs: this is held false because the environment roots pin a
+  #       LONG-TERM SUPPORT minor release, and AWS documents that staying on an
+  #       LTS minor requires automatic minor version upgrade to be switched off
+  #       -- left at the provider default of true, RDS would move the cluster
+  #       off the reviewed LTS minor on its own schedule and the three-year
+  #       support horizon the pin was chosen for would silently evaporate. The
+  #       second effect is just as costly and less obvious: an out-of-band minor
+  #       upgrade leaves var.engine_version describing a release the cluster is
+  #       no longer running, so every subsequent plan shows a spurious version
+  #       diff and a real one becomes impossible to see. Alternatives Considered:
+  #       exposing this as a module input was rejected because it is not an
+  #       environment-shaped choice -- it follows from the pinning strategy
+  #       itself, so both roots would have to pass the same value and a root
+  #       that passed true would quietly break its own version pin. Patch-level
+  #       fixes are NOT forgone: Aurora patches clusters on an LTS minor to that
+  #       release's latest patch version annually.
+  auto_minor_version_upgrade = false
+
   tags = local.tags
 }

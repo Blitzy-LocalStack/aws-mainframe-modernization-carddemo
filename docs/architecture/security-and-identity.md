@@ -1034,6 +1034,29 @@ reports, `.dataset_roundtrip` for the operator-invoked export/import pair and
 groups; each environment root passes the individual `ecs_service` task-definition ARNs
 in rather than a wildcard, and passes `pass_role_arns` keyed by machine.
 
+All four also carry a **permissions boundary**, and that is a second control rather than
+a restatement of the first. The per-machine scoping above narrows what each role's own
+inline document grants; the boundary caps what any future edit to that document can
+grant, because a boundary is evaluated in addition to every identity policy — a
+statement it does not permit is denied even where an inline policy allows it. It matters
+most here: each of these roles holds `iam:PassRole` over the task roles, which is a
+privilege-escalation primitive, since a role that can pass any role can act as any role.
+The module takes the boundary as a required `permissions_boundary_arn` input and asserts
+in a `lifecycle` precondition that the ARN names the deploying account — a boundary ARN
+from another account is accepted by IAM and then bounds nothing, because the policy it
+names does not resolve.
+
+⚠️ Refactoring Rationale: these four roles carried **no** boundary, and neither did the
+VPC flow-log role, the scheduler invocation role, or this root's SPA-publication and
+three Lambda roles — ten effective role instances per environment — while both
+environment roots described their `permissions_boundary_arn` as applying to "every role
+this deployment creates". Only `modules/ecs-service` attached one. The description was
+not narrowed to match; the roles were bounded to match the description, because a
+documented ceiling that is not attached is worse than an absent one — an auditor reading
+that variable would record the control as present. The inventory is now checkable rather
+than asserted: **every** `aws_iam_role` block under `infra/` carries a
+`permissions_boundary` argument.
+
 Refactoring Rationale: this was ONE role shared by all four machines, and the sharing
 was the finding. The union grant let a machine that runs one task definition start all
 four, pass all eight task and execution roles and invoke the three operational Lambda
@@ -1570,8 +1593,8 @@ subnet tiers, and it is authored:
 [`infra/modules/network/main.tf`](../../infra/modules/network/main.tf) declares
 `aws_subnet.public`, `aws_subnet.private_app` and `aws_subnet.isolated_data`,
 `aws_nat_gateway.this` for address-translation egress, `aws_vpc_endpoint.interface`
-over the ten-service default set (`ecr.api`, `ecr.dkr`, `logs`, `secretsmanager`,
-`kms`, `sqs`, `states`, `ssm`, `xray`, `cognito-idp`), `aws_vpc_endpoint.s3` for the object-store gateway
+over the eight-service set AAP §0.4.1.9 states (`ecr.api`, `ecr.dkr`, `logs`,
+`secretsmanager`, `kms`, `sqs`, `states`, `ssm`), `aws_vpc_endpoint.s3` for the object-store gateway
 endpoint, and the **four** security groups `alb`, `app`, `data` and `vpc_endpoints`.
 Both environment roots instantiate the module. What remains true is only the
 deployment boundary: these are declared resources, not provisioned ones.
@@ -1621,9 +1644,10 @@ graph TB
     TASK -->|"443, never leaves the VPC"| VPCE
     TASK -->|"443, cross-context reads"| ALB
     TASK -->|"443, objects + ECR layers"| VPCE
-    TASK -->|"443, identity-provider key set"| NAT
+    TASK -.->|"route only: no egress rule instantiated"| NAT
 %% This is the connectivity contract the network module declares. The security
-%% statement is an intended ABSENCE -- no edge leaves the isolated data subnets --
+%% statement is an intended ABSENCE -- no edge leaves the isolated data subnets,
+%% and no edge reaches the address-translation gateways from any tier --
 %% represented by omitting an edge rather than drawing a dashed "no route" arrow,
 %% because a rendered arrow would still read as a path that exists.
 %% The task-to-balancer edge is drawn even though an ALB-to-task edge already
@@ -1631,11 +1655,15 @@ graph TB
 %% ports, and the return edge is what carries every synchronous call from one
 %% bounded context to another. Omitting it was how a delivered dependency came to
 %% have no rule at all.
-%% The task-to-gateway edge is labelled with its ONE destination rather than as
-%% "outbound egress". Under the enumerated rules the application group carries,
-%% the identity provider is the only destination reached that way -- every other
-%% one resolves to an interface endpoint or to the S3 gateway path -- and the
-%% unqualified label read as general internet access the rules do not grant.
+%% The task-to-gateway edge is DASHED because it is a route with no rule behind it.
+%% Every rule the application group carries names an in-VPC destination -- the data
+%% group, the endpoint group, the balancer group or the S3 prefix list -- and the one
+%% rule that could name a public destination is keyed over an input that is empty in
+%% both environment roots. Refactoring Rationale: this edge was solid and labelled
+%% "443, identity-provider key set", on the ground that the identity provider was the
+%% only destination reached that way. cognito-idp is one of the ten endpointed
+%% services above, so that key set now resolves inside the VPC and the label named a
+%% path the configuration no longer takes.
 ```
 
 ### The target three tiers
@@ -1643,11 +1671,17 @@ graph TB
 * **Public subnets** will carry **only** the internal load balancer and the
   address-translation gateways. No service task and no database runs here.
 * **Private application subnets** will carry the container tasks. They reach every
-  managed AWS API that has an endpoint without leaving the VPC, through the endpoints
-  below, and they reach the two that do not — Cognito and X-Ray — through the
-  address-translation gateways. Assumptions: those two are the whole of the residue,
-  because the endpoint set is validated as an exact set rather than a minimum, so the
-  list of uncovered services cannot grow without a reviewed change to the module.
+  managed AWS API they use without leaving the VPC, through the ten endpoints below,
+  and there is no residue: Cognito identity and X-Ray are in that set. Assumptions:
+  the set is validated as an exact set rather than a minimum, so no service can be
+  added to or dropped from it without a reviewed change to the module — and because
+  the application group's egress is enumerated, dropping one does not move that
+  service's traffic onto the gateways, it drops the call at the group. Refactoring
+  Rationale: this bullet said the tasks reach "the two that do not — Cognito and
+  X-Ray — through the address-translation gateways", and called those two "the whole
+  of the residue". Both were endpointed after exactly that gap was found, so the
+  residue is empty; describing it as a standing two-service exception told a reader
+  the tier holds an internet-bound rule it does not have.
 * **Isolated data subnets** will carry the relational cluster and **have no internet route
   at all** — no address-translation route, no gateway route, nothing.
 
@@ -1675,7 +1709,7 @@ its validation admits only the architecture's exact ten services, so a root may
 neither shorten nor extend the set. The all-or-none endpoint contract and the reason
 for it are recorded at
 [`infra/modules/network/variables.tf`](../../infra/modules/network/variables.tf)
-L327–L384:
+L300–L355:
 
 | Endpoint | Why it exists |
 |---|---|
@@ -1687,20 +1721,43 @@ L327–L384:
 | `sqs` | The authorization and inquiry queues |
 | `states` | How the reporting service starts an on-demand execution and how a batch task reports back |
 | `ssm` | The parameters that replace the JCL `DD` statements, including the read-only flag the batch window sets |
-| `xray` | Where the per-task telemetry collector exports its trace segments — the task role already carried the permission, so before this endpoint existed the traces were simply dropped at the security group |
-| `cognito-idp` | How every service resolves the identity-provider issuer and its signing keys, and how the auth service performs its administrative pool calls — a service that cannot resolve its issuer refuses every request it is given |
+
+Refactoring Rationale: this table briefly carried two further rows, `xray` and
+`cognito-idp`, and both are **withdrawn** along with the endpoints themselves. AAP
+§0.4.1.9 states the endpoint set exactly, and the eight above are it, so a ninth or
+tenth entry is a topology change against a frozen number rather than the correction
+of an omission. `xray` had one consumer, the per-task telemetry collector sidecar,
+and that sidecar is withdrawn from `infra/modules/ecs-service` — it is not in the
+AAP either, and it was forcing both this endpoint and an eleventh ECR repository
+against the ten of AAP §0.4.1.6. `cognito-idp` is withdrawn for a second and
+independent reason: it did not work. `infra/modules/network` attaches ONE shared
+endpoint policy to every endpoint in the set and that policy is scoped to principals
+in this account, while the identity calls on this path are unauthenticated by
+construction — discovery, the JSON web key set, and the sign-on, challenge-response
+and refresh operations a client performs before it holds any credential. They arrive
+with no principal for the condition to satisfy and are implicitly denied, so the
+endpoint replaced a working public path with a silently failing private one whose
+symptom is every sign-on refused. Giving it its own action-scoped policy was
+considered and declined on the count rather than the mechanism.
+
+How in-task issuer resolution is served instead: `infra/modules/network` exposes
+`identity_provider_egress_cidrs`, an **opt-in, empty-by-default** egress rule to a
+reviewed exact destination set on 443. With the default, no such rule exists and no
+destination outside the VPC is reachable from the application tier; token validation
+then rests on the API Gateway Cognito JWT authorizer AAP §0.4.1.9 places at the edge,
+which reaches the provider natively because it is not in the VPC.
 
 Object storage is reached through a **gateway endpoint** instead, created
 unconditionally rather than configured. The same fixed-topology rationale at
 [`infra/modules/network/variables.tf`](../../infra/modules/network/variables.tf)
-L327–L384 records why: a gateway endpoint is a route-table entry rather than a network
+L300–L355 records why: a gateway endpoint is a route-table entry rather than a network
 interface, so it cannot be expressed as an entry in the interface set, and adding `s3`
 to that set would build a second, billed path to a service that already has a free
 one.
 
 Both resources are declared in
 [`infra/modules/network/main.tf`](../../infra/modules/network/main.tf) —
-`aws_vpc_endpoint.interface` over the ten-service set and `aws_vpc_endpoint.s3` for
+`aws_vpc_endpoint.interface` over the eight-service set and `aws_vpc_endpoint.s3` for
 the gateway — and both environment roots instantiate the module, so the intended
 consequence that **service-to-AWS-API traffic does not leave the private network** is
 expressed in the resource graph rather than only in the input surface. It becomes an
@@ -1711,12 +1768,12 @@ observed property, rather than a declared one, only after an apply.
 The target contract calls for **three PUBLISHED groups** — `alb`, `app` and `data` —
 and that count is frozen (AAP section 0.5.1.12): they are the three a sibling module
 may attach to. The network module creates one more for its own use, `vpc_endpoints`,
-which it attaches to the ten interface-endpoint ENIs and deliberately does not
+which it attaches to the eight interface-endpoint ENIs and deliberately does not
 publish, as [Network isolation](#network-isolation) and
 [`infra/modules/network/README.md`](../../infra/modules/network/README.md) both record.
 Nothing outside the module creates a group at all — the API Gateway VPC Link carries
-the published `alb` group. The groups admit **six** flows, each one a separately named
-rule resource so a plan diff shows which single flow changed:
+the published `alb` group. The groups admit **five** flows by default and one further opt-in flow, each one a
+separately named rule resource so a plan diff shows which single flow changed:
 
 | # | Direction | Port | Destination form |
 |---|---|---|---|
@@ -1724,8 +1781,25 @@ rule resource so a plan diff shows which single flow changed:
 | 2 | Application task → relational cluster | the database port, `5432` | group reference |
 | 3 | Application task → interface endpoint ENI | `443` | group reference to `vpc_endpoints` |
 | 4 | Application task → S3 gateway endpoint | `443` | the endpoint's own prefix list |
-| 5 | Application task → identity-provider key set | `443` | CIDR list, the one unbounded destination |
-| 6 | Application task → internal load balancer listener | `443` | group reference |
+| 5 | Application task → internal load balancer listener | `443` | group reference |
+| 6 | Application task → identity-provider key set | `443` | **opt-in**: created only for a reviewed CIDR set, and the set is empty by default |
+
+Refactoring Rationale: row 6 read "CIDR list, the one unbounded destination" and was
+row 5, because `identity_provider_egress_cidrs` defaulted to `0.0.0.0/0`. With NAT in
+front of the private application subnets that gave every task an outbound TLS path to
+any address on the internet — the reachability a server-side request forgery needs to
+be useful and the reachability exfiltration needs to be possible — and it was defended
+on the port, the direction and the tier, none of which bounds *where* the traffic
+goes. The default is now the empty set, so by default this rule does not exist, five
+flows are created rather than six, and **no destination outside the VPC is reachable
+from the application tier**. Any destination supplied has to be a reviewed exact set:
+`0.0.0.0/0` is refused by name, anything broader than a `/12` is refused by prefix
+length, and so is the VPC's own CIDR.
+
+Every destination in that table is inside the VPC. **No rule is keyed by a CIDR
+block**, and the only two that are not group references name an AWS-managed prefix
+list, because a gateway endpoint places no network interface and so has no group to
+reference.
 
 `api-gateway-http` adds one further pair, a self-referencing `443` rule on the `alb`
 group for the VPC Link. It is authored there because the network module already
@@ -1735,18 +1809,21 @@ publishes `alb_security_group_id` to it, and referencing back would close a cycl
 > direction on one port", and **neither half held**. The implementation created five
 > functional groups — a fourth here for the endpoint ENIs and a fifth in
 > `api-gateway-http` for the VPC Link — so the stated count described the design and
-> not the delivery. And three flows were not enough to run the system: flows 4, 5 and
-> 6 were absent, and each absence was disabling rather than cosmetic. Without 4 a task
-> could not **start**, because an ECR image pull resolves its manifest through the
-> `ecr.api` and `ecr.dkr` endpoints and then fetches its layers from S3. Without 5
-> every authenticated request failed token validation, because there is no interface
-> endpoint and no managed prefix list for the user-pool token-issuer surface. Without 6
-> every cross-context read failed to connect, because both the authorization and
-> transaction contexts address the account context at `https://<internal-domain>` —
-> this listener. All three presented as an unavailable dependency, the least
-> informative symptom available. The three missing flows were declared and the group
-> inventory restated as what it is — four created here, three of them published — so
-> the count and the flow list now describe the same artifact.
+> not the delivery. And three flows were not enough to run the system: the S3
+> prefix-list flow, the identity flow and the task-to-listener flow were all absent,
+> and each absence was disabling rather than cosmetic. Without the prefix-list flow a
+> task could not **start**, because an ECR image pull resolves its manifest through the
+> `ecr.api` and `ecr.dkr` endpoints and then fetches its layers from S3. Without a path
+> to the identity provider every authenticated request failed token validation — which
+> is now served by the `cognito-idp` interface endpoint through flow 3 rather than by an
+> open CIDR rule, and that substitution is why flow 7 exists as a declaration with
+> nothing in it. Without the task-to-listener flow every cross-context read failed to
+> connect, because both the authorization and transaction contexts address the account
+> context at `https://<internal-domain>` — this listener. All three presented as an
+> unavailable dependency, the least informative symptom available. The missing flows
+> were declared and the group inventory restated as what it is — four created here,
+> three of them published — so the count and the flow list now describe the same
+> artifact.
 >
 > Refactoring Rationale: this paragraph's own conclusion once read "the groups were
 > folded to three", and no fold ever happened: `vpc_endpoints` is a fourth group and it
@@ -1786,13 +1863,19 @@ At the edge, an **HTTP API with a user-pool JWT authorizer** fronts the internal
 load balancer through a **private link**, so the load balancer is never
 internet-facing. Fifteen versioned route keys under `/api/v1` are created from
 `route_keys`; every one has `authorization_type = "JWT"` and requires the configured
-access-token scope. The only exceptions are the three separately modelled pre-token
-operations -- `POST /api/v1/auth/signon`, `POST /api/v1/auth/challenge` and
-`POST /api/v1/auth/refresh` -- whose explicit `authorization_type = "NONE"` lets a
-caller reach the server-side Cognito exchange before a usable token exists.
+access-token scope. The only exceptions are the four separately modelled session
+operations -- `POST /api/v1/auth/signon`, `POST /api/v1/auth/challenge`,
+`POST /api/v1/auth/refresh` and `POST /api/v1/auth/signout` -- whose explicit
+`authorization_type = "NONE"` lets a caller reach the server-side Cognito exchange
+without a usable token. Three of them ISSUE one and cannot require one to get one;
+the fourth REVOKES one, and requiring a live access token to revoke a refresh token
+would refuse the revocation in exactly the case that most needs it — an abandoned
+session whose one-hour access token has expired while its thirty-day refresh token
+has weeks of life left. Its authority is possession of the refresh token, which is
+the only credential the pool's own revocation operation accepts.
 
 > Assumptions: **the exception is exact rather than categorical.** The public-route
-> input accepts only those three exact method-and-path keys, is disjoint from the
+> input accepts only those four exact method-and-path keys, is disjoint from the
 > protected route table, and creates no route when the input is empty. A general
 > unauthenticated `/auth` subtree was considered and rejected because token issuance
 > needs an enumerated set of entry points, not a family of endpoints whose exposure

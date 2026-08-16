@@ -20,29 +20,38 @@
 //       non-breaking hyphen followed by an em dash -- two characters indistinguishable on screen
 //       from their ASCII counterparts, either of which would put a byte outside ASCII into a file
 //       whose documentation audit is configured for one character set.
-//   2.  Assumptions: the shared advice is handed to the unguarded dispatcher BY HAND, and every
-//       status assertion in this file rests on that. com.carddemo.common.error
-//       .GlobalExceptionHandler carries the only @RestControllerAdvice in this migration, at L177
-//       of its own source, and it sits outside the com.carddemo.reference scan root; the module
-//       entry point receives it from com.carddemo.common.CardDemoCommonAutoConfiguration rather
-//       than naming it. A dispatcher assembled by standaloneSetup has no context to discover it
-//       from, and omitting the registration does not fail loudly: the dispatcher falls back to
-//       the framework's default error handling, the assertions observe that instead of the real
-//       mapping, and the 404 below would read as green while the real mapping was broken.
-//   3.  Alternatives Considered: the context-slicing web-test annotation, which would have
-//       discovered the advice through an imported auto-configuration instead. It is unavailable
-//       rather than declined: the framework release in use moved its test slices into per-module
-//       artifacts, the only slice on this classpath is the JSON one, and the artifact carrying
-//       the web-mvc slice is not a declared dependency and may not become one. The mechanism used
-//       instead is the one this package publishes -- a real dispatcher over a hand-built
-//       controller -- and it registers the advice explicitly, which is the property the
-//       assertions actually depend on.
-//   4.  Assumptions: TWO dispatchers are built rather than one, and the split is load-bearing in
-//       both directions. The unguarded dispatcher installs no filter chain, so a 404 from it can
-//       only mean the key resolved to nothing and never that a caller was refused -- which is
-//       what makes the terminal-miss case below unambiguous. The guarded dispatcher installs the
-//       deployed chain, which is the only way to observe what a read actually demands of a
-//       caller. Merging them would cost the first property to gain the second.
+//   2.  Assumptions: the shared advice is what every status assertion in this file rests on.
+//       com.carddemo.common.error.GlobalExceptionHandler carries the only @RestControllerAdvice in
+//       this migration, at L177 of its own source, and it sits outside the com.carddemo.reference
+//       scan root; the module entry point receives it from
+//       com.carddemo.common.CardDemoCommonAutoConfiguration rather than naming it. Its absence
+//       does not fail loudly -- a dispatcher without it falls back to the framework's default
+//       error handling, the assertions observe that instead of the real mapping, and the 404 below
+//       would read as green while the real mapping was broken. The unguarded dispatcher now
+//       obtains it the way a deployed task does, by importing that auto-configuration into an MVC
+//       slice; the guarded context still names it explicitly, because it is assembled from bean
+//       methods rather than auto-configured.
+//   3.  Refactoring Rationale: the unguarded dispatcher used to be assembled by
+//       standaloneSetup, and the reason recorded here was that the context-slicing web-test
+//       annotation was unavailable -- the framework release having moved its test slices into
+//       per-module artifacts, of which only the JSON one was on this classpath. That reason no
+//       longer holds: services/reference-service/pom.xml now declares the web-mvc slice artifact.
+//       The change is not cosmetic. A hand-assembled dispatcher is handed its controller, its
+//       converters and its advice, so it cannot report a component scan that stopped finding this
+//       controller, a converter or serialisation setting the deployed configuration publishes and
+//       this file forgot, or an advice the deployed configuration would have supplied. In
+//       particular the money module reached the old dispatcher only because this file installed a
+//       converter carrying it; the slice obtains it from the shared auto-configuration, so the
+//       JSON-token assertions below now hold the DEPLOYED rendering rather than a locally
+//       configured one.
+//   4.  Assumptions: TWO dispatchers are still built rather than one, and the split is
+//       load-bearing in both directions. The slice installs no filter chain -- SecurityConfig is a
+//       plain configuration class rather than a web configurer, so the slice's include filter does
+//       not admit it -- and that is what makes a 404 from it mean the key resolved to nothing and
+//       never that a caller was refused, which is what makes the terminal-miss case below
+//       unambiguous. The guarded context installs the deployed chain, which is the only way to
+//       observe what a read actually demands of a caller. Merging them would cost the first
+//       property to gain the second.
 //   5.  Assumptions: the rate is written as a JSON STRING because
 //       com.carddemo.common.money.MoneyModule binds its serialiser to the Money TYPE at its L269,
 //       not to the decimal it wraps, and this file asserts the JSON TOKEN rather than only its
@@ -65,12 +74,36 @@
 //       field left-justifies and space-fills. A case that wrote the unpadded name into an
 //       assertion would be comparing against its own transcription rather than against the value
 //       the service looks up.
-//   8.  Alternatives Considered: exercising the substitution on any (type, category) pair other
-//       than 07 and 0001. Rejected on measurement: app/data/ASCII/discgrp.txt holds three account
-//       groups over the same seventeen pairs, and sixteen of those pairs price identically under
-//       A000000000 and the substituted group, so an assertion on one of them passes whether or
-//       not the substitution fired and would keep passing if the branch were deleted. At 07 and
-//       0001 the two rates differ, which is what lets the case fail.
+//   8.  Assumptions: the two rate constants below are the values of the DEPLOYED table, and the
+//       pair they are read at is 07 and 0001 -- where, in that table, the two groups price
+//       IDENTICALLY. That is deliberate and it is the whole reason this file cannot be the owner
+//       of the substitution's data behaviour. app/data/EBCDIC/AWS.M2.CARDDEMO.DISCGRP.PS is the
+//       authoritative extract and V2__seed_reference.sql is seeded from it at its lines 236 to
+//       262; that extract prices the substituted group's ('07','0001') pair at 15.00, the same as
+//       A000000000, and only the ASCII convenience copy prices it at 0.00. The divergence between
+//       the two extracts is registered as D-SEED-ENCODING-AUTHORITY in
+//       docs/architecture/cobol-to-service-traceability.md. So the constants here describe two
+//       DISTINCT stubbed answers and prove that this boundary reports whichever one the resolver
+//       supplied together with the indicator that says which group supplied it -- which is a
+//       property of the boundary and needs no discriminating data at all.
+//       Refactoring Rationale: this note previously claimed that 07 and 0001 is "the only pair in
+//       the seed priced differently under A000000000 and the substituted group", citing
+//       app/data/ASCII/discgrp.txt, and offered that as the reason a substitution case here can
+//       fail. Both halves were wrong once the table stopped being seeded from that copy: measured
+//       against the deployed rows the two groups agree on all seventeen pairs, so no pair here
+//       discriminates and this file's resolver is substituted in any case, which means no
+//       assertion in it could have failed on the strength of a rate whatever pair was chosen. The
+//       claim therefore asserted a safety property this file never had.
+//   8a. Alternatives Considered: making this file the owner of the substitution's data behaviour
+//       by choosing a pair that does discriminate in the deployed table -- ('01','0001'), where
+//       the substituted group carries 15.00 against ZEROAPR's 0.00. Rejected: with the resolver
+//       substituted, a discriminating pair changes nothing, because the stub answers whatever it
+//       is told to and the real read never happens. The control the review of this file asked for
+//       is a REAL first miss, and it now exists one layer down as
+//       com.carddemo.reference.repository.DisclosureGroupRepositoryIT's
+//       theSubstitutionFiresAgainstTheSeededTableAndDiscriminates, which drives the real service
+//       over the real seeded table at that pair and asserts the two rates UNEQUAL. Naming that
+//       owner here is what keeps this file's narrower scope honest rather than merely narrower.
 //   9.  Assumptions: the terminal miss is driven with type 01 and category 0005 because that pair
 //       is the one the seed leaves unpriced in EVERY group, the substituted group included.
 //       app/data/ASCII/trancatg.txt carries eighteen pairs against the seventeen
@@ -118,6 +151,7 @@ import static org.springframework.security.test.web.servlet.setup.SecurityMockMv
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.carddemo.common.CardDemoCommonAutoConfiguration;
 import com.carddemo.common.error.AbendDetail;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.GlobalExceptionHandler;
@@ -149,8 +183,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.security.oauth2.server.resource.autoconfigure.OAuth2ResourceServerAutoConfiguration;
+import org.springframework.boot.security.oauth2.server.resource.autoconfigure.web.OAuth2ResourceServerWebSecurityAutoConfiguration;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.HttpMessageConverters;
 import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
@@ -161,6 +200,7 @@ import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
@@ -220,6 +260,13 @@ import tools.jackson.databind.json.JsonMapper;
  * its own at-clauses, including the private helpers, because the documentation audit that governs
  * this file reads test sources and filters method visibility down to private.</p>
  */
+@WebMvcTest(controllers = DisclosureGroupController.class,
+        excludeAutoConfiguration = {
+            OAuth2ResourceServerAutoConfiguration.class,
+            OAuth2ResourceServerWebSecurityAutoConfiguration.class
+        })
+@Import({CardDemoCommonAutoConfiguration.class, DisclosureGroupControllerTest.SliceFixtures.class})
+@ActiveProfiles("test")
 @DisplayName("the disclosure-group rate route at its HTTP boundary")
 class DisclosureGroupControllerTest {
 
@@ -242,11 +289,17 @@ class DisclosureGroupControllerTest {
     private static final String GROUP_ABSENT = "Z999999999";
 
     /**
-     * The transaction type of the one pair whose rate differs between the two account groups.
+     * The transaction type this file reads its two stubbed rates at.
      *
-     * <p>Assumptions: type {@code 07} with category {@code 0001} is the only pair in the seed
-     * priced differently under {@code A000000000} and the substituted group, which is what makes a
-     * substitution case here able to fail rather than merely able to pass.</p>
+     * <p>Assumptions: type {@code 07} with category {@code 0001} is the pair at which the two baseline
+     * extracts of this dataset disagree, and the DEPLOYED table -- seeded from the authoritative EBCDIC
+     * extract -- prices it identically under {@code A000000000} and the substituted group. The two rate
+     * constants below are therefore two distinct STUBBED answers rather than two seeded values, and what
+     * they let this file assert is that the boundary reports whichever rate the resolver supplied
+     * alongside the indicator naming the group that supplied it. The data behaviour of the substitution
+     * is owned by {@code DisclosureGroupRepositoryIT}, which drives it over the real table at
+     * {@code ('01','0001')} where the rows genuinely differ; the header note 8 records why that division
+     * is the right one for a file whose resolver is substituted.</p>
      */
     private static final String TYPE_DISCRIMINATING = "07";
 
@@ -286,11 +339,21 @@ class DisclosureGroupControllerTest {
     private static final String RATE_PRICED_TEXT = "15.00";
 
     /**
-     * The rate the substituted group carries for that same pair, as the wire spells it.
+     * The second rate this file stubs, standing for the substituted group's answer on the wire.
      *
-     * <p>Assumptions: <code>00000{</code> in the seed, which is the whole point of choosing this
-     * pair: it differs from the other group's rate, so an assertion on the value distinguishes the two
-     * reads instead of passing under either.</p>
+     * <p>Assumptions: <code>00000{</code> is the span the ASCII convenience copy holds at this pair, and
+     * the DEPLOYED table does not hold it -- the authoritative EBCDIC extract prices the substituted
+     * group's {@code ('07','0001')} at {@link #RATE_PRICED_TEXT}. The value is kept because what this
+     * file needs from it is only that it DIFFERS from the other constant, so that an assertion on the
+     * rendered rate can tell which of the two stubbed answers the boundary published. It is not a claim
+     * about a seeded row, and reading it as one is the mistake the header's note 8 exists to prevent.</p>
+     *
+     * <p>Refactoring Rationale: this doc previously called the value "the rate the substituted group
+     * carries for that same pair" and offered the difference as evidence that an assertion here
+     * "distinguishes the two reads". Neither survives measurement: the deployed table carries
+     * {@link #RATE_PRICED_TEXT} for that group and pair, and there is only ever ONE read in this file
+     * because the resolver is substituted. The constant's real job -- being a second, distinguishable
+     * stubbed value -- is what it is now documented as.</p>
      */
     private static final String RATE_SUBSTITUTED_TEXT = "0.00";
 
@@ -342,8 +405,16 @@ class DisclosureGroupControllerTest {
     /** The mapper the response bodies in this class are read back with. */
     private static final JsonMapper JSON = JsonMapper.builder().addModule(new MoneyModule()).build();
 
-    /** The rate resolver, substituted because its rules are asserted in the service package. */
-    private static DisclosureGroupService rates;
+    /**
+     * The rate resolver, substituted because its rules are asserted in the service package.
+     *
+     * <p>Refactoring Rationale: it is constructed where it is declared rather than inside
+     * {@code @BeforeAll}, so that ONE instance is reachable both from the guarded context's bean method
+     * and from the slice fixture's. The two dispatchers deliberately share it, which is what the
+     * per-case reset below is for; creating it in a lifecycle method would have made that sharing depend
+     * on the order in which the framework loads a context relative to running that method.</p>
+     */
+    private static final DisclosureGroupService rates = mock(DisclosureGroupService.class);
 
     /** The context backing the dispatcher that carries the deployed filter chain. */
     private static AnnotationConfigWebApplicationContext guardedContext;
@@ -351,35 +422,34 @@ class DisclosureGroupControllerTest {
     /** The dispatcher that carries the deployed filter chain, used only by the authority cases. */
     private static MockMvc guarded;
 
-    /** The dispatcher that carries no filter chain, used by every body and status case. */
-    private static MockMvc unguarded;
+    /**
+     * The dispatcher that carries no filter chain, used by every body and status case.
+     *
+     * <p>Assumptions: injected from the MVC slice rather than assembled, so the controller, the shared
+     * advice, the message converters and the money module all arrive from the configuration a deployed
+     * task would run. It is an instance field because a slice injects into the test instance; the guarded
+     * dispatcher beside it stays static because the context it wraps is built once for the class.</p>
+     */
+    @Autowired
+    private MockMvc unguarded;
 
     /**
-     * Builds both dispatchers over one substituted resolver, once for the class.
+     * Builds the guarded dispatcher over the shared substituted resolver, once for the class.
      *
      * <p>Trade-offs: the guarded context is assembled ONCE rather than per case, because starting
      * a security-enabled context is the most expensive thing this class does and no case mutates
      * it. What is given up is per-case isolation of the substituted resolver, which is bought back
      * by resetting it before each case.</p>
      *
-     * <p>Assumptions: the unguarded dispatcher is given the shared advice through
-     * {@code setControllerAdvice} and a converter carrying the money module through
-     * {@code setMessageConverters}. Both are deliberate and both are load-bearing: without the
-     * advice a refusal renders through the framework's default handling and the status assertions
-     * stop describing the real mapping, and without the module the rate renders in a shape the
-     * running service does not publish.</p>
+     * <p>Assumptions: this context still names the shared advice and installs a converter carrying the
+     * money module BY HAND, unlike the slice beside it. It is assembled from bean methods rather than
+     * auto-configured, so nothing in it would discover either: without the advice a refusal renders
+     * through the framework's default handling and the status assertions stop describing the real
+     * mapping, and without the module the rate renders in a shape the running service does not
+     * publish.</p>
      */
     @BeforeAll
-    static void buildDispatchers() {
-        rates = mock(DisclosureGroupService.class);
-
-        unguarded = MockMvcBuilders
-                .standaloneSetup(new DisclosureGroupController(rates))
-                .setMessageConverters(new JacksonJsonHttpMessageConverter(JSON))
-                .setControllerAdvice(new GlobalExceptionHandler(
-                        Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC)))
-                .build();
-
+    static void buildGuardedDispatcher() {
         guardedContext = new AnnotationConfigWebApplicationContext();
         // WHY : Assumptions: a servlet context is installed BEFORE the refresh because the deployed
         //       chain is a servlet filter chain and the configuration that builds it is conditional
@@ -1362,10 +1432,27 @@ class DisclosureGroupControllerTest {
      * so this descriptor carries no parameter or return at-clause; each bean method below carries
      * its own.</p>
      */
-    @Configuration(proxyBeanMethods = false)
+    // WHY : Refactoring Rationale: this is a @TestConfiguration and not a plain @Configuration, and the
+    //       difference is load-bearing rather than stylistic. This module now carries the Spring Boot MVC
+    //       test slice, and a slice component-scans from the application package -- which is this package's
+    //       own root -- while its include filter admits any WebMvcConfigurer it finds. A plain
+    //       @Configuration declared here therefore leaked into every sibling slice's context and collided
+    //       with the beans that slice declared for itself; the first symptom was a duplicate clock
+    //       definition reported against a class in a different file from the failing test.
+    //       @TestConfiguration carries @TestComponent, which the test type-exclude filter removes from
+    //       component scanning, while explicit registration and explicit import both still work -- which is
+    //       how the case that needs this class obtains it.
+    // WHY : Assumptions: the class is FINAL, which keeps the framework from ALSO reporting it as an
+    //       ignored default configuration class. Default-configuration detection admits only a static,
+    //       non-private, non-final nested class, and this class's cases live in @Nested groups, for which
+    //       that detection is skipped entirely -- so the framework would otherwise log that it had found
+    //       this class and ignored it. Marking it final states in the type system that explicit
+    //       registration is the route being used. proxyBeanMethods = false already declines the subclass
+    //       that would have needed the type to be extensible, so nothing is given up.
+    @TestConfiguration(proxyBeanMethods = false)
     @EnableWebMvc
     @EnableWebSecurity
-    static class GuardedChainWiring implements WebMvcConfigurer {
+    static final class GuardedChainWiring implements WebMvcConfigurer {
 
         /**
          * Installs a JSON converter carrying the exact-money module.
@@ -1455,6 +1542,52 @@ class DisclosureGroupControllerTest {
                 Clock clock) throws Exception {
 
             return new SecurityConfig().filterChain(http, converter, clock);
+        }
+    }
+
+    /**
+     * Supplies the two beans the MVC slice cannot obtain from the deployed configuration.
+     *
+     * <p>Assumptions: only the clock and the substituted resolver are declared. Everything else the
+     * unguarded dispatcher needs -- the controller, the shared advice, the JSON converter and the money
+     * module -- now arrives from the deployed configuration through the imported shared
+     * auto-configuration, which is the whole point of driving the slice rather than a hand-built
+     * dispatcher.</p>
+     *
+     * <p>Assumptions: it is {@code final}, for the reason recorded on the guarded wiring above: the cases
+     * here live in {@code @Nested} groups, so default-configuration detection is skipped and would
+     * otherwise log that this class was found and ignored.</p>
+     */
+    @TestConfiguration(proxyBeanMethods = false)
+    static final class SliceFixtures {
+
+        /**
+         * Supplies the fixed clock the shared advice stamps its problem documents from.
+         *
+         * <p>Assumptions: the auto-configured clock declares itself conditional on being missing, so
+         * declaring one here replaces it without any exclusion. The deployed bean reads the system clock,
+         * against which no stamp could be named at all.</p>
+         *
+         * @return a {@code Clock} fixed at this class's instant, never {@code null}
+         */
+        @Bean
+        Clock clock() {
+            return Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC);
+        }
+
+        /**
+         * Publishes the SAME substituted resolver the guarded context holds.
+         *
+         * <p>Assumptions: the one instance is shared deliberately rather than duplicated, so a case that
+         * stubs it once is answered identically whichever dispatcher it then drives, and the per-case
+         * reset governs both. Two instances would let a stubbing apply to one dispatcher and not the
+         * other, which is a failure a reader would attribute to authority rather than to wiring.</p>
+         *
+         * @return the class's substituted {@code DisclosureGroupService}, never {@code null}
+         */
+        @Bean
+        DisclosureGroupService disclosureGroupService() {
+            return rates;
         }
     }
 }

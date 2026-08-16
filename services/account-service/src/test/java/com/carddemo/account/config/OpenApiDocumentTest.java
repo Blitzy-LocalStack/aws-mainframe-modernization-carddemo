@@ -388,6 +388,13 @@ class OpenApiDocumentTest {
      * <p>Assumptions: the operation count is asserted so the loop cannot pass vacuously. A scanner that
      * matched nothing -- because a path item gained a member, or because the document was restructured --
      * would otherwise assert nothing at all while reading as though it had checked every route.</p>
+     *
+     * <p>Refactoring Rationale: the census figure moved from eleven to twelve when the account edit's
+     * non-writing check was published at {@code POST /api/v1/accounts/update/validate} -- the baseline's
+     * Enter turn, which had no operation until then. The figure is RAISED deliberately rather than
+     * loosened into a lower bound: its whole job is to fail when the scanner stops matching, and an
+     * assertion that merely required "at least one" would keep passing after a restructuring that hid
+     * eleven of the twelve.</p>
      */
     @Test
     @DisplayName("every operation declares the transport refusals the shared advice can produce")
@@ -425,9 +432,14 @@ class OpenApiDocumentTest {
             }
         }
 
+        // WHY : Refactoring Rationale: the figure moved from eleven to twelve when the no-write
+        //       validation turn was published at /api/v1/accounts/update/validate. It is stated as a
+        //       MEASURED count of the operations this document declares rather than incremented on
+        //       faith: the whole purpose of the assertion is to fail when an operation is added
+        //       without being examined, so a figure adjusted by reflex would retire the guard it is.
         assertThat(operations)
                 .as("the census is not vacuous; every published operation was examined")
-                .isEqualTo(11);
+                .isEqualTo(12);
 
         Map<String, Object> declared = nested(nested(document, "components"), "responses");
         assertThat(declared)

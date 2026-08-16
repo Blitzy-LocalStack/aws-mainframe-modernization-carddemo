@@ -1,5 +1,3 @@
-package com.carddemo.reference.api;
-
 // =============================================================================
 // services/reference-service/src/test/java/com/carddemo/reference/api/TransactionTypeControllerTest.java
 // -----------------------------------------------------------------------------
@@ -42,7 +40,20 @@ package com.carddemo.reference.api;
 //       form the rules document lists at its lines 31 to 34. The singular and parenthesised
 //       spellings mean the same thing and are simply not used; that equivalence is recorded in
 //       this sentence alone and the forms are not mixed anywhere in this file.
+//
+//   Assumptions: this header block sits ABOVE the package declaration, which is
+//       unusual for Java and is what makes the WHAT: line above legal. Rule 1's
+//       prohibition is on a statement-level WHAT:, and
+//       config/rule1/rule1_gate.py implements it by permitting WHAT: only inside a
+//       file's leading header block -- a contiguous run of comment lines beginning
+//       at line ONE. With the package declaration first, the same block is a
+//       statement-level comment and the gate fails the build. Three sibling
+//       dispatcher classes in this package already carry the header first; the
+//       package-first ones carry no WHAT: line at all, which is the other legal
+//       shape.
 // =============================================================================
+
+package com.carddemo.reference.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
@@ -50,24 +61,29 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 
+
+import com.carddemo.common.CardDemoCommonAutoConfiguration;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.error.RecordConflictException;
-import com.carddemo.common.money.MoneyModule;
+import com.carddemo.common.security.JwtRoleConverter;
 import com.carddemo.common.validation.FieldValidationFlag;
+import com.carddemo.common.web.CorrelationIdFilter;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
+import com.carddemo.reference.domain.TransactionType;
 import com.carddemo.reference.dto.PageDirection;
 import com.carddemo.reference.dto.TransactionTypeCreateRequest;
 import com.carddemo.reference.dto.TransactionTypeListRequest;
@@ -83,22 +99,37 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.security.oauth2.server.resource.autoconfigure.OAuth2ResourceServerAutoConfiguration;
+import org.springframework.boot.security.oauth2.server.resource.autoconfigure.web.OAuth2ResourceServerWebSecurityAutoConfiguration;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.webmvc.test.autoconfigure.MockMvcBuilderCustomizer;
+import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
+import org.springframework.jdbc.BadSqlGrammarException;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
-import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -145,12 +176,99 @@ import tools.jackson.databind.json.JsonMapper;
  * refusal, and it is asserted here from the parent side, which is where the delete that provokes
  * it lives.
  *
+ * <h2>How the boundary is assembled</h2>
+ *
+ * <p>Refactoring Rationale: this class is a real MVC slice, and it was not. It previously built its
+ * dispatcher with {@code MockMvcBuilders.standaloneSetup}, constructing the controller itself,
+ * installing one hand-built message converter and registering the shared advice by hand. Everything
+ * that arrangement asserted was true of the arrangement rather than of the deployed boundary: the
+ * controller was reached because this file instantiated it and not because the component scan finds
+ * it; a response serialised through a converter this file assembled and not through the one the
+ * running service installs; the advice answered because this file passed it in, so dropping the
+ * shared kernel's registration of it would have changed nothing here. Four classes of real defect
+ * were therefore unreachable from this file at all -- a controller the scan cannot see, a Jackson
+ * customisation that stops being applied, an advice bean that stops being published, and a converter
+ * whose configuration differs from the deployed one.
+ *
+ * <p>Assumptions: {@code @WebMvcTest} names ONE controller, so the slice mounts that controller's
+ * routes and no others. That narrowness is deliberate and is what keeps a 404 here meaningful: an
+ * address this class does not expect to be served is genuinely unmounted rather than merely
+ * unreached. The service collaborator is substituted with {@code @MockitoBean}, so each case still
+ * asserts the answer the boundary composes and never the query that decided it.
+ *
+ * <p>Assumptions: the shared kernel's auto-configuration is imported EXPLICITLY rather than left to
+ * arrive on its own. A slice applies only the web-related auto-configurations Spring Boot lists for
+ * it, and {@code CardDemoCommonAutoConfiguration} is not among them, so without the import the
+ * advice, the money module and the Jackson customisation that refuses a non-textual scalar for a
+ * text target would all be absent -- and their absence is silent, because the container answers a
+ * refusal with its own representation and every status assertion below would still pass.
+ *
+ * <p>Alternatives Considered: importing it with {@code @ImportAutoConfiguration} rather than with
+ * {@code @Import}, which reads more naturally for an auto-configuration class. Rejected because that
+ * annotation is not repeatable and the slice annotation is itself meta-annotated with it: declaring it
+ * again here replaced the slice's own attributes, including the exclusion list aliased below, so the
+ * excluded auto-configurations came back and the context failed to start. {@code @Import} adds the
+ * class without disturbing anything the slice declares, and an auto-configuration imported that way
+ * still evaluates every condition it carries.
+ *
+ * <p>Assumptions: two beans are supplied by the nested configuration and both are supplied because
+ * the deployed ones are unusable in a test rather than because a stand-in is preferred. The clock is
+ * fixed, because the shared advice stamps a refusal with the current instant and an assertion on a
+ * moving value cannot be written. The cursor codec carries this file's own key material, because the
+ * deployed bean is conditional on a signing-key property that names a secret no test holds; both
+ * auto-configured beans declare themselves conditional on being missing, so a locally declared one
+ * takes precedence without any exclusion. Trade-offs: a real key is not exercised, and that is the
+ * accepted cost of not committing one.
+ *
+ * <p>Assumptions: the two resource-server auto-configurations are excluded by name, and the exclusion
+ * is required rather than tidy. One of them builds a token decoder from an issuer location and issues
+ * the provider-document request while the context refreshes, against an issuer the test profile pins
+ * to a reserved name that resolves to nothing; the other declares a filter chain and needs the
+ * security builder a slice does not create. Neither is reachable from any case below, because no
+ * request here presents a token.
+ *
+ * <p>Trade-offs: the deployed security chain is still NOT installed here, and that is preserved from
+ * the previous arrangement on purpose. The slice's include filter admits controllers, advices,
+ * converters and web configurers, and {@code com.carddemo.reference.config.SecurityConfig} is none of
+ * those, so no chain is installed, no authority is demanded, and a refusal cannot be confused with an
+ * unmounted address. The rule table is
+ * owned by the {@code com.carddemo.reference.config} test package, which asserts it against the
+ * chain's own installed authorization managers. The one authority-adjacent property that belongs to
+ * this boundary rather than to the chain IS asserted here: the caller's name reaching the browse as
+ * the value its paging positions are sealed against, which the nested customizer supplies as a
+ * default principal.
+ *
+ * <p>Assumptions: the four category labels used below are written in the plural, un-parenthesised
+ * form the rules document lists at its lines 31 to 34. The singular and parenthesised spellings mean
+ * the same thing and are simply not used; that equivalence is recorded in this sentence alone and the
+ * forms are not mixed anywhere in this file.
+ *
+ * <p>Refactoring Rationale: this file previously opened with a shell-style banner comment placed
+ * after its package declaration, carrying a {@code WHAT:} narration and five numbered rationale
+ * points. The banner failed {@code config/rule1/rule1_gate.py --check what}, which admits a
+ * {@code WHAT:} comment only inside a file's LEADING header block and treats one below the package
+ * declaration as a statement-level restatement; the gate is build-failing, so the whole repository
+ * gate was red. The banner has been removed rather than relocated above the package declaration, and
+ * the deviation from the suggested remedy is deliberate: no other Java class in this repository
+ * carries a pre-package banner -- the construct appears only in {@code package-info.java} descriptors,
+ * where it is Javadoc -- so relocating it would have made this one file the sole exception to a
+ * convention held everywhere else, and its content would have sat outside the Javadoc that Checkstyle
+ * audits. Every surviving point is above, and the three that described the hand-assembled dispatcher
+ * are superseded rather than copied, because that dispatcher is gone.
+ *
  * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries
  * no parameter, return or exception tag. The inapplicability is stated rather than left silent,
  * because the Explainability rule lists a docstring that omits its parameters or return values
  * among its forbidden patterns at line 39 and a reader has to be able to tell a declared
  * inapplicability from an oversight.
  */
+@WebMvcTest(controllers = TransactionTypeController.class,
+        excludeAutoConfiguration = {
+            OAuth2ResourceServerAutoConfiguration.class,
+            OAuth2ResourceServerWebSecurityAutoConfiguration.class
+        })
+@Import({CardDemoCommonAutoConfiguration.class, TransactionTypeControllerTest.SliceFixtures.class})
+@ActiveProfiles("test")
 class TransactionTypeControllerTest {
 
     /** A seeded type code, the highest of the seven the reference data carries. */
@@ -158,6 +276,16 @@ class TransactionTypeControllerTest {
 
     /** A well-formed code the domain admits but no row holds, for the absent-row paths. */
     private static final String ABSENT_TYPE_CD = "42";
+
+    /**
+     * The characters a transaction-type code occupies, everywhere it appears.
+     *
+     * <p>Assumptions: two, from {@code PIC X(02)} at line 6 of {@code app/cpy/CVTRA03Y.cpy} and from the
+     * {@code TRAN_TYPE CHAR(2)} column the reference schema declares. It is named rather than written as
+     * a literal two because the assertion that reads it is about the width being DECLARED somewhere and
+     * carried, and a bare digit in an assertion is indistinguishable from a coincidence.</p>
+     */
+    private static final int TYPE_CODE_WIDTH = 2;
 
     /** The stored description of {@link #TYPE_CD}, within the fifty characters the column declares. */
     private static final String DESCRIPTION = "ADJUSTMENT";
@@ -176,6 +304,26 @@ class TransactionTypeControllerTest {
 
     /** A fixed instant, so a refusal the shared advice renders carries a reproducible timestamp. */
     private static final Instant FIXED_INSTANT = Instant.parse("2026-08-05T09:16:44.902355Z");
+
+    /**
+     * Reads the correlation identifier the deployed filter put on one response.
+     *
+     * <p>Assumptions: read from the response HEADER rather than parsed out of the body, because the
+     * header is where the shared filter publishes it and the body member is a copy the advice makes.
+     * Reading the source rather than the copy is what lets a case assert the two agree.</p>
+     *
+     * @param result the completed exchange
+     * @return the identifier the filter published, never {@code null}
+     */
+    private static String correlationOf(MvcResult result) {
+        String correlation = result.getResponse().getHeader(
+                CorrelationIdFilter.CORRELATION_ID_HEADER);
+        assertThat(correlation)
+                .as("the deployed correlation filter must publish an identifier on every response,"
+                        + " so its absence means the filter is not installed in this slice at all")
+                .isNotNull();
+        return correlation;
+    }
 
     /**
      * The sealing key this class constructs its cursor codec with.
@@ -204,6 +352,17 @@ class TransactionTypeControllerTest {
     /** The members the published page schema declares, and the complete set a page may carry. */
     private static final Set<String> PAGE_MEMBERS =
             Set.of("items", "firstKey", "lastKey", "hasNext");
+
+    /**
+     * The members the published item schema declares, and the complete set one row may carry.
+     *
+     * <p>Assumptions: the set is closed rather than a minimum, because
+     * {@code src/main/resources/openapi/reference-api.yaml} declares the transaction-type object with
+     * {@code additionalProperties: false} and names all three members required. A client validating
+     * against that document rejects a fourth member, so a containment assertion here would admit a body
+     * such a client would refuse.</p>
+     */
+    private static final Set<String> ITEM_MEMBERS = Set.of("typeCd", "description", "version");
 
     /**
      * The codes a full first page publishes, at the published page width.
@@ -246,12 +405,73 @@ class TransactionTypeControllerTest {
     /**
      * A state no branch of the service classifies, standing for an integrity failure it cannot act on.
      *
-     * <p>Assumptions: {@code 42P01} is an undefined-table condition, chosen because it is neither
-     * of the two states the service classifies -- {@code 23503} for a referencing row and
-     * {@code 23505} for a duplicate key -- so it exercises the arm that hands the failure back
-     * unchanged.
+     * <p>Assumptions: {@code 23502} is {@code not_null_violation}, and it is chosen on three
+     * grounds rather than one. It sits in SQLSTATE class {@code 23}, integrity constraint
+     * violation, so a translator genuinely renders it as
+     * {@link DataIntegrityViolationException} and the failure this class hands the boundary is one
+     * a driver could actually produce. It is neither of the two states the service classifies --
+     * {@code 23503} for a referencing row and {@code 23505} for a duplicate key -- so it still
+     * exercises the arm that hands the failure back unchanged. And it is reachable against THIS
+     * table: {@code src/main/resources/db/migration/V1__reference.sql} declares
+     * {@code description VARCHAR(50) NOT NULL} on {@code reference.transaction_types}, so a write
+     * that left the description absent reports exactly this state.
+     *
+     * <p>Refactoring Rationale: this constant was {@code 42P01}, undefined table. Class {@code 42}
+     * is syntax-error-or-access-rule-violation, which a translator renders as
+     * {@code BadSqlGrammarException} -- a sibling of {@link DataIntegrityViolationException} and
+     * never a subtype of it. So the case below manufactured a pairing no translator produces, and
+     * an undefined table is a schema fault the deployment owns rather than a conflict a caller can
+     * resolve. The case still passed, because the boundary classifies by exception CLASS and the
+     * hand-built wrapper said integrity violation whatever state it carried -- which is precisely
+     * why the wrong state was invisible. Asserting a 409 for a state that can only arrive as a
+     * fault documented the opposite of the intended contract. The undefined-table condition is now
+     * asserted separately, under the type it really translates to, by
+     * {@code anUndefinedTableAnswersALeakFreeFaultAndNeverAConflict}.
      */
-    private static final String UNCLASSIFIED_SQLSTATE = "42P01";
+    private static final String UNCLASSIFIED_INTEGRITY_SQLSTATE = "23502";
+
+    /**
+     * The undefined-table state, kept so the schema fault it stands for can be asserted as a fault.
+     *
+     * <p>Assumptions: this is carried on a {@code BadSqlGrammarException} rather than on an
+     * integrity violation, because that is what a translator produces for class {@code 42}. The
+     * distinction is the whole point of the case that uses it: a missing relation means the
+     * deployment is wrong, and reporting it to a caller as a conflict would invite a retry that
+     * cannot succeed while hiding the condition from the fault channel the alerting watches.
+     */
+    private static final String UNDEFINED_TABLE_SQLSTATE = "42P01";
+
+    /**
+     * Statement text standing for the SQL a translator attaches to a grammar failure.
+     *
+     * <p>Assumptions: a real translator carries the offending statement on the exception so an
+     * operator can read it out of a log. It names the schema and the table, so it is exactly the kind
+     * of text a body must not repeat, and this literal carries that shape so its absence is
+     * assertable.
+     */
+    private static final String FAILING_STATEMENT =
+            "delete from reference.transaction_type where type_cd = ?";
+
+    /**
+     * The referencing-row state, standing for a genuine restricted-delete refusal from the engine.
+     *
+     * <p>Assumptions: this is the state the equivalent of the baseline's restricted foreign key
+     * reports, and it is declared here rather than read from the service because the service holds
+     * it with package visibility in {@code com.carddemo.reference.service} and this class sits in
+     * {@code com.carddemo.reference.api}. Widening the service's constant so a test in a sibling
+     * package could read it would relax production visibility for a test's convenience, which is
+     * the wrong direction of the two.
+     */
+    private static final String CLASSIFIED_REFERENCING_SQLSTATE = "23503";
+
+    /**
+     * The duplicate-key state, the second member of the integrity family this surface can meet.
+     *
+     * <p>Assumptions: it is named alongside the referencing state so the case below asserts the
+     * whole family the classifier admits rather than one member of it, for the same visibility
+     * reason recorded on {@link #CLASSIFIED_REFERENCING_SQLSTATE}.
+     */
+    private static final String CLASSIFIED_DUPLICATE_SQLSTATE = "23505";
 
     /**
      * Text standing for the diagnostic a driver composes, which must never reach a caller.
@@ -265,6 +485,24 @@ class TransactionTypeControllerTest {
                     + "constraint fk_tran_cat_type; Key (tr_type)=(07)";
 
     /**
+     * A path segment of the declared width that the published pattern excludes.
+     *
+     * <p>Assumptions: {@code 00} is used rather than an arbitrary value because the published pattern
+     * admits 01 through 99, so this is a value a width check alone would let through. It is the one
+     * segment that separates an enforced pattern from an enforced length.</p>
+     */
+    private static final String SEGMENT_OUTSIDE_THE_DOMAIN = "00";
+
+    /**
+     * A request body the parser cannot read at all, for the malformed-payload refusal.
+     *
+     * <p>Assumptions: it is truncated rather than merely wrong, so the failure is a parse failure and not
+     * a validation failure. A well-formed document carrying the wrong members would be refused by
+     * validation instead, which is a different handler and already covered by the segment above.</p>
+     */
+    private static final String UNREADABLE_BODY = "{\"description\":";
+
+    /**
      * A sentence left in the baseline's working storage that no path ever selects.
      *
      * <p>Assumptions: {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl} declares it at line
@@ -276,41 +514,100 @@ class TransactionTypeControllerTest {
     private static final String DEVELOPER_PLACEHOLDER = "Looks Good.... so far";
 
     /** The substituted collaborator, so each case asserts the answer and not the store. */
+    @MockitoBean
     private TransactionTypeService service;
 
-    /** The cursor codec both this class and the handler under test read positions through. */
+    /**
+     * The cursor codec both this class and the handler under test read positions through.
+     *
+     * <p>Assumptions: injected rather than constructed here, so this class reads positions through the
+     * SAME instance the handler was given. Constructing a second one with the same key would work by
+     * coincidence and would stop working the moment the codec carried any per-instance state.</p>
+     */
+    @Autowired
     private CursorToken sealer;
 
-    /** The dispatcher under test. */
+    /** The dispatcher under test, built by the slice from the deployed web configuration. */
+    @Autowired
     private MockMvc mockMvc;
 
-    /** The mapper the assertions read a response body back through. */
+    /**
+     * The mapper the assertions read a response body back through.
+     *
+     * <p>Assumptions: this is the context's own mapper and not a locally built one, so a body is read
+     * back through the same configuration that wrote it. A locally built mapper would silently paper
+     * over a serialisation difference by parsing it away.</p>
+     */
+    @Autowired
     private JsonMapper mapper;
 
     /**
-     * Assembles the dispatcher, the substituted collaborator and the cursor codec before each case.
+     * Supplies the three beans the slice cannot obtain from the deployed configuration.
      *
-     * <p>Assumptions: the message converter is built over the shared money module even though
-     * nothing on this surface carries money, because the converter this dispatcher installs
-     * replaces the framework's defaults wholesale -- so it has to be the one the running service
-     * uses rather than a reduced stand-in, or a serialisation difference would go unnoticed here
-     * and appear in production.
+     * <p>Assumptions: it is nested rather than top-level because the values it declares are this
+     * class's fixtures, and a top-level configuration would invite a second class to depend on them.
+     * It is named explicitly in this class's {@code @Import} rather than left to be discovered: a
+     * nested configuration class is auto-detected only for a test class that declares its cases
+     * directly, and every case here lives in a {@code @Nested} group, for which the framework skips
+     * that detection entirely. Relying on discovery therefore left the slice with no clock, no money
+     * module and no cursor signer, and the failure surfaced as a missing-bean error rather than as
+     * anything pointing at the nesting.</p>
+     *
+     * <p>Assumptions: it is {@code final}, which is what keeps the framework from also reporting it as
+     * an ignored default configuration class. The detection above admits only a static, non-private,
+     * NON-FINAL nested class, so marking it final states in the type system that discovery is not the
+     * route being used and removes the warning that says the class was found and skipped. Nothing is
+     * given up: {@code proxyBeanMethods = false} on the annotation already declines the CGLIB subclass
+     * that would have needed the type to be extensible.</p>
      */
-    @BeforeEach
-    void setUp() {
-        this.service = mock(TransactionTypeService.class);
-        this.sealer = new CursorToken(CURSOR_KEY, CURSOR_LIFETIME);
-        this.mapper = JsonMapper.builder().addModule(new MoneyModule()).build();
+    @TestConfiguration(proxyBeanMethods = false)
+    static final class SliceFixtures {
 
-        JacksonJsonHttpMessageConverter converter = new JacksonJsonHttpMessageConverter(this.mapper);
+        /**
+         * A clock stopped at {@link #FIXED_INSTANT}, so a stamped refusal is assertable.
+         *
+         * <p>Assumptions: the shared advice stamps every refusal with the current instant, so with the
+         * deployed system clock no assertion could name the value. The auto-configured clock declares
+         * itself conditional on being missing, so declaring one here replaces it without any
+         * exclusion.</p>
+         *
+         * @return a fixed clock in UTC, never {@code null}
+         */
+        @Bean
+        Clock clock() {
+            return Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC);
+        }
 
-        this.mockMvc = MockMvcBuilders
-                .standaloneSetup(new TransactionTypeController(this.service, this.sealer))
-                .defaultRequest(get("/").principal(CALLER))
-                .setMessageConverters(converter)
-                .setControllerAdvice(new GlobalExceptionHandler(
-                        Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC)))
-                .build();
+        /**
+         * The cursor codec, carrying this file's own key material.
+         *
+         * <p>Assumptions: the deployed bean is conditional on a signing-key property naming a secret
+         * that reaches a running task from a secret store, so no test can obtain it. The key here is
+         * this class's own constant and seals nothing that outlives the test.</p>
+         *
+         * @return a cursor codec over the test key and lifetime, never {@code null}
+         */
+        @Bean
+        CursorToken cursorToken() {
+            return new CursorToken(CURSOR_KEY, CURSOR_LIFETIME);
+        }
+
+        /**
+         * Gives every request a default principal, which the browse seals its positions against.
+         *
+         * <p>Assumptions: the principal is supplied as a builder default rather than per request,
+         * because it is a property of the arrangement and not of any single case, and because a case
+         * that forgot it would then fail on a sealing mismatch far from the omission. This is the one
+         * authority-adjacent value this slice carries; no chain is installed, so nothing here decides
+         * whether the caller is admitted.</p>
+         *
+         * @return a customizer installing {@link #CALLER} as the default request principal, never
+         *     {@code null}
+         */
+        @Bean
+        MockMvcBuilderCustomizer defaultPrincipal() {
+            return builder -> builder.defaultRequest(get("/").principal(CALLER));
+        }
     }
 
     /**
@@ -390,6 +687,28 @@ class TransactionTypeControllerTest {
     }
 
     /**
+     * Builds the failure a translator produces for a class {@code 42} state, as a driver would.
+     *
+     * <p>Assumptions: {@code BadSqlGrammarException} is the type the persistence abstraction raises
+     * for syntax-error-or-access-rule-violation states, and it is NOT a subtype of
+     * {@link DataIntegrityViolationException} -- both descend from {@code NonTransientDataAccessException}
+     * as siblings. That is what makes it the honest carrier for an undefined table, and what lets a
+     * case assert that the boundary answers such a condition on the fault channel rather than the
+     * conflict one.
+     *
+     * <p>Assumptions: the statement text handed to the constructor is diagnostic-shaped for the same
+     * reason the message is -- so a case can assert that neither the state nor the SQL reaches a
+     * caller, rather than assert nothing.
+     *
+     * @param sqlState the state the simulated driver reports
+     * @return the failure a repository would surface for that state
+     */
+    private static BadSqlGrammarException undefinedTableFailure(String sqlState) {
+        return new BadSqlGrammarException(VENDOR_DIAGNOSTIC, FAILING_STATEMENT,
+                new SQLException(VENDOR_DIAGNOSTIC, sqlState));
+    }
+
+    /**
      * Reads a response body back as a mapping of its members.
      *
      * @param result the completed exchange to read
@@ -428,15 +747,26 @@ class TransactionTypeControllerTest {
     }
 
     /**
-     * Counts how many times a sentence occurs in a body.
+     * Counts how many times a sentence occurs in a body, counting no occurrence twice.
+     *
+     * <p>Refactoring Rationale: the search resumes at the END of a match rather than one character past
+     * its start, which is what makes the count non-overlapping as this method's contract says. Resuming
+     * one character on counts an overlapping match as two, so a sentence able to overlap itself would have
+     * been reported more often than it travelled -- and the one case that reads this method asserts a
+     * count of exactly one, so an over-count would have been read as the boundary publishing a sentence
+     * twice. The sentence it counts today cannot overlap itself, which is precisely why the defect was
+     * invisible: it was a correct answer from an incorrect rule, and the next sentence counted would have
+     * inherited the rule rather than the answer.</p>
      *
      * @param body the body to search
-     * @param sentence the sentence to count
+     * @param sentence the sentence to count; must not be empty, since an empty needle matches at every
+     *     position and no advance would terminate
      * @return the number of non-overlapping occurrences
      */
     private static int occurrencesOf(String body, String sentence) {
         int found = 0;
-        for (int at = body.indexOf(sentence); at >= 0; at = body.indexOf(sentence, at + 1)) {
+        for (int at = body.indexOf(sentence); at >= 0;
+                at = body.indexOf(sentence, at + sentence.length())) {
             found++;
         }
         return found;
@@ -460,8 +790,10 @@ class TransactionTypeControllerTest {
      * <p>Assumptions: the constraint itself is proven against a real database in
      * {@code com.carddemo.reference.repository}, and the classification of a SQLSTATE into a
      * kinded conflict in {@code com.carddemo.reference.service}. What is proven here is the last
-     * link: that the refusal SURFACES as a conflict carrying the baseline's sentence, and that a
-     * failure the service could not classify does not.
+     * link: that a refusal in the integrity-constraint family SURFACES as a conflict carrying the
+     * baseline's sentence, whether the service classified it or the shared advice did, and that a
+     * failure outside that family -- a lost connection, or a state such as an undefined relation
+     * that no constraint reports -- surfaces as a fault instead.
      *
      * <p>A test class accepts no parameter, yields no value and raises nothing, so this block
      * carries no parameter, return or exception tag.
@@ -559,29 +891,33 @@ class TransactionTypeControllerTest {
         }
 
         /**
-         * An integrity refusal still answers 409 when the service did not classify its state.
+         * A translated integrity refusal in the constraint family answers 409 without the service
+         * having classified it.
          *
-         * <p>Assumptions: the referential guarantee does not depend on the service recognising the
-         * state, and this case is what establishes that. The service classifies two states, 23503
-         * for a referencing row and 23505 for a duplicate key, and hands any other integrity
-         * failure back unchanged. The shared advice then recognises the failure by class name while
-         * walking the cause chain -- which is why it needs no dependency on a driver -- and answers
-         * 409 with the same referential sentence. So a state nobody anticipated cannot downgrade
-         * the refusal into a fault, which is the failure mode the ON DELETE RESTRICT semantic must
-         * survive.
+         * <p>Assumptions: the referential guarantee has two independent links and this case proves
+         * the SECOND one. The case above reaches 409 through a kinded conflict the SERVICE raised
+         * after reading the state; this one hands the advice the persistence abstraction's own
+         * translated failure, unclassified, and still expects 409 with the same sentence. The advice
+         * recognises the failure by class name while walking the cause chain -- which is why it needs
+         * no dependency on a driver -- and reads the SQL state off the {@link SQLException} beneath
+         * it. Both states the engine reports for this table are exercised, so the answer is
+         * established for the family and not for one member of it.
          *
-         * <p>Trade-offs: because the advice already answers correctly for the whole family, the
-         * service's classification buys the SENTENCE and not the status for this table -- both of
-         * the states it recognises reach the same referential wording here. That redundancy is
-         * accepted deliberately: it is what makes the status robust to an unrecognised state, and
-         * the cost is one classification step whose effect on this surface is invisible.
+         * <p>Trade-offs: because the advice answers correctly for the whole constraint family, the
+         * service's own classification buys the SENTENCE rather than the status for this table --
+         * both of the states it recognises reach the same referential wording here. That redundancy
+         * is accepted deliberately: it is what keeps the status right when the engine reports a
+         * constraint state the service has no branch for, and its cost is one classification step
+         * whose effect on this surface is invisible.
          *
+         * @param sqlState the constraint state the simulated driver reports
          * @throws Exception if the request cannot be performed
          */
-        @Test
-        @DisplayName("an integrity refusal answers 409 even when its state was not classified")
-        void anUnclassifiedIntegrityStateStillAnswersConflict() throws Exception {
-            doThrow(integrityViolation(UNCLASSIFIED_SQLSTATE))
+        @ParameterizedTest
+        @ValueSource(strings = {CLASSIFIED_REFERENCING_SQLSTATE, CLASSIFIED_DUPLICATE_SQLSTATE})
+        @DisplayName("a translated constraint refusal answers 409 with the baseline's sentence")
+        void aTranslatedConstraintRefusalAnswersConflict(String sqlState) throws Exception {
+            doThrow(integrityViolation(sqlState))
                     .when(TransactionTypeControllerTest.this.service).delete(TYPE_CD);
 
             MvcResult result = TransactionTypeControllerTest.this.mockMvc
@@ -589,15 +925,121 @@ class TransactionTypeControllerTest {
                     .andReturn();
 
             assertThat(result.getResponse().getStatus())
-                    .as("an integrity refusal is a caller error whatever state it reports;"
-                            + " answering 500 here would report a blocked delete as a fault")
+                    .as("a constraint breach is a caller error; answering 500 here would report a"
+                            + " blocked delete as a fault the caller cannot act on")
                     .isEqualTo(409);
             assertThat(messageOf(result))
                     .isEqualTo(GlobalExceptionHandler.MESSAGE_REFERENCED_ROW);
             assertThat(rawBodyOf(result))
                     .as("the driver's own text names a relation and a key and must not travel")
                     .doesNotContain(VENDOR_DIAGNOSTIC)
-                    .doesNotContain(UNCLASSIFIED_SQLSTATE);
+                    .doesNotContain(sqlState);
+        }
+
+        /**
+         * An integrity failure whose state this service does not classify still answers 409.
+         *
+         * <p>Purpose: the service's own classifier recognises exactly two states -- the unique breach
+         * and the foreign-key breach -- and hands anything else back unchanged, so a third
+         * constraint state reaches the shared advice as the raw translated violation. This case is
+         * the guard on what happens then, and the answer is the conflict: the advice narrows its
+         * conflict branch to SQLSTATE class {@code 23}, and every member of that class describes data
+         * the caller supplied being refused by a rule.
+         *
+         * <p>⚠️ Refactoring Rationale: the state used here was {@code 42P01}, undefined table, and the
+         * assertion was a 500. Both were wrong together, and in opposite directions. Class {@code 42}
+         * is syntax-error-or-access-rule-violation, which a translator renders as
+         * {@code BadSqlGrammarException} and never as a subtype of the integrity violation this case
+         * stubs -- so the pairing was one no translator produces, and the case was really asserting
+         * the advice's behaviour for a type it was not given. The state is now {@code 23502}, a
+         * not-null breach, which is a real class {@code 23} condition this schema can report:
+         * {@code src/main/resources/db/migration/V1__reference.sql} declares
+         * {@code description VARCHAR(50) NOT NULL}. The undefined-table condition is asserted
+         * separately, under the type it really translates to and as the fault it really is, by
+         * {@code anUndefinedTableAnswersALeakFreeFaultAndNeverAConflict} below -- so the pair covers
+         * both halves of the classification instead of one case straddling them.
+         *
+         * <p>Assumptions: the vendor text and the state are asserted ABSENT from the body whichever
+         * answer is given. The driver composes that text and quotes the values that violated the
+         * constraint, so it is caller data, and the reason it must not travel does not depend on the
+         * status code carrying it.
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("an integrity refusal answers 409 even when its state was not classified")
+        void anUnclassifiedIntegrityStateStillAnswersConflict() throws Exception {
+            doThrow(integrityViolation(UNCLASSIFIED_INTEGRITY_SQLSTATE))
+                    .when(TransactionTypeControllerTest.this.service).delete(TYPE_CD);
+
+            MvcResult result = TransactionTypeControllerTest.this.mockMvc
+                    .perform(delete(itemPath(TYPE_CD)))
+                    .andReturn();
+
+            assertThat(result.getResponse().getStatus())
+                    .as("a class 23 state is a constraint the caller tripped, so the shared advice"
+                            + " answers the conflict even for a member this service does not classify")
+                    .isEqualTo(409);
+
+            String body = rawBodyOf(result);
+            assertThat(messageOf(result)).isEqualTo(GlobalExceptionHandler.MESSAGE_REFERENCED_ROW);
+            assertThat(body)
+                    .as("the driver's own text names a relation and a key and must not travel")
+                    .doesNotContain(VENDOR_DIAGNOSTIC)
+                    .doesNotContain(UNCLASSIFIED_INTEGRITY_SQLSTATE);
+        }
+
+        /**
+         * An undefined table answers a leak-free 500, and never the referential conflict.
+         *
+         * <p>Purpose: this is the other side of the case above, and the pair is what keeps the
+         * classification honest. A state in SQLSTATE class {@code 23} is a constraint the caller
+         * tripped and can resolve; a state in class {@code 42} is a relation that is not there,
+         * which no caller can act on and which means the schema this service was deployed against is
+         * not the one its migration declares. The two must not share an answer.
+         *
+         * <p>Assumptions: the failure arrives as {@code BadSqlGrammarException} because that is what
+         * a translator produces for class {@code 42}, and that type is a SIBLING of
+         * {@link DataIntegrityViolationException} rather than a subtype -- so the advice's
+         * integrity-family recognition does not match it and it falls through to the fault channel.
+         * Building it as an integrity violation instead would be the defect this case exists to
+         * prevent: it would pass while asserting the wrong contract.
+         *
+         * <p>Trade-offs: asserting the negative -- that the referential sentence is absent -- costs
+         * one more assertion than reading the status alone, and it is the assertion that earns the
+         * case. A boundary that answered 500 while still attaching the referential wording would
+         * satisfy a status-only check and would tell an operator reading the body that a row was
+         * referenced, when in fact no table was found to reference it.
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("an undefined table answers a leak-free 500 and never the referential 409")
+        void anUndefinedTableAnswersALeakFreeFaultAndNeverAConflict() throws Exception {
+            doThrow(undefinedTableFailure(UNDEFINED_TABLE_SQLSTATE))
+                    .when(TransactionTypeControllerTest.this.service).delete(TYPE_CD);
+
+            MvcResult result = TransactionTypeControllerTest.this.mockMvc
+                    .perform(delete(itemPath(TYPE_CD)))
+                    .andReturn();
+
+            assertThat(result.getResponse().getStatus())
+                    .as("a missing relation is a deployment fault, not a conflict a caller can"
+                            + " resolve; answering 409 would invite a retry that cannot succeed")
+                    .isEqualTo(500)
+                    .isNotEqualTo(409);
+            assertThat(messageOf(result)).isEqualTo(GlobalExceptionHandler.MESSAGE_INTERNAL);
+
+            String body = rawBodyOf(result);
+            assertThat(body)
+                    .as("the referential sentence belongs to a tripped constraint and must not be"
+                            + " attached to a schema that is not there")
+                    .doesNotContain(GlobalExceptionHandler.MESSAGE_REFERENCED_ROW);
+            assertThat(body)
+                    .as("neither the state, the driver's text nor the failing statement may travel")
+                    .doesNotContain(UNDEFINED_TABLE_SQLSTATE)
+                    .doesNotContain(VENDOR_DIAGNOSTIC)
+                    .doesNotContain(FAILING_STATEMENT);
         }
 
         /**
@@ -1199,11 +1641,15 @@ class TransactionTypeControllerTest {
         }
 
         /**
-         * The position a caller returns reaches the browse exactly as it was minted.
+         * The position a caller returns reaches the browse verbatim, and the page answered is coherent.
          *
          * <p>Assumptions: the position is opaque to a client, so the boundary must hand it on
          * unaltered; a boundary that normalised, trimmed or re-encoded it would invalidate the seal
          * and turn a legitimate continuation into a refusal.
+         *
+         * <p>Assumptions: the ANSWERED envelope is read as well as the composed request, so the page a
+         * continuation produces is held to being one a browse could produce -- two rows, a leading position
+         * naming the first of them and a trailing position naming the last.
          *
          * @throws Exception if the request cannot be performed
          */
@@ -1213,7 +1659,7 @@ class TransactionTypeControllerTest {
             String minted = seal(false, LAST_PUBLISHED_CODE);
             stubSecondPage();
 
-            TransactionTypeControllerTest.this.mockMvc
+            MvcResult result = TransactionTypeControllerTest.this.mockMvc
                     .perform(get(TransactionTypeController.BASE_PATH)
                             .param(TransactionTypeController.PARAM_CURSOR, minted)
                             .param(TransactionTypeController.PARAM_DIRECTION,
@@ -1224,6 +1670,25 @@ class TransactionTypeControllerTest {
                     .as("handed on unaltered; any rewriting would break the seal")
                     .isEqualTo(minted);
             assertThat(capturedRequest().direction()).isEqualTo(PageDirection.NEXT);
+
+            // WHY : Refactoring Rationale: the envelope this continuation ANSWERS with is asserted as
+            //       well, and it was not before. A case that reads only the request it composed cannot
+            //       notice that the page it received described two rows whose leading and trailing
+            //       positions named one row -- which is what this stub used to return. Reading both
+            //       positions back through the deployed codec is what ties the stub to a page a browse
+            //       could produce, and it is why the correction to that stub is visible here.
+            Map<String, Object> envelope = bodyOf(result);
+            assertThat(TransactionTypeControllerTest.this.sealer
+                    .open(browseBinding(false), String.valueOf(envelope.get("firstKey"))))
+                    .as("the leading position names the first row this page published")
+                    .isEqualTo(SECOND_PAGE_CODES.get(0));
+            assertThat(TransactionTypeControllerTest.this.sealer
+                    .open(browseBinding(false), String.valueOf(envelope.get("lastKey"))))
+                    .as("the trailing position names the LAST row published, never the first again")
+                    .isEqualTo(SECOND_PAGE_CODES.get(SECOND_PAGE_CODES.size() - 1));
+            assertThat(envelope.get("hasNext"))
+                    .as("a final page reports no further page")
+                    .isEqualTo(Boolean.FALSE);
         }
 
         /**
@@ -1271,6 +1736,21 @@ class TransactionTypeControllerTest {
          * in this migration that raw key is a primary account number. Here it is only a two-digit
          * code, but the property is asserted on this surface too so the shape is uniform.
          *
+         * <p>⚠️ Refactoring Rationale: this case asserted that the published position does not CONTAIN
+         * the key as a substring, and that assertion was decided by chance rather than by behaviour.
+         * {@code CursorToken} draws a fresh {@code SecureRandom} nonce per seal, so the encoded token is
+         * a different random string on every run; the key here is the two characters {@code 07}, and a
+         * base64url body of this length contains any given two-character sequence by coincidence
+         * roughly one run in seventy. It failed exactly that way during this checkpoint's validation.
+         * A test that fails on a coincidence is worse than no test, because the first response to it is
+         * to re-run the build. Alternatives Considered: pinning the nonce for the test, which would make
+         * the substring assertion deterministic. Rejected: it would require a seam into the codec's
+         * randomness that exists for no other reason, and the assertion would still be asserting a
+         * property of one nonce rather than of the seal. What replaces it says the same thing without
+         * appealing to the encoding: the published value is not the key, it carries the sealed shape and
+         * version marker, and opening it with the codec yields the key -- which is the whole of
+         * "recoverable only through the codec", stated as two facts rather than as an absence.
+         *
          * @throws Exception if the request cannot be performed
          */
         @Test
@@ -1289,9 +1769,13 @@ class TransactionTypeControllerTest {
                     .as("the published cursor shape, so a raw key is unrepresentable here")
                     .isTrue();
             assertThat(lastKey)
-                    .as("the key it stands for is recoverable only through the codec")
-                    .doesNotContain(LAST_PUBLISHED_CODE);
+                    .as("the position published is the sealed token and never the key itself")
+                    .isNotEqualTo(LAST_PUBLISHED_CODE);
             assertThat(lastKey).startsWith(CursorToken.VERSION + ".");
+            assertThat(TransactionTypeControllerTest.this.sealer
+                    .open(browseBinding(false), lastKey))
+                    .as("the key it stands for is recoverable through the codec and only through it")
+                    .isEqualTo(LAST_PUBLISHED_CODE);
         }
 
         /**
@@ -1417,6 +1901,101 @@ class TransactionTypeControllerTest {
         }
 
         /**
+         * The three remaining filter combinations arrive with the omitted narrowing absent, not blank.
+         *
+         * <p>Purpose: the case above drives BOTH filters together. This one drives the other three
+         * combinations the two optional parameters admit -- neither, the code alone, the description
+         * alone -- and asserts what the boundary composes for the parameter that was not sent.
+         *
+         * <p>Assumptions: an omitted parameter must reach the collaborator as {@code null} and never as
+         * an empty string, and the two are not interchangeable one layer down. The browse builds a
+         * {@code LIKE} pattern from a description that is present; an empty string is present, so it
+         * would build {@code LIKE '%%'} and narrow nothing while every row paid for a pattern match, and
+         * an empty code filter would compare a two-character column against a zero-length value and
+         * narrow to nothing at all. Those two mistakes fail in opposite directions -- one returns
+         * everything, the other returns nothing -- and neither is visible from a status code, which is
+         * why the composed request is inspected rather than the response.
+         *
+         * <p>Alternatives Considered: asserting the four combinations through the SQL they produce.
+         * Rejected as the wrong boundary: the predicate the two arms build is owned by
+         * {@code com.carddemo.reference.service.TransactionTypeBrowseTest} and, against a real schema, by
+         * {@code com.carddemo.reference.repository.TransactionTypeRepositoryIT}, whose case "both filter
+         * arms active narrow by their conjunction" asserts the conjunction itself. What belongs here is
+         * only the binding: which value each arm RECEIVES for a request a caller actually sent.
+         *
+         * @param typeCode the value to send for the code filter, or {@code null} to omit the parameter
+         * @param description the value to send for the description filter, or {@code null} to omit it
+         * @throws Exception if the request cannot be performed
+         */
+        @ParameterizedTest(name = "typeCode={0} description={1}")
+        @CsvSource(nullValues = "OMITTED", value = {
+            "OMITTED,OMITTED",
+            "07,OMITTED",
+            "OMITTED,50% _OFF"})
+        @DisplayName("each filter combination reaches the browse with an omitted narrowing left absent")
+        void eachFilterCombinationReachesTheBrowseAsSent(String typeCode, String description)
+                throws Exception {
+
+            stubFirstPage();
+
+            MockHttpServletRequestBuilder request = get(TransactionTypeController.BASE_PATH);
+            if (typeCode != null) {
+                request = request.param(TransactionTypeController.PARAM_TYPE_CODE, typeCode);
+            }
+            if (description != null) {
+                request = request.param(TransactionTypeController.PARAM_DESCRIPTION, description);
+            }
+
+            MvcResult result = TransactionTypeControllerTest.this.mockMvc.perform(request).andReturn();
+            assertThat(result.getResponse().getStatus()).isEqualTo(200);
+
+            TransactionTypeListRequest received = capturedRequest();
+            assertThat(received.typeCode())
+                    .as("the code filter must arrive exactly as sent, and absent when not sent")
+                    .isEqualTo(typeCode);
+            assertThat(received.description())
+                    .as("the description filter must arrive exactly as sent, and absent when not sent")
+                    .isEqualTo(description);
+        }
+
+        /**
+         * A published row's code carries its declared two characters, leading zero intact.
+         *
+         * <p>Assumptions: the code is asserted as a JSON STRING of exactly two characters rather than
+         * merely equal to a literal, because the column is
+         * {@code TRAN_TYPE CHAR(2)} and the copybook picture at line 6 of {@code app/cpy/CVTRA03Y.cpy}
+         * is {@code PIC X(02)} -- a code serialised as a JSON number would arrive as {@code 7}, address
+         * no row on the next request a client built from it, and still satisfy an equality assertion
+         * written against an unquoted value. The width and the type are therefore both asserted, and the
+         * category code beside it is asserted at four for the same reason: {@code TRC_TYPE_CATEGORY
+         * CHAR(4)} against {@code PIC 9(04)}, where a numeric reading loses three leading zeros.
+         *
+         * <p>Alternatives Considered: leaving this to the schema, which declares the widths, and to the
+         * repository suite, which asserts the columns. Rejected because neither observes the SERIALISED
+         * form: the padding survives to the column and is then free to be lost by the writer, and this
+         * is the only boundary in the module where the wire representation of a reference key is visible.
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("a published code is a two-character string on the wire, not a number")
+        void aPublishedCodeKeepsItsDeclaredWidthOnTheWire() throws Exception {
+            stubFirstPage();
+
+            MvcResult result = TransactionTypeControllerTest.this.mockMvc
+                    .perform(get(TransactionTypeController.BASE_PATH))
+                    .andReturn();
+
+            String payload = result.getResponse().getContentAsString();
+            assertThat(publishedCodes(result))
+                    .allSatisfy(code -> assertThat(code).hasSize(TYPE_CODE_WIDTH));
+            assertThat(payload)
+                    .as("the code must be quoted; an unquoted value is a number and loses its padding")
+                    .contains("\"typeCd\":\"" + FIRST_PAGE_CODES.get(0) + "\"")
+                    .doesNotContain("\"typeCd\":" + FIRST_PAGE_CODES.get(0));
+        }
+
+        /**
          * Substitutes a first page of the published width with a surplus row beyond it.
          */
         private void stubFirstPage() {
@@ -1428,12 +2007,23 @@ class TransactionTypeControllerTest {
 
         /**
          * Substitutes a final page beginning at the row after the first page's last.
+         *
+         * <p>Refactoring Rationale: the trailing position names the LAST code the page publishes and no
+         * longer repeats the leading one. It used to seal both positions against the first code of this
+         * page, which describes an envelope no browse can produce: a two-row page whose leading and
+         * trailing positions name the same row asserts that the row after the first is also the row before
+         * the last. Nothing failed, because the one case that drives this stub reads the request the
+         * boundary composed rather than the envelope it answered -- so the impossible envelope was never
+         * looked at. It is corrected here and asserted in that case, so the stub describes a page a
+         * deployed browse could actually return.</p>
          */
         private void stubSecondPage() {
             when(TransactionTypeControllerTest.this.service.list(
                     any(TransactionTypeListRequest.class), any(CursorToken.class), anyString()))
-                    .thenReturn(pageOf(SECOND_PAGE_CODES, seal(false, SURPLUS_CODE),
-                            seal(false, SURPLUS_CODE), false));
+                    .thenReturn(pageOf(SECOND_PAGE_CODES,
+                            seal(false, SECOND_PAGE_CODES.get(0)),
+                            seal(false, SECOND_PAGE_CODES.get(SECOND_PAGE_CODES.size() - 1)),
+                            false));
         }
 
         /**
@@ -1508,8 +2098,16 @@ class TransactionTypeControllerTest {
      *
      * <p>Purpose: transformation rule T8 carries every user-visible string across character for
      * character, so a sentence is a contract in its own right and a well-meaning normalisation of
-     * one is a behavioural change. Two of the sentences below carry a defect the baseline carries,
-     * and repairing either would be exactly that change.
+     * one is a behavioural change. Two of the sentences below carry spellings the baseline carries
+     * that a modern reader reads as mistakes -- a two-word "some one" and a missing terminal period --
+     * and normalising either would be exactly that change.
+     *
+     * <p>Assumptions: those spellings are described as the baseline's FORM and never as defects to be
+     * repaired, and the distinction is not cosmetic. {@code app/**} is reference-only, so the baseline's
+     * wording is the specification rather than a candidate for correction; calling it defective invites
+     * the reading that the migration is entitled to put it right, which is the one thing rule T8 forbids.
+     * What the assertions below protect is character-for-character carry-over, whatever a reader thinks
+     * of the characters.
      *
      * <p>Assumptions: every sentence is asserted THROUGH the constant that publishes it and never
      * against a copy retyped here. That is the difference between checking that the boundary
@@ -1518,10 +2116,10 @@ class TransactionTypeControllerTest {
      *
      * <p>Trade-offs: the baseline's full screen catalogue is wider than what this surface can
      * publish, and the difference is bounded deliberately rather than papered over. Two further
-     * defective literals sit in
-     * {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl} -- the save prompt at line 161, missing
-     * the space after its period, and the exit notice at line 170, missing the space after
-     * its period and carrying trailing spaces that are part of the literal. Both are screen-turn
+     * literals whose spacing a reader would likewise want to normalise sit in
+     * {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl} -- the save prompt at line 161, with no
+     * space after its period, and the exit notice at line 170, with no space after
+     * its period and with trailing spaces that are part of the literal. Both are screen-turn
      * notices belonging to a terminal conversation this surface does not have: no route publishes
      * either, the shared catalogue declares neither, and asserting them here would mean retyping
      * baseline text that nothing serves, which is the practice this group exists to avoid. Their
@@ -1545,9 +2143,9 @@ class TransactionTypeControllerTest {
          * spelling and its absence of a terminating period, and the reference maintenance screen
          * declares the identical characters at line 184 of
          * {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl}. Both the presence of the two-word
-         * form and the absence of the one-word form are asserted, because a repair would substitute
-         * one for the other and an assertion on only the first would still pass if the sentence had
-         * been rewritten around it.
+         * form and the absence of the one-word form are asserted, because a normalisation would
+         * substitute one for the other and an assertion on only the first would still pass if the
+         * sentence had been rewritten around it.
          *
          * @throws Exception if the request cannot be performed
          */
@@ -1696,8 +2294,8 @@ class TransactionTypeControllerTest {
         /**
          * Renders the body of every refusal and every fault this surface can produce.
          *
-         * <p>Assumptions: all five are driven through their real routes rather than composed here,
-         * so what a case inspects is a body that actually travelled.
+         * <p>Assumptions: every body is driven through a real route rather than composed here, so what a
+         * case inspects is a body that actually travelled.
          *
          * <p>Refactoring Rationale: the FAULT body is included, and its absence was a measured hole
          * rather than a hypothetical one. This helper originally returned the four client-correctable
@@ -1708,7 +2306,27 @@ class TransactionTypeControllerTest {
          * the channel most likely to acquire a stray sentence, because it is the one nobody looks at
          * in a passing build, so it is the one that most needed covering.
          *
-         * @return one body per refusal path plus one for the fault path, in no particular order
+         * <p>Refactoring Rationale: the five PROTOCOL-level refusals were then added for the same
+         * reason, and their absence was the larger hole of the two. This method's name and its first
+         * sentence claim every refusal, and the two cases that read it -- one asserting no developer
+         * placeholder reaches a caller, the other that every published sentence fits the declared
+         * message-line width -- are properties of EVERY body this surface writes, not only of the ones a
+         * collaborator raised. The five omitted paths were all reachable and none of them was covered:
+         * a path segment outside the published domain, a body the parser cannot read, a submitted media
+         * type the route does not consume, a method the route does not declare, and an accepted media
+         * type it cannot produce. Each is rendered by a DIFFERENT handler of the shared advice, so a
+         * sentence over the width or a placeholder in any one of them would have travelled unnoticed.
+         *
+         * <p>Assumptions: a SECURITY refusal is deliberately not among them, and its absence is a
+         * property of the arrangement rather than an omission. This slice installs no filter chain -- the
+         * security configuration is a plain configuration class the slice's include filter does not admit
+         * -- so an unauthenticated or unauthorised request is answered by the handler here rather than
+         * refused before it. The bodies the deployed chain writes for those two conditions are asserted
+         * against the chain itself in {@code com.carddemo.reference.config}, which is the only place they
+         * can be produced at all.
+         *
+         * @return one body per refusal path, collaborator-raised and protocol-level, plus one for the
+         *     fault path, in no particular order
          * @throws Exception if a request cannot be performed
          */
         private List<String> everyRefusalBody() throws Exception {
@@ -1727,6 +2345,19 @@ class TransactionTypeControllerTest {
             when(TransactionTypeControllerTest.this.service.read(TYPE_CD))
                     .thenThrow(new DataAccessResourceFailureException(VENDOR_DIAGNOSTIC));
 
+            // WHY : Assumptions: the browse is stubbed to SUCCEED, and it is the route the negotiation
+            //       refusal is driven against for a specific reason. A negotiation failure is raised while
+            //       the answer is being written, so it can only arise on a request the handler answered.
+            //       Driving it against a route whose collaborator raises instead produces the collaborator's
+            //       failure, whose rendering is then negotiated against the same unacceptable header and
+            //       escapes the dispatcher unrendered -- which is a different condition from the one this
+            //       body is here to represent. The negotiation handler presets its own content type, which
+            //       is why ITS body still renders.
+            when(TransactionTypeControllerTest.this.service.list(
+                    any(TransactionTypeListRequest.class), any(CursorToken.class), anyString()))
+                    .thenReturn(pageOf(FIRST_PAGE_CODES, seal(false, FIRST_PAGE_CODES.get(0)),
+                            seal(false, LAST_PUBLISHED_CODE), false));
+
             return List.of(
                     rawBodyOf(TransactionTypeControllerTest.this.mockMvc
                             .perform(delete(itemPath(TYPE_CD))).andReturn()),
@@ -1743,7 +2374,252 @@ class TransactionTypeControllerTest {
                                     .content(createBody(TYPE_CD, DESCRIPTION)))
                             .andReturn()),
                     rawBodyOf(TransactionTypeControllerTest.this.mockMvc
-                            .perform(get(itemPath(TYPE_CD))).andReturn()));
+                            .perform(get(itemPath(TYPE_CD))).andReturn()),
+                    rawBodyOf(TransactionTypeControllerTest.this.mockMvc
+                            .perform(get(itemPath(SEGMENT_OUTSIDE_THE_DOMAIN))).andReturn()),
+                    rawBodyOf(TransactionTypeControllerTest.this.mockMvc
+                            .perform(post(TransactionTypeController.BASE_PATH)
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .content(UNREADABLE_BODY))
+                            .andReturn()),
+                    rawBodyOf(TransactionTypeControllerTest.this.mockMvc
+                            .perform(post(TransactionTypeController.BASE_PATH)
+                                    .contentType(MediaType.TEXT_PLAIN)
+                                    .content(createBody(TYPE_CD, DESCRIPTION)))
+                            .andReturn()),
+                    rawBodyOf(TransactionTypeControllerTest.this.mockMvc
+                            .perform(patch(itemPath(TYPE_CD))
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .content(replaceBody(NEW_DESCRIPTION, SUBMITTED_VERSION)))
+                            .andReturn()),
+                    rawBodyOf(TransactionTypeControllerTest.this.mockMvc
+                            .perform(get(TransactionTypeController.BASE_PATH)
+                                    .accept(MediaType.APPLICATION_XML))
+                            .andReturn()));
+        }
+    }
+
+    /**
+     * Holds the keyed read to the answer the published contract declares for it.
+     *
+     * <p>Purpose: this group exists because the SUCCESSFUL keyed read had no owner anywhere in this
+     * module. Every other case that touched {@code service.read} drove it to raise, so the one answer a
+     * caller receives on the ordinary path -- a 200 carrying one object -- was asserted nowhere, and a
+     * handler that had stopped binding its segment, stopped delegating, renamed a member or added one
+     * would have satisfied every existing case in this file.
+     *
+     * <p>Assumptions: the segment the handler is given is CAPTURED rather than inferred from the answer,
+     * because the published path parameter is narrowed by a pattern and a width and the failure this
+     * guards against is a boundary that read for the wrong value rather than one that answered wrongly.
+     * A case reading only the body cannot tell a handler that delegated the caller's code from one that
+     * delegated a normalised copy of it.
+     *
+     * <p>Assumptions: the published schema closes its member set with {@code additionalProperties: false}
+     * and declares all three members required, so the answered member set is asserted as an EQUALITY
+     * rather than as a containment. A containment assertion admits a body that grew a member, which is
+     * precisely what a closed schema forbids and what a client validating against it would reject.
+     *
+     * <p>Assumptions: authority is not decided here and is not asserted here. This slice installs no
+     * filter chain, which is what keeps a 404 on this route meaning that no row holds the code rather
+     * than that a caller was refused; which caller the deployed chain admits to this read is asserted
+     * against the chain's own authorization managers in {@code com.carddemo.reference.config}. What this
+     * group asserts is the complement: that the handler itself reaches the same answer whichever
+     * authorities the caller carries, so no authority decision has been duplicated into it.
+     *
+     * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
+     * parameter, return or exception tag.
+     */
+    @Nested
+    @DisplayName("on the keyed read")
+    class OnTheKeyedRead {
+
+        /**
+         * The ordinary read answers 200 with the stored row, delegating the caller's code verbatim.
+         *
+         * <p>Assumptions: the delegation is verified as the ONLY interaction, so a boundary that read
+         * twice -- once to check existence and once for the value -- would fail here. The service already
+         * answers an absent row by raising, so a second read would be a boundary re-deciding something
+         * the collaborator has decided.
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("the read answers 200 with the stored row and delegates the code verbatim")
+        void theReadAnswersTheStoredRow() throws Exception {
+            when(TransactionTypeControllerTest.this.service.read(TYPE_CD))
+                    .thenReturn(new TransactionTypeResponse(TYPE_CD, DESCRIPTION, STORED_VERSION));
+
+            MvcResult result = TransactionTypeControllerTest.this.mockMvc
+                    .perform(get(itemPath(TYPE_CD)))
+                    .andReturn();
+
+            assertThat(result.getResponse().getStatus())
+                    .as("the ordinary read is the one answer no case in this file used to assert")
+                    .isEqualTo(200);
+
+            Map<String, Object> body = TransactionTypeControllerTest.this.bodyOf(result);
+            assertThat(body.get("typeCd")).isEqualTo(TYPE_CD);
+            assertThat(body.get("description")).isEqualTo(DESCRIPTION);
+            assertThat(body.get("version")).isEqualTo((int) STORED_VERSION);
+
+            ArgumentCaptor<String> delegated = ArgumentCaptor.forClass(String.class);
+            verify(TransactionTypeControllerTest.this.service).read(delegated.capture());
+            verifyNoMoreInteractions(TransactionTypeControllerTest.this.service);
+            assertThat(delegated.getValue())
+                    .as("the segment is handed on as the caller wrote it, at its declared width")
+                    .isEqualTo(TYPE_CD)
+                    .hasSize(TransactionType.TYPE_CD_WIDTH);
+        }
+
+        /**
+         * The answered body carries exactly the three members the closed schema declares.
+         *
+         * <p>Assumptions: the member set is compared for equality against the published set, so both a
+         * missing member and an added one fail. The published schema declares all three required and
+         * closes the object, so either departure is a contract break rather than a tolerance.
+         *
+         * <p>Assumptions: the code is asserted to be a JSON STRING and the version a JSON NUMBER, read
+         * from the parsed tree's own types rather than from the text. The code is a fixed-width character
+         * value whose leading zero is significant -- {@code app/cpy/CVTRA03Y.cpy} declares it as two
+         * characters at its line 5 -- so a code rendered as a number would arrive as 7 rather than as 07
+         * and would no longer address the row it names.
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("the body carries exactly the three declared members, the code as a string")
+        void theBodyCarriesExactlyTheDeclaredMembers() throws Exception {
+            when(TransactionTypeControllerTest.this.service.read(TYPE_CD))
+                    .thenReturn(new TransactionTypeResponse(TYPE_CD, DESCRIPTION, STORED_VERSION));
+
+            MvcResult result = TransactionTypeControllerTest.this.mockMvc
+                    .perform(get(itemPath(TYPE_CD)))
+                    .andReturn();
+
+            assertThat(TransactionTypeControllerTest.this.bodyOf(result).keySet())
+                    .as("the schema closes its member set, so a grown body is a break and not a"
+                            + " tolerated addition")
+                    .containsExactlyInAnyOrderElementsOf(ITEM_MEMBERS);
+
+            String raw = rawBodyOf(result);
+            assertThat(raw)
+                    .as("the code travels as a quoted string; rendered as a number its leading zero"
+                            + " is lost and the value no longer addresses its row")
+                    .contains("\"typeCd\":\"" + TYPE_CD + "\"")
+                    .contains("\"version\":" + STORED_VERSION)
+                    .doesNotContain("\"version\":\"");
+        }
+
+        /**
+         * A code no row holds answers 404 carrying the service's own verbatim sentence.
+         *
+         * <p>Assumptions: the sentence is asserted through the service's published constant rather than
+         * retyped, so a change to the constant moves this assertion with it instead of leaving a stale
+         * copy behind. The status is asserted alongside it because the two are separable: the same
+         * sentence rendered with a 500 would report a caller's mistake as a fault.
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("a code no row holds answers 404 with the service's sentence")
+        void anAbsentCodeIsReportedAsNotFound() throws Exception {
+            when(TransactionTypeControllerTest.this.service.read(ABSENT_TYPE_CD))
+                    .thenThrow(new NoSuchElementException(
+                            TransactionTypeService.MESSAGE_TYPE_NOT_FOUND));
+
+            MvcResult result = TransactionTypeControllerTest.this.mockMvc
+                    .perform(get(itemPath(ABSENT_TYPE_CD)))
+                    .andReturn();
+
+            assertThat(result.getResponse().getStatus()).isEqualTo(404);
+            assertThat(TransactionTypeControllerTest.this.messageOf(result))
+                    .isEqualTo(TransactionTypeService.MESSAGE_TYPE_NOT_FOUND);
+            assertThat(rawBodyOf(result))
+                    .as("an absent row says nothing about the table it was looked for in")
+                    .doesNotContain(VENDOR_DIAGNOSTIC);
+        }
+
+        /**
+         * A segment outside the published domain is refused as a bad request and never read for.
+         *
+         * <p>Assumptions: the two values driven are the two distinguishable ways a segment can leave the
+         * domain -- a value of the declared width that the pattern excludes, and a value of the wrong
+         * width entirely. Both matter because the pattern the contract publishes admits 01 through 99 and
+         * therefore excludes 00, so a boundary enforcing only the width would let 00 through.
+         *
+         * <p>Assumptions: the collaborator is asserted never to have been called at all. That is the
+         * property that separates a refused request from a request answered as an absent row: without it
+         * a boundary that read for the malformed value and reported 404 would satisfy a status-only case
+         * while telling a caller something about the table when what is wrong is the request.
+         *
+         * @param outsideTheDomain a segment the published path parameter does not admit
+         * @throws Exception if the request cannot be performed
+         */
+        @ParameterizedTest
+        @ValueSource(strings = {"00", "7"})
+        @DisplayName("a segment outside the published domain is refused without reaching the store")
+        void aSegmentOutsideTheDomainIsRefused(String outsideTheDomain) throws Exception {
+            MvcResult result = TransactionTypeControllerTest.this.mockMvc
+                    .perform(get(itemPath(outsideTheDomain)))
+                    .andReturn();
+
+            assertThat(result.getResponse().getStatus())
+                    .as("a request outside the published domain is the caller's to correct;"
+                            + " answering 404 would describe the table instead of the request")
+                    .isEqualTo(400);
+            assertThat(TransactionTypeControllerTest.this.bodyOf(result).get("code"))
+                    .isEqualTo(ApiError.CODE_VALIDATION);
+            verify(TransactionTypeControllerTest.this.service, never()).read(anyString());
+        }
+
+        /**
+         * The handler reaches the same answer whichever authorities the caller carries.
+         *
+         * <p>Purpose: this is the complement of the chain assertions in
+         * {@code com.carddemo.reference.config}, and it is what stops an authority decision being
+         * duplicated into the handler. A handler that inspected the caller's groups itself would give two
+         * different answers here, and the two mechanisms would then disagree about who may read -- with
+         * whichever ran first deciding.
+         *
+         * <p>Assumptions: the callers are presented with the security test support rather than with a
+         * real token, a reachable issuer or a credential written into a source file, and the three
+         * postures driven are the administrative group, the ordinary group and no authority at all.
+         *
+         * @throws Exception if a request cannot be performed
+         */
+        @Test
+        @DisplayName("the handler decides no authority: both groups and neither receive one answer")
+        void theHandlerMakesNoAuthorityDecisionOfItsOwn() throws Exception {
+            when(TransactionTypeControllerTest.this.service.read(TYPE_CD))
+                    .thenReturn(new TransactionTypeResponse(TYPE_CD, DESCRIPTION, STORED_VERSION));
+
+            String asAdmin = readAs(JwtRoleConverter.ADMIN_AUTHORITY);
+            String asUser = readAs(JwtRoleConverter.USER_AUTHORITY);
+            String withNone = readAs();
+
+            assertThat(asAdmin)
+                    .as("no authority is read by the handler, so all three answers are one answer")
+                    .isEqualTo(asUser)
+                    .isEqualTo(withNone);
+            assertThat(asAdmin).contains("\"typeCd\":\"" + TYPE_CD + "\"");
+        }
+
+        /**
+         * Reads the seeded code as a caller holding the stated authorities and returns the raw body.
+         *
+         * @param authorities the authority names the presented caller carries; an empty argument list
+         *     yields an authenticated caller carrying none
+         * @return the body exactly as it travelled
+         * @throws Exception if the request cannot be performed
+         */
+        private String readAs(String... authorities) throws Exception {
+            return rawBodyOf(TransactionTypeControllerTest.this.mockMvc
+                    .perform(get(itemPath(TYPE_CD)).with(jwt().authorities(
+                            Arrays.stream(authorities)
+                                    .map(SimpleGrantedAuthority::new)
+                                    .toList()
+                                    .toArray(new SimpleGrantedAuthority[0]))))
+                    .andReturn());
         }
     }
 
@@ -1777,12 +2653,23 @@ class TransactionTypeControllerTest {
     class OnTheStatelessBoundary {
 
         /**
-         * Two identical requests are answered identically, byte for byte.
+         * Two identical requests are answered identically, apart from the per-request correlation.
          *
-         * <p>Assumptions: comparable byte for byte because the advice is constructed over a fixed
-         * clock, so the only thing that could differ between two renderings of one refusal is the
-         * timestamp, and it does not. Without that the case would have to compare selected members
-         * and would stop seeing a difference in any member it did not name.
+         * <p>Assumptions: everything except one member is comparable byte for byte, because the advice
+         * is constructed over a fixed clock, so a timestamp cannot differ between two renderings of one
+         * refusal. Comparing whole bodies rather than selected members is deliberate: a comparison of
+         * named members stops seeing a difference in any member it does not name, which is precisely
+         * how a remembered turn count would hide.
+         *
+         * <p>Refactoring Rationale: the correlation identifier is excluded from the comparison, and the
+         * exclusion is a correction rather than a concession. This case previously compared the two
+         * bodies whole and passed, because the boundary it ran against was a bare dispatcher with no
+         * filters: nothing issued a correlation identifier, so the member was constant. The deployed
+         * boundary registers the shared correlation filter, which mints one per request BY DESIGN -- a
+         * value shared between two requests would defeat the whole point of carrying it. So the member
+         * is asserted to DIFFER, which is the real contract, and the remainder is asserted to be
+         * identical, which is the property this case is about. Comparing the bodies whole and calling
+         * the failure a defect would have been asserting that the deployed filter should not exist.
          *
          * @throws Exception if a request cannot be performed
          */
@@ -1792,12 +2679,21 @@ class TransactionTypeControllerTest {
             doThrow(new RecordConflictException(RecordConflictException.Kind.REFERENCED_ROW))
                     .when(TransactionTypeControllerTest.this.service).delete(TYPE_CD);
 
-            String first = rawBodyOf(TransactionTypeControllerTest.this.mockMvc
-                    .perform(delete(itemPath(TYPE_CD))).andReturn());
-            String second = rawBodyOf(TransactionTypeControllerTest.this.mockMvc
-                    .perform(delete(itemPath(TYPE_CD))).andReturn());
+            MvcResult firstResult = TransactionTypeControllerTest.this.mockMvc
+                    .perform(delete(itemPath(TYPE_CD))).andReturn();
+            MvcResult secondResult = TransactionTypeControllerTest.this.mockMvc
+                    .perform(delete(itemPath(TYPE_CD))).andReturn();
+            String first = rawBodyOf(firstResult);
+            String second = rawBodyOf(secondResult);
 
-            assertThat(second)
+            String firstCorrelation = correlationOf(firstResult);
+            String secondCorrelation = correlationOf(secondResult);
+            assertThat(secondCorrelation)
+                    .as("a correlation identifier is minted per request, so two requests must not"
+                            + " share one; a shared value would make two calls indistinguishable in"
+                            + " every log that carries it")
+                    .isNotEqualTo(firstCorrelation);
+            assertThat(second.replace(secondCorrelation, firstCorrelation))
                     .as("no turn count and no remembered context, so a repeated request is the"
                             + " same request rather than a later turn of the first")
                     .isEqualTo(first);

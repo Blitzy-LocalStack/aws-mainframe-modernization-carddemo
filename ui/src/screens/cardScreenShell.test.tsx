@@ -36,6 +36,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { getCard, listCards, lookupCard, updateCard } from '../api/cards';
 import type { CardDetail, CardSummary, PageResponse } from '../api/cards';
+import { AppShell } from '../layout/AppShell';
+
 import { PF_KEY_BAR_REGION_LABEL } from '../layout/PfKeyBar';
 import { PROGRAM_MESSAGES, SHARED_MESSAGES, STATUS_MESSAGES } from '../messages/messages';
 import { CARD_DETAIL_ROUTE, CARD_EDIT_ROUTE } from '../routes/cards';
@@ -60,6 +62,8 @@ import {
   CARD_UPDATE_TRANSACTION_ID,
   CardUpdateScreen,
 } from './cardUpdate';
+import type { ApiError } from '../api/types';
+import { MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
 
 /**
  * Builds the mocked surface of the card transport module.
@@ -105,6 +109,33 @@ const ONE_ROW_PAGE: PageResponse<CardSummary> = {
 };
 
 /** One card detail, whose masked rendering is what a non-administrative read returns. */
+/**
+ * Builds a rejection carrying a complete problem document, as the transport raises one.
+ *
+ * Assumptions: every member the published `ApiError` declares is supplied, because a partial document
+ * describes a response no service can send and would let a structural narrowing pass that the real
+ * shape fails.
+ * @param {number} status - The HTTP status the failure carries.
+ * @returns {{ problem: ApiError }} A rejection value of the shape the client raises.
+ */
+function aRefusal(status: number): { readonly problem: ApiError } {
+  return {
+    problem: {
+      code: 'CARD0001',
+      secondaryCode: '',
+      message: null,
+      severity: 'WARNING',
+      subsystem: 'APPLICATION',
+      status,
+      correlationId: 'correlation-0001',
+      path: '/api/v1/cards',
+      timestamp: '2026-01-01T00:00:00Z',
+      fieldErrors: [],
+      abend: null,
+    },
+  };
+}
+
 const CARD: CardDetail = {
   ...ROW,
   embossedName: 'PAUL BUCK',
@@ -126,7 +157,32 @@ function collapse(value: string): string {
 }
 
 /**
- * Renders one screen at a concrete path inside an in-memory router.
+ * Timeout for the one case whose accessible-name role queries dominate its cost.
+ *
+ * Assumptions: 45 seconds is roughly four times the 10.4s the case measures in isolation, which
+ * leaves room for the parallel load a full run adds without being so large that a genuine hang
+ * would stall a build rather than fail it.
+ */
+const SLOW_ROLE_QUERY_TIMEOUT_MS = 45000;
+
+/**
+ * Renders one screen at a concrete path inside an in-memory router, wrapped in the shared shell.
+ *
+ * ⚠️ Refactoring Rationale: the screen is mounted inside a LAYOUT route rendering `AppShell`, where it
+ * used to be mounted directly under `Routes`. That mirrors `ui/src/router.tsx`, which now nests every
+ * authenticated screen inside one such layout route, and it is what these cases need in order to keep
+ * asserting anything: the three card screens no longer paint a title band or a key legend themselves,
+ * they DELEGATE both to the shell through `useShellSlot`. Rendered without the shell they publish a
+ * delegation nothing subscribes to, so the band and the legend are simply absent and every assertion
+ * about them fails against correct code.
+ *
+ * Assumptions: this is the one place the composition is expressed, which is why the change is one edit
+ * rather than one per case. Every case below reaches the document through this helper.
+ *
+ * Assumptions: the shell is given NO props, so each case exercises the delegation path rather than the
+ * override path. `AppShell` prefers its own props over a screen's delegation, so passing the band here
+ * would assert the test's values instead of the screen's -- which is the one thing these cases exist to
+ * check.
  * @param {string} path - Initial location for the router.
  * @param {string} routePattern - Route pattern the element is mounted at.
  * @param {ReactElement} element - The screen under test.
@@ -136,7 +192,9 @@ function renderAt(path: string, routePattern: string, element: ReactElement): vo
   render(
     <MemoryRouter initialEntries={[path]}>
       <Routes>
-        <Route path={routePattern} element={element} />
+        <Route element={<AppShell />}>
+          <Route path={routePattern} element={element} />
+        </Route>
       </Routes>
     </MemoryRouter>,
   );
@@ -308,14 +366,26 @@ async function listRefusesAPartialEntryWithItsOwnSentence(): Promise<void> {
   await user.type(screen.getByLabelText(collapse(CARD_LIST_LABELS.cardNumberFilter)), '4444');
   await user.click(screen.getByRole('button', { name: 'Filter' }));
 
-  expect(
-    await screen.findByText(
-      collapse(SHARED_MESSAGES.CARD_ID_FILTER_IF_SUPPLIED_MUST_BE_A_16_DIGIT_NUMBER),
-    ),
-  ).toBeInTheDocument();
-  expect(
-    screen.queryByText(collapse(STATUS_MESSAGES.COCRDSLC.SEARCHED_CARD_NOT_NUMERIC.text)),
-  ).not.toBeInTheDocument();
+  // WHY : Refactoring Rationale: the sentence is asserted on the row-23 BAND rather than on the whole
+  //       document. The refused filter now also carries a visually-hidden copy of the sentence as the
+  //       target of its `aria-describedby`, without which that association would be a dangling
+  //       reference -- so an unscoped by-text query matches two elements and throws. Naming the band
+  //       is also the stronger assertion: it pins the sentence to the surface the mapset declares for
+  //       it (`app/bms/COCRDLI.bms` places ERRMSG on row 23) rather than merely somewhere on screen.
+  await waitFor(
+    /**
+     * Waits for the list screen's own filter refusal to reach the row-23 band.
+     * @returns {void} Nothing; throws until the band carries the sentence.
+     */
+    () => {
+      expect(screen.getByTestId(MESSAGE_BAND_TEST_ID)).toHaveTextContent(
+        collapse(SHARED_MESSAGES.CARD_ID_FILTER_IF_SUPPLIED_MUST_BE_A_16_DIGIT_NUMBER),
+      );
+    },
+  );
+  expect(document.body).not.toHaveTextContent(
+    collapse(STATUS_MESSAGES.COCRDSLC.SEARCHED_CARD_NOT_NUMERIC.text),
+  );
 }
 
 /**
@@ -338,8 +408,26 @@ async function detailComposesTheShellAndMapsetLabels(): Promise<void> {
   );
   expect(screen.getByRole('heading', { name: CARD_DETAIL_TITLE })).toBeInTheDocument();
   expect(legendControlNames()).toStrictEqual(['ENTER=Search Cards', 'F3=Exit']);
-  for (const label of Object.values(CARD_DETAIL_FIELD_LABELS)) {
-    expect(screen.getByText(collapse(label))).toBeInTheDocument();
+  /*
+   * WHY : Refactoring Rationale: the account and card labels are expected TWICE and the other three
+   *       once, where every label was expected once before. The mapset paints its two `UNPROT` fields
+   *       -- `ACCTSID` and `CARDSID` -- and the screen now renders them as controls as well as
+   *       rendering the same two values on the record, so each of those two labels names a control and
+   *       a record row. Counting them is what keeps this case able to fail: a single `getByText` would
+   *       have thrown on the duplicate, and relaxing it to `getAllByText` without a count would have
+   *       passed whether the control was rendered or not.
+   */
+  const labelOccurrences: Record<string, number> = {
+    accountNumber: 2,
+    cardNumber: 2,
+    nameOnCard: 1,
+    cardActive: 1,
+    expiryDate: 1,
+  };
+  for (const [field, label] of Object.entries(CARD_DETAIL_FIELD_LABELS)) {
+    expect(screen.getAllByText(collapse(label)), `${field} label occurrences`).toHaveLength(
+      labelOccurrences[field] ?? 0,
+    );
   }
   expect(screen.getByText(CARD.activeStatus)).toBeInTheDocument();
 }
@@ -370,17 +458,46 @@ async function detailEnterRereadsTheRecord(): Promise<void> {
 }
 
 /**
- * Asserts the detail screen reports a failed read with its source program's own sentence.
+ * Asserts the detail screen reports an absent card with its source program's own not-found sentence.
+ *
+ * Refactoring Rationale: this case rejected with a bare `Error` and expected the not-found sentence,
+ * which encoded the very laxity it looked like it was guarding -- the screen answered EVERY rejection
+ * with that one sentence, so an expired session, a caller outside the required group and a service
+ * fault were all reported to the operator as a card that does not exist. The reference does branch,
+ * taking `DFHRESP(NOTFND)` at `app/cbl/COCRDSLC.cbl` L755-L761 and composing something else for any
+ * other file response at L762-L771. The case now supplies the 404 the sentence belongs to, and its
+ * sibling covers what a rejection carrying no status reports instead.
  * @returns {Promise<void>} Resolves once the refusal has been rendered.
  */
 async function detailReportsTheSourceReadFailure(): Promise<void> {
-  vi.mocked(getCard).mockRejectedValue(new Error('transport'));
+  vi.mocked(getCard).mockRejectedValue(aRefusal(404));
 
   renderAt(`/cards/${CARD_SELECTOR}`, CARD_DETAIL_ROUTE, <CardDetailScreen />);
 
   expect(
     await screen.findByText(collapse(STATUS_MESSAGES.COCRDSLC.DID_NOT_FIND_ACCTCARD_COMBO.text)),
   ).toBeInTheDocument();
+}
+
+/**
+ * Asserts a rejection carrying no status is NOT reported as an absent card.
+ *
+ * Assumptions: a bare `Error` is what a transport fault or a malformed response settles with, and it
+ * carries no status to branch on -- so the screen reports the application's abend sentence rather than
+ * asserting a cause it has not established. This is the half of the branch the case above cannot show.
+ * @returns {Promise<void>} Resolves once the refusal has been rendered.
+ */
+async function detailWithholdsTheNotFoundSentenceFromAStatuslessFailure(): Promise<void> {
+  vi.mocked(getCard).mockRejectedValue(new Error('transport'));
+
+  renderAt(`/cards/${CARD_SELECTOR}`, CARD_DETAIL_ROUTE, <CardDetailScreen />);
+
+  expect(
+    await screen.findByText(collapse(SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED)),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByText(collapse(STATUS_MESSAGES.COCRDSLC.DID_NOT_FIND_ACCTCARD_COMBO.text)),
+  ).not.toBeInTheDocument();
 }
 
 /**
@@ -662,9 +779,31 @@ function cardScreenShellCases(): void {
     'composes the header, the mapset title and the three painted keys on the browse',
     listComposesTheShell,
   );
+  /*
+   * WHY : ⚠️ Assumptions: this ONE case carries a per-case timeout above the suite's own, and the
+   *       figure is measured rather than chosen. It is the only case here that asks Testing Library
+   *       for roles by ACCESSIBLE NAME inside an antd `Table` -- two `getByRole('button', { name })`
+   *       lookups and a `getAllByRole('columnheader')` -- and a role query resolves visibility for
+   *       every candidate through `getComputedStyle`, which jsdom implements slowly and partially
+   *       (it warns on pseudo-elements). Mounting the shared shell around the screen, which every
+   *       case here now does because the screens delegate their band and legend, enlarges the tree
+   *       those lookups walk: this case went from 3414ms to a consistent 10.4s while the other
+   *       fifteen stayed level or got faster, several of them under 700ms.
+   * WHY : Assumptions: the cost is the TEST environment's and not the application's, which was
+   *       measured rather than assumed. An instrumented render counter showed `AppShell` rendering
+   *       exactly TWICE across this case -- the initial mount and the one slot publication -- so
+   *       there is no re-render storm to fix, and the structural equivalence check in
+   *       `areSlotsRenderEquivalent` is what keeps it at two even though `usePfKeys` hands up a
+   *       freshly built bindings array on every screen render.
+   * WHY : Trade-offs: the allowance is given HERE rather than by raising the suite default again,
+   *       so the 20s ceiling keeps applying to every other case and this outlier is visible at the
+   *       one place it applies. Raising the default a second time would hide the next genuinely
+   *       slow case behind an ever-larger number.
+   */
   it(
     'heads the browse columns and its row controls with the mapset values',
     listRendersMapsetColumnsAndCodes,
+    SLOW_ROLE_QUERY_TIMEOUT_MS,
   );
   it(
     'carries the source informational sentence on the browse',
@@ -688,6 +827,10 @@ function cardScreenShellCases(): void {
   );
   it('re-reads the record when the detail Enter key is invoked', detailEnterRereadsTheRecord);
   it('reports a failed detail read with the source sentence', detailReportsTheSourceReadFailure);
+  it(
+    'withholds the not-found sentence from a statusless failure',
+    detailWithholdsTheNotFoundSentenceFromAStatuslessFailure,
+  );
   it(
     'withholds the non-display legend field on the update screen',
     updateComposesTheShellWithTheHiddenLegendWithheld,

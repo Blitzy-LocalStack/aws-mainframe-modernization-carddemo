@@ -1206,9 +1206,50 @@ public class UserService {
                 //       handler, where the shared advice can only render a generic 500.
                 User saved = this.users.saveAndFlush(stored);
 
-                return new Written(saved, this.identitySync.record(saved.getUserId(),
+                IdentitySyncTask intention = this.identitySync.record(saved.getUserId(),
                         IdentitySyncTask.OPERATION_SYNCHRONISE, saved.getFirstName(),
-                        saved.getLastName(), previousUserType, saved.getUserType()));
+                        saved.getLastName(), previousUserType, saved.getUserType());
+
+                // WHY : ⚠️ Refactoring Rationale: a privilege REDUCTION converges at the provider BEFORE
+                //       this transaction commits, and it is the one thing on this path that does. The
+                //       arrangement it replaces committed the row, recorded the intention, called the
+                //       provider afterwards and discarded the outcome -- so a caller was told a demotion
+                //       had happened while the account could still hold the administrative group, and
+                //       every token already minted under it went on being accepted for its full hour with
+                //       its refresh token good for thirty days. A reconciliation pass that kept failing
+                //       left the membership in place indefinitely, silently.
+                // WHY : Assumptions: it runs HERE -- after the flush and after the intention, and as the
+                //       last statement of the transaction -- so that every application-level failure has
+                //       already been raised and the only thing left that can fail is the commit itself.
+                //       That ordering is what makes the residual fail CLOSED: a provider call that
+                //       succeeded and a commit that then failed leaves the pool WITHHOLDING authority the
+                //       row still grants, which is the safe direction. The general rule this path follows
+                //       -- call the provider only after the commit, because the reverse leaves the pool
+                //       projecting a row that was never written -- is stated for a projection of names and
+                //       group membership, where either direction of divergence is equally harmless. It
+                //       does not hold for the withdrawal of authority, where the two directions are not
+                //       comparable at all.
+                // WHY : Assumptions: a failure PROPAGATES and rolls the transaction back, so a demotion
+                //       the provider could not accept is answered as a failure and nothing is committed --
+                //       the caller is told, the row still reads as it did, and retrying is the whole of the
+                //       remedy. Reporting success and leaving the reconciliation pass to converge is what
+                //       this replaces.
+                // WHY : Assumptions: the intention is STILL recorded, and it is what completes the
+                //       projection after the commit: this call removes the administrative group and ends
+                //       the sessions, while the post-commit application updates the attributes and adds the
+                //       ordinary group. Dropping the intention would leave an account holding no group at
+                //       all if the process died between here and the post-commit call.
+                // WHY : Assumptions: this step has NO baseline counterpart -- the reference re-reads the
+                //       user type from its security file on each turn, so a written demotion took effect at
+                //       once -- and it exists because a signed bearer validated offline does not. The
+                //       difference is registered as D-AUTHORITY-WITHDRAWN-ON-DEMOTION in
+                //       docs/architecture/cobol-to-service-traceability.md, together with its residual: an
+                //       access token already issued stays valid at every resource server until it expires.
+                if (reducesAuthority(previousUserType, saved.getUserType())) {
+                    this.provisioning.withdrawAdministrativeAuthority(saved.getUserId());
+                }
+
+                return new Written(saved, intention);
 
             } catch (DataAccessException unwritable) {
                 throw unableTo(MESSAGE_UNABLE_TO_UPDATE,
@@ -1223,10 +1264,41 @@ public class UserService {
         //       change the caller asked for is committed and durable by this point, so answering a failure
         //       would be untrue; the applier records its own failure in the ledger, and the reconciliation
         //       pass owns the retry.
+        // WHY : Assumptions: that reasoning survives the withdrawal above precisely BECAUSE the withdrawal
+        //       ran inside the transaction. What is left for this call to do on a demotion is the harmless
+        //       half of the projection -- the attributes and the ordinary group -- and the authority itself
+        //       is already gone, so a failure here cannot leave a demoted user holding administrative
+        //       authority. Requiring this call to succeed would therefore report a failure for a change
+        //       that has taken effect in every sense a client can observe.
         this.identitySync.applyOwed(result.getUserId());
 
         LOG.info("event=auth.user.updated");
         return this.mapper.toResponse(result);
+    }
+
+    /**
+     * Reports whether a type change takes administrative authority away.
+     *
+     * <p>Purpose: this is the one direction of change whose provider work cannot wait until after the
+     * commit, and it is named rather than written inline so the condition reads as the question it answers.
+     * {@code app/cpy/COCOM01Y.cpy} L27 and L28 declare the whole domain as two values, so "reduces" means
+     * exactly one transition: administrator to ordinary user.
+     *
+     * <p>Assumptions: the OPPOSITE transition needs nothing of the kind. A promotion leaves outstanding
+     * tokens carrying the ordinary group, so the holder can reach less than the row now permits until they
+     * sign on again -- an inconvenience, and the safe direction. Revoking on a promotion as well was
+     * considered and rejected: it would sign a user out of a working session to grant them something they
+     * had not asked for at that moment, and the reference has no such behaviour to reproduce.
+     *
+     * <p>Assumptions: a change that leaves the type alone -- a corrected surname, say -- is not a reduction
+     * and reaches none of this, which is why the comparison is on the two types and not on whether the
+     * update touched anything.
+     * @param previousUserType the type the row held before the update, {@code "A"} or {@code "U"}
+     * @param userType the type the row holds after it, {@code "A"} or {@code "U"}
+     * @return {@code true} only for the administrator-to-ordinary-user transition
+     */
+    private static boolean reducesAuthority(String previousUserType, String userType) {
+        return USER_TYPE_ADMIN.equals(previousUserType) && !USER_TYPE_ADMIN.equals(userType);
     }
 
     /**

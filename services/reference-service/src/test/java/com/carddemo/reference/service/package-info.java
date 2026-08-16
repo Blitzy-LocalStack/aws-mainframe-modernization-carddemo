@@ -47,19 +47,29 @@
  *       with three trailing blanks rather than seven characters long.</li>
  *   <li>The batch reference-update rule answers for
  *       {@code app/app-transaction-type-db2/cbl/COBTUPDT.cbl}, 237 lines.</li>
- *   <li>The date-conversion reply rule answers for
- *       {@code app/app-vsam-mq/cbl/CODATE01.cbl}, 524 lines, which declares
- *       itself {@code IS INITIAL} at line 2 and waits five thousand
- *       milliseconds for a message at line 286.</li>
+ *   <li>The SYNCHRONOUS half of the date-conversion rule answers for
+ *       {@code app/app-vsam-mq/cbl/CODATE01.cbl}, 524 lines. ⚠️ Refactoring
+ *       Rationale: this entry claimed the whole of that program's reply rule and
+ *       cited its five-thousand-millisecond message wait at line 286. The QUEUE
+ *       half of it is not in this package any more: the baseline drives BOTH of
+ *       its inquiry programs from ONE request destination,
+ *       {@code DEFINE QLOCAL('CARDDEMO.REQUEST.QUEUE')} at
+ *       {@code app/app-vsam-mq/README.md} L53, and a queue admits exactly one
+ *       owning consumer, so the queue and its wait belong to
+ *       {@code com.carddemo.account.service.InquiryMessageListener}. What this
+ *       package answers for is the date EVALUATION of
+ *       {@code app/cbl/CSUTLDTC.cbl} reached on the synchronous route, plus the
+ *       wire GEOMETRY both halves read.</li>
  * </ul>
  *
  * <h2>What this directory holds</h2>
  *
  * <pre>
- * this directory: 13 java files = 12 tests + 1 charter
+ * this directory: 11 java files = 10 tests + 1 charter
  * </pre>
  *
- * <p>Twelve test classes are present, and between them they carry all five rules above, with no
+ * <p>Ten test classes are present -- nine unit suites and one integration suite -- and between
+ * them they carry all five rules above, with no
  * subdirectory beneath this one:</p>
  *
  * <ul>
@@ -75,23 +85,27 @@
  *       {@code DEFAULT} fallback.</li>
  *   <li>{@code TransactionTypeBrowseTest} across 17 cases -- the keyset browse of the
  *       transaction-type table.</li>
- *   <li>{@code DateInquiryMessageListenerTest} across 18 cases -- the date-conversion reply rule,
- *       including the reply's exact bytes, the echoed correlation identifier and the request dropped
- *       for having expired.</li>
  *   <li>{@code DateConversionServiceTest} across 6 cases -- the date edit rules themselves.</li>
- *   <li>{@code DateConversionMessageListenerTest} across 11 cases -- the properties of the date
- *       flow that SPAN the two classes above, which neither of their own suites can state: that the
- *       withdrawn consumer both are named after is absent while both halves it was split into
- *       remain, that the copybook geometry and the shared request codec agree on every offset, that
- *       nothing carries from one invocation of the consumer to the next, that the queue answer
- *       ignores its request while the evaluation answer depends on its own, that the reply and the
- *       diagnostic address two distinct queues, that all three queue names arrive from configuration
- *       with no in-code fallback, and that the two ten-character date pictures this flow carries are
- *       never interchangeable.</li>
- *   <li>{@code ReferenceServiceStructureTest} across 3 cases and
- *       {@code ReferenceQueueConsumerContractTest} across 1 -- the structural guards on this
- *       package rather than on one rule.</li>
+ *   <li>{@code DateConversionFlowContractTest} across 5 cases -- the properties of the date flow
+ *       that SPAN the evaluation half and the reply codec, which neither of their own suites can
+ *       state: that no queue consumer is bound in this module at all, that the copybook geometry and
+ *       the shared request codec agree on every offset, that the queue answer ignores its request
+ *       while the evaluation answer depends on its own, and that the two ten-character date pictures
+ *       this flow carries are never interchangeable.</li>
+ *   <li>{@code ReferenceServiceStructureTest} across 3 cases -- the structural guards on this
+ *       package rather than on one rule, chief among them that no queue consumer remains here.</li>
  * </ul>
+ *
+ * <p>⚠️ Refactoring Rationale: three classes left this list together and the reason is one topology
+ * fact rather than three decisions. {@code DateInquiryMessageListenerTest} covered a queue consumer
+ * that is no longer in this module; {@code DateConversionMessageListenerTest} drove that consumer to
+ * assert the properties spanning it and the evaluation half, and is superseded by
+ * {@code DateConversionFlowContractTest}, which asserts the surviving ones without a transport; and
+ * {@code ReferenceQueueConsumerContractTest} asserted that exactly ONE consumer was bound here, a
+ * claim now inverted into {@code ReferenceServiceStructureTest}'s assertion that none is. The
+ * queue-side properties are not dropped: they are asserted where the consumer now lives, in
+ * {@code com.carddemo.account.service.InquiryMessageListenerTest}, and the reply body's own layout in
+ * {@code com.carddemo.common.codec.DateInquiryReplyCodecTest}.</p>
  *
  * <p>Refactoring Rationale: this section has been recounted twice. It first named two classes and
  * three files while three classes and four sat in the directory; it was corrected to three and four,
@@ -204,17 +218,33 @@
  *       migrations already own.</li>
  * </ul>
  *
- * <h2>Surefire collects every test class in this package</h2>
+ * <h2>This package carries BOTH suffixes, and the split is by what a class needs</h2>
  *
- * <p>Assumptions: every test class here ends in {@code Test}, so Surefire
- * collects them and they run at the {@code test} phase. The container-backed
- * classes ending in {@code IT} belong to the repository package and are
- * collected by Failsafe, which asserts their result at {@code verify}. The
- * suffix is doing structural work, which is why it is stated at package scope
- * rather than left to be inferred: a class placed in this package but given the
- * integration suffix is passed over by Surefire and appears to succeed by never
- * having run, and that is the dangerous direction of the mistake because it is
- * indistinguishable from success in every report.</p>
+ * <p>Refactoring Rationale: this section said "every test class here ends in
+ * {@code Test}" and that "the container-backed classes ending in {@code IT}
+ * belong to the repository package", and both halves were false of this
+ * directory. Eleven of the twelve classes here end in {@code Test} and one,
+ * {@code ReferenceBatchUpdateServiceIT}, ends in {@code IT} -- it is
+ * container-backed, and it sits here rather than in the repository package
+ * because the property it holds is a SERVICE's write behaviour against a real
+ * engine rather than a mapping's. The correction matters more than a count
+ * usually would, because the section goes on to argue that the suffix is doing
+ * structural work: a reader who took "every class here ends in Test" literally
+ * would read the one {@code IT} name in this directory as exactly the mistake
+ * the paragraph below warns about, and would rename it -- which would run a
+ * container-backed class with no container at the {@code test} phase.</p>
+ *
+ * <p>Assumptions: Surefire collects the eleven {@code Test} names and runs them
+ * at the {@code test} phase; Failsafe collects the one {@code IT} name here,
+ * together with the container-backed classes in the repository package, and
+ * asserts their result at {@code verify}. The suffix is therefore doing
+ * structural work, which is why it is stated at package scope rather than left
+ * to be inferred: a class needing no container but given the integration suffix
+ * is passed over by Surefire and appears to succeed by never having run, and
+ * that is the dangerous direction of the mistake because it is
+ * indistinguishable from success in every report. The safe reading is that the
+ * suffix follows the REQUIREMENT -- a container, or none -- and never the
+ * directory.</p>
  *
  * <p>Assumptions: the report directory is left at its default,
  * {@code services/reference-service/target/surefire-reports}, and no test in

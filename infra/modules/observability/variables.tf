@@ -314,6 +314,53 @@ variable "daily_state_machine_arn" {
   }
 }
 
+# WHY : Refactoring Rationale: this input did not exist, and its absence made a
+#       published contract untrue rather than merely incomplete.
+#       infra/modules/step-functions-batch publishes the name of each machine's
+#       execution log group and its output descriptions state that this module
+#       attaches metric filters and log-based alarms to those exact groups. Nothing
+#       consumed them, so the claim described a wiring that was never made -- and the
+#       gap it hid is real: the AWS/States alarms below are dimensioned on the DAILY
+#       machine's ARN alone, so a failure of the ad-hoc report, dataset round-trip or
+#       authorization-extract machine produced no signal at all. Naming the groups here
+#       makes the dependency explicit, so a rename inside the owning module fails at
+#       plan time in the root that wires the two together instead of leaving a filter
+#       pointed at a group that no longer exists and reporting nothing.
+# WHY : Alternatives Considered: dimensioning the existing AWS/States alarms on each
+#       machine's ARN instead, which needs no log group at all. Rejected because it
+#       cannot see INSIDE an execution: ExecutionsFailed counts a whole execution, so a
+#       state that failed and was caught into a notification path -- which is how every
+#       state in that module handles failure -- never increments it. The execution log
+#       carries the per-event record, so a filter over it is the only way to alarm on
+#       the events the graph deliberately catches.
+# WHY : Assumptions: NAMES rather than ARNs, because aws_cloudwatch_log_metric_filter
+#       takes a log-group name and will not accept an ARN. The owning module publishes
+#       both, and the ARNs are for policy scoping rather than for this input.
+variable "state_machine_log_group_names" {
+  description = "Map of state-machine key (daily, adhoc, dataset, authz) to the exact CloudWatch log-group name that machine writes its execution history to, as published by infra/modules/step-functions-batch. Each entry receives one metric filter over terminal failure events and one alarm on that metric. Empty creates neither, which is the correct value for a root that composes no state machine."
+
+  type = map(string)
+
+  # WHY : Assumptions: the default is empty so a root that provisions no state machine
+  #       is not forced to supply anything, matching how log_group_names above treats
+  #       the producers it does not own. Both environment roots in this repository
+  #       compose the batch module and pass all four entries.
+  default = {}
+
+  validation {
+    # WHY : Assumptions: the key is a Terraform identity and the value is the exact
+    #       service path, kept separate for the same reason log_group_names does: a
+    #       path change is then an in-place update rather than the destroy-and-create a
+    #       for_each key change forces.
+    condition = alltrue([
+      for key, name in var.state_machine_log_group_names :
+      can(regex("^[a-z][a-z0-9_-]*$", key)) &&
+      can(regex("^/[A-Za-z0-9_./#-]+$", name))
+    ])
+    error_message = "Each state_machine_log_group_names key must be snake_case and each value must be an absolute CloudWatch log-group name beginning with / and containing only supported path characters."
+  }
+}
+
 variable "vpc_flow_log_group_name" {
   description = "Exact CloudWatch log-group name created by the network module for VPC flow logs. It feeds the dashboard Logs Insights query and is never recreated here, preserving the network module's ownership of the flow-log lifecycle."
   type        = string

@@ -121,6 +121,15 @@ class AccountContextContractTest {
     private static final String ACCOUNT_UPDATE_PATH = "/api/v1/accounts/update";
 
     /**
+     * The address of the no-write validation turn.
+     *
+     * <p>Assumptions: it is declared beneath the write's own path rather than beside it, so the closed-set
+     * assertion below reads the two together. The operation judges exactly the submission the write
+     * applies and shares its request schema.</p>
+     */
+    private static final String ACCOUNT_UPDATE_VALIDATE_PATH = "/api/v1/accounts/update/validate";
+
+    /**
      * The internal account context lookup path, written as a literal on purpose.
      *
      * <p>Assumptions: a literal and not a template, because the identifier no longer appears in the
@@ -438,8 +447,8 @@ class AccountContextContractTest {
     void theContractDocumentDeclaresEveryServedOperation() throws Exception {
         Map<String, Object> paths = contractPaths();
 
-        // WHY : ⚠️ Refactoring Rationale: the closed set carries ELEVEN addresses and the display read is
-        //   the eleventh. It is not a widening of this context's surface but the operation a screen in
+        // WHY : ⚠️ Refactoring Rationale: the closed set carries TWELVE addresses; the display read was
+        //   the eleventh and the edit check below is the twelfth. It is not a widening of this context's surface but the operation a screen in
         //   another context was already relying on and could not name: the pending-authorization detail
         //   screen renders a cardholder's name and address, and with no read for those fields it rendered
         //   them from an existence check that answers no body at all. Leaving it out of this assertion
@@ -447,8 +456,9 @@ class AccountContextContractTest {
         //   passed, which is the exact failure mode a closed-set check exists to prevent.
         assertThat(paths).containsOnlyKeys(XREF_LOOKUP_PATH, XREF_LOOKUP_BY_ACCOUNT_PATH,
                 XREF_SEARCH_BY_ACCOUNT_PATH, ACCOUNT_LOOKUP_PATH, ACCOUNT_UPDATE_PATH,
-                ACCOUNT_VIEW_PATH, ACCOUNT_XREF_SEARCH_PATH, CUSTOMER_LOOKUP_PATH,
-                CUSTOMER_SCAN_PATH, CUSTOMER_RECORD_PATH, CUSTOMER_DISPLAY_PATH);
+                ACCOUNT_UPDATE_VALIDATE_PATH, ACCOUNT_VIEW_PATH, ACCOUNT_XREF_SEARCH_PATH,
+                CUSTOMER_LOOKUP_PATH, CUSTOMER_SCAN_PATH, CUSTOMER_RECORD_PATH,
+                CUSTOMER_DISPLAY_PATH);
         assertThat(operation(paths, XREF_LOOKUP_PATH)).containsOnlyKeys("post");
 
         // WHY : Assumptions: all three cross-reference addresses declare a post and nothing else, and the
@@ -471,6 +481,8 @@ class AccountContextContractTest {
         //   which is what makes each address claimable by exactly one of the two chains.
         assertThat(operation(paths, ACCOUNT_LOOKUP_PATH)).containsOnlyKeys("post");
         assertThat(operation(paths, ACCOUNT_UPDATE_PATH)).containsOnlyKeys("post");
+
+        assertThat(operation(paths, ACCOUNT_UPDATE_VALIDATE_PATH)).containsOnlyKeys("post");
         assertThat(operation(paths, ACCOUNT_VIEW_PATH)).containsOnlyKeys("post");
         assertThat(operation(paths, ACCOUNT_XREF_SEARCH_PATH)).containsOnlyKeys("post");
 

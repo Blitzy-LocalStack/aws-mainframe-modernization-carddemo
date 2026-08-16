@@ -17,10 +17,10 @@ import org.hibernate.type.SqlTypes;
  *
  * <p>A row is one transaction that failed posting validation. It is written by the migrated posting
  * job on the branch {@code app/cbl/CBTRN02C.cbl:213-215} takes when the validation reason is not
- * zero, and it is the only mapping in this package that this module inserts into a schema it does
- * not own. The committed expectation files under {@code tests/golden/posting} compare the rendered
- * form of these rows byte for byte, which is why every width, type and padding decision below is
- * derived from the baseline rather than chosen.</p>
+ * zero, and it is the only mapping in this package that this module inserts into a schema it does not
+ * own. The committed expectation files under {@code tests/golden/posting} compare the rendered form of
+ * these rows byte for byte, which is why every width, type and padding decision below is derived from
+ * the baseline rather than chosen.</p>
  *
  * <h2>The 430-byte contract, and where each of the three parts comes from</h2>
  *
@@ -41,31 +41,30 @@ import org.hibernate.type.SqlTypes;
  *       <td>{@code DCB=(RECFM=F,LRECL=430,BLKSIZE=0)}</td></tr>
  * </table>
  *
- * <p>Assumptions: the two record views disagree in granularity and the finer one is the one this
- * mapping follows. The file description sees the trailer as a single opaque {@code X(80)} field,
- * while working storage declares the same 80 bytes as a separate group of a four-digit reason and a
- * 76-character description; 4 plus 76 is 80, so the views agree on width and differ only in
- * structure. Note that the finer group is a distinct {@code 01} item rather than a
- * {@code REDEFINES}: {@code app/cbl/CBTRN02C.cbl:448} moves it wholesale into the record's opaque
- * trailer field, which is how the two views meet. Three columns are carried rather than one opaque
- * 80-character column because the reason code is the field every consumer filters on, and reading
- * it out of a character substring on every query would make an ordinary count a string operation
- * over the whole table.</p>
+ * <p>Assumptions: the two record views disagree in granularity and the finer one is what this mapping
+ * follows. The file description sees the trailer as one opaque {@code X(80)} field while working
+ * storage declares the same 80 bytes as a four-digit reason and a 76-character description, so the
+ * views agree on width and differ only in structure -- and the finer group is a distinct {@code 01}
+ * item rather than a {@code REDEFINES}, which {@code app/cbl/CBTRN02C.cbl:448} moves wholesale into
+ * the record's opaque trailer field. The three columns therefore reconstitute the record as 350
+ * characters of verbatim rejected transaction, a reason code, and a 76-character description. Three
+ * columns are carried rather than one opaque 80-character column because the reason code is the field
+ * every consumer filters on, and reading it out of a character substring on every query would make an
+ * ordinary count a string operation over the whole table.</p>
  *
- * <p>Assumptions: the record format is fixed rather than variable, so every emitted record is
- * exactly 430 characters and carries no length prefix. Two consequences follow and both belong to
- * the emitter rather than to this type: the four-digit reason is rendered zero-padded, so 100
- * becomes {@code 0100}, and the description is rendered blank-padded to its full 76 characters. The
- * committed expectation files confirm both -- each of the four reject expectations under
- * {@code tests/golden/posting} is a single 430-character line whose characters 350 to 353 are a
- * zero-padded code and whose characters 354 to 429 are the message followed by blanks.</p>
+ * <p>Assumptions: the record format is fixed, so every emitted record is exactly 430 characters and
+ * carries no length prefix. Both consequences belong to the emitter rather than to this type: the
+ * four-digit reason renders zero-padded, so 100 becomes {@code 0100}, and the description renders
+ * blank-padded to its full 76 characters. Each reject expectation under {@code tests/golden/posting}
+ * confirms it as a single 430-character line whose characters 350 to 353 are a zero-padded code and
+ * whose characters 354 to 429 are the message followed by blanks.</p>
  *
  * <h2>The reason codes the posting pass emits</h2>
  *
  * <table border="1">
  *   <caption>The four reason codes the posting pass reaches, the line that sets each, and its
  *   verbatim text. They are the codes PRODUCED, not the bound on what may be stored: the column and
- *   this type admit any value in 0 to 9999, for the reason given further below</caption>
+ *   this type admit any value in 0 to 9999, for the reason given below</caption>
  *   <tr><th>Code</th><th>Condition</th><th>Set at</th><th>Text, verbatim</th></tr>
  *   <tr><td>100</td><td>Card number absent from the cross-reference</td>
  *       <td>{@code :385-387}</td><td>{@code INVALID CARD NUMBER FOUND}</td></tr>
@@ -78,134 +77,121 @@ import org.hibernate.type.SqlTypes;
  * </table>
  *
  * <p>All four line references are to {@code app/cbl/CBTRN02C.cbl}. The three control-flow facts a
- * faithful translation depends on -- the short circuit that makes 100 and 101 mutually exclusive,
- * the overwrite that makes 103 beat 102, and the two opposite boundary senses -- are recorded on
+ * faithful translation depends on -- the short circuit that makes 100 and 101 mutually exclusive, the
+ * overwrite that makes 103 beat 102, and the two opposite boundary senses -- are recorded on
  * {@link #getReasonCode()}, because that is where a reader looking at a stored value will ask about
  * them.</p>
  *
- * <h2>What this type is not</h2>
+ * <p>Two domains apply to the reason code and must not be conflated. The domain this type and its
+ * column can REPRESENT is the inclusive range {@code 0} to {@code 9999}: the constructor validates
+ * exactly that, and the owning migration enforces
+ * {@code CHECK (reason_code BETWEEN 0 AND 9999)} on {@code ck_transaction_rejects_reason_code}.
+ * Assumptions: that range is the source picture's rather than a widening chosen here --
+ * {@code app/cpy/CVTRA06Y.cpy} carries the trailer as a four-digit numeric field and the baseline
+ * writes the code it computed rather than one drawn from a closed list. The set the posting pass
+ * actually EMITS is the four values tabulated above, and no other value is written on any path this
+ * module runs.</p>
  *
- * <p>Assumptions: the write path is split, and this type owns only the middle of it. In the
- * baseline, {@code app/cbl/CBTRN02C.cbl:446-465} does the whole job in one paragraph: {@code :447}
- * copies the daily record, {@code :448} moves the assembled trailer over it, and {@code :451}
- * writes the 430 bytes. In the target that sequence is three components -- the validation service
- * decides the code and the description, the job constructs this row, and the fixed-width emitter in
- * {@code com.carddemo.common.codec.FixedWidthCodec} renders the 350-character image followed by the
- * zero-padded code and the blank-padded description. The rendering is deliberately absent from this
- * type, and it is absent from {@link #toString()} in particular; the reasoning is recorded there.</p>
- *
- * <p>Assumptions: the reject count is not a column here and is not derived from this type. The
- * baseline keeps it in {@code WS-REJECT-COUNT PIC 9(09)} at {@code app/cbl/CBTRN02C.cbl:186},
- * increments it at {@code :214} immediately before writing the row at {@code :215}, and at
- * {@code :229-230} turns a non-zero count into a process return code of 4. The migrated job counts
- * what it writes in exactly that place and records the outcome on {@link BatchRun}, whose return
- * code carries the soft-warning tier. The existence of even one of these rows in a run is therefore
- * what makes that run's return code 4 rather than 0, and {@code app/jcl/TRANBKP.jcl:51} carries the
- * {@code COND=(4,LT)} skip predicate that inverts to the orchestration run predicate
- * {@code rc <= 4}. A count column here would be a second place for that number to live and a second
- * place for it to be wrong.</p>
- *
- * <p>Assumptions: a row carries no scope of its own beyond the three contract columns and the
- * ordinal. There is no run identifier, no timestamp, no card number and no account identifier, even
- * though each would be convenient, because the table belongs to another service and a column added
- * here that the owning migration does not declare would fail the start-up assertion rather than
- * work. Per-run scoping is carried by the dataset generation the job writes -- the generation-group
- * analogue, allocated as {@code AWS.M2.CARDDEMO.DALYREJS(+1)} at
- * {@code app/jcl/POSTTRAN.jcl:34-38} and defined at {@code LIMIT(5) SCRATCH} by
- * {@code app/jcl/DALYREJS.jcl:24-28} -- and by the {@code batch.batch_run} ledger.</p>
- *
- * <h2>What the three mapped columns are, and what the reason code can hold</h2>
- *
- * <p>The three columns reconstitute the 430-byte reject record as 350 characters of verbatim
- * rejected transaction, then a four-digit reason code, then a 76-character description. The width
- * derivation is given three independent ways above.</p>
- *
- * <p>Two different domains apply to the reason code and they must not be conflated. The domain this
- * type and its column can REPRESENT is the inclusive range {@code 0} to {@code 9999}: the
- * constructor validates exactly that range, and the owning migration enforces it as
- * {@code CHECK (reason_code BETWEEN 0 AND 9999)} on
- * {@code ck_transaction_rejects_reason_code}. The set the posting pass actually EMITS is the four
- * values {@code {100, 101, 102, 103}} tabulated above, and no other value is written on any path
- * this module runs.</p>
- *
- * <p>Assumptions: the representable range is the source picture's and not a widening chosen here.
- * {@code app/cpy/CVTRA06Y.cpy} carries the trailer as a four-digit numeric field, so any value of
- * that width is expressible in the reference record, and the baseline writes the code it computed
- * rather than one drawn from a closed list.</p>
- *
- * <p>Alternatives Considered: narrowing the constraint to {@code IN (100, 101, 102, 103)} so that
- * the representable domain equalled the emitted set. Rejected on two grounds. It would make the
- * schema assert a closed vocabulary the reference record does not have, so a reject image the
- * baseline can produce would become unstorable and the divergence would surface as a constraint
- * violation rather than as data. And it would move a rule that belongs to the posting pass into the
- * shape of the table every consumer reads, which is the pattern the sibling constraint removal for
- * {@code customers} was corrected for. The four-value set is documented where it is decided --
+ * <p>Alternatives Considered: narrowing the constraint to {@code IN (100, 101, 102, 103)} so that the
+ * representable domain equalled the emitted set. Rejected on two grounds: it would make the schema
+ * assert a closed vocabulary the reference record does not have, so a reject image the baseline can
+ * produce would become unstorable and the divergence would surface as a constraint violation rather
+ * than as data; and it would move a rule belonging to the posting pass into the shape of the table
+ * every consumer reads. The four-value set is documented where it is decided --
  * {@link #getReasonCode()} carries the reachability analysis, including the fifth value {@code 109}
- * that {@code app/cbl/CBTRN02C.cbl:556} assigns on a path that cannot reach the write -- rather than
- * being encoded as a constraint.</p>
+ * that {@code app/cbl/CBTRN02C.cbl:556} assigns on a path that cannot reach the write.</p>
  *
  * <p>Assumptions: reason 101 and the unreachable 109 carry BYTE-IDENTICAL text -- {@code ACCOUNT
  * RECORD NOT FOUND} at {@code app/cbl/CBTRN02C.cbl:398} and {@code :557} respectively -- so a
  * description does not identify a reason. That is a further reason the code is its own queryable
  * column rather than something a reader derives from the text beside it.</p>
+ *
+ * <h2>What this type is not</h2>
+ *
+ * <p>Assumptions: the write path is split and this type owns only the middle of it. The baseline does
+ * the whole job in one paragraph at {@code app/cbl/CBTRN02C.cbl:446-465} -- {@code :447} copies the
+ * daily record, {@code :448} moves the assembled trailer over it, {@code :451} writes the 430 bytes.
+ * In the target that sequence is three components: the validation service decides the code and the
+ * description, the job constructs this row, and
+ * {@code com.carddemo.common.codec.FixedWidthCodec} renders the image. The rendering is deliberately
+ * absent from this type, and from {@link #toString()} in particular, where the reasoning is
+ * recorded.</p>
+ *
+ * <p>Assumptions: the reject count is neither a column here nor derived from this type. The baseline
+ * keeps it in {@code WS-REJECT-COUNT PIC 9(09)} at {@code app/cbl/CBTRN02C.cbl:186}, increments it at
+ * {@code :214} immediately before writing the row at {@code :215}, and at {@code :229-230} turns a
+ * non-zero count into a process return code of 4. The migrated job counts what it writes in exactly
+ * that place and records the outcome on {@link BatchRun}, whose return code carries the soft-warning
+ * tier, so the existence of even one of these rows makes a run's return code 4 rather than 0 -- which
+ * is what {@code app/jcl/TRANBKP.jcl:51} expresses as {@code COND=(4,LT)} and the orchestration
+ * expresses as {@code rc <= 4}. A count column here would be a second place for that number to be
+ * wrong.</p>
+ *
+ * <p>Assumptions: a row carries no scope of its own beyond the three contract columns and the
+ * ordinal -- no run identifier, no timestamp, no card number, no account identifier -- because the
+ * table belongs to another service and a column the owning migration does not declare fails the
+ * start-up assertion rather than working. Per-run scoping is carried by the dataset generation the job
+ * writes, allocated as {@code AWS.M2.CARDDEMO.DALYREJS(+1)} at {@code app/jcl/POSTTRAN.jcl:34-38} and
+ * defined at {@code LIMIT(5) SCRATCH} by {@code app/jcl/DALYREJS.jcl:24-28}, and by the
+ * {@code batch.batch_run} ledger.</p>
  */
 @Entity
-// WHY : Alternatives Considered: reusing transaction-service's mapping of this same table instead of
-//       declaring a local one. Rejected on three independent grounds. The migration plan forbids a
-//       cross-service dependency on another context's domain package, and the shared architecture
-//       test enforces that at build time rather than by convention, so the import would fail the
-//       build. A compile-time dependency between two independently deployable services would also
-//       reintroduce exactly the coupling a bounded context exists to remove: this module could then
-//       not be released without agreeing a version with the owning service. And common-lib cannot
-//       hold the type either, because it ships no persistence provider by design. The cost of a
-//       local mapping is that two types describe one table and can drift; that cost is paid down by
-//       the start-up assertion, which fails loudly against the owning migration rather than quietly.
-// WHY : Assumptions: the baseline writes each of these records exactly once and never rewrites one,
-//       so the type is immutable rather than merely lacking mutators. The evidence is the file
-//       itself: app/cbl/CBTRN02C.cbl:46-49 selects the reject stream as ORGANIZATION IS SEQUENTIAL
-//       with no record key, :293 opens it OUTPUT, and :451 is the only statement that writes it --
-//       there is no REWRITE and no DELETE against it anywhere in the program. Declaring the type
-//       immutable makes that structural: the provider excludes it from dirty checking, so a member
-//       mutated inside a managed context produces no update statement at all. Inserts and deletes
-//       remain available, which is what this module needs and all it needs.
-// WHY : Assumptions: this annotation is read here for a different reason than on the sibling feed
-//       mapping, and the two must not be read as the same claim. DailyTransaction is immutable
-//       because this module never writes that table at all; this type is immutable because this
-//       module writes each row once. Same annotation, opposite direction of the same boundary.
-// WHY : Trade-offs: the annotation is provider-specific rather than portable, accepted because
-//       every module under services/ runs the same provider through Spring Data JPA and no second
-//       provider is in scope. Marking each column non-updatable instead would be portable but has
-//       to be repeated per column, so a column added later would be writable by default and the
-//       guarantee would decay by omission; the type-level form cannot be partially applied.
+// Alternatives Considered: reusing transaction-service's mapping of this same table instead of
+// declaring a local one. Rejected on three independent grounds. The migration plan forbids a
+// cross-service dependency on another context's domain package, and the shared architecture
+// test enforces that at build time rather than by convention, so the import would fail the
+// build. A compile-time dependency between two independently deployable services would also
+// reintroduce exactly the coupling a bounded context exists to remove: this module could then
+// not be released without agreeing a version with the owning service. And common-lib cannot
+// hold the type either, because it ships no persistence provider by design. The cost of a
+// local mapping is that two types describe one table and can drift; that cost is paid down by
+// the start-up assertion, which fails loudly against the owning migration rather than quietly.
+// Assumptions: the baseline writes each of these records exactly once and never rewrites one,
+// so the type is immutable rather than merely lacking mutators. The evidence is the file
+// itself: app/cbl/CBTRN02C.cbl:46-49 selects the reject stream as ORGANIZATION IS SEQUENTIAL
+// with no record key, :293 opens it OUTPUT, and :451 is the only statement that writes it --
+// there is no REWRITE and no DELETE against it anywhere in the program. Declaring the type
+// immutable makes that structural: the provider excludes it from dirty checking, so a member
+// mutated inside a managed context produces no update statement at all. Inserts and deletes
+// remain available, which is what this module needs and all it needs.
+// Assumptions: this annotation is read here for a different reason than on the sibling feed
+// mapping, and the two must not be read as the same claim. DailyTransaction is immutable
+// because this module never writes that table at all; this type is immutable because this
+// module writes each row once. Same annotation, opposite direction of the same boundary.
+// Trade-offs: the annotation is provider-specific rather than portable, accepted because
+// every module under services/ runs the same provider through Spring Data JPA and no second
+// provider is in scope. Marking each column non-updatable instead would be portable but has
+// to be repeated per column, so a column added later would be writable by default and the
+// guarantee would decay by omission; the type-level form cannot be partially applied.
 @Immutable
-// WHY : Alternatives Considered: leaving the table unqualified and letting the pinned connection
-//       search path resolve it. Declined because this module spans four schemas at three different
-//       grant levels, so one search path cannot express which level applies to which access, and
-//       this particular table is one the module writes under a narrowly-scoped cross-schema grant
-//       rather than one it owns. Naming the schema on the annotation puts that boundary where a
-//       reader of the entity finds it instead of in the connection configuration.
-// WHY : Assumptions: this mapping is DDL-passive and declares no index, no unique constraint, no
-//       column definition and no check. The table, its columns and its primary key are created by
-//       the owning service's migration at
-//       services/transaction-service/src/main/resources/db/migration/V1__ledger.sql:550-761, and
-//       the provider is never permitted to emit DDL in this module -- its schema setting is at most
-//       an assertion against the existing shape. BatchRun is the one mapping in this package whose
-//       table is genuinely owned here and therefore the only one that may declare a constraint.
-// WHY : Assumptions: a uniqueness assertion here would be wrong on the merits as well as out of
-//       bounds. That migration states at :665-678 that no unique constraint exists over the record
-//       image or over any combination of the three contract columns, because the source asserts
-//       uniqueness over nothing: app/cbl/CBTRN02C.cbl:46-49 declares the stream sequential with no
-//       record key and app/jcl/POSTTRAN.jcl:36 gives it a fixed-length format, so it is appended to
-//       and never keyed into. The same record rejected in two runs is two legitimate entries, and
-//       app/jcl/DALYREJS.jcl:24-28 retains five generations of exactly that.
-// WHY : Alternatives Considered: an association to the daily transaction this row was rejected
-//       from, mapped as a many-to-one with a join column. Rejected because the baseline copies the
-//       record rather than referencing it -- app/cbl/CBTRN02C.cbl:447 is a single wholesale move of
-//       the entire 350-byte area -- so the stream is deliberately self-contained and can be
-//       replayed or diffed without joining anything. A foreign key would additionally make a reject
-//       undeletable independently of the feed row that caused it, which inverts the retention
-//       relationship: the generation group keeps rejects for five generations regardless of what
-//       happens to the feed.
+// Alternatives Considered: leaving the table unqualified and letting the pinned connection
+// search path resolve it. Declined because this module spans four schemas at three different
+// grant levels, so one search path cannot express which level applies to which access, and
+// this particular table is one the module writes under a narrowly-scoped cross-schema grant
+// rather than one it owns. Naming the schema on the annotation puts that boundary where a
+// reader of the entity finds it instead of in the connection configuration.
+// Assumptions: this mapping is DDL-passive and declares no index, no unique constraint, no
+// column definition and no check. The table, its columns and its primary key are created by
+// the owning service's migration at
+// services/transaction-service/src/main/resources/db/migration/V1__ledger.sql:550-761, and
+// the provider is never permitted to emit DDL in this module -- its schema setting is at most
+// an assertion against the existing shape. BatchRun is the one mapping in this package whose
+// table is genuinely owned here and therefore the only one that may declare a constraint.
+// Assumptions: a uniqueness assertion here would be wrong on the merits as well as out of
+// bounds. That migration states at :665-678 that no unique constraint exists over the record
+// image or over any combination of the three contract columns, because the source asserts
+// uniqueness over nothing: app/cbl/CBTRN02C.cbl:46-49 declares the stream sequential with no
+// record key and app/jcl/POSTTRAN.jcl:36 gives it a fixed-length format, so it is appended to
+// and never keyed into. The same record rejected in two runs is two legitimate entries, and
+// app/jcl/DALYREJS.jcl:24-28 retains five generations of exactly that.
+// Alternatives Considered: an association to the daily transaction this row was rejected
+// from, mapped as a many-to-one with a join column. Rejected because the baseline copies the
+// record rather than referencing it -- app/cbl/CBTRN02C.cbl:447 is a single wholesale move of
+// the entire 350-byte area -- so the stream is deliberately self-contained and can be
+// replayed or diffed without joining anything. A foreign key would additionally make a reject
+// undeletable independently of the feed row that caused it, which inverts the retention
+// relationship: the generation group keeps rejects for five generations regardless of what
+// happens to the feed.
 @Table(name = "transaction_rejects", schema = "ledger")
 public class TransactionReject {
 
@@ -237,23 +223,23 @@ public class TransactionReject {
      */
     public static final short REASON_CODE_AFTER_EXPIRATION = 103;
 
-    // WHY : Assumptions: the four texts below are carried character for character from the lines
-    //       cited on each, under the migration plan's transformation rule that user-visible strings
-    //       are verbatim. Capitalisation and internal spacing are part of the value: the committed
-    //       expectation files compare characters 354 to 429 of each record against these exact
-    //       strings, so re-casing one, correcting its wording, or trimming it changes compared bytes
-    //       rather than merely changing prose. No message is synthesised for a code the baseline
-    //       does not emit, and none is reworded to read better.
-    // WHY : Alternatives Considered: leaving the literals at their point of use in the validation
-    //       service, or pairing each code with its text in a nested enum. Keeping them here was
-    //       chosen because the code and the text are written as a pair at four places in the
-    //       baseline and are stored as a pair in two columns of one row, so the type that persists
-    //       the pair is the one place a reader looks for it and the one place a change has to be
-    //       made. A nested enum would express the pairing more tightly, but the persisted column is
-    //       a small integer that the owning migration declares, so the enum would need an explicit
-    //       conversion at every mapping site -- the annotation-driven enum mappings are prohibited
-    //       here, ordinal position is not the reason code, and a converter would add a second
-    //       mapping mechanism to a type whose whole point is to describe an existing shape plainly.
+    // Assumptions: the four texts below are carried character for character from the lines
+    // cited on each, under the migration plan's transformation rule that user-visible strings
+    // are verbatim. Capitalisation and internal spacing are part of the value: the committed
+    // expectation files compare characters 354 to 429 of each record against these exact
+    // strings, so re-casing one, correcting its wording, or trimming it changes compared bytes
+    // rather than merely changing prose. No message is synthesised for a code the baseline
+    // does not emit, and none is reworded to read better.
+    // Alternatives Considered: leaving the literals at their point of use in the validation
+    // service, or pairing each code with its text in a nested enum. Keeping them here was
+    // chosen because the code and the text are written as a pair at four places in the
+    // baseline and are stored as a pair in two columns of one row, so the type that persists
+    // the pair is the one place a reader looks for it and the one place a change has to be
+    // made. A nested enum would express the pairing more tightly, but the persisted column is
+    // a small integer that the owning migration declares, so the enum would need an explicit
+    // conversion at every mapping site -- the annotation-driven enum mappings are prohibited
+    // here, ordinal position is not the reason code, and a converter would add a second
+    // mapping mechanism to a type whose whole point is to describe an existing shape plainly.
 
     /**
      * Verbatim description stored alongside {@link #REASON_CODE_INVALID_CARD_NUMBER}.
@@ -276,24 +262,24 @@ public class TransactionReject {
     public static final String REASON_DESC_AFTER_EXPIRATION =
             "TRANSACTION RECEIVED AFTER ACCT EXPIRATION";
 
-    // WHY : Assumptions: the bounds below are the declared widths of the baseline fields and of the
-    //       columns the owning migration creates, held once so that a mapping annotation and a
-    //       constructor check can never disagree about the same number. Three baseline fields yield
-    //       four bounds because the numeric one is bounded at both ends: the record image is
-    //       PIC X(350) at app/cbl/CBTRN02C.cbl:177, the description is PIC X(76) at :182, and the
-    //       reason is PIC 9(04) at :181 -- four digits and unsigned, so 9999 is its inclusive
-    //       ceiling and 0 its inclusive floor. A five-digit value could not have come from that
-    //       field, and it would render as five characters where the contract reserves four,
-    //       displacing every byte that follows.
-    // WHY : Alternatives Considered: trailing the qualifier instead, so that the two bounds would
-    //       read as a reason-code maximum and a reason-description maximum length. That reads more
-    //       naturally in isolation but was rejected, because either name then shares its prefix with
-    //       the public catalogue above, and that prefix is load-bearing: it is what lets an audit
-    //       enumerate the reason-code domain or the message set by reflecting over a prefix and
-    //       assert that it holds exactly four members. With a bound sharing the prefix, such an
-    //       audit counts five and either fails on a correct type or, worse, is relaxed to pass and
-    //       then stops noticing a genuinely added fifth code. Leading with the qualifier keeps the
-    //       two prefixes meaning exactly one thing each.
+    // Assumptions: the bounds below are the declared widths of the baseline fields and of the
+    // columns the owning migration creates, held once so that a mapping annotation and a
+    // constructor check can never disagree about the same number. Three baseline fields yield
+    // four bounds because the numeric one is bounded at both ends: the record image is
+    // PIC X(350) at app/cbl/CBTRN02C.cbl:177, the description is PIC X(76) at :182, and the
+    // reason is PIC 9(04) at :181 -- four digits and unsigned, so 9999 is its inclusive
+    // ceiling and 0 its inclusive floor. A five-digit value could not have come from that
+    // field, and it would render as five characters where the contract reserves four,
+    // displacing every byte that follows.
+    // Alternatives Considered: trailing the qualifier instead, so that the two bounds would
+    // read as a reason-code maximum and a reason-description maximum length. That reads more
+    // naturally in isolation but was rejected, because either name then shares its prefix with
+    // the public catalogue above, and that prefix is load-bearing: it is what lets an audit
+    // enumerate the reason-code domain or the message set by reflecting over a prefix and
+    // assert that it holds exactly four members. With a bound sharing the prefix, such an
+    // audit counts five and either fails on a correct type or, worse, is relaxed to pass and
+    // then stops noticing a genuinely added fifth code. Leading with the qualifier keeps the
+    // two prefixes meaning exactly one thing each.
     private static final int RAW_RECORD_LENGTH = 350;
     private static final int MAX_REASON_DESC_LENGTH = 76;
     private static final short MAX_REASON_CODE = 9999;
@@ -306,32 +292,32 @@ public class TransactionReject {
      * rather than the record that provoked it, which is the distinction that lets two legitimate
      * rejections of one identical record be told apart.</p>
      */
-    // WHY : Alternatives Considered: a natural key over the three contract columns. Rejected because
-    //       they are not unique and are not meant to be: the source is a sequential stream with no
-    //       key at all -- app/jcl/POSTTRAN.jcl:34-38 allocates it as a new fixed-length dataset
-    //       rather than as a keyed cluster -- and the same input record rejected in two runs is two
-    //       entries carrying the same code and the same description. A key over those columns would
-    //       refuse the second of two identical rejects, turning a faithful append into a constraint
-    //       violation. Including the record image in a key was rejected for the same duplication
-    //       reason and additionally because a 350-character key column indexes poorly.
-    // WHY : Alternatives Considered: sequence or automatic generation instead of identity. Both
-    //       rejected because both imply a generator object named by the provider rather than by the
-    //       owning migration, which declares this column as an identity column at
-    //       services/transaction-service/src/main/resources/db/migration/V1__ledger.sql:616. A
-    //       provider-named sequence would be a second object to keep in step and would fail the
-    //       start-up assertion against a migration that declares no such sequence.
-    // WHY : Assumptions: identity generation is the one generation strategy compatible with this
-    //       package's DDL-passive boundary, and it is compatible because it delegates rather than
-    //       creates -- it asks the database for the value the existing identity column already
-    //       supplies and needs no generator declaration of its own. The reason this mapping declares
-    //       a strategy at all where the sibling feed mapping deliberately declares none is the
-    //       direction of access: this module writes this table, so a strategy describes an insert
-    //       that genuinely happens here, whereas on the read-only feed it would describe an insert
-    //       this module cannot perform.
-    // WHY : Assumptions: the column is declared GENERATED BY DEFAULT rather than GENERATED ALWAYS at
-    //       that same migration line, so a loader replaying a captured stream or restaging one
-    //       dataset generation can supply the original ordinal explicitly. Identity generation here
-    //       does not remove that possibility; it only means this module never exercises it.
+    // Alternatives Considered: a natural key over the three contract columns. Rejected because
+    // they are not unique and are not meant to be: the source is a sequential stream with no
+    // key at all -- app/jcl/POSTTRAN.jcl:34-38 allocates it as a new fixed-length dataset
+    // rather than as a keyed cluster -- and the same input record rejected in two runs is two
+    // entries carrying the same code and the same description. A key over those columns would
+    // refuse the second of two identical rejects, turning a faithful append into a constraint
+    // violation. Including the record image in a key was rejected for the same duplication
+    // reason and additionally because a 350-character key column indexes poorly.
+    // Alternatives Considered: sequence or automatic generation instead of identity. Both
+    // rejected because both imply a generator object named by the provider rather than by the
+    // owning migration, which declares this column as an identity column at
+    // services/transaction-service/src/main/resources/db/migration/V1__ledger.sql:616. A
+    // provider-named sequence would be a second object to keep in step and would fail the
+    // start-up assertion against a migration that declares no such sequence.
+    // Assumptions: identity generation is the one generation strategy compatible with this
+    // package's DDL-passive boundary, and it is compatible because it delegates rather than
+    // creates -- it asks the database for the value the existing identity column already
+    // supplies and needs no generator declaration of its own. The reason this mapping declares
+    // a strategy at all where the sibling feed mapping deliberately declares none is the
+    // direction of access: this module writes this table, so a strategy describes an insert
+    // that genuinely happens here, whereas on the read-only feed it would describe an insert
+    // this module cannot perform.
+    // Assumptions: the column is declared GENERATED BY DEFAULT rather than GENERATED ALWAYS at
+    // that same migration line, so a loader replaying a captured stream or restaging one
+    // dataset generation can supply the original ordinal explicitly. Identity generation here
+    // does not remove that possibility; it only means this module never exercises it.
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     @Column(name = "reject_seq", updatable = false)
@@ -343,67 +329,67 @@ public class TransactionReject {
      * <p>This is the first 350 characters of the 430-byte record and it is stored exactly as it
      * arrived, never parsed into fields.</p>
      */
-    // WHY : Assumptions: the provenance is a single statement. app/cbl/CBTRN02C.cbl:447 is
-    //       MOVE DALYTRAN-RECORD TO REJECT-TRAN-DATA, one wholesale copy of the entire 350-byte
-    //       daily-transaction area with no field-level handling of any kind. This column is that
-    //       image. Its content duplicating a feed row field for field is intended rather than
-    //       redundant: the reject stream is a self-contained artifact that can be replayed or
-    //       compared without joining anything, which is exactly why the baseline copies instead of
-    //       referencing. The layout it holds is 01 DALYTRAN-RECORD at app/cpy/CVTRA06Y.cpy:4-18, and
-    //       the widths there sum to 350 -- 16, 2, 4, 10, 100, an 11-character zoned amount, 9, 50,
-    //       50, 10, 16, 26, 26 and a 20-character trailing FILLER.
-    // WHY : Alternatives Considered: a variable-width column, which is what a descriptive string
-    //       would normally get and what the sibling description column below does get. Rejected
-    //       here, and this is the most consequential type decision in the type. The fixed-width form
-    //       blank-pads to the declared width and preserves that width on retrieval, so a reader gets
-    //       350 characters back whatever a writer supplied; a variable-width column would faithfully
-    //       store a short value and offer no such guarantee. Because the comparison is byte-exact at
-    //       430, a short image does not fail where it occurs -- it displaces the trailer and every
-    //       character after it, so the comparison fails at position 350 and at every position
-    //       following, and the reported difference points nowhere near the cause. The fixed-width
-    //       type makes the width structural instead of conventional, and the owning migration
-    //       declares it for exactly this reason at V1__ledger.sql:618-670.
-    // WHY : Trade-offs: fixed-width comparison semantics ignore trailing blanks, so a query
-    //       comparing a 350-character value against its trimmed form reports them equal, and the
-    //       SQL length function reports the trimmed figure while the octet-length function reports
-    //       350. A test that asserted only content equality would therefore pass against a short
-    //       store, which is why the round-trip test asserts the retrieved length explicitly rather
-    //       than relying on equality alone.
-    // WHY : Alternatives Considered: a binary column holding raw bytes. Rejected because the record
-    //       reaching this point is already character data: the extract package decodes the source
-    //       encoding per fixed-width field rather than per record, in
-    //       data-migration/src/carddemo_migration/copybook/ebcdic_codec.py, precisely so that sign
-    //       bytes and packed nibbles never pass through a text decoder. Storing bytes here would
-    //       reintroduce an encoding boundary that has already been resolved upstream, and it would
-    //       make the parity comparison operate on a representation the committed expectation files
-    //       do not use -- those files are text, one 430-character line per reject.
-    // WHY : Assumptions: the value is inert. It is never trimmed, never re-parsed into its fields,
-    //       never re-serialised through a formatter and never masked. It does contain a primary
-    //       account number, at zero-based offset 262 from app/cpy/CVTRA06Y.cpy:15, and masking it
-    //       would change compared bytes rather than merely obscuring a number. The migration's
-    //       masking discipline applies where a value leaves the system to a caller, and this module
-    //       publishes no such surface for this record; what closes the remaining log exposure is the
-    //       rendering decision at the end of this type.
-    // WHY : Refactoring Rationale: the column is NOT NULL rather than nullable.
-    //       A reject row EXISTS because a record was rejected, and the single
-    //       statement cited above copies the whole 350-byte area unconditionally before the write at
-    //       app/cbl/CBTRN02C.cbl:448, so the reference program has no path that appends a reject
-    //       carrying no image. A null image is an entry recording that something was rejected while
-    //       discarding the only evidence of what -- and the 430-byte parity comparison cannot be
-    //       performed against it at all. The owning migration declares the same NOT NULL.
+    // Assumptions: the provenance is a single statement. app/cbl/CBTRN02C.cbl:447 is
+    // MOVE DALYTRAN-RECORD TO REJECT-TRAN-DATA, one wholesale copy of the entire 350-byte
+    // daily-transaction area with no field-level handling of any kind. This column is that
+    // image. Its content duplicating a feed row field for field is intended rather than
+    // redundant: the reject stream is a self-contained artifact that can be replayed or
+    // compared without joining anything, which is exactly why the baseline copies instead of
+    // referencing. The layout it holds is 01 DALYTRAN-RECORD at app/cpy/CVTRA06Y.cpy:4-18, and
+    // the widths there sum to 350 -- 16, 2, 4, 10, 100, an 11-character zoned amount, 9, 50,
+    // 50, 10, 16, 26, 26 and a 20-character trailing FILLER.
+    // Alternatives Considered: a variable-width column, which is what a descriptive string
+    // would normally get and what the sibling description column below does get. Rejected
+    // here, and this is the most consequential type decision in the type. The fixed-width form
+    // blank-pads to the declared width and preserves that width on retrieval, so a reader gets
+    // 350 characters back whatever a writer supplied; a variable-width column would faithfully
+    // store a short value and offer no such guarantee. Because the comparison is byte-exact at
+    // 430, a short image does not fail where it occurs -- it displaces the trailer and every
+    // character after it, so the comparison fails at position 350 and at every position
+    // following, and the reported difference points nowhere near the cause. The fixed-width
+    // type makes the width structural instead of conventional, and the owning migration
+    // declares it for exactly this reason at V1__ledger.sql:618-670.
+    // Trade-offs: fixed-width comparison semantics ignore trailing blanks, so a query
+    // comparing a 350-character value against its trimmed form reports them equal, and the
+    // SQL length function reports the trimmed figure while the octet-length function reports
+    // 350. A test that asserted only content equality would therefore pass against a short
+    // store, which is why the round-trip test asserts the retrieved length explicitly rather
+    // than relying on equality alone.
+    // Alternatives Considered: a binary column holding raw bytes. Rejected because the record
+    // reaching this point is already character data: the extract package decodes the source
+    // encoding per fixed-width field rather than per record, in
+    // data-migration/src/carddemo_migration/copybook/ebcdic_codec.py, precisely so that sign
+    // bytes and packed nibbles never pass through a text decoder. Storing bytes here would
+    // reintroduce an encoding boundary that has already been resolved upstream, and it would
+    // make the parity comparison operate on a representation the committed expectation files
+    // do not use -- those files are text, one 430-character line per reject.
+    // Assumptions: the value is inert. It is never trimmed, never re-parsed into its fields,
+    // never re-serialised through a formatter and never masked. It does contain a primary
+    // account number, at zero-based offset 262 from app/cpy/CVTRA06Y.cpy:15, and masking it
+    // would change compared bytes rather than merely obscuring a number. The migration's
+    // masking discipline applies where a value leaves the system to a caller, and this module
+    // publishes no such surface for this record; what closes the remaining log exposure is the
+    // rendering decision at the end of this type.
+    // Refactoring Rationale: the column is NOT NULL rather than nullable.
+    // A reject row EXISTS because a record was rejected, and the single
+    // statement cited above copies the whole 350-byte area unconditionally before the write at
+    // app/cbl/CBTRN02C.cbl:448, so the reference program has no path that appends a reject
+    // carrying no image. A null image is an entry recording that something was rejected while
+    // discarding the only evidence of what -- and the 430-byte parity comparison cannot be
+    // performed against it at all. The owning migration declares the same NOT NULL.
     @JdbcTypeCode(SqlTypes.CHAR)
-    // WHY : Refactoring Rationale: nullable = false is declared on this member and on the two
-    //       below, matching the NOT NULL the columns carry. app/cbl/CBTRN02C.cbl L446-L451
-    //       writes the reject record by moving two WHOLE group items into it, and a group move
-    //       transfers the full declared width every time -- so there is no branch on which any of
-    //       the three components is absent and no width at which one is short.
-    // WHY : Trade-offs: a null in any of the three would make the 430-byte record
-    //       UNRECONSTRUCTABLE rather than merely incomplete. A reconstruction concatenates the
-    //       padded 350-character image, the four-digit code and the 76-character description; a null
-    //       has no width, so every field after the gap would sit at the wrong offset and the record
-    //       would parse cleanly into different data. Declaring the constraint on the member as well
-    //       as on the column is what lets the provider refuse the instance before a flush, naming
-    //       the member rather than reporting a constraint violation from the driver.
+    // Refactoring Rationale: nullable = false is declared on this member and on the two
+    // below, matching the NOT NULL the columns carry. app/cbl/CBTRN02C.cbl L446-L451
+    // writes the reject record by moving two WHOLE group items into it, and a group move
+    // transfers the full declared width every time -- so there is no branch on which any of
+    // the three components is absent and no width at which one is short.
+    // Trade-offs: a null in any of the three would make the 430-byte record
+    // UNRECONSTRUCTABLE rather than merely incomplete. A reconstruction concatenates the
+    // padded 350-character image, the four-digit code and the 76-character description; a null
+    // has no width, so every field after the gap would sit at the wrong offset and the record
+    // would parse cleanly into different data. Declaring the constraint on the member as well
+    // as on the column is what lets the provider refuse the instance before a flush, naming
+    // the member rather than reporting a constraint violation from the driver.
     @Column(name = "raw_record", nullable = false, length = RAW_RECORD_LENGTH, updatable = false)
     private String rawRecord;
 
@@ -413,38 +399,34 @@ public class TransactionReject {
      * <p>Occupies characters 350 to 353 of the 430-byte record, rendered zero-padded to four
      * characters by the emitter.</p>
      */
-    // WHY : Assumptions: the source field is WS-VALIDATION-FAIL-REASON PIC 9(04) at
-    //       app/cbl/CBTRN02C.cbl:181 -- numeric, unsigned, four digits, so its domain is 0 through
-    //       9999. A small integer is the narrowest exact integer type covering that domain, so a
-    //       wider one would reserve bytes no value can use. A four-character column was rejected
-    //       because the field is numeric and the value is compared and aggregated rather than read:
-    //       :229 tests the reject count to decide the process return code, and an operator
-    //       diagnosing a run groups by this value.
-    // WHY : Assumptions: the type change from four zoned digits to an integer is only safe because
-    //       the rendering is restored on the way out. A PIC 9(04) field occupies four characters and
-    //       the value 100 renders as 0100 -- zero-padded, not blank-padded and not left-aligned --
-    //       which the committed expectations confirm at characters 350 to 353 of each reject line.
-    //       That padding belongs to the fixed-width emitter in com.carddemo.common.codec; this
-    //       column stores the number. Rendering it as anything but four zero-padded characters
-    //       displaces the 76 characters that follow.
-    // WHY : Refactoring Rationale: this column is NOT NULL at V1__ledger.sql:697 and the migration
-    //       bounds it to the picture's own domain with CHECK (reason_code BETWEEN 0 AND 9999) at its
-    //       L757. Reading the PIC 9(04) domain only as the reason a small integer is WIDE ENOUGH
-    //       would leave that type's whole 32767 range admissible, negative values included, which an
-    //       unsigned picture cannot express; the same reading that makes 9999 the sufficiency
-    //       argument makes it the BOUND. Each reject site moves a code and its text in one pair of
-    //       statements, so a null code is a state the program never produces, and it would break the
-    //       reject COUNT that :229 turns into the return code because a null neither equals nor
-    //       differs from any code a filter names.
-    // WHY : Assumptions: the WRAPPER type is retained even though the column is NOT NULL, and what
-    //       makes that DECISIVE rather than weaker is that ZERO is a legitimate
-    //       value of this domain: PIC 9(04) at CBTRN02C L181 admits 0000, and the constraint above
-    //       is inclusive at that end. A primitive member left unassigned would therefore read back
-    //       as a real reason code rather than as an unpopulated one. The provider instantiates
-    //       through the no-argument constructor below and assigns the members afterwards, so an
-    //       instance does exist in that intermediate state, and a null there fails loudly where a
-    //       zero would be silently plausible. Nullability of the MEMBER and nullability of the
-    //       COLUMN are different questions, and only the second is what NOT NULL answers.
+    // Assumptions: the source field is WS-VALIDATION-FAIL-REASON PIC 9(04) at
+    //     app/cbl/CBTRN02C.cbl:181 -- numeric, unsigned, four digits, so its domain is 0 through
+    //     9999, and a small integer is the narrowest exact integer type covering it. A
+    //     four-character column is not used because the value is compared and aggregated rather
+    //     than read: :229 tests the reject count to decide the process return code, and an operator
+    //     diagnosing a run groups by this value.
+    // Assumptions: holding four zoned digits as an integer is safe only because the rendering is
+    //     restored on the way out. A PIC 9(04) field occupies four characters and the value 100
+    //     renders as 0100 -- zero-padded, not blank-padded and not left-aligned -- which the
+    //     committed expectations confirm at characters 350 to 353 of each reject line. That padding
+    //     belongs to the fixed-width emitter in com.carddemo.common.codec while this column stores
+    //     the number, and rendering it as anything but four zero-padded characters displaces the 76
+    //     characters that follow.
+    // Assumptions: the column is NOT NULL at V1__ledger.sql:697 and is bounded to the picture's own
+    //     domain by CHECK (reason_code BETWEEN 0 AND 9999) at its L757, so the same 9999 that makes
+    //     a small integer wide enough is also the bound -- the type's own 32767 range, negative
+    //     values included, is not admissible because an unsigned picture cannot express it. Each
+    //     reject site moves a code and its text in one pair of statements, so a null code is a state
+    //     the program never produces, and it would break the reject COUNT that :229 turns into the
+    //     return code because a null neither equals nor differs from any code a filter names.
+    // Trade-offs: the WRAPPER type is retained even though the column is NOT NULL, because ZERO is a
+    //     legitimate value of this domain: PIC 9(04) at CBTRN02C L181 admits 0000 and the constraint
+    //     above is inclusive at that end, so a primitive member left unassigned would read back as a
+    //     real reason code rather than as an unpopulated one. The provider instantiates through the
+    //     no-argument constructor below and assigns the members afterwards, so an instance does exist
+    //     in that intermediate state, and a null there fails loudly where a zero would be silently
+    //     plausible. Nullability of the MEMBER and of the COLUMN are different questions, and only
+    //     the second is what NOT NULL answers.
     @Column(name = "reason_code", nullable = false)
     private Short reasonCode;
 
@@ -454,44 +436,44 @@ public class TransactionReject {
      * <p>Occupies characters 354 to 429 of the 430-byte record, rendered blank-padded to 76
      * characters by the emitter.</p>
      */
-    // WHY : Assumptions: the source field is WS-VALIDATION-FAIL-REASON-DESC PIC X(76) at
-    //       app/cbl/CBTRN02C.cbl:182, and the declared width is carried as the contract rather than
-    //       trimmed to the longest observed message. The longest of the four is 103's at 42
-    //       characters, so all four fit with room to spare.
-    // WHY : Alternatives Considered: the fixed-width form used for the record image above. Rejected
-    //       here, and the two differing choices are deliberate rather than inconsistent. This
-    //       column's logical value is the message text, drawn from a small closed catalogue of four
-    //       literals declared at the head of this type, and its padding to 76 is purely a rendering
-    //       concern the emitter applies deterministically. The record image, by contrast, IS a
-    //       fixed-width image whose padding is part of its content, because the padding is bytes the
-    //       source record actually carried. The owning migration declares this column variable-width
-    //       at V1__ledger.sql:699-719 and the image fixed-width at :670 for that distinction.
-    // WHY : Refactoring Rationale: the column is NOT NULL, on the same reading as the two columns
-    //       above. Every reject site moves a reason code and its verbatim text in the same pair of
-    //       statements, so a row carrying a code and no text is a state the reference program cannot
-    //       reach. The texts are user-visible strings carried across character for character under
-    //       transformation rule T8, and a null one would silently drop the half of the 430-byte
-    //       trailer an operator actually reads.
+    // Assumptions: the source field is WS-VALIDATION-FAIL-REASON-DESC PIC X(76) at
+    // app/cbl/CBTRN02C.cbl:182, and the declared width is carried as the contract rather than
+    // trimmed to the longest observed message. The longest of the four is 103's at 42
+    // characters, so all four fit with room to spare.
+    // Alternatives Considered: the fixed-width form used for the record image above. Rejected
+    // here, and the two differing choices are deliberate rather than inconsistent. This
+    // column's logical value is the message text, drawn from a small closed catalogue of four
+    // literals declared at the head of this type, and its padding to 76 is purely a rendering
+    // concern the emitter applies deterministically. The record image, by contrast, IS a
+    // fixed-width image whose padding is part of its content, because the padding is bytes the
+    // source record actually carried. The owning migration declares this column variable-width
+    // at V1__ledger.sql:699-719 and the image fixed-width at :670 for that distinction.
+    // Refactoring Rationale: the column is NOT NULL, on the same reading as the two columns
+    // above. Every reject site moves a reason code and its verbatim text in the same pair of
+    // statements, so a row carrying a code and no text is a state the reference program cannot
+    // reach. The texts are user-visible strings carried across character for character under
+    // transformation rule T8, and a null one would silently drop the half of the 430-byte
+    // trailer an operator actually reads.
     @Column(name = "reason_desc", nullable = false, length = MAX_REASON_DESC_LENGTH)
     private String reasonDesc;
 
     /**
      * Creates an unpopulated instance for the persistence provider to hydrate.
      */
-    // WHY : Assumptions: the provider requires a non-private no-argument constructor so that it can
-    //       instantiate this type reflectively when materialising a row or building a lazy proxy, and
-    //       it assigns the members afterwards by field access rather than through accessors, which is
-    //       what placing the identity annotation on a field selects. The body is empty by design and
-    //       not unfinished: anything initialised here would be overwritten on every load and would
-    //       mask an absent column rather than surface it.
-    // WHY : Alternatives Considered: private visibility, relying on the provider's reflective access.
-    //       Rejected because a subclass generated for a lazy proxy must be able to invoke it, so
-    //       protected is the narrowest visibility that works. Public was also rejected: it would let
-    //       application code create a row with no image and no reason, which is precisely the state
-    //       the argument constructor below exists to prevent.
+    // Assumptions: the provider requires a non-private no-argument constructor so that it can
+    // instantiate this type reflectively when materialising a row or building a lazy proxy, and
+    // it assigns the members afterwards by field access rather than through accessors, which is
+    // what placing the identity annotation on a field selects. The body is empty by design and
+    // not unfinished: anything initialised here would be overwritten on every load and would
+    // mask an absent column rather than surface it.
+    // Alternatives Considered: private visibility, relying on the provider's reflective access.
+    // Rejected because a subclass generated for a lazy proxy must be able to invoke it, so
+    // protected is the narrowest visibility that works. Public was also rejected: it would let
+    // application code create a row with no image and no reason, which is precisely the state
+    // the argument constructor below exists to prevent.
     protected TransactionReject() {
-        // WHY : Assumptions: intentionally empty, because the provider populates every mapped member
-        //       immediately after reflective creation.
+        // Assumptions: intentionally empty, because the provider populates every mapped member
+        // immediately after reflective creation.
     }
 
     /**
@@ -511,61 +493,61 @@ public class TransactionReject {
      * @throws IllegalArgumentException if the image is not exactly 350 characters, the description
      *     exceeds 76 characters, or the reason code falls outside the inclusive range 0 to 9999
      */
-    // WHY : Assumptions: the MAPPED IDENTITY of this row is `rejectSeq` -- the member carrying the
-    //       @Id annotation and the generated `reject_seq` identity column -- and it is deliberately
-    //       NOT a parameter of this constructor, because the database assigns it. None of the three
-    //       arguments below is or contributes to that identity: `rawRecord` is the 350-character
-    //       payload image, and the two trailer members classify it. Accepting an ordinal would let a
-    //       caller overwrite an append position it does not own, and on this module's write path
-    //       there is no legitimate value to supply.
-    // WHY : Assumptions: sequence identity is kept SEPARATE from the fixed-width payload content, and
-    //       the separation is what makes duplicate rejects representable. The source asserts
-    //       uniqueness over nothing -- app/cbl/CBTRN02C.cbl L46-L47 selects DALYREJS as ORGANIZATION
-    //       IS SEQUENTIAL with no RECORD KEY, and app/jcl/POSTTRAN.jcl L36 gives it RECFM=F, a flat
-    //       stream appended to and never keyed into -- so two identical 430-byte records are both
-    //       legitimate. Deriving identity from the image, or from the image plus its trailer, would
-    //       collapse those two occurrences into one row and undercount the reject total that
-    //       CBTRN02C L229-L230 turns into the job's return code. A generated ordinal distinguishes
-    //       them while leaving every payload byte free to repeat.
-    // WHY : Assumptions: nothing is derived here. No generation, no run identifier and no timestamp
-    //       is minted, because the 430-byte record carries none of the three and the generation that
-    //       does exist is a property of the dataset rather than of a row.
-    // WHY : Alternatives Considered: performing no validation at all, which is what the owning
-    //       service's mapping of this table does and which is correct there. Its callers replay a
-    //       captured stream, so it must be able to represent whatever a stored row holds, including a
-    //       row with no reason. This module is the write side, where the three parts have just been
-    //       computed, so a null or a mis-width here is a defect in this module rather than a fact
-    //       about stored data -- and it is a defect whose only other symptom is a byte-exact
-    //       comparison failing at position 350 and every position after it. Checking at construction
-    //       reports it naming the contract, before a flush or an emit can obscure it.
-    // WHY : Trade-offs: only the structural properties of the three values are checked -- presence,
-    //       width and the numeric range the source picture admits. Their CONTENT is deliberately not
-    //       validated, because validating it would refuse exactly the records this table exists to
-    //       keep: a reason 100 image carries a card number that resolved to nothing, and a reason 102
-    //       image can carry an amount no validated column would accept. The reason-code check is a
-    //       width check in numeric form for the same reason: it admits the whole four-digit domain
-    //       rather than only the four codes this module emits, because narrowing it to those four
-    //       would put a policy that belongs to the validation service into the type that merely
-    //       stores its outcome.
+    // Assumptions: the MAPPED IDENTITY of this row is `rejectSeq` -- the member carrying the
+    // @Id annotation and the generated `reject_seq` identity column -- and it is deliberately
+    // NOT a parameter of this constructor, because the database assigns it. None of the three
+    // arguments below is or contributes to that identity: `rawRecord` is the 350-character
+    // payload image, and the two trailer members classify it. Accepting an ordinal would let a
+    // caller overwrite an append position it does not own, and on this module's write path
+    // there is no legitimate value to supply.
+    // Assumptions: sequence identity is kept SEPARATE from the fixed-width payload content, and
+    // the separation is what makes duplicate rejects representable. The source asserts
+    // uniqueness over nothing -- app/cbl/CBTRN02C.cbl L46-L47 selects DALYREJS as ORGANIZATION
+    // IS SEQUENTIAL with no RECORD KEY, and app/jcl/POSTTRAN.jcl L36 gives it RECFM=F, a flat
+    // stream appended to and never keyed into -- so two identical 430-byte records are both
+    // legitimate. Deriving identity from the image, or from the image plus its trailer, would
+    // collapse those two occurrences into one row and undercount the reject total that
+    // CBTRN02C L229-L230 turns into the job's return code. A generated ordinal distinguishes
+    // them while leaving every payload byte free to repeat.
+    // Assumptions: nothing is derived here. No generation, no run identifier and no timestamp
+    // is minted, because the 430-byte record carries none of the three and the generation that
+    // does exist is a property of the dataset rather than of a row.
+    // Alternatives Considered: performing no validation at all, which is what the owning
+    // service's mapping of this table does and which is correct there. Its callers replay a
+    // captured stream, so it must be able to represent whatever a stored row holds, including a
+    // row with no reason. This module is the write side, where the three parts have just been
+    // computed, so a null or a mis-width here is a defect in this module rather than a fact
+    // about stored data -- and it is a defect whose only other symptom is a byte-exact
+    // comparison failing at position 350 and every position after it. Checking at construction
+    // reports it naming the contract, before a flush or an emit can obscure it.
+    // Trade-offs: only the structural properties of the three values are checked -- presence,
+    // width and the numeric range the source picture admits. Their CONTENT is deliberately not
+    // validated, because validating it would refuse exactly the records this table exists to
+    // keep: a reason 100 image carries a card number that resolved to nothing, and a reason 102
+    // image can carry an amount no validated column would accept. The reason-code check is a
+    // width check in numeric form for the same reason: it admits the whole four-digit domain
+    // rather than only the four codes this module emits, because narrowing it to those four
+    // would put a policy that belongs to the validation service into the type that merely
+    // stores its outcome.
     public TransactionReject(String rawRecord, Short reasonCode, String reasonDesc) {
         String checkedRawRecord = Objects.requireNonNull(rawRecord, "rawRecord must not be null");
         Short checkedReasonCode = Objects.requireNonNull(reasonCode, "reasonCode must not be null");
         String checkedReasonDesc = Objects.requireNonNull(reasonDesc, "reasonDesc must not be null");
 
-        // WHY : Assumptions: the image is checked for an exact width rather than a maximum, unlike
-        //       the description below, because it is the one value whose padding is content. The
-        //       baseline moves a fixed 350-byte area into another fixed 350-byte area, so a
-        //       legitimate value is never short. The fixed-width column would pad a short value out
-        //       on storage, but the emitter renders from this instance rather than from a re-read
-        //       row, so padding at the column would arrive after the record had already been written
-        //       at the wrong width.
+        // Assumptions: the image is checked for an exact width rather than a maximum, unlike
+        // the description below, because it is the one value whose padding is content. The
+        // baseline moves a fixed 350-byte area into another fixed 350-byte area, so a
+        // legitimate value is never short. The fixed-width column would pad a short value out
+        // on storage, but the emitter renders from this instance rather than from a re-read
+        // row, so padding at the column would arrive after the record had already been written
+        // at the wrong width.
         if (checkedRawRecord.length() != RAW_RECORD_LENGTH) {
             throw new IllegalArgumentException(
                     "rawRecord must be exactly " + RAW_RECORD_LENGTH + " characters");
         }
-        // WHY : Assumptions: the description is checked for a maximum rather than an exact width
-        //       because its four admitted values are 25, 24, 21 and 42 characters long and the
-        //       emitter is what pads the stored text out to the declared 76.
+        // Assumptions: the description is checked for a maximum rather than an exact width
+        // because its four admitted values are 25, 24, 21 and 42 characters long and the
+        // emitter is what pads the stored text out to the declared 76.
         if (checkedReasonDesc.length() > MAX_REASON_DESC_LENGTH) {
             throw new IllegalArgumentException(
                     "reasonDesc must not exceed " + MAX_REASON_DESC_LENGTH + " characters");
@@ -692,14 +674,14 @@ public class TransactionReject {
         return reasonDesc;
     }
 
-    // WHY : Alternatives Considered: exposing mutators for the three contract members, which the
-    //       owning service's mapping of this table does expose because its callers hydrate rows from
-    //       a replayed stream. Rejected here because on this module's side a reject is an immutable
-    //       historical fact: the baseline writes the record once at app/cbl/CBTRN02C.cbl:451 and the
-    //       program contains no REWRITE against that file, so a mutator would be a path with no
-    //       counterpart in the behaviour being migrated. The type-level immutability declared above
-    //       makes the same guarantee reach the reflective and provider-driven paths that an absence
-    //       of mutators does not.
+    // Alternatives Considered: exposing mutators for the three contract members, which the
+    // owning service's mapping of this table does expose because its callers hydrate rows from
+    // a replayed stream. Rejected here because on this module's side a reject is an immutable
+    // historical fact: the baseline writes the record once at app/cbl/CBTRN02C.cbl:451 and the
+    // program contains no REWRITE against that file, so a mutator would be a path with no
+    // counterpart in the behaviour being migrated. The type-level immutability declared above
+    // makes the same guarantee reach the reflective and provider-driven paths that an absence
+    // of mutators does not.
 
     /**
      * Compares rows by the ordinal the database assigned, and by nothing else.
@@ -708,27 +690,27 @@ public class TransactionReject {
      * @return true when other is a TransactionReject whose ordinal is non-null and equal to this
      *     row's; otherwise false
      */
-    // WHY : Alternatives Considered: equality over the three contract members, which is the form the
-    //       sibling BatchRun uses. Rejected because the two tables differ in exactly the property
-    //       that decides this: BatchRun carries a named unique constraint over its business pair, so
-    //       memory and database agree on what one row is, whereas the owning migration for this
-    //       table states at V1__ledger.sql:721-745 that no unique constraint exists over these
-    //       columns and that duplicate images remain legitimate. Business-member equality here would
-    //       collapse two distinct rejects of one identical record into a single element of a hashed
-    //       collection, which is the very thing the ordinal was added to prevent.
-    // WHY : Assumptions: the ordinal is null until the row is flushed, so two unflushed instances
-    //       must not compare equal however identical their members -- otherwise a set of pending
-    //       rejects would silently lose all but one. Returning false while the ordinal is absent is
-    //       the deliberate handling of that state rather than an unconsidered null check, and it is
-    //       why the sibling test asserts the unflushed case explicitly.
-    // WHY : Assumptions: this refusal is what the constant hash below is chosen against, and the two
-    //       together give the property a caller depends on: an instance placed in a hashed collection
-    //       while its ordinal was absent stays findable once the flush assigns one, both by itself
-    //       and by a distinct instance re-read on the same ordinal, because the bucket never moves
-    //       and the comparison then succeeds on the assigned value. The accepted consequence is
-    //       narrower than it looks -- while the ordinal is still absent an instance is findable only
-    //       by itself, never by an equal-membered twin -- and that is the state the reject stream
-    //       actually wants, since two unflushed rejects of one identical record are two entries.
+    // Alternatives Considered: equality over the three contract members, which is the form the
+    //     sibling BatchRun uses. Rejected because the two tables differ in exactly the property that
+    //     decides this: BatchRun carries a named unique constraint over its business pair, so memory
+    //     and database agree on what one row is, whereas the owning migration for this table states
+    //     at V1__ledger.sql:721-745 that no unique constraint exists over these columns and that
+    //     duplicate images remain legitimate. Business-member equality would collapse two distinct
+    //     rejects of one identical record into a single element of a hashed collection, and the
+    //     ordinal is what keeps them two.
+    // Assumptions: the ordinal is null until the row is flushed, so two unflushed instances must not
+    //     compare equal however identical their members -- otherwise a set of pending rejects would
+    //     silently lose all but one. Returning false while the ordinal is absent is the deliberate
+    //     handling of that state rather than an unconsidered null check, and the sibling test asserts
+    //     the unflushed case explicitly.
+    // Trade-offs: this refusal is what the constant hash below is chosen against, and the two
+    //     together give the property a caller depends on: an instance placed in a hashed collection
+    //     while its ordinal was absent stays findable once the flush assigns one, both by itself and
+    //     by a distinct instance re-read on the same ordinal, because the bucket never moves and the
+    //     comparison then succeeds on the assigned value. The accepted consequence is narrower than
+    //     it looks -- while the ordinal is absent an instance is findable only by itself, never by an
+    //     equal-membered twin -- and that is the state the reject stream wants, since two unflushed
+    //     rejects of one identical record are two entries.
     @Override
     public boolean equals(Object other) {
         if (this == other) {
@@ -749,30 +731,30 @@ public class TransactionReject {
      *
      * @return the int hash of this class, the same value for every instance whatever its ordinal
      */
-    // WHY : Assumptions: the ordinal is null until the row is flushed and non-null afterwards, so a
-    //       hash derived from it would take one value before the insert and a different one after.
-    //       The hashed collections in the JDK read the bucket once, at insertion, and never rehash
-    //       an element the collection already holds, so an instance added while the ordinal was
-    //       absent would sit in the bucket for the absent value and be unreachable from the bucket
-    //       the assigned value now selects -- contains would answer false for an element the
-    //       collection still contains, and remove would not remove it. A constant makes every
-    //       instance select one bucket for its whole lifetime, which is the property that removes
-    //       that failure altogether.
-    // WHY : Alternatives Considered: Objects.hash(rejectSeq), which is the form that pairs most
-    //       obviously with an equality over the ordinal. Rejected for the lifecycle reason above.
-    //       Two further details make the rejection concrete rather than theoretical. Objects.hash of
-    //       a single null argument answers 31 and not zero, because it hashes a one-element array
-    //       whose seed is 1, so the pre-insert and post-insert values are two different non-zero
-    //       numbers rather than a zero that a reader might expect to be treated specially. And this
-    //       type is inserted per rejected record inside a chunk, so the pre-insert state is the
-    //       normal state of an instance a caller holds rather than an edge case.
-    // WHY : Trade-offs: every instance of this type shares one bucket, so a hashed collection over
-    //       many rejects degrades to a linear scan through equals. That cost is accepted because the
-    //       posting job holds rejects in an ordered collection while building a chunk and addresses
-    //       stored ones by ordinal, so no large hashed collection of this type exists on any path;
-    //       what it buys is that membership never depends on when an instance was hashed relative to
-    //       its flush. The sibling DailyTransaction of this package answers a constant for the same
-    //       reason, so the two feed-side mappings behave alike.
+    // Assumptions: the ordinal is null until the row is flushed and non-null afterwards, so a
+    // hash derived from it would take one value before the insert and a different one after.
+    // The hashed collections in the JDK read the bucket once, at insertion, and never rehash
+    // an element the collection already holds, so an instance added while the ordinal was
+    // absent would sit in the bucket for the absent value and be unreachable from the bucket
+    // the assigned value now selects -- contains would answer false for an element the
+    // collection still contains, and remove would not remove it. A constant makes every
+    // instance select one bucket for its whole lifetime, which is the property that removes
+    // that failure altogether.
+    // Alternatives Considered: Objects.hash(rejectSeq), which is the form that pairs most
+    // obviously with an equality over the ordinal. Rejected for the lifecycle reason above.
+    // Two further details make the rejection concrete rather than theoretical. Objects.hash of
+    // a single null argument answers 31 and not zero, because it hashes a one-element array
+    // whose seed is 1, so the pre-insert and post-insert values are two different non-zero
+    // numbers rather than a zero that a reader might expect to be treated specially. And this
+    // type is inserted per rejected record inside a chunk, so the pre-insert state is the
+    // normal state of an instance a caller holds rather than an edge case.
+    // Trade-offs: every instance of this type shares one bucket, so a hashed collection over
+    // many rejects degrades to a linear scan through equals. That cost is accepted because the
+    // posting job holds rejects in an ordered collection while building a chunk and addresses
+    // stored ones by ordinal, so no large hashed collection of this type exists on any path;
+    // what it buys is that membership never depends on when an instance was hashed relative to
+    // its flush. The sibling DailyTransaction of this package answers a constant for the same
+    // reason, so the two feed-side mappings behave alike.
     @Override
     public int hashCode() {
         return TransactionReject.class.hashCode();
@@ -784,21 +766,21 @@ public class TransactionReject {
      * @return a String containing the ordinal, the reason code and the reason description, and
      *     deliberately not the record image
      */
-    // WHY : Trade-offs: the record image is omitted entirely rather than abbreviated. It carries a
-    //       primary account number at zero-based offset 262 per app/cpy/CVTRA06Y.cpy:15, and
-    //       rendered output reaches log lines, so including it would put an unmasked card number
-    //       into a log -- the one data exposure this module could plausibly create, given that it
-    //       publishes no caller-facing surface at all. Omitting it also keeps each log line from
-    //       growing by 350 characters. What is given up is the ability to see the rejected bytes in a
-    //       log; they are in the row and in the emitted dataset generation, which are the places an
-    //       operator is meant to read them from.
-    // WHY : Trade-offs: this method is a diagnostic and is emphatically not the parity emitter. The
-    //       committed expectations under tests/golden/posting are compared against a 430-character
-    //       fixed-width rendering the job produces through com.carddemo.common.codec.FixedWidthCodec.
-    //       Routing parity output through a method whose whole purpose is to read well in a log would
-    //       break the comparison the first time someone improved a log line, and the break would be
-    //       silent because nothing about this method's signature says a byte contract depends on it.
-    //       No caller may parse this form or depend on its field order.
+    // Trade-offs: the record image is omitted entirely rather than abbreviated. It carries a
+    // primary account number at zero-based offset 262 per app/cpy/CVTRA06Y.cpy:15, and
+    // rendered output reaches log lines, so including it would put an unmasked card number
+    // into a log -- the one data exposure this module could plausibly create, given that it
+    // publishes no caller-facing surface at all. Omitting it also keeps each log line from
+    // growing by 350 characters. What is given up is the ability to see the rejected bytes in a
+    // log; they are in the row and in the emitted dataset generation, which are the places an
+    // operator is meant to read them from.
+    // Trade-offs: this method is a diagnostic and is emphatically not the parity emitter. The
+    // committed expectations under tests/golden/posting are compared against a 430-character
+    // fixed-width rendering the job produces through com.carddemo.common.codec.FixedWidthCodec.
+    // Routing parity output through a method whose whole purpose is to read well in a log would
+    // break the comparison the first time someone improved a log line, and the break would be
+    // silent because nothing about this method's signature says a byte contract depends on it.
+    // No caller may parse this form or depend on its field order.
     @Override
     public String toString() {
         return "TransactionReject{"

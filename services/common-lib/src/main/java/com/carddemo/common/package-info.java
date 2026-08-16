@@ -9,10 +9,12 @@
  *       string wire form. Two production classes: {@code Money},
  *       {@code MoneyModule}.</li>
  *   <li><b>{@code codec}</b> -- the copybook record layouts, the sign-overpunch
- *       and packed-decimal codecs, and the two message-queue payload forms. Six
+ *       and packed-decimal codecs, and the message-queue payload forms of both
+ *       extensions, request side and reply side. Seven
  *       production classes: {@code CopybookLayout}, {@code FixedWidthCodec},
  *       {@code ZonedDecimalCodec}, {@code PackedDecimalCodec},
- *       {@code CsvAuthCodec}, {@code InquiryRequestCodec}.</li>
+ *       {@code CsvAuthCodec}, {@code InquiryRequestCodec},
+ *       {@code DateInquiryReplyCodec}.</li>
  *   <li><b>{@code error}</b> -- the problem shape carrying a per-field error
  *       array, the structured equivalent of the baseline abend data block, the
  *       two refusals the security filter chain answers itself, and the two
@@ -42,11 +44,13 @@
  *       consumer honours, the canonical encoding a correlation identity must
  *       satisfy to travel as queue metadata, the rule that every bound on a
  *       consumer's per-message work fits inside that message's visibility period,
- *       and the listener error handler that records a failed delivery as a
- *       message-free digest and rethrows it unchanged so the queue's own
- *       redelivery is untouched. Four production classes:
+ *       what a configured queue destination is and how a queue's name is recovered
+ *       from its address, and the listener error handler that records a failed
+ *       delivery as a message-free digest and rethrows it unchanged so the queue's
+ *       own redelivery is untouched. Five production classes:
  *       {@code MessageExpiry}, {@code MessagingCorrelationId},
- *       {@code QueueClientBudget}, {@code RethrowingDigestErrorHandler}.</li>
+ *       {@code QueueClientBudget}, {@code QueueDestination},
+ *       {@code RethrowingDigestErrorHandler}.</li>
  *   <li><b>{@code observability}</b> -- the Micrometer common tag set
  *       {@code service}, {@code environment} and {@code version}, the decision
  *       about what a rendered value may contain before it reaches a log line, and
@@ -69,63 +73,34 @@
  *       {@code OnlineWriteGateInterceptor}, {@code OnlineWriteGateExempt}.</li>
  * </ul>
  *
- * <p>Trade-offs: those ten subpackages are the whole of it. This package has
- * no application-layer subpackage at all -- no controller, service, repository,
+ * <p>Trade-offs: those ten subpackages are the whole of it. This package has no
+ * application-layer subpackage at all -- no controller, service, repository,
  * domain, transfer-object or mapper package, and no configuration package
  * either. {@code MetricsConfig} consequently sits under {@code observability},
  * beside the concern it configures, rather than in a configuration package of
- * its own.
+ * its own, so all ten subpackage names are contracts rather than nine contracts
+ * and one bucket.
  *
- * <p>Refactoring Rationale: this roster named eight subpackages and understated
- * three of them -- {@code codec} by one class, {@code observability} by one and
- * {@code security} by four -- while omitting {@code messaging} altogether. The
- * omission was the consequential one: a reader looking for where a queue
- * consumer's expiry contract lives would have concluded from this charter that
- * the shared kernel had no messaging concern, and would have written a second
- * copy of it inside a service. {@code SharedKernelInventoryTest} now re-derives
- * the whole roster from the directory on every build, so the next such gap fails
- * a test rather than misleading a reader.
- *
- * <p>Refactoring Rationale: this roster named nine subpackages and omitted
- * {@code control} because that subpackage did not exist: the online-write flag was
- * created by the infrastructure, toggled by two functions and injected into every
- * online task definition, and READ BY NOTHING. Every service accepted writes
- * straight through the batch window, so "quiesce" named a control that had no
- * application half at all. It is a subpackage of its own rather than four classes
- * inside {@code web} because what it owns is a DECISION about the environment -- read
- * a flag, fail closed, cache briefly -- and only the application of that decision is a
- * request concern. Filing the whole of it under the request package would make the
- * fail-closed semantics an implementation detail of a replaceable interceptor, which
- * is the wrong way round.
- *
- * <p>Refactoring Rationale: this root holds exactly ONE production class,
- * {@code CardDemoCommonAutoConfiguration}, and an earlier revision held none. It
- * is here rather than in any of the ten because it registers components from
- * FOUR of them -- the correlation filter and the cursor-token signer from
- * {@code web}, the meter filter from {@code observability}, the codec module from
- * {@code money} and the error advice from {@code error} -- so placing it in one of
- * the four would put that package in charge of three it does not own. Its sixth
- * contribution, a {@code Clock}, belongs to no subpackage at all: it is a
- * {@code java.time} type, supplied here because five of those components take one
- * and a service that had to declare its own would be free to declare a different
- * one. It exists at all because those components
- * were being written and then instantiated by nothing: a service scans its own
- * bounded context's root, never this module's, so each shared component was
- * compiled, tested and left out of every running context. The symptom was silent
- * rather than loud -- log lines with no correlation identity, meters with no
- * service dimension, failed requests rendered in the framework's own shape -- and
- * an alternative that required each of the eight services to import them
- * explicitly would have left the same omission possible eight times over. The cost is that a reader hunting for configuration by name has to
- * know the concern first. The gain is that all ten subpackage names are
- * contracts rather than nine contracts and one bucket, so the question "which
- * subpackage does this belong in" keeps a definite answer as the tree grows.
- * The closed inventory immediately below enumerates those ten and nothing else,
- * which is what makes the closed list checkable rather than merely intended.
+ * <p>Assumptions: the root holds exactly one production class,
+ * {@code CardDemoCommonAutoConfiguration}, and it is here rather than in any of
+ * the ten because it registers components from FOUR of them -- the correlation
+ * filter and the cursor-token signer from {@code web}, the meter filter from
+ * {@code observability}, the codec module from {@code money} and the error
+ * advice from {@code error} -- so placing it in one would put that package in
+ * charge of three it does not own. Its sixth contribution, a {@code Clock},
+ * belongs to no subpackage at all: it is a {@code java.time} type, supplied
+ * here because five of those components take one and a service that declared
+ * its own would be free to declare a different one. The registration entry is
+ * necessary because a service scans its own bounded context's root and never
+ * this module's, so a shared component without it is compiled, tested and
+ * instantiated by nothing -- and the symptom is silent rather than loud: log
+ * lines with no correlation identity, meters with no service dimension, failed
+ * requests rendered in the framework's own shape.
  *
  * <h2>The closed inventory</h2>
  *
- * <p>The module holds <b>44 production classes</b> in a root and ten
- * subpackages, each carrying one charter file, for <b>55</b> compilation units. The
+ * <p>The module holds <b>46 production classes</b> in a root and ten
+ * subpackages, each carrying one charter file, for <b>57</b> compilation units. The
  * table is the closed set: a class belonging to this module belongs to exactly one
  * of these eleven rows, and a proposed addition that fits none of them does not belong
  * in the shared kernel at all. The set is deliberately FLAT: there is no nested
@@ -137,9 +112,9 @@
  * package               production classes   charter   compilation units
  * common (this root)                     1         1                   2
  * common.money                           2         1                   3
- * common.codec                           6         1                   7
+ * common.codec                           7         1                   8
  * common.error                           7         1                   8
- * common.messaging                       4         1                   5
+ * common.messaging                       5         1                   6
  * common.web                             4         1                   5
  * common.security                        9         1                  10
  * common.observability                   4         1                   5
@@ -149,20 +124,20 @@
  * </pre>
  *
  * <p>Read down the table. Cross-check by production class:
- * 1 + 2 + 6 + 7 + 4 + 4 + 9 + 4 + 1 + 2 + 4 = 44, the root contributing one. Cross-check by
- * compilation unit: 2 + 3 + 7 + 8 + 5 + 5 + 10 + 5 + 2 + 3 + 5 = 55. Both totals agree,
+ * 1 + 2 + 7 + 7 + 5 + 4 + 9 + 4 + 1 + 2 + 4 = 46, the root contributing one. Cross-check by
+ * compilation unit: 2 + 3 + 8 + 8 + 6 + 5 + 10 + 5 + 2 + 3 + 5 = 57. Both totals agree,
  * and this file is one of the eleven charters. Each sum is kept whole on one line
  * so that it can be checked by eye and matched by a search without a line break
  * splitting it.
  *
- * <p>Assumptions: the authoritative figures are <strong>44 production classes
- * across 10 subpackages and the root, in 55 compilation units, of which 11 are charters</strong>
+ * <p>Assumptions: the authoritative figures are <strong>46 production classes
+ * across 10 subpackages and the root, in 57 compilation units, of which 11 are charters</strong>
  * -- this file among them. They are counted subpackage by subpackage, and both
  * cross-checks above re-derive them independently, by class and by compilation
  * unit. The total and the breakdown are stated together for that reason: a bare
  * total invites a reader to trust it, whereas a breakdown lets a reader re-derive
  * it and reject any figure that does not add up. Any class count for this package
- * other than 44 fails both sums and is wrong.
+ * other than 45 fails both sums and is wrong.
  *
  * <p>Refactoring Rationale: this table has now been wrong twice in the same way, and
  * the second time is why it is no longer maintained by hand. The first revision said
@@ -198,8 +173,8 @@
  * <h2>Where this inventory exceeds the plan, and why each addition is here</h2>
  *
  * <p>Assumptions: the migration plan's section 0.4.1.2 names <b>17</b> shared-kernel
- * production classes by path, and the closed inventory above admits <b>44</b>. The
- * difference is 27 deliberate additions rather than drift, and it is enumerated here
+ * production classes by path, and the closed inventory above admits <b>46</b>. The
+ * difference is 29 deliberate additions rather than drift, and it is enumerated here
  * because a count that exceeds the plan's without saying so reads as either an
  * oversight or an unrecorded scope change. Each addition below is in the shared
  * kernel for the same reason the plan's own 17 are: it carries a contract that two or
@@ -207,84 +182,54 @@
  * with another service's copy without anything failing.
  *
  * <ul>
- *   <li>{@code CardDemoCommonAutoConfiguration} in this root -- the registration
- *       entry. A service scans its own bounded context's root and never reaches
- *       {@code com.carddemo.common}, so without it the correlation filter, the
- *       meter filter, the money codec module and the single error advice were
- *       compiled, tested and then instantiated by nothing.</li>
- *   <li>{@code error.ApiErrorSecurityHandlers} -- the 401 and 403 the security
- *       filter chain answers before any advice runs, rendered as the same problem
+ *   <li>{@code CardDemoCommonAutoConfiguration} in this root -- registers the
+ *       shared components a service's own component scan never reaches.</li>
+ *   <li>{@code error.ApiErrorSecurityHandlers} -- renders the 401 and 403 the
+ *       security filter chain answers before any advice runs, in the same problem
  *       shape as every other failure, because every published contract declares
  *       those two statuses with that body.</li>
  *   <li>{@code error.ClientInputException} -- the caller-fault marker the advice
- *       keys HTTP 400 on. The standard exception hierarchy cannot distinguish a
- *       value a caller supplied from an internal invariant violation, and the
- *       advice must not answer 400 for the second.</li>
+ *       keys HTTP 400 on, the standard hierarchy being unable to tell a value a
+ *       caller supplied from an internal invariant violation.</li>
  *   <li>{@code error.RecordConflictException} -- lets a service that has already
- *       detected contention name which kind, instead of the advice inferring it by
- *       walking a persistence provider's cause chain.</li>
- *   <li>{@code error.FieldOrdering} -- declares the order one request body's fields
- *       are checked in. Bean Validation evaluates constraints in no defined order,
- *       while several migrated screens report the first failure and only the
- *       first.</li>
- *   <li>{@code web.CursorToken} -- seals and opens the paging position. Keyset
- *       paging is the plan's own choice at its section 0.4.3, and the token that
- *       carries a position between two requests is a wire contract every browse
- *       endpoint shares.</li>
- *   <li>{@code web.RequestBodySizeFilter} -- the one ceiling on how many bytes a
- *       request body may carry. The servlet container's own post-size setting
- *       bounds form data only, which none of these services accepts, so without
- *       this filter a JSON body reached the deserialiser at whatever length the
- *       caller chose. A per-service copy could disagree with another service's on
- *       how large the same shape of request may be, with nothing failing on either
- *       side, which is the test every entry in this list has to pass.</li>
+ *       detected contention name which kind, rather than the advice inferring it
+ *       from a persistence provider's cause chain.</li>
+ *   <li>{@code error.FieldOrdering} -- declares the order a request body's fields
+ *       are checked in, Bean Validation defining none and several migrated screens
+ *       reporting the first failure only.</li>
+ *   <li>{@code web.CursorToken} -- seals and opens the keyset paging position,
+ *       which is a wire contract every browse endpoint shares.</li>
+ *   <li>{@code web.RequestBodySizeFilter} -- the one ceiling on request-body
+ *       bytes, the container's own post-size setting bounding form data alone,
+ *       which none of these services accepts.</li>
  *   <li>{@code security.CardNumberMasker} -- the one implementation of the
- *       last-four rendering the plan requires at its section 0.4.1.9. Two
- *       implementations that disagreed on how many digits survive would each look
- *       correct in isolation.</li>
- *   <li>{@code security.ApprovedOriginPolicy} -- the one check that refuses a configured
- *       service-to-service base address which is not an approved absolute HTTPS origin. Three
- *       internal clients attach a credential to every request they send; two of them held a
- *       structurally identical private copy of this check and the third had none at all. A check
- *       duplicated per service is one that gets strengthened in a single copy, and the client that
- *       was missing it would have sent a minted internal token, and a primary account number, to
- *       whatever address a parameter file named.</li>
- *   <li>{@code security.CognitoAccessTokenValidator} -- the access-token checks the
- *       issuer's own decoder does not perform. It sits beside
- *       {@code JwtRoleConverter}, which the plan does name, because both take effect
- *       inside the same decoder.</li>
+ *       last-four rendering, two that disagreed on how many digits survive each
+ *       looking correct in isolation.</li>
+ *   <li>{@code security.ApprovedOriginPolicy} -- refuses a configured
+ *       service-to-service base address that is not an approved absolute HTTPS
+ *       origin, for the three internal clients that attach a credential to every
+ *       request they send.</li>
+ *   <li>{@code security.CognitoAccessTokenValidator} -- the access-token checks
+ *       the issuer's own decoder does not perform, taking effect inside the same
+ *       decoder as {@code JwtRoleConverter}.</li>
  *   <li>{@code security.OpaqueIdentifier} -- renders an identifier for an
- *       operational record without disclosing it, which is what lets a log line and
- *       an error body name a row at all under the plan's data-exposure rules.</li>
+ *       operational record without disclosing it, which is what lets a log line
+ *       or an error body name a row at all.</li>
  *   <li>{@code observability.LogSafeText} -- decides what a rendered value may
- *       contain before it reaches a log line, which is the executable half of the
- *       sensitive-data logging prohibition in
- *       {@code docs/architecture/observability.md}.</li>
- *   <li>{@code observability.ThrowableDigest} -- renders a failure for a log line as
- *       the chain of types that produced it and carries no message text, because a
- *       provider's exception message routinely quotes the value that failed and a log
- *       line is durable.</li>
+ *       contain before it reaches a log line, the executable half of the
+ *       sensitive-data prohibition in {@code docs/architecture/observability.md}.</li>
+ *   <li>{@code observability.ThrowableDigest} -- renders a failure as the chain of
+ *       types that produced it and carries no message text, a provider's message
+ *       routinely quoting the value that failed into a durable record.</li>
  *   <li>{@code observability.FailureSummary} -- renders the bounded, sanitised and
- *       card-masked message that the digest beside it withholds, plus the database
- *       state code when the chain carries one, and a second rendering that also
- *       replaces every run of three or more digits for the sites whose message text
- *       was composed by a driver or a codec over a record rather than by a transport.
- *       It is in the kernel because three
- *       different contexts log a failure they did not raise -- the queue listener
- *       adapter, the maintenance task runner and the outbox publisher -- and a
- *       per-context copy of "how much of a message may be logged" is a rule that can
- *       disagree with itself, which is the one thing a data-exposure rule must not
- *       do.</li>
+ *       card-masked message the digest withholds, plus the database state code when
+ *       the chain carries one.</li>
  *   <li>{@code codec.InquiryRequestCodec} -- the fixed-width request and reply
- *       framing the two request/reply inquiry flows share. Two independently written
- *       framings would agree until the day one padded a field differently, and the
- *       symptom would be a reply the other side parsed into plausible wrong
- *       values.</li>
+ *       framing the two request/reply inquiry flows share, two framings agreeing
+ *       until one pads a field differently.</li>
  *   <li>{@code messaging.MessageExpiry} -- the message-expiry attribute every queue
- *       consumer honours, parsed in one place. The baseline sets a five-second
- *       expiry and the target queue service has no per-message time-to-live, so the
- *       attribute IS the contract; a consumer that read it differently from the
- *       producer would drop live messages or act on stale ones.</li>
+ *       consumer honours, parsed in one place because the target queue service has
+ *       no per-message time-to-live and the attribute IS the contract.</li>
  *   <li>{@code messaging.MessagingCorrelationId} -- the canonical encoding a
  *       correlation identity must satisfy to travel as queue metadata, kept separate
  *       from the servlet rule because the two transports admit different characters
@@ -294,39 +239,37 @@
  *       visibility period. Three services and one infrastructure module share the
  *       period, so three private copies of the rule would be three chances for one to
  *       be relaxed while the others still claimed the guarantee.</li>
+ *   <li>{@code messaging.QueueDestination} -- states what a configured queue
+ *       destination IS, and recovers a queue's name from its address. Every
+ *       destination this system publishes is a queue URL, and two consumers had each
+ *       written their own "any non-blank string" acceptance and then treated the value
+ *       as a queue NAME -- so each asked the queue service to resolve a queue called
+ *       {@code https://...}, which could only fail, and failed only on the reply path a
+ *       request reaches after it has already been consumed. One rule shared by both
+ *       consumers is what makes the property name and the property value agree, and it
+ *       is a shared-kernel contract for the ordinary reason: the deployment publishes
+ *       the same shape to every context, so a per-service copy of the rule could accept
+ *       a form another service refuses.</li>
  *   <li>{@code security.MaskedCardNumber} -- states what a masked primary account
- *       number IS, where {@code CardNumberMasker} only produces one. Without it each
- *       response contract judged the shape for itself, so a contract could accept a
- *       value the masker would never emit.</li>
+ *       number IS, where {@code CardNumberMasker} only produces one, so no response
+ *       contract judges the shape for itself.</li>
  *   <li>{@code security.SealedSelector} -- seals a protected identifier into an
- *       opaque authenticated selector a URL may carry, and opens it again on the
- *       service side. An HTTP resource has to be addressable, and the masker cannot
- *       serve because a masked value is not reversible.</li>
+ *       opaque authenticated selector a URL may carry and opens it again, a masked
+ *       value not being reversible.</li>
  *   <li>{@code security.HtmlTextEncoder} -- encodes a value so that placing it in a
- *       markup document cannot change that document's structure. The migrated
- *       statement generator writes a markup artifact whose cells carry merchant free
- *       text, which is caller-supplied.</li>
+ *       markup document cannot change that document's structure, the statement
+ *       generator writing merchant free text into markup cells.</li>
  *   <li>{@code security.InternalServiceToken} -- mints the short-lived bearer token
- *       one bounded context presents to another. Two contexts calling each other
- *       must agree on the token's shape and lifetime exactly, which is the defining
- *       property of a shared-kernel contract.</li>
- *   <li>{@code messaging.RethrowingDigestErrorHandler} -- decides what a failed queue
- *       delivery puts in a log record and what it rethrows. Three contexts consume a
- *       queue and all three need the same answer: the record must not carry exception
- *       message text, because that text is written by a driver, a codec or a validation
- *       library and can quote a request value verbatim; and the failure must be
- *       rethrown, because the starter installs its error-handler stage as a recovery
- *       step, so a handler that returned normally would have the message deleted
- *       instead of redelivered. Three copies of a control whose correctness turns on
- *       rethrowing is three chances for one of them to be edited into swallowing.</li>
+ *       one bounded context presents to another, whose shape and lifetime both
+ *       sides must agree on exactly.</li>
+ *   <li>{@code messaging.RethrowingDigestErrorHandler} -- records a failed delivery
+ *       as a message-free digest and rethrows it unchanged, so the queue's own
+ *       redelivery is untouched and no driver text reaches the record.</li>
  *   <li>{@code control.OnlineWriteGate} -- decides whether the environment is
- *       currently accepting mutating work, and refuses when it cannot establish that
- *       it is. Seven services must agree on that decision and on its fail-closed
- *       behaviour exactly; seven copies of a safety control is seven chances for one
- *       of them to be quietly fail-open.</li>
- *   <li>{@code control.OnlineWritesDisabledException} -- the refusal the gate raises,
- *       carried here rather than per service so that one status and one message answer
- *       a closed window everywhere instead of each context choosing its own.</li>
+ *       accepting mutating work and refuses when it cannot establish that it is,
+ *       one fail-closed decision rather than seven.</li>
+ *   <li>{@code control.OnlineWritesDisabledException} -- the refusal the gate
+ *       raises, so one status and one message answer a closed window everywhere.</li>
  *   <li>{@code control.OnlineWriteGateInterceptor} -- applies the gate to every
  *       mutating request without any handler having to call it, which is what makes
  *       the coverage a property of the code rather than of who remembered.</li>
@@ -335,13 +278,30 @@
  *       shared because the operations needing it are the cross-context internal
  *       lookups, so the vocabulary for exempting one has to be common to the caller's
  *       context and the callee's.</li>
+ *   <li>{@code codec.DateInquiryReplyCodec} -- the positional reply body the
+ *       date-and-time inquiry answers with, beside the request half of the same
+ *       one-thousand-character wire. It is here rather than in a bounded context
+ *       because the wire is shared: one queue carries both inquiry flows, so the
+ *       consumer that owns that queue renders this answer while the layout stays
+ *       described in the same place as the request fields, the framing and the
+ *       diagnostic the two reference programs declare identically.</li>
  * </ul>
  *
- * <p>Trade-offs: the alternative to naming these 19 here was to leave the plan's 17
- * and this charter's 36 to be reconciled by whoever next noticed the gap. Rejected,
- * because the reconciliation is not mechanical -- eighteen of the nineteen are
- * cross-cutting contracts and one is a registration mechanism, and no arithmetic
- * recovers that from two totals. The cost accepted is that this list has to be
+ * <p>Trade-offs: the alternative to naming these 27 here was to leave the plan's 17
+ * and this charter's 44 to be reconciled by whoever next noticed the gap. Rejected,
+ * because the reconciliation is not mechanical -- twenty-six of the twenty-seven are
+ * cross-cutting contracts and one, {@code CardDemoCommonAutoConfiguration}, is a
+ * registration mechanism, and no arithmetic recovers that from two totals.
+ * ⚠️ Refactoring Rationale: this sentence read "these 19" against "the plan's 17 and this
+ * charter's 36", and all three figures were stale against the list directly above it:
+ * the list holds 27 entries, the charter's own machine-checked sentence 138 lines
+ * earlier already says "the difference is 27 deliberate additions", and 44 minus 17 is
+ * 27. {@code SharedKernelInventoryTest} enforces THAT figure and the list length
+ * against each other, so the two numbers a build checks agreed while the prose
+ * reconciling them did not -- which is the worst arrangement of the three, because a
+ * reader reconciling 19 against 27 concludes the enumeration has eight unexplained
+ * members and goes looking for a scope change that never happened. The figures here
+ * are now derived from the same two sources the test reads. The cost accepted is that this list has to be
  * maintained alongside the table above whenever an addition is argued in; the
  * compensation is that the argument for each existing addition is on the record
  * rather than reconstructed.
@@ -392,28 +352,23 @@
  * <p>Assumptions: the prohibition is enforced by a test, at
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java},
  * and it is a test precisely so that it cannot rot into a comment nobody runs.
- *
- * <p>Alternatives Considered: the ruleset's own import-restriction check was
+ * Alternatives Considered: the lint ruleset's own import-restriction check was
  * evaluated for the same job and rejected, so that layering has exactly one
- * owner. Two owners would mean two files to change whenever a boundary moves,
- * and no way to tell from either file which of them is authoritative. A test
- * also reports the offending class together with the offending dependency,
- * which is the information needed to act, and it runs wherever the module's
- * tests run rather than only where a lint configuration happens to be wired in.
+ * owner; a test also reports the offending class together with the offending
+ * dependency, and it runs wherever the module's tests run.
  *
  * <h2>Why the shared kernel exists: it is the Java {@code cobc -I app/cpy}</h2>
  *
  * <p>The COBOL baseline resolves every record layout through one compiler
- * copybook path. The invocation is recorded at {@code tests/README.md} line 268
- * as {@code cobc -fixed -fsign=EBCDIC --std=ibm-strict -I app/cpy}, and
- * {@code tests/README.md} lines 540 to 542 state the discipline it buys: "COBOL
- * unit tests resolve record layouts through the compiler copybook path
- * ({@code cobc -I app/cpy}) via {@code COPY CVTRA06Y.} / {@code COPY CVACT01Y.}
- * -- never duplicate a layout; keep it single-sourced from {@code app/cpy/}."
- * The first two switches in that command are compiler settings and nothing
- * more: {@code -fixed} selects fixed-format source and {@code -fsign=EBCDIC}
- * selects the sign convention discussed further down this charter. Only the
- * trailing {@code -I} is the include path this section is about.
+ * copybook path, recorded at {@code tests/README.md} line 268 as
+ * {@code cobc -fixed -fsign=EBCDIC --std=ibm-strict -I app/cpy}, and
+ * {@code tests/README.md} lines 540 to 542 state the discipline it buys: never
+ * duplicate a layout, keep it single-sourced from {@code app/cpy/}. This package
+ * is that include path expressed in Java, which is what transformation rule T2
+ * requires: one {@code COPY} becomes one import, and shared concerns -- codecs,
+ * money, errors, validation flags -- live only in {@code common-lib}. A service
+ * therefore imports a shared type from {@code com.carddemo.common} and never
+ * re-declares it locally.
  *
  * <p>This package is that include path, expressed in Java. Two transformation
  * rules govern it. Transformation rule T2, verbatim: "One {@code COPY} becomes
@@ -461,7 +416,7 @@
  *
  * <p>Assumptions: first, the count canon above admits exactly eleven charter
  * files, every one of them at this package or deeper. A twelfth would break the
- * 55-compilation-unit total, and authoring an artifact the migration plan does
+ * 57-compilation-unit total, and authoring an artifact the migration plan does
  * not call for falls outside the scope this tree is held to. Second, the
  * ruleset's charter-presence check is a file-set check: it fires only for a
  * directory that contains a compilation unit the audit actually processed.
@@ -482,141 +437,100 @@
  *
  * <h2>Lineage: the four reference-only trees</h2>
  *
- * <p>Every type in this package derives from one of four trees that are read
- * and never written:
+ * <p>Every type here derives from one of four trees that are read and never
+ * written: {@code app/cpy}, the 30 normative record, message, session, flag,
+ * function-key and date-validation copybooks; {@code app/cbl}, the 31 programs
+ * carrying the interest formula, the browse cursor discipline, the timestamp
+ * form, the posting reject reasons and the sign-on behaviour;
+ * {@code app/app-authorization-ims-db2-mq}, the message-queue payloads, the two
+ * packed-decimal segment layouts and the correlation-id discipline; and
+ * {@code tests}, whose sign-overpunch reference implementation, posting fixtures
+ * and mandatory {@code -fsign=EBCDIC} setting are the parity oracle.
  *
- * <ul>
- *   <li><b>{@code app/cpy}</b> -- 30 copybooks, 29 with a lower-case extension
- *       plus {@code COSTM01.CPY}. These are the normative record, message,
- *       session, flag, function-key and date-validation contracts.
- *       {@code UNUSED1Y.cpy} has no migration target and is retired as a target
- *       only; it stays on disk untouched like everything else in the tree.</li>
- *   <li><b>{@code app/cbl}</b> -- 31 programs, 29 with a lower-case extension
- *       plus {@code CBSTM03A.CBL} and {@code CBSTM03B.CBL}; 12 batch programs,
- *       18 online programs and one date utility. These carry the interest
- *       formula, the browse cursor discipline, the timestamp form, the posting
- *       reject reasons and the sign-on behaviour.</li>
- *   <li><b>{@code app/app-authorization-ims-db2-mq}</b> -- 9 copybooks and 8
- *       programs: the message-queue CSV payloads, the two packed-decimal
- *       segment layouts, the structured error-log record and the correlation-id
- *       discipline.</li>
- *   <li><b>{@code tests}</b> -- the sign-overpunch reference implementation at
- *       {@code tests/helpers/record_codec.py}, 1777 lines, with its record
- *       layout registry and the nine posting fixture scenarios beneath
- *       {@code tests/fixtures/posting}; the mandatory {@code -fsign=EBCDIC}
- *       compiler setting; and the documentation convention this charter extends
- *       to Java.</li>
- * </ul>
- *
- * <p>Assumptions: all four trees are reference-only. Nothing beneath
- * {@code app/cpy}, {@code app/cbl}, {@code app/app-authorization-ims-db2-mq} or
- * {@code tests} is edited, re-pinned or retro-documented, this migration
- * included. The baseline is the behavioural oracle, so it has to stay
- * byte-identical to remain usable as one. Where the migrated Java behaves
- * differently from a baseline program, the framing is always that the baseline
- * does one thing, the Java implements another, and the divergence is documented
- * in the migration's traceability matrix -- never that the baseline was
- * altered, because it never is.
- *
- * <p>Assumptions: the counts above are per-tree and must not be conflated. Use
- * 31 for {@code app/cbl} and 44 for the whole migration scope beneath
- * {@code app}. The repository holds 56 COBOL compilation units altogether, but
- * 12 of those are the oracle suite's own test programs rather than migration
- * targets, so 56 is never the number of programs being migrated. The copybook
- * figure splits the same way: 30 beneath {@code app/cpy} and 62
- * repository-wide.
+ * <p>Assumptions: nothing beneath those four trees is edited, re-pinned or
+ * retro-documented, this migration included, because the baseline is the
+ * behavioural oracle and has to stay byte-identical to remain usable as one.
+ * Where the migrated Java behaves differently from a baseline program the
+ * framing is always that the baseline does one thing, the Java implements
+ * another, and the divergence is recorded in the migration's traceability
+ * matrix -- never that the baseline was altered, because it never is.
  *
  * <h2>Money is exact fixed point, at every hop</h2>
  *
  * <p>Transformation rule T3 pins one representation per layer and admits no
  * exception: {@code NUMERIC(p,2)} in SQL, {@code BigDecimal} carried at scale 2
- * in Java, and a JSON <em>string</em> on the wire. IEEE-754 binary arithmetic
- * is forbidden anywhere in the money path -- neither of the language's two
- * binary primitive types, neither of their wrapper types, and never a bare JSON
- * number either. The prohibition is architecture-tested by
- * {@code LayeringRulesTest}, so it fails a build rather than a review.
+ * in Java, and a JSON <em>string</em> on the wire. IEEE-754 binary arithmetic is
+ * forbidden anywhere in the money path -- neither of the language's two binary
+ * primitive types, neither of their wrapper types, and never a bare JSON number
+ * either. The prohibition is architecture-tested by {@code LayeringRulesTest}, so
+ * it fails a build rather than a review.
  *
  * <p>Assumptions: the normative field is
- * {@code 05  ACCT-CURR-BAL                     PIC S9(10)V99.}, declared at
- * line 7 of {@code app/cpy/CVACT01Y.cpy}, the 300-byte account record. It is
- * zoned decimal with a sign overpunch, not packed decimal, and
+ * {@code 05  ACCT-CURR-BAL                     PIC S9(10)V99.}, declared at line
+ * 7 of {@code app/cpy/CVACT01Y.cpy}, the 300-byte account record. It is zoned
+ * decimal with a sign overpunch rather than packed decimal, and
  * {@code tests/README.md} lines 273 and 274 record that compiling with the
- * default sign convention rather than the EBCDIC one "misreads the
- * zoned-decimal sign overpunch and silently corrupts negative balances". Packed
- * decimal does occur elsewhere, in the export record and in the authorization
- * segment layouts, which is why {@code codec} carries two distinct numeric
- * codecs rather than one.
+ * default sign convention "misreads the zoned-decimal sign overpunch and
+ * silently corrupts negative balances". Packed decimal occurs elsewhere, in the
+ * export record and the authorization segment layouts, which is why
+ * {@code codec} carries two distinct numeric codecs.
  *
- * <p>Trade-offs: this charter names the money invariant even though the
- * arithmetic lives in {@code money} and the decoding in {@code codec}. The
- * duplication was accepted because a money error is silent: an IEEE-754 binary
- * value that slips into the path yields numbers that look right, survive a
- * smoke test and are wrong in the cents. The migration plan calls fixed-point
- * and character-set fidelity the highest-risk area of the whole migration for
- * exactly that reason, so the invariant is stated where every reader of this
- * tree passes through and not only where it is implemented.
- *
- * <p>Trade-offs: the two forbidden numeric type names are described rather than
- * spelled anywhere in this file. Spelling them would make this charter itself
- * match a search for the very tokens the money path must not contain, and that
- * search is one of the checks this tree is audited with, so a literal mention
- * would produce a hit that has to be explained away on every audit. The
- * description is unambiguous -- the language has exactly two IEEE-754 binary
- * primitive types and one wrapper type for each -- and the enforcement is
- * {@code LayeringRulesTest}, never this prose. Prose cannot fail a build; the
- * architecture test can, which is why the prohibition is stated here and
- * asserted there.
+ * <p>Trade-offs: the invariant is stated in this charter even though the
+ * arithmetic lives in {@code money} and the decoding in {@code codec}, because a
+ * money error is silent -- a binary value that slips into the path yields
+ * numbers that look right, survive a smoke test and are wrong in the cents. The
+ * two forbidden type names are described rather than spelled, so that this
+ * charter does not itself match a search for the tokens the money path must not
+ * contain; the enforcement is the architecture test, never this prose.
  *
  * <h2>No session state crosses a request boundary</h2>
  *
- * <p>The baseline is pseudo-conversational: a task ends at every screen turn,
- * so all continuity between turns travels in one 160-byte communication area,
+ * <p>The baseline is pseudo-conversational: a task ends at every screen turn, so
+ * all continuity between turns travels in one 160-byte communication area,
  * {@code CARDDEMO-COMMAREA}, declared at lines 19 to 44 of
  * {@code app/cpy/COCOM01Y.cpy} and shared by every online program. That single
- * structure decomposes into four different target mechanisms, and this package
- * holds none of them:
+ * structure decomposes into four target mechanisms and this package holds none
+ * of them: the navigation fields become client-side router history; the identity
+ * fields -- an eight-character user id and a one-character user type whose
+ * condition names are {@code 'A'} for administrator and {@code 'U'} for user --
+ * become signed token claims that {@code security} converts into authorities;
+ * the selection fields become request path parameters; and the re-entry
+ * discriminator at lines 29 to 31 becomes nothing at all, a stateless handler
+ * having no first-entry-versus-re-entry distinction to draw.
  *
- * <ul>
- *   <li>the navigation fields become client-side router history;</li>
- *   <li>the identity fields -- an eight-character user id and a one-character
- *       user type whose condition names are {@code 'A'} for administrator and
- *       {@code 'U'} for user -- become signed token claims, which
- *       {@code security} converts into authorities;</li>
- *   <li>the selection fields become request path parameters;</li>
- *   <li>the re-entry discriminator becomes nothing at all.</li>
- * </ul>
+ * <p>Assumptions: the consequence for this package is concrete. Nothing here
+ * holds per-user or per-conversation state, {@code web} propagates a correlation
+ * id and a page cursor and no session, {@code validation} carries a field-flag
+ * type and no turn counter, and the services that depend on this module scale
+ * horizontally without sticky routing or a session store.
  *
- * <p>Assumptions: the fourth item is not an omission. The discriminator is the
- * one-digit field at lines 29 to 31 of {@code app/cpy/COCOM01Y.cpy}, whose two
- * condition names distinguish a first entry from a re-entry. A stateless
- * handler has no such distinction to draw, so the field has nothing left to
- * discriminate, and the field-highlight behaviour the baseline gates on it is
- * driven in the target purely by the response body -- which is why
- * {@code validation} carries a field-flag type and no turn counter. The
- * consequence for this package is concrete: nothing here holds per-user or
- * per-conversation state, {@code web} propagates a correlation id and a page
- * cursor and no session, and the services that depend on it scale horizontally
- * without sticky routing or a session store.
+ * <p>Assumptions: one field of the baseline security record, the eight-character
+ * plaintext {@code SEC-USR-PWD} at line 21 of {@code app/cpy/CSUSR01Y.cpy}, is
+ * not carried forward at all -- not to a column, not to a transfer object, not to
+ * a codec field. This package therefore has no password type, no password
+ * comparison and no credential of any kind, and it must never acquire one. The
+ * baseline compares that field directly at sign-on; the target delegates the
+ * comparison to the managed identity provider and retains only a subject
+ * reference, and the divergence is recorded in the migration's security and
+ * identity notes.
  *
- * <p>Assumptions: one field of the baseline security record, the
- * eight-character plaintext {@code SEC-USR-PWD} at line 21 of
- * {@code app/cpy/CSUSR01Y.cpy}, is not carried forward at all -- not to a
- * column, not to a transfer object, not to a codec field. This package
- * therefore has no password type, no password comparison and no credential of
- * any kind, and it must never acquire one. The baseline compares that field
- * directly at sign-on; the target delegates the comparison to the managed
- * identity provider and retains only a subject reference, and the divergence is
- * documented in the migration's security and identity notes.
+ * <h2>One failure shape, one disclosure rule</h2>
  *
- * <h2>The documentation contract this tree is held to</h2>
+ * <p>Every service answers a failure in the single problem shape {@code error}
+ * publishes, carrying a per-field error array so that a validation failure names
+ * the fields it refers to, and the two refusals the security filter chain answers
+ * itself are rendered in that same shape rather than the framework's. Assumptions:
+ * one shape is a wire contract rather than a convenience -- the browser client
+ * parses one body for every endpoint of every service, so a second shape is a
+ * second parser and an untested branch in the client.
  *
- * <p>One user-specified rule governs this migration: Explainability. Every
- * compilation unit in this tree carries a docstring on every function, class
- * and module entry point, stating the four elements the rule enumerates at its
- * lines 18 to 21 -- Purpose, Parameters, Return values, and Exceptions or
- * errors -- in the Javadoc form its line 22 requires. A package declaration is
- * the language's module entry point, which is the reason this file exists at
- * all.
+ * <p>Assumptions: the disclosure rules are enforced by the types in
+ * {@code security} and {@code observability} rather than left to each caller. A
+ * primary account number is rendered as its last four digits, a card
+ * verification value is never rendered at all, and no exception message text
+ * reaches a log record, because that text is written by a driver, a codec or a
+ * validation library and can quote a request value verbatim into a durable
+ * record.
  *
  * <p>Every non-obvious decision carries one of exactly four labels, quoted with
  * their definitions from the rule's lines 31 to 34:
@@ -725,7 +639,7 @@
  * layer, its single-program integration layer, its golden-master end-to-end
  * layer, and its fixtures, goldens, helpers and mocks. This module's own test
  * tree is {@code services/common-lib/src/test}, and it holds the unit tests and
- * the architecture rules for the 44 production classes this charter enumerates.
+ * the architecture rules for the 46 production classes this charter enumerates.
  * Neither substitutes for the other, and work on one does not modify the other.
  *
  * <p>Assumptions: the oracle suite covers batch flows. Three of the contracts

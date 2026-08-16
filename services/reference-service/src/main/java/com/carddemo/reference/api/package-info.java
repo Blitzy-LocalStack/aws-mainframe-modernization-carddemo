@@ -281,7 +281,7 @@
  *
  * <p>⚠️ Refactoring Rationale: the paragraph that stood here recorded the opposite decision -- that the
  * three seeded allow-list browses would reach {@code UsPhoneAreaCodeRepository},
- * {@code UsStateRepository} and {@code UsStateZipPrefixRepository} directly, on the argument that those
+ * {@code StateRepository} and {@code UsStateZipPrefixRepository} directly, on the argument that those
  * tables "carry no rule beyond whether a code is present" so a service over them "would forward a call and
  * add a file". Review found that argument false on both counts. It was not one call being forwarded: the
  * controller held three near-identical four-way conditionals selecting among four query members each on

@@ -11,16 +11,17 @@
 #       held to it mechanically rather than by review: config/SecurityConfig.java
 #       enforces the authority each operation below declares; api/AuthController.java
 #       and api/UserController.java serve the operations; the request and response
-#       shapes are the eleven types under dto/, into which mapper/UserMapper.java
+#       shapes are the thirteen types under dto/, into which mapper/UserMapper.java
 #       translates the stored row; config/AuthApiContractTest.java compares the served
 #       route set and the declared authorities against this document in BOTH
 #       directions, so a published operation with no handler and a handler this
 #       document omits both fail; and the browser client ui/src/api/auth.ts calls
 #       these operations, which ui/src/api/contracts.test.ts asserts against this same
-#       document. The contract covers eight operations: the sign-on token exchange
+#       document. The contract covers nine operations: the sign-on token exchange
 #       migrated from app/cbl/COSGN00C.cbl, the challenge exchange that completes it
 #       for a user whose password is temporary, the token renewal that has no baseline
-#       counterpart, and the four user-administration operations migrated from
+#       counterpart, the session revocation that has none either, and the four
+#       user-administration operations migrated from
 #       app/cbl/COUSR00C.cbl, COUSR01C.cbl, COUSR02C.cbl and COUSR03C.cbl, whose
 #       shared list view contributes the fifth of those.
 #
@@ -30,23 +31,27 @@
 #       - servers: the single server entry, declared as a substitutable variable
 #         rather than as any environment's address.
 #       - security: the bearer scheme, applied to every operation by default.
-#       - paths: the eight operations of this context, in the order a user meets
-#         them -- sign on, answer a sign-on challenge, renew a token set, then
-#         list users, create one, read one, update one, delete one. The first
-#         three are the pre-token operations and the last five are
-#         administrative, which is the split the operation census asserts.
+#       - paths: the nine operations of this context, in the order a user meets
+#         them -- sign on, answer a sign-on challenge, renew a token set, sign out,
+#         then list users, create one, read one, update one, delete one. The first
+#         four require no token and the last five are administrative, which is the
+#         split the operation census asserts.
 #       - components.securitySchemes: the single authentication scheme every
-#         operation but the three pre-token ones requires -- sign-on, challenge
-#         and refresh each declare an empty security requirement, because a
-#         caller cannot present the token they exist to issue or renew.
+#         operation but the four Sign-On ones requires -- sign-on, challenge,
+#         refresh and sign-out each declare an empty security requirement, because
+#         a caller cannot present the token the first three exist to issue or renew,
+#         and the fourth is authorised by the very token it revokes.
 #       - components.headers: the response header every operation returns,
 #         declared once.
 #       - components.responses: the two error responses that are identical across
 #         all five user-administration operations.
-#       - components.schemas: the payload shapes of this context -- six of its own,
-#         and five that mirror types the shared kernel owns -- among them the error
-#         body every failing operation returns together with the two nested shapes
-#         it carries.
+#       - components.schemas: twenty-one payload shapes -- ELEVEN of this context's
+#         own and TEN that mirror types the shared kernel owns, among the latter the
+#         error body every failing operation returns together with the two nested
+#         shapes it carries. Refactoring Rationale: this read "six of its own, and
+#         five that mirror", which was a count of neither half; it was re-measured
+#         while adding the sign-out request rather than incremented, because an
+#         inventory that was wrong before the addition stays wrong after it.
 #
 # WHY (non-obvious design decisions):
 #       (0) Assumptions: components.parameters declares one entry, the correlation
@@ -87,13 +92,13 @@
 #       provisioned environment does not permit. Every method, authority, schema
 #       and message text below is exactly as specified; only the reachable prefix
 #       is used.
-#       (3) Assumptions: all THREE unauthenticated /auth routes are contracted
-#       here -- POST /api/v1/auth/signon, POST /api/v1/auth/refresh and
-#       POST /api/v1/auth/challenge -- so this document is the whole edge surface
-#       for /auth and a reader comparing it against the route table finds no gap.
-#       Those three are exactly the pre-token keys validated at
-#       infra/modules/api-gateway-http/variables.tf, so the gateway forwards no
-#       operation this document does not describe.
+#       (3) Assumptions: all FOUR unauthenticated /auth routes are contracted
+#       here -- POST /api/v1/auth/signon, POST /api/v1/auth/refresh,
+#       POST /api/v1/auth/challenge and POST /api/v1/auth/signout -- so this
+#       document is the whole edge surface for /auth and a reader comparing it
+#       against the route table finds no gap. Those four are exactly the keys
+#       validated at infra/modules/api-gateway-http/variables.tf, so the gateway
+#       forwards no operation this document does not describe.
 #       Assumptions: the challenge in particular is not an optional extra flow but
 #       the FIRST thing every provisioned user does, because the infrastructure
 #       seeds each user with a temporary password
@@ -223,10 +228,12 @@ tags:
   - name: Sign-On
     description: >-
       The token exchange migrated from app/cbl/COSGN00C.cbl, together with the
-      challenge exchange that completes it for a user whose password is temporary
-      and the refresh exchange that renews an expired token set. All three are
-      reachable without a token, because between them they are the operations
-      that issue one, and all three carry x-required-authority none.
+      challenge exchange that completes it for a user whose password is temporary,
+      the refresh exchange that renews an expired token set, and the sign-out
+      exchange that revokes the refresh token a session renews from. All four are
+      reachable without a token and all four carry x-required-authority none: three
+      of them are the operations that issue a token, and the fourth is authorised by
+      the token it invalidates.
   - name: User Administration
     description: >-
       List, create, read, update and delete over the auth schema's users table,
@@ -237,16 +244,20 @@ tags:
 #       operations the explicit exception rather than the silent norm, so an
 #       operation added later without a security block inherits the
 #       authenticated posture instead of being published open.
-# WHY : Assumptions: THREE operations override this default with an empty
-#       requirement -- signOn, answerSignOnChallenge and refreshTokens -- and they
-#       are exactly the three the Sign-On tag covers and the three
-#       SecurityConfig names in its unauthenticated list. Each is open for the
-#       same reason: between them they are the operations that ISSUE a token, so
-#       none of them can require one. Sign-on issues the first, the challenge
-#       issues the one a temporary password could not, and the renewal issues a
-#       replacement for one that has expired -- a caller holding only an expired
-#       access token must still be able to renew. The five user operations
-#       inherit the default and override nothing.
+# WHY : Assumptions: FOUR operations override this default with an empty
+#       requirement -- signOn, answerSignOnChallenge, refreshTokens and signOut --
+#       and they are exactly the four the Sign-On tag covers and the four
+#       SecurityConfig names in its unauthenticated list. The first three are open
+#       because between them they are the operations that ISSUE a token, so none of
+#       them can require one: sign-on issues the first, the challenge issues the one
+#       a temporary password could not, and the renewal issues a replacement for one
+#       that has expired -- a caller holding only an expired access token must still
+#       be able to renew. The fourth is open for the mirror of that reason: it
+#       revokes a refresh token, possession of that token is the only authority a
+#       caller could present for revoking it, and demanding a live access token as
+#       well would refuse the revocation exactly when the session it ends has been
+#       abandoned rather than closed. The five user operations inherit the default
+#       and override nothing.
 security:
   - bearerAuth: []
 
@@ -635,7 +646,7 @@ paths:
 
 
   # Assumptions: this path is the one the edge already publishes. It is the second
-  #   of the three deliberately unauthenticated route keys in
+  #   of the four deliberately unauthenticated route keys in
   #   infra/modules/api-gateway-http/variables.tf, so the gateway forwards it with
   #   no authorizer attached, and it must be unauthenticated for the same reason
   #   sign-on is: a caller answering a challenge has no token yet, that being what
@@ -745,6 +756,123 @@ paths:
             request signature was rejected, or the pool raised a further challenge
             this flow does not publish a contract for. The body carries a
             correlation identifier and never a provider diagnostic.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+
+  # Assumptions: this path is the FOURTH deliberately unauthenticated route key in
+  #   infra/modules/api-gateway-http/variables.tf, and the only one of the four that
+  #   sits AFTER a token has stopped being wanted rather than before one exists. It is
+  #   unauthenticated for a reason that reads backwards until it is stated: this is the
+  #   operation whose purpose is to make a credential stop working, so gating it behind
+  #   a valid access token would refuse it in exactly the case it matters -- a session
+  #   abandoned rather than closed, whose access token has expired while its refresh
+  #   token has twenty-nine days left. Authority is possession of the refresh token,
+  #   which the pool verifies; a caller that cannot produce it revokes nothing.
+  /api/v1/auth/signout:
+    description: >-
+      Revocation at the identity pool of the refresh token a session renews from. It
+      has no baseline counterpart: signing off under the transaction monitor
+      transferred control back to the sign-on screen and revoked nothing, because a
+      terminal session was the session and it lasted until the terminal disconnected.
+
+    post:
+      tags: [Sign-On]
+      operationId: signOut
+      summary: Revoke the refresh token a session renews from.
+      description: >-
+        Asks the pool to revoke the submitted refresh token, so that no further token
+        set can be minted from it. This is what makes signing out an event at the pool
+        rather than a change of state in one browser: the refresh token is provisioned
+        with a thirty-day life, so a copy taken from a browser store, a synchronised
+        profile or a shared workstation would otherwise keep minting access tokens for
+        the rest of that month.
+
+
+        It carries no bearer token, and no identifier. Authority is possession of the
+        refresh token itself, which is also all the provider's revocation call accepts
+        -- it takes the token and this service's own client credentials and no user
+        name. Requiring a valid access token instead would refuse the revocation
+        precisely when the session most needs ending.
+
+
+        It is idempotent. A token the pool will not accept -- expired, already
+        revoked, already rotated away, or not a refresh token at all -- answers 204
+        exactly as a revoked one does, because an unusable token is the outcome the
+        caller asked for and reporting a failure would both misstate that and hand an
+        unauthenticated caller a test for whether a token is live. RFC 7009 section
+        2.2 takes the same position for the same reason.
+
+
+        Revocation stops RENEWAL. It does not invalidate an access token already
+        issued: every service validates a bearer by signature, issuer and expiry
+        against the pool's published keys, which consults no revocation state, so a
+        bearer already in a caller's hands stays acceptable until it expires --
+        bounded by access_token_validity_minutes, 60 by default. A client must
+        therefore discard its own copies as well as calling this operation, and it
+        must do so even when this operation fails.
+      security: []
+      x-required-authority: none
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+      requestBody:
+        required: true
+        description: >-
+          The refresh token to revoke.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignOutRequest"
+      responses:
+        # Assumptions: 204 rather than 200 with a body, because there is nothing this
+        #   operation could truthfully put in one. It reports neither whether the token
+        #   was live nor whose it was, so a body would publish a shape carrying only
+        #   restatements of the request.
+        "204":
+          description: >-
+            The token will mint nothing further. This is the answer both for a token
+            the pool revoked and for one it would not accept, and the two are
+            deliberately indistinguishable.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+        "400":
+          description: >-
+            The submitted token was absent, blank or above its declared maximum. The
+            fieldErrors array carries one entry keyed refreshToken.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        # Assumptions: no 401 is declared, and its absence is the point of the 204
+        #   above rather than an oversight. There is no credential this operation can
+        #   refuse: the token it is given is the thing it exists to invalidate, so a
+        #   token it cannot use has already produced the caller's outcome.
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          description: >-
+            The pool could not be reached or answered a fault, so the token may still
+            be live and able to mint. The message is
+            "Unable to verify the User ..." (app/cbl/COSGN00C.cbl line 254), which is
+            this tag's declared sentence for an exchange that could not be evaluated;
+            the body never carries a provider diagnostic. A client clears its own
+            state regardless, and this status is what tells the operator the token was
+            not revoked.
           headers:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
@@ -1678,9 +1806,8 @@ components:
         bound, or carrying a character outside the published set, is refused with
         400 rather than being silently replaced, so a caller cannot believe it is
         correlating requests the service is in fact correlating under a different
-        identity. A value whose shape is that of a
-        primary account number -- only digits and the three separators, with
-        thirteen or more digits -- is refused on the same terms, because this
+        identity. A value whose shape is that of a protected identifier -- only digits and the
+        three separators, with nine or more digits -- is refused on the same terms, because this
         identity is echoed and logged. The refusal carries the shared problem body
         and the response correlation header, the same as any other 400, and it names
         the rule it applied without ever repeating the value it refused.
@@ -2147,6 +2274,41 @@ components:
             not be blank, and at most 8192 characters.
             Write-only: it travels in this request only and appears in no response.
 
+    # Assumptions: this schema carries ONE property where TokenRefreshRequest carries
+    #   two, and the asymmetry is the provider's rather than an omission. Cognito's
+    #   RevokeToken operation takes the token, the client id and the client secret and
+    #   accepts no user name -- the token identifies its own subject -- so an identifier
+    #   declared here would be read by nothing, and declaring one would tell an
+    #   integrator it was checked.
+    # Assumptions: the operation makes no membership decision either, which is the
+    #   second reason no identifier appears. Refusing to revoke because auth.users no
+    #   longer holds a row for the token's subject would leave a removed user's
+    #   thirty-day token live, which is the opposite of what a sign-out is for.
+    SignOutRequest:
+      type: object
+      description: >-
+        The refresh token to revoke. Required, and the whole of the request.
+      additionalProperties: false
+      required: [refreshToken]
+      properties:
+        # Assumptions: the bound is the same 8192 TokenRefreshRequest declares for the
+        #   same value, for the reason recorded there -- the value is opaque and
+        #   provider-sized, so a generous bound refuses an implausible token without
+        #   being able to refuse one the pool legitimately issued, and it stays an
+        #   eighth of the shared body ceiling so the two controls remain ordered. A
+        #   test asserts the two agree, so a token accepted on one operation cannot be
+        #   refused by the other.
+        refreshToken:
+          type: string
+          minLength: 1
+          maxLength: 8192
+          pattern: "\\S"
+          writeOnly: true
+          description: >-
+            The refresh token to revoke, replayed unaltered. Must not be blank, and at
+            most 8192 characters.
+            Write-only: it travels in this request only and appears in no response.
+
     SignOnResponse:
       type: object
       description: >-
@@ -2226,11 +2388,13 @@ components:
           type: ["string", "null"]
           description: >-
             The pool's refresh token where the app client is configured to issue
-            one, and null where it is not -- and null on the response to a renewal,
-            because the pool does not reissue one there. It is not a bearer
-            credential and no operation accepts it for authorisation; the refresh
-            operation above accepts it in a request body, which is the one place it
-            travels.
+            one, and null where it is not. On the response to a renewal it carries
+            the ROTATED successor the pool issues in place of the token presented,
+            which the client must store, because the deployed app client enables
+            refresh-token rotation and the presented token is invalidated as it is
+            exchanged. It is not a bearer credential and no operation accepts it for
+            authorisation; the refresh operation above accepts it in a request body,
+            which is the one place it travels.
         tokenType:
           type: string
           description: >-
@@ -2258,7 +2422,7 @@ components:
     #   the very first sign-on of every provisioned user report a server fault with no
     #   path to set a permanent password, which is why the challenge is a contracted
     #   outcome rather than an error. The edge publishes the matching route:
-    #   POST /api/v1/auth/challenge is one of the three deliberately unauthenticated
+    #   POST /api/v1/auth/challenge is one of the four deliberately unauthenticated
     #   keys in infra/modules/api-gateway-http/variables.tf.
     # Assumptions: the challenge has NO baseline counterpart and none is invented
     #   for it. The reference sign-on compared a stored password directly at
@@ -2890,7 +3054,7 @@ components:
     CorrelationId:
       type: string
       maxLength: 24
-      pattern: '^$|^(?!(?:[._-]*[0-9]){13,}[._-]*$)[A-Za-z0-9_.-]{1,24}$'
+      pattern: '^$|^(?!(?:[._-]*[0-9]){9,}[._-]*$)[A-Za-z0-9_.-]{1,24}$'
       description: >-
         Identity of one unit of work. At most twenty-four characters drawn from the
         ASCII letters, the digits, the hyphen, the underscore and the full stop. A
@@ -2898,14 +3062,15 @@ components:
         characters over eleven bytes of entropy; a value a caller supplies need
         only fit the bound and the set. The empty string appears only inside an
         error body, and only for a failure raised before any identity had been
-        established. The pattern additionally
-        refuses one narrow class the character set alone admits: a value made up
-        only of digits and the three separators, carrying thirteen or more digits.
-        That is the shape of a primary account number, in contiguous form and in
-        every separated form, and the shared correlation filter refuses it because
-        this identity is echoed on the response and written to every log line for
-        the request -- so accepting one would copy a card number into both. Ordinary
-        values are unaffected: a timestamp-like 2022-07-18-0930 carries nine digits
+        established. The pattern additionally refuses one narrow class the character set alone
+        admits: a value made up only of digits and the three separators, carrying nine
+        or more digits. That is the shape of every protected identifier this system
+        holds, in contiguous form and in every separated form -- a customer identifier
+        and a national identifier are nine digits, an account identifier eleven, a
+        card number sixteen -- and the shared correlation filter refuses it because
+        this identity is echoed on the response and written to every log line for the
+        request, so accepting one would copy a protected identifier into both.
+        Ordinary values are unaffected: a date-like 2022-07-18 carries eight digits
         and is accepted, and any value containing a letter is accepted whatever its
         digits. A value the service mints begins CD, which is a non-numeric prefix
         chosen so that a minted identity can never fall into the refused class.

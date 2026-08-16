@@ -59,11 +59,30 @@ field.
 
 ## 3. Expected outcome
 
-The reply is the **same** system-date reply the control case receives:
+**On the baseline** the reply is the **same** system-date reply the control case receives:
 `SYSTEM DATE : MM-DD-YYYY` then `SYSTEM TIME : HH:MM:SS`, with both literals
 verbatim. No error, no rejection and no distinguishable difference from
-`happy_path` other than the request bytes. That indistinguishability is the asserted
-value.
+`happy_path` other than the request bytes. That indistinguishability is the property this
+scenario names, and it is a property of `CODATE01` specifically.
+
+**On the target the two envelopes diverge, and the divergence is registered.** The whole
+inquiry exchange is answered by one consumer,
+`services/account-service/src/main/java/com/carddemo/account/service/InquiryMessageListener.java`,
+which dispatches on the four-character function code because that field is the only thing on
+the wire separating the two flows that shared the baseline's single request queue. `DATE` is
+answered from the clock; `DTE `, which is what these bytes carry, is answered with
+`INVALID REQUEST PARAMETERS` -- the sibling program's own refusal sentence, verbatim. The
+divergence is registered as `D-INQUIRY-UNRECOGNISED-FUNCTION` in
+`docs/architecture/cobol-to-service-traceability.md`, where its reason and the alternative
+considered are recorded.
+
+Refactoring Rationale: the baseline outcome is kept rather than replaced, and the target
+outcome added beside it, because this fixture's whole subject is a baseline property a
+reader would not predict. Deleting the baseline half would leave the directory's name
+unexplained; leaving it alone would have a reader expect a date on the target and read the
+refusal as a defect. The two are labelled so neither can be mistaken for the other. Note
+that this changes nothing about what this module asserts on these bytes -- section 6 names
+the one consumer that reads them, and it asserts geometry, not replies.
 
 ---
 
@@ -178,7 +197,8 @@ requires -- the second derivation wrote them in bold, which that document lists 
 four ways the label has actually been written wrongly.
 
 - Assumptions: the deviation this fixture carries is in the FUNCTION code, not in a date. The record has no date field at all - it is a function code, an account key and padding - so a scenario in this domain can only deviate in its function code or its key.
-- Refactoring Rationale: this bullet previously ended by stating that "the directory name describes the outcome the migrated endpoint produces, which is a rejected date-conversion request." That sentence survived the rename recorded in section 1 and contradicted both this directory's name and its own section 3, which state that the reply is indistinguishable from `happy_path`. It is corrected rather than left standing: the migrated consumer, `services/reference-service/src/main/java/com/carddemo/reference/service/DateInquiryMessageListener.java`, now exists and applies **no** guard, exactly as `CODATE01` applies none, and `DateInquiryMessageListenerTest` asserts that these bytes and `happy_path`'s produce byte-identical replies. A sentence describing a rejection that neither the baseline nor the target performs would have sent a reader looking for a branch that does not exist.
+- Refactoring Rationale: this bullet previously ended by stating that "the directory name describes the outcome the migrated endpoint produces, which is a rejected date-conversion request." That sentence survived the rename recorded in section 1 and contradicted this directory's name, which says the payload is ignored rather than rejected. It is corrected rather than left standing, because a sentence describing a rejection the BASELINE does not perform would have sent a reader looking for a branch `CODATE01` does not contain.
+- Refactoring Rationale: the bullet above was then corrected a second time, and the second correction has itself gone stale, so both are recorded rather than overwritten. It claimed that "the migrated consumer, `services/reference-service/src/main/java/com/carddemo/reference/service/DateInquiryMessageListener.java`, now exists and applies **no** guard, exactly as `CODATE01` applies none, and `DateInquiryMessageListenerTest` asserts that these bytes and `happy_path`'s produce byte-identical replies." Neither clause survives: that consumer has been withdrawn from this module, and the consumer that replaced it -- one owner for the shared request queue, in `account-service` -- DOES apply a guard on the function code, so these bytes and `happy_path`'s no longer produce identical replies on the target. Section 3 now states the baseline outcome and the target outcome separately, and this bullet's original point is unaffected: the directory name still describes an ignored payload rather than a rejected date, which is what `CODATE01` does and what the name has to describe.
 - Assumptions: the tables above list the fields **this scenario gives a value to**, each with its offset, its `PICTURE` and the copybook or program line that declares it. The complete record layout, including any field this scenario does not vary and the fill regime for each, is tabled once in the tree charter section 3.7 and is cited rather than restated in full. Copying a whole layout table into each scenario directory would create as many places for the geometry to drift as there are scenarios, which the charter forbids at its section 5.8; citing a line per field costs nothing and points a reader at the normative source rather than at a copy of it.
 - Alternatives Considered: making the request invalid by its KEY instead - an account number absent from the seed, or a non-numeric one. Rejected because the key is `PIC 9(11)` and the accepted sibling already fixes its shape, so a key deviation would exercise a lookup miss rather than a request-validation refusal, which is a different scenario and would need its own name.
 - Trade-offs: the two scenarios differ in their keys as well as their function codes, `00000000002` against `00000000001`. Holding the key constant would isolate the variable more tightly; distinct keys are used instead so that a consumer reading both files can tell which one it has from the key alone, which is worth more here than the isolation, since neither field affects the other's validation.

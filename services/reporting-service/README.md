@@ -1297,10 +1297,11 @@ target behaviour.
 
 ### 10.2 Test inventory
 
-<!-- test-inventory: 33 tests + 2 integration tests -->
-**35** test classes across nine subpackages and the module root: **33** matching `*Test`, run
-by Surefire, and **2** matching `*IT` — `repository/ReportingQueryBootstrapIT` and
-`repository/StatementHeadingChunkIT` — run by Failsafe against a Testcontainers-backed
+<!-- test-inventory: 34 tests + 3 integration tests -->
+**37** test classes across nine subpackages and the module root: **34** matching `*Test`, run
+by Surefire, and **3** matching `*IT` — `repository/ReportingQueryBootstrapIT`,
+`repository/StatementHeadingChunkIT` and `repository/ReportingDeployedRelationIT` — run by
+Failsafe against a Testcontainers-backed
 PostgreSQL, with the Testcontainers BOM at **2.0.5** managed by the parent. Every test package
 carries a `package-info.java`, because the documentation gate audits test sources (§8.2).
 
@@ -1321,6 +1322,20 @@ to answer. It supplies three relations as plain tables through a Testcontainers 
 under `src/test/resources/db/testharness`, which records why a stand-in is used rather than the
 real views: those views read base tables four other services' migrations create.
 
+Refactoring Rationale: it then moved from 35 to 36 with a third integration test,
+`repository/ReportingDeployedRelationIT`, added because the card and card-cross-reference
+fixtures had a codec-only consumer. A codec settles record geometry and settles nothing about
+the three properties that live entirely in the shipped view definitions and grants — that a card
+number is narrowed before publication, that a card resolves across three projections to its
+customer and its account, and that the SELECT-only login role cannot write. Unlike the class
+above it, it applies the **shipped DDL itself** rather than a stand-in: it copies the bootstrap,
+the four owning services' migrations and `data-migration/sql/V1__reporting_views.sql` into the
+container and executes them in the order an operator does, bootstrap included twice because the
+cross-schema read grants it issues are conditional on base tables that do not exist on a first
+pass. A stand-in relation would have asserted masking and privilege of the stand-in. It also
+authenticates as `carddemo_reporting` rather than as the container owner, since reading the
+projections as an owner exercises none of the privilege boundary.
+
 Assumptions: the marker comment above this paragraph is **machine-checked**, not decorative.
 `ServiceReadmeInventoryTest` in `common-lib` parses it, re-measures both figures against this
 module's test tree, and additionally requires that the stated total equals their sum — so
@@ -1330,14 +1345,14 @@ fails the build in `common-lib` rather than here.
 | Package | Classes |
 |---|---|
 | `mapper` | 9 |
-| `config` | 6 |
+| `config` | 7 |
 | `api` | 3 |
 | `service` | 6 |
 | `dto` | 3 |
 | `domain` | 1 |
 | `fixtures` | 1 |
 | `task` | 3 |
-| `repository` | 2 (`ReportingQueryBootstrapIT`, `StatementHeadingChunkIT`) |
+| `repository` | 3 (`ReportingQueryBootstrapIT`, `StatementHeadingChunkIT`, `ReportingDeployedRelationIT`) |
 | module root | 1 |
 
 ### 10.3 What the suites must cover

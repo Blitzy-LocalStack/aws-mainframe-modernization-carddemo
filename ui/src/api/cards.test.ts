@@ -24,8 +24,10 @@
  */
 
 // Assumptions: every test API is imported rather than taken from an ambient global, because
-// ui/vitest.config.ts records `globals: false` as a contract: ambient test globals are declared per
-// PROJECT, so admitting them here would make `expect` and `vi` visible to production screens too.
+// ui/tsconfig.json keeps its `types` list EMPTY -- so nothing is declared ambiently and an omitted
+// import fails to compile on the symbol it omitted. The runner's own `globals` option is set to
+// `true`, for the separate reason recorded beside it, so the enforcing mechanism is the empty
+// `types` list and never that option.
 import type { AxiosRequestConfig, AxiosResponse } from 'axios';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 

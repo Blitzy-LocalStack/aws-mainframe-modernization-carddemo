@@ -506,21 +506,46 @@ variable "parameter_group_family" {
   type        = string
   nullable    = false
 
-  # WHY : Assumptions: this value is coupled to engine_version and the coupling
-  #       is not enforceable here. A family naming a different major version
-  #       than the engine is accepted by `terraform validate`, survives the
-  #       plan, and fails only when RDS is asked to attach the group to the
-  #       cluster -- by which point the parameter group and the subnet group
-  #       exist and the failure reads as a cluster error rather than a
-  #       mismatched pair. Deriving the family from engine_version inside
-  #       main.tf was considered and would remove the coupling entirely, but it
-  #       would also silently invent a family name for any engine version
-  #       whose family is not spelled the way the derivation assumes, which
-  #       trades a loud failure for a quiet one. The shape check below at least
-  #       rejects a value that is not a family name at all.
+  # WHY : Assumptions: this value is coupled to engine_version, and a family
+  #       naming a different major version than the engine fails only when RDS
+  #       is asked to attach the group to the cluster -- by which point the
+  #       parameter group and the subnet group exist and the failure reads as a
+  #       cluster error rather than as a mismatched pair. The two checks below
+  #       are therefore both needed: the first rejects a value that is not a
+  #       family name at all, the second rejects one that is a family name for
+  #       the wrong major version.
+  # WHY : Alternatives Considered: deriving the family from engine_version
+  #       inside main.tf, which would remove the coupling entirely. Rejected
+  #       because it would silently invent a family name for any engine version
+  #       whose family is not spelled the way the derivation assumes, trading a
+  #       loud failure for a quiet one. Asserting the pair keeps the value
+  #       explicit and reviewed while still refusing a mismatch.
   validation {
     condition     = can(regex("^aurora-postgresql[0-9]+$", var.parameter_group_family))
     error_message = "The parameter_group_family must be an Aurora PostgreSQL family such as \"aurora-postgresql16\", matching the major version given in engine_version."
+  }
+
+  # WHY : ⚠️ Refactoring Rationale: this check is NEW, and the paragraph it
+  #       replaced asserted that the coupling "is not enforceable here". That
+  #       was true of the Terraform this module was first written against,
+  #       where a variable validation could reference only its own variable --
+  #       and it stopped being true at Terraform 1.9, which permits a
+  #       validation to reference other variables. versions.tf already requires
+  #       >= 1.15.0, so the capability has been available the whole time this
+  #       module has been in its current form; the claim of impossibility was
+  #       simply stale. Leaving it in place cost a real failure mode: a
+  #       mismatched pair passed `validate`, passed `plan`, and surfaced during
+  #       apply as a cluster error.
+  # WHY : Assumptions: the comparison is between MAJOR versions only. The
+  #       family carries a major and nothing else, so the engine's major is
+  #       taken as the leading dot-separated component -- which is why the
+  #       shape check on engine_version accepts both "17" and "16.6" and this
+  #       check reads the same value for either. Minor releases are deliberately
+  #       not part of the comparison, because a family is shared by every minor
+  #       release of its major and requiring more would reject correct pairs.
+  validation {
+    condition     = split(".", var.engine_version)[0] == trimprefix(var.parameter_group_family, "aurora-postgresql")
+    error_message = "The parameter_group_family must name the SAME major version as engine_version: an engine of \"16.6\" requires \"aurora-postgresql16\". A mismatched pair is accepted by validate and plan and fails only when RDS attaches the parameter group, where it reports as a cluster error rather than as the input pair that caused it."
   }
 }
 

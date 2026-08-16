@@ -24,8 +24,10 @@
  */
 
 // Assumptions: every test API is imported rather than taken from an ambient global, because
-// ui/vitest.config.ts records `globals: false` as a contract: ambient test globals are declared per
-// PROJECT, so admitting them here would make `expect` and `vi` visible to production screens too.
+// ui/tsconfig.json keeps its `types` list EMPTY -- so nothing is declared ambiently and an omitted
+// import fails to compile on the symbol it omitted. The runner's own `globals` option is set to
+// `true`, for the separate reason recorded beside it, so the enforcing mechanism is the empty
+// `types` list and never that option.
 import type { AxiosRequestConfig, AxiosResponse } from 'axios';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -37,7 +39,7 @@ import {
   payAccountBalanceInFull,
   viewTransaction,
 } from './transactions';
-import type { TransactionCreateRequest } from './types';
+import type { CopiedTransactionData, TransactionCreateRequest } from './types';
 import {
   answerWith,
   dispatchedRequests,
@@ -66,6 +68,15 @@ const AMOUNT = '50.47';
 const BALANCE = '1234.56';
 
 const ADDED_SENTENCE = 'Transaction added successfully.  Your Tran ID is 0000000000683580.';
+
+/**
+ * How many data fields the copy block moves onto the screen.
+ *
+ * Assumptions: eleven, counted at `app/cbl/COTRN02C.cbl` L480 to L493. It is asserted as a count rather
+ * than left implicit in the fixture, so a twelfth member appearing in the answer -- or one of the eleven
+ * quietly dropping out of the shape -- fails here instead of reaching a screen with one stale control.
+ */
+const COPIED_FIELD_COUNT = 11;
 
 let nextStatus: number = HTTP_OK;
 
@@ -126,6 +137,60 @@ function submission(): TransactionCreateRequest {
   };
 }
 
+/** The card the cross-reference resolves for the keyed account, sixteen digits and unmasked. */
+const RESOLVED_CARD = '4111111111111111';
+
+/**
+ * The copied record a copy turn's preview carries, in the published shapes.
+ *
+ * ⚠️ Refactoring Rationale: this is the published `CopiedTransactionData` and it carries NO resolved key.
+ * A distinct `EffectiveCapture` block was authored carrying the ten data values AND the two resolved keys
+ * together; the keys are members of the PREVIEW instead, because the service resolves them on every turn
+ * -- `app/cbl/COTRN02C.cbl` L166 performs `VALIDATE-INPUT-KEY-FIELDS` for the Enter arm exactly as L473
+ * does for the copy arm -- while this record is attached to the copy turn alone.
+ *
+ * Assumptions: `merchantId` is exactly nine digits, which is the pattern the contract publishes here. The
+ * submission helper's own merchant identifier is wider, and the difference is deliberate: this is the
+ * value the SERVICE reports, normalised to the record's column width, not the text an operator typed.
+ * @returns {CopiedTransactionData} A record every member check admits.
+ */
+function copiedRecord(): CopiedTransactionData {
+  return {
+    sourceTransactionId: '0000000000683580',
+    typeCode: '01',
+    categoryCode: '0001',
+    source: 'POS TERM',
+    description: 'PARITY CAPTURE',
+    merchantId: '000000001',
+    merchantName: 'PARITY MERCHANT',
+    merchantCity: 'PARITY CITY',
+    merchantZip: '00001',
+    originDate: '2022-07-18',
+    processDate: '2022-07-18',
+  };
+}
+
+/**
+ * The whole body a withheld turn answers with, whichever operation produced it.
+ *
+ * Assumptions: the resolved pair is present on every preview fixture because the contract requires it on
+ * every preview. A case that wants one member to fail replaces exactly that member, so the failure it
+ * observes can only be that member's.
+ * @param {Record<string, unknown>} overrides - Members to replace, for a case that needs one to fail.
+ * @returns {Record<string, unknown>} The body a successful withheld turn answers with.
+ */
+function previewBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    amount: AMOUNT,
+    written: false,
+    returnMessage: null,
+    resolvedAccountId: ACCOUNT_ID,
+    resolvedCardNumber: RESOLVED_CARD,
+    copied: copiedRecord(),
+    ...overrides,
+  };
+}
+
 /** Asserts a written capture is read from the created status with all three members intact. */
 async function readsACaptureFromTheCreatedStatus(): Promise<void> {
   nextStatus = HTTP_CREATED;
@@ -181,7 +246,7 @@ async function refusesACaptureWithoutItsSentence(): Promise<void> {
 /** Asserts a preview is read from the ok status, with its absent sentence left absent. */
 async function readsAPreviewFromTheOkStatus(): Promise<void> {
   nextStatus = HTTP_OK;
-  nextBody = { amount: AMOUNT, written: false };
+  nextBody = previewBody();
   const outcome = await addTransaction({ ...submission(), confirmation: 'N' });
   expect(outcome.outcome).toBe('PREVIEWED');
   if (outcome.outcome !== 'PREVIEWED') {
@@ -209,19 +274,91 @@ async function readsAPreviewFromTheOkStatus(): Promise<void> {
  */
 async function refusesAPreviewWhoseFlagContradictsTheStatus(): Promise<void> {
   nextStatus = HTTP_OK;
-  nextBody = { amount: AMOUNT, written: true };
+  nextBody = previewBody({ written: true });
   await expect(addTransaction(submission())).rejects.toThrow(RangeError);
 }
 
-/** Asserts the copy-last operation validates through the same two shapes as the plain add. */
-async function copyLastSharesTheSameValidation(): Promise<void> {
-  nextStatus = HTTP_CREATED;
-  nextBody = { transactionId: TRANSACTION_ID, amount: AMOUNT, returnMessage: ADDED_SENTENCE };
-  const captured = await copyLastTransaction(submission());
-  expect(captured.outcome).toBe('CREATED');
+/**
+ * Asserts the copy-last answer is read as a withheld preview carrying the copied record.
+ *
+ * ⚠️ Refactoring Rationale: the answer is a PREVIEW and not a bare block of eleven values. Two shapes
+ * were authored on the second reading -- a lookup answering the values directly -- and the service
+ * publishes neither: the reference's copy paragraph ends by performing `PROCESS-ENTER-KEY` at
+ * `app/cbl/COTRN02C.cbl` L495, so one turn copies AND validates AND asks, and the operation answers the
+ * same outcome the ordinary capture answers with. What is asserted here is that the copied record reaches
+ * the caller through it, with all eleven values -- the ten data members plus the source row's identifier.
+ */
+async function readsTheCopiedRecordFromTheCopyAnswer(): Promise<void> {
+  nextStatus = HTTP_OK;
+  nextBody = previewBody();
 
-  nextBody = { amount: AMOUNT, returnMessage: ADDED_SENTENCE };
-  await expect(copyLastTransaction(submission())).rejects.toThrow(RangeError);
+  const outcome = await copyLastTransaction({ accountId: ACCOUNT_ID });
+
+  expect(outcome.outcome).toBe('PREVIEWED');
+  if (outcome.outcome !== 'PREVIEWED') {
+    throw new Error('the ok status must be read as a preview');
+  }
+  expect(outcome.preview.copied).toEqual(copiedRecord());
+  expect(Object.keys(outcome.preview.copied ?? {})).toHaveLength(COPIED_FIELD_COUNT);
+  expect(outcome.preview.resolvedAccountId).toBe(ACCOUNT_ID);
+  expect(outcome.preview.resolvedCardNumber).toBe(RESOLVED_CARD);
+}
+
+/**
+ * Asserts a copy answer missing any one member of its copied record is refused rather than applied in part.
+ *
+ * Assumptions: every member is dropped in turn rather than one representative member, because the caller's
+ * purpose is to replace ten controls at once -- so a single member admitted absent would leave one control
+ * holding what the operator typed beside nine that were replaced, which is precisely the mixture this
+ * operation was corrected to stop producing.
+ */
+async function refusesACopyAnswerMissingAnyOneField(): Promise<void> {
+  for (const member of Object.keys(copiedRecord())) {
+    const partial: Record<string, unknown> = { ...copiedRecord() };
+    delete partial[member];
+    nextStatus = HTTP_OK;
+    nextBody = previewBody({ copied: partial });
+    await expect(copyLastTransaction({ accountId: ACCOUNT_ID })).rejects.toThrow(RangeError);
+  }
+}
+
+/**
+ * Asserts a copy answer whose members breach their published shapes is refused.
+ *
+ * Assumptions: the breaches are chosen one per validation kind the shapes use -- a pattern on the category
+ * code, a bound on the merchant name, the amount's mandatory two decimal places, and a masked spelling of
+ * the resolved card -- so a validator that checked presence and JavaScript type alone would fail every one.
+ */
+async function refusesACopyAnswerBreachingItsPublishedShapes(): Promise<void> {
+  const breaches: readonly Record<string, unknown>[] = [
+    previewBody({ copied: { ...copiedRecord(), categoryCode: '1' } }),
+    previewBody({ copied: { ...copiedRecord(), merchantName: '' } }),
+    previewBody({ amount: '100.4' }),
+    previewBody({ resolvedCardNumber: '************1111' }),
+  ];
+  for (const breach of breaches) {
+    nextStatus = HTTP_OK;
+    nextBody = breach;
+    await expect(copyLastTransaction({ accountId: ACCOUNT_ID })).rejects.toThrow(RangeError);
+  }
+}
+
+/**
+ * Asserts the copy-last answer goes through the SAME preview validation as an ordinary capture's.
+ *
+ * ⚠️ Purpose: the two operations answer one shape, so one validator reads both bodies. This states it as a
+ * property rather than leaving it to be inferred from the source: a copy answer whose capture flag
+ * contradicts its status is refused exactly as the capture's is, which can only be true if the copy's body
+ * reaches the same check. A second validator for the copy operation is what this forbids.
+ */
+async function copyLastSharesTheSameValidation(): Promise<void> {
+  nextStatus = HTTP_OK;
+  nextBody = previewBody({ written: true });
+  await expect(copyLastTransaction({ accountId: ACCOUNT_ID })).rejects.toThrow(RangeError);
+
+  nextStatus = HTTP_OK;
+  nextBody = previewBody({ amount: 42.75 });
+  await expect(copyLastTransaction({ accountId: ACCOUNT_ID })).rejects.toThrow(RangeError);
 }
 
 /** Asserts a posted payment is read from the created status with all four required members. */
@@ -339,6 +476,45 @@ async function neverReproducesARejectedValue(): Promise<void> {
   expect(message).not.toContain(BALANCE);
 }
 
+/*
+ * WHY : ⚠️ Refactoring Rationale: a SECOND generation of copy-answer cases stood here, written against a
+ *       read-only lookup that answered the eleven values directly -- `copiedBody()` plus
+ *       `readsTheElevenCopiedValues`, `refusesACopyEchoingAKey`, `refusesACopiedValueTheFormCannotHold`,
+ *       `refusesACopiedAmountAsANumber` and `refusesACopyMissingAValue`. The service publishes no such
+ *       operation: the reference's copy paragraph ends by performing `PROCESS-ENTER-KEY` at
+ *       `app/cbl/COTRN02C.cbl` L495, so the copy answers the same withheld preview the ordinary capture
+ *       answers with. Every property those five cases established is asserted above against that shape --
+ *       all eleven values arriving, a missing member refused, a shape breach refused, a numeric amount
+ *       refused -- and `refusesACopiedValueTheFormCannotHold` is kept below, because the two spellings it
+ *       rejects are members the cases above do not touch.
+ * WHY : Assumptions: the key-echo case is NOT carried across, and its premise is what withdrew it. It
+ *       refused a body naming a key on the ground that the copy block moves nothing into the two key
+ *       controls; the preview now publishes the RESOLVED pair deliberately, because
+ *       `VALIDATE-INPUT-KEY-FIELDS` writes both key fields at L209 and L221 before the screen is re-sent,
+ *       so a body naming a key is the contract rather than a breach. The property that replaced it -- that
+ *       the pair is present, validated and unmasked -- is asserted by
+ *       `readsTheCopiedRecordFromTheCopyAnswer` and by the masked-card breach above.
+ */
+
+/**
+ * Asserts a copied value that the form's own field could not hold is refused on arrival.
+ *
+ * Assumptions: the two rejected spellings are a merchant identifier one digit short and a date carrying a
+ * time. Both would be painted into a control whose predicate then refuses them, leaving the operator with
+ * a refusal they did not cause and nothing on screen to explain it, so the breach is reported where it
+ * happened instead.
+ */
+async function refusesACopiedValueTheFormCannotHold(): Promise<void> {
+  nextStatus = HTTP_OK;
+  nextBody = previewBody({ copied: { ...copiedRecord(), merchantId: '87654321' } });
+  await expect(copyLastTransaction({ accountId: ACCOUNT_ID })).rejects.toThrow(RangeError);
+
+  nextBody = previewBody({
+    copied: { ...copiedRecord(), originDate: '2026-01-10 12:00:00.000000' },
+  });
+  await expect(copyLastTransaction({ accountId: ACCOUNT_ID })).rejects.toThrow(RangeError);
+}
+
 /** Groups the assertions that fix the ledger client's write-response validation. */
 function ledgerWriteOutcomeContract(): void {
   beforeEach(stubBuildConfiguration);
@@ -354,6 +530,13 @@ function ledgerWriteOutcomeContract(): void {
     refusesAPreviewWhoseFlagContradictsTheStatus,
   );
   it('validates the copy-last outcome through the same shapes', copyLastSharesTheSameValidation);
+  it('reads the copied record from the copy answer', readsTheCopiedRecordFromTheCopyAnswer);
+  it('refuses a copied value the form cannot hold', refusesACopiedValueTheFormCannotHold);
+  it('refuses a copy answer missing any one member', refusesACopyAnswerMissingAnyOneField);
+  it(
+    'refuses a copy answer breaching its published shapes',
+    refusesACopyAnswerBreachingItsPublishedShapes,
+  );
   it('reads a posted payment from the created status', readsAPostedPaymentFromTheCreatedStatus);
   it('refuses a posted payment without its balance', refusesAPostedPaymentWithoutItsBalance);
   it(
@@ -503,7 +686,7 @@ async function refusesAnUnmaskedDetail(): Promise<void> {
  * refused before the request under test can be inspected.
  */
 async function addsATransactionAtTheCollectionTarget(): Promise<void> {
-  answerWith({ amount: '100.00', written: false, returnMessage: 'CONFIRM?' }, HTTP_OK);
+  answerWith(previewBody({ amount: '100.00', returnMessage: 'CONFIRM?' }), HTTP_OK);
 
   await addTransaction(CREATE_REQUEST);
 
@@ -520,7 +703,7 @@ async function addsATransactionAtTheCollectionTarget(): Promise<void> {
  * DISTINCTION -- a client that always reported one of the two would satisfy a single-status assertion.
  */
 async function readsTheAddOutcomeFromTheStatus(): Promise<void> {
-  answerWith({ amount: '100.00', written: false, returnMessage: 'CONFIRM?' }, HTTP_OK);
+  answerWith(previewBody({ amount: '100.00', returnMessage: 'CONFIRM?' }), HTTP_OK);
   const previewed = await addTransaction(CREATE_REQUEST);
   expect(previewed.outcome).toBe('PREVIEWED');
 
@@ -537,17 +720,33 @@ async function readsTheAddOutcomeFromTheStatus(): Promise<void> {
   expect(created.created.transactionId).toBe(TRANSACTION_ID);
 }
 
-/** Asserts the copy-last action has its own target and reads the same two outcomes. */
+/**
+ * Asserts the copy-last action has its own target and sends the key fields alone.
+ *
+ * Refactoring Rationale: the body is asserted, where this case previously sent a whole create request
+ * and asserted only the target. Sending the eleven data members is what made the action unusable from
+ * the screen that reaches it -- an operator presses the copy key INSTEAD of typing them -- so the body's
+ * membership is the property worth fixing here, not just the URL.
+ */
 async function copiesTheLastTransactionAtItsOwnTarget(): Promise<void> {
-  answerWith(
-    { transactionId: TRANSACTION_ID, amount: '100.00', returnMessage: ADDED_SENTENCE },
-    HTTP_CREATED,
-  );
+  answerWith(previewBody(), HTTP_OK);
 
-  const outcome = await copyLastTransaction(CREATE_REQUEST);
+  const outcome = await copyLastTransaction({ cardNumber: RESOLVED_CARD });
 
-  expect(onlyRequest().url).toBe('/transactions/copy-last');
-  expect(outcome.outcome).toBe('CREATED');
+  const request = onlyRequest();
+  expect(request.url).toBe('/transactions/copy-last');
+  expect(request.body).toEqual({ cardNumber: RESOLVED_CARD });
+  /*
+   * WHY : Assumptions: a copied value is read off the PREVIEW's copied record rather than off the answer
+   *       itself, because the operation answers the same withheld preview the ordinary capture answers
+   *       with -- the reference's own fall-through at `app/cbl/COTRN02C.cbl` L495 -- and not a bare block
+   *       of copied values.
+   */
+  expect(outcome.outcome).toBe('PREVIEWED');
+  if (outcome.outcome !== 'PREVIEWED') {
+    throw new Error('the ok status must be read as a preview');
+  }
+  expect(outcome.preview.copied?.description).toBe('PARITY CAPTURE');
 }
 
 /** Asserts bill payment posts to its own target and reads its two outcomes from the status. */

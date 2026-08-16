@@ -60,8 +60,10 @@
 #   exists rather than five.
 #
 # Parameters:
-#   Requests carry four kinds of input, and every one of them is described
-#   at the point it is declared rather than only here.
+#   Requests carry THREE kinds of input, and every one of them is described
+#   at the point it is declared rather than only here. components/parameters
+#   declares exactly two entries, one path and one header, and the count below is
+#   derivable from it.
 #
 #   - A path parameter: the OPAQUE SELECTOR identifying one card, declared once
 #     at components/parameters/CardKeyPath and referenced by the three
@@ -71,19 +73,25 @@
 #     into the load balancer's access log before any application code can redact
 #     it, which is why no primary account number appears in a path or a query
 #     string anywhere in this document.
-#   - Query parameters: ONE optional list filter, accountId -- the first of the
-#     baseline list screen's two filter fields -- and the two paging inputs,
-#     cursor and direction. The screen's second filter field, the card number, is
-#     served by the lookup operation's request body instead. All three query
-#     parameters are declared under components/parameters.
 #   - A request header: X-Correlation-Id, optional on every operation, declared
 #     once at components/parameters/CorrelationIdHeader.
-#   - Two request bodies: CardUpdateRequest, carried by the update operation, and
-#     CardLookupRequest, carried by the lookup operation. The three read
-#     operations carry no body. Refactoring Rationale: the lookup body exists for
-#     a transport reason and not a semantic one -- it reads and changes nothing --
-#     because a body is the only part of a request that neither access log
-#     records.
+#   - THREE request bodies: CardPageQuery, carried by the list operation;
+#     CardLookupRequest, carried by the lookup operation; and CardUpdateRequest,
+#     carried by the update operation. The two READ-BY-SELECTOR operations carry
+#     none. Refactoring Rationale: the lookup body exists for a transport reason
+#     and not a semantic one -- it reads and changes nothing -- because a body is
+#     the only part of a request that neither access log records.
+#
+#   Refactoring Rationale: this block declared FOUR kinds of input and named a
+#   query-parameter kind holding accountId, cursor and direction, and this
+#   document declares no query parameter at all. Those three inputs travel in the
+#   list operation's CardPageQuery BODY, for the same access-log reason the path
+#   selector exists -- so the bullet that justified sealing the selector sat
+#   beside a bullet putting an account identifier in a query string, and a client
+#   written to it would have issued GET /api/v1/cards?accountId=... against a
+#   route this service does not serve and received 405. The body count was
+#   understated by one for the same reason: the list body was the one being
+#   described as query parameters.
 #
 #   The number of rows a full page carries is NOT among them. It is settled
 #   server-side at seven by carddemo.card.list.page-size (application.yml),
@@ -92,8 +100,14 @@
 #
 # Return values:
 #   - CardPage, from the list operation: one page of CardSummary rows with the
-#     sealed cursor tokens and the two availability indicators needed to walk
-#     the ordered set by key.
+#     two sealed cursor tokens, firstKey and lastKey, and the ONE availability
+#     indicator, hasNext, needed to walk the ordered set by key.
+#     Refactoring Rationale: this read "the two availability indicators", and
+#     CardPage declares four members of which exactly one reports availability.
+#     The pair a reader would look for -- a forward and a backward flag -- does
+#     not exist here: backward availability is derivable from the cursor a caller
+#     already holds, so publishing a second flag would have added a value the
+#     server cannot compute more cheaply than the client can.
 #   - CardDetail, from the non-administrative read and from a successful update:
 #     the full state of one card with the account number masked, and with no
 #     member able to carry it unmasked.
@@ -107,8 +121,16 @@
 #   declared once at components/headers/XCorrelationId.
 #
 # Exceptions or errors:
-#   Six failure responses are declared, each as a reusable entry under
+#   ELEVEN failure responses are declared, each as a reusable entry under
 #   components/responses so that every operation references one definition.
+#   Refactoring Rationale: this said SIX and enumerated six. The five it omitted
+#   -- 405 for a method a path does not serve, 406 for an Accept header no
+#   representation satisfies, 413 for a body over the accepted size, 415 for a
+#   media type this service does not read, and 503 while a dependency is
+#   unavailable -- are declared here and referenced by operations, and four of the
+#   five are what a MISCONFIGURED client provokes first, which is precisely when a
+#   caller reads this section. The enumeration below is extended to match rather
+#   than the total being edited on its own, so the two cannot disagree again.
 #
 #   - 400 the request itself is not acceptable: a malformed identifier, a
 #     filter of the wrong width, an unreadable cursor, or a body failing
@@ -121,6 +143,13 @@
 #     distinct conditions reach it and are never merged; each carries its own
 #     machine identity and its own message, reproduced character for
 #     character from app/cbl/COCRDUPC.cbl:205-210.
+#   - 405 the path exists but does not serve the method used. Reached by a caller
+#     that assumed a GET where this document declares a POST, which is the shape
+#     the list and lookup operations take.
+#   - 406 no representation this service produces satisfies the Accept header.
+#   - 413 the body exceeds the accepted size.
+#   - 415 the body's media type is not one this service reads.
+#   - 503 a dependency this operation needs is unavailable.
 #   - 500 the operation failed for a reason the caller cannot correct. Declared
 #     on every operation because the shared advice in the kernel assembles a
 #     body of this shape for any failure it did not classify, so a client that
@@ -242,6 +271,17 @@
 
 openapi: 3.1.1
 
+# WHY : ⚠️ Refactoring Rationale: the description below said selection is taken "from the card
+#       number in the request path", and this document declares no such path anywhere -- the three
+#       single-card operations are keyed by an opaque cardKey the service mints, precisely so that a
+#       primary account number never reaches a request line the load balancer logs verbatim. The
+#       sentence therefore contradicted the parameter it was describing and, worse, described the
+#       exact disclosure the selector exists to prevent, in the one paragraph a reader treats as this
+#       context's summary. CONTRACT_DESCRIPTION in
+#       services/card-service/src/main/java/com/carddemo/card/config/OpenApiConfig.java already read
+#       "an opaque selector in the request path", so the two published texts disagreed and the
+#       correct wording was the one the bean served; this brings the committed contract to it rather
+#       than the reverse.
 info:
   title: CardDemo Card Service API
   version: 1.0.0
@@ -263,7 +303,7 @@ info:
     it replaces. Session state is gone: the baseline was pseudo-conversational
     and carried identity, selection and navigation in a buffer the terminal
     echoed back, so every request here instead takes identity from a signed
-    token and selection from the card number in the request path. The
+    token and selection from an opaque selector in the request path. The
     four-verb VSAM browse
     becomes a single keyset-paginated query per request. And the record's
     before-image, which the update screen carried across the gap between
@@ -417,9 +457,17 @@ paths:
         baseline states the same thing unconditionally at
         app/cbl/COCRDLIC.cbl:1287.
       x-required-authority: carddemo-user
-      # WHY : Refactoring Rationale: ONLY ONE of the baseline screen's two filter
-      #       fields is a query parameter of this operation -- the account number at
-      #       app/cpy-bms/COCRDLI.CPY:66. The card-number field at :72 is served by
+      # WHY : ⚠️ Refactoring Rationale: ONLY ONE of the baseline screen's two filter
+      #       fields is a criterion of this operation -- the account number at
+      #       app/cpy-bms/COCRDLI.CPY:66 -- and it travels in this operation's
+      #       CardPageQuery BODY. This sentence called it "a query parameter of this
+      #       operation", which contradicted the rest of its own paragraph and the
+      #       path-level rationale above it: both explain that the narrowing moved
+      #       OUT of the query string precisely because the load balancer writes the
+      #       request line into its access log before any application code runs. A
+      #       reader who stopped at the opening clause would have concluded the very
+      #       disclosure this operation's shape exists to prevent was still present.
+      #       The card-number field at :72 is served by
       #       the lookup operation below, which takes it in a request body. A
       #       previous revision of this document carried both as query parameters
       #       and defended that by saying common-lib's CardNumberMasker redacts a
@@ -988,9 +1036,8 @@ components:
         the published bound or carries a character outside the published set is
         refused with 400 rather than being silently replaced, so that a caller
         cannot believe it is correlating requests that the service is in fact
-        correlating under a different identity. A value whose shape is that of a
-        primary account number -- only digits and the three separators, with
-        thirteen or more digits -- is refused on the same terms, because this
+        correlating under a different identity. A value whose shape is that of a protected identifier -- only digits and the
+        three separators, with nine or more digits -- is refused on the same terms, because this
         identity is echoed and logged. The refusal carries the shared problem body
         and the response correlation header, the same as any other 400, and it names
         the rule it applied without ever repeating the value it refused.
@@ -1917,7 +1964,7 @@ components:
     CorrelationId:
       type: string
       maxLength: 24
-      pattern: '^$|^(?!(?:[._-]*[0-9]){13,}[._-]*$)[A-Za-z0-9_.-]{1,24}$'
+      pattern: '^$|^(?!(?:[._-]*[0-9]){9,}[._-]*$)[A-Za-z0-9_.-]{1,24}$'
       description: >-
         Identity of one unit of work. At most twenty-four characters drawn from
         the ASCII letters, the digits, the hyphen, the underscore and the full
@@ -1925,14 +1972,15 @@ components:
         characters over eleven bytes of entropy; a value a caller
         supplies need only fit the bound and the set. The empty string appears
         only inside an error body, and only for a failure raised before any
-        identity had been established. The pattern additionally
-        refuses one narrow class the character set alone admits: a value made up
-        only of digits and the three separators, carrying thirteen or more digits.
-        That is the shape of a primary account number, in contiguous form and in
-        every separated form, and the shared correlation filter refuses it because
-        this identity is echoed on the response and written to every log line for
-        the request -- so accepting one would copy a card number into both. Ordinary
-        values are unaffected: a timestamp-like 2022-07-18-0930 carries nine digits
+        identity had been established. The pattern additionally refuses one narrow class the character set alone
+        admits: a value made up only of digits and the three separators, carrying nine
+        or more digits. That is the shape of every protected identifier this system
+        holds, in contiguous form and in every separated form -- a customer identifier
+        and a national identifier are nine digits, an account identifier eleven, a
+        card number sixteen -- and the shared correlation filter refuses it because
+        this identity is echoed on the response and written to every log line for the
+        request, so accepting one would copy a protected identifier into both.
+        Ordinary values are unaffected: a date-like 2022-07-18 carries eight digits
         and is accepted, and any value containing a letter is accepted whatever its
         digits. A value the service mints begins CD, which is a non-numeric prefix
         chosen so that a minted identity can never fall into the refused class.

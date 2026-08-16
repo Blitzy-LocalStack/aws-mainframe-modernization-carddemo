@@ -75,12 +75,25 @@ class TransactionApiRoutingContractTest {
     /**
      * The contract publishes exactly the five operations the four migrated programs need.
      *
-     * <p>Refactoring Rationale: five rather than four, because {@code COTRN02C} contributes TWO
-     * operations and not one. Its Enter path is the capture at {@code app/cbl/COTRN02C.cbl} line 172 and
-     * its PF5 path is the copy-last action at lines 146 and 147, performing
-     * {@code COPY-LAST-TRAN-DATA} at line 471. The second was transcribed in the service and published
-     * nowhere, so the count and the surface are both corrected here rather than the transcription being
-     * deleted.</p>
+     * <p>Refactoring Rationale: five rather than four, because {@code COTRN02C} contributes MORE THAN
+     * ONE operation. Its Enter path is the capture at {@code app/cbl/COTRN02C.cbl} line 172 and its PF5
+     * path is the copy-last action at lines 146 and 147, performing {@code COPY-LAST-TRAN-DATA} at line
+     * 471. The second was transcribed in the service and published nowhere, so the count and the surface
+     * were both corrected here rather than the transcription being deleted.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: FIVE and not six. A separate read-only {@code lookupLastTransaction}
+     * operation was published beside the copy for a time, on the ground that the PF5 paragraph splits at
+     * its own seam -- line 473 validates only the key fields, lines 480 to 493 paint eleven values into
+     * the form, and line 495 is where the capture begins -- and that one operation binding the capture
+     * request could not be called from an empty form, its eleven data members being required. The
+     * premise stopped holding when the copy operation was given its OWN request shape:
+     * {@code CopyLastRequest} declares the two key components and the confirmation only, so the copy is
+     * callable from an empty form, and its withheld answer carries {@code CopiedTransactionData} -- the
+     * eleven painted values together with the resolved account and card. That single operation is
+     * therefore both halves: the read that paints and, on a confirming turn, the capture. Two operations
+     * over one paragraph would leave a client choosing which of two documents it is confirming, which is
+     * the split the reference does not have. The count is asserted rather than inferred so that
+     * publishing a further operation is a deliberate edit here as well.</p>
      */
     @Test
     @DisplayName("cover exactly five operations")

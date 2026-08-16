@@ -18,6 +18,7 @@ import com.carddemo.common.security.OpaqueIdentifier;
 import com.carddemo.reporting.domain.AccountView;
 import com.carddemo.reporting.domain.CardXrefView;
 import com.carddemo.reporting.domain.CustomerView;
+import com.carddemo.reporting.domain.StatementTransactionView;
 import com.carddemo.reporting.dto.StatementDocument;
 import com.carddemo.reporting.dto.StatementRequest;
 import com.carddemo.reporting.dto.StatementResponse;
@@ -84,6 +85,29 @@ class StatementServiceTest {
 
     /** A second card's fingerprint, so a two-card account can be expressed. */
     private static final String OTHER_FINGERPRINT = "b".repeat(63) + "2";
+
+    /**
+     * The measured transaction threshold of the baseline's inner same-card table.
+     *
+     * <p>Assumptions: 512, from {@code tests/README.md}, which records that one card renders up to 512
+     * transactions and that the 513th overruns {@code WS-TRAN-TBL} at line 228 of
+     * {@code app/cbl/CBSTM03A.CBL} and terminates the process. It is the MEASURED threshold rather than
+     * the declared arity of that table, and the two are different numbers -- the declaration reads
+     * {@code OCCURS 10 TIMES} -- which is exactly why the measured figure is cited to the document that
+     * measured it rather than derived from the copybook.</p>
+     */
+    private static final int BASELINE_INNER_TABLE_THRESHOLD = 512;
+
+    /**
+     * The declared and measured card arity of the baseline's outer table.
+     *
+     * <p>Assumptions: 51, from {@code WS-CARD-TBL OCCURS 51 TIMES} at line 226 of
+     * {@code app/cbl/CBSTM03A.CBL} and corroborated as measured in {@code tests/README.md}, which records
+     * that the 52nd distinct card overruns it. This is the one of the three arity figures where the
+     * declaration and the measurement agree, and it is cited to both so a reader need not decide which
+     * to trust.</p>
+     */
+    private static final int BASELINE_OUTER_TABLE_ARITY = 51;
 
     /** The account the seeded card is issued against, at the declared eleven positions. */
     private static final long ACCOUNT_ID = 21_820_493_291L;
@@ -754,6 +778,132 @@ class StatementServiceTest {
                 StatementService.HEADING_CHUNK_SIZE);
     }
 
+    // WHY : Assumptions: the two cases below are the ONLY executable controls in this reactor over the
+    //       two arity thresholds tests/README.md measures on app/cbl/CBSTM03A.CBL, and they are here
+    //       rather than in the mapper package because arity is a property of what ACCUMULATES a
+    //       statement. StatementTextMapper is a stateless per-line assembler that holds no table, which
+    //       its own class documentation states, so no arity assertion is available to write there.
+    // WHY : Assumptions: both cases assert that the migrated Java has NO fixed arity, and neither
+    //       asserts that the baseline was put right. app/** is reference-only, so the baseline's two
+    //       unchecked tables stay exactly as they are; what these cases pin is the migrated behaviour
+    //       and the divergence D-2 registered in docs/architecture/cobol-to-service-traceability.md.
+    //       Framing them as repairs would assert an edit to app/cbl/CBSTM03A.CBL that never happened.
+    /**
+     * Asserts one card carrying more transactions than the baseline's inner table admits still statements.
+     *
+     * <p>Purpose: {@code tests/README.md} records the measured threshold of the inner same-card table in
+     * {@code app/cbl/CBSTM03A.CBL} -- a single card renders up to 512 transactions and the 513th overruns
+     * the table and terminates the process with a memory fault. The migrated service holds no table, so
+     * the 513th transaction must be an ordinary one. This case drives exactly that count and asserts
+     * every line survives to the document.</p>
+     *
+     * <p>Assumptions: 513 is driven rather than a comfortable round number above it, because the
+     * threshold is a boundary and the first value past it is the one that distinguishes "no arity" from
+     * "an arity that happens to be larger". A run at 1,000 would pass against a service whose limit was
+     * 600 and would report the boundary as covered.</p>
+     *
+     * <p>Assumptions: the count is asserted on the DOCUMENT's transaction list rather than on the
+     * repository call, because a service that fetched 513 rows and then truncated its output at 512
+     * would satisfy a call assertion while producing exactly the baseline's defect in a quieter form.
+     * The window request is bounded by {@code MAX_RESPONSE_TRANSACTIONS}, which is 1,000 and therefore
+     * above this boundary -- so a truncation at 513 could only come from an arity, not from the cap.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a card carrying 513 transactions statements every one of them")
+    void aCardPastTheBaselineInnerTableThresholdStatementsEveryTransaction() {
+        stubOneCard();
+        when(transactions.aggregateByCardFingerprint(FINGERPRINT))
+                .thenReturn(aggregate("-1234.56", BASELINE_INNER_TABLE_THRESHOLD + 1L));
+        when(transactions.findWindowByCardFingerprint(
+                eq(FINGERPRINT), anyString(), eq(StatementService.MAX_RESPONSE_TRANSACTIONS)))
+                .thenReturn(transactionWindow(BASELINE_INNER_TABLE_THRESHOLD + 1));
+
+        StatementDocument document = service.compose(new StatementRequest(SEED_CARD_NUMBER, null));
+
+        assertThat(document.transactions())
+                .as("the 513th transaction overruns the baseline's inner table at "
+                        + "app/cbl/CBSTM03A.CBL line 228; the migrated service must hold no table")
+                .hasSize(BASELINE_INNER_TABLE_THRESHOLD + 1);
+        assertThat(document.statement().transactionCount())
+                .as("the heading must report the true count past the threshold as well")
+                .isEqualTo(BASELINE_INNER_TABLE_THRESHOLD + 1);
+        assertThat(document.transactions().getLast().transactionId())
+                .as("the LAST line is asserted by identity, so a truncation that kept the count "
+                        + "by repeating a row could not pass")
+                .isEqualTo(transactionId(BASELINE_INNER_TABLE_THRESHOLD));
+    }
+
+    /**
+     * Asserts a run over more distinct cards than the baseline's outer table admits statements them all.
+     *
+     * <p>Purpose: {@code tests/README.md} records the measured threshold of the outer card table --
+     * {@code WS-CARD-TBL OCCURS 51 TIMES} at line 226 of {@code app/cbl/CBSTM03A.CBL} renders up to 51
+     * distinct cards and the 52nd overruns it and terminates the process. The migrated run walks the
+     * portfolio by keyset in chunks and holds no card table, so the 52nd card must be an ordinary one.
+     * This case drives 52 distinct cards across two chunk reads and asserts a statement, and an index
+     * entry, for every one of them.</p>
+     *
+     * <p>Assumptions: the 52 cards are split ACROSS the chunk boundary rather than delivered in one
+     * read, because a single read would exercise the absence of a table while leaving the continuation
+     * unexercised, and a run that restarted each chunk from the beginning would loop on a real portfolio.
+     * The split is 51 then 1, which puts the boundary card alone in the second chunk so that a failure
+     * naming it is unambiguous.</p>
+     *
+     * <p>Assumptions: the index is asserted contiguous over all 52 entries as well as complete. A gap
+     * would mean records belonging to no statement and an overlap would mean one card's records reported
+     * inside another's, and both are states a count alone cannot distinguish from a correct run.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a run over 52 distinct cards produces a statement for every one of them")
+    void aRunPastTheBaselineOuterTableThresholdStatementsEveryCard() {
+        List<StatementCardXrefRepository.StatementHeadingRow> firstChunk = new ArrayList<>();
+        for (int index = 0; index < BASELINE_OUTER_TABLE_ARITY; index++) {
+            firstChunk.add(headingRow(distinctFingerprint(index)));
+        }
+        String boundaryFingerprint = distinctFingerprint(BASELINE_OUTER_TABLE_ARITY);
+
+        when(cardXrefs.findHeadingChunk("", "", StatementService.HEADING_CHUNK_SIZE))
+                .thenReturn(firstChunk);
+        when(cardXrefs.findHeadingChunk(MASKED_CARD,
+                distinctFingerprint(BASELINE_OUTER_TABLE_ARITY - 1),
+                StatementService.HEADING_CHUNK_SIZE))
+                .thenReturn(List.of(headingRow(boundaryFingerprint)));
+        when(cardXrefs.findHeadingChunk(MASKED_CARD, boundaryFingerprint,
+                StatementService.HEADING_CHUNK_SIZE))
+                .thenReturn(List.of());
+        when(transactions.aggregateByCardFingerprint(anyString()))
+                .thenReturn(aggregate("0.00", 0L));
+        when(transactions.findWindowByCardFingerprint(anyString(), anyString(), anyInt()))
+                .thenReturn(List.of());
+
+        RecordingSink sink = new RecordingSink();
+        StatementRunOutcome outcome = service.generateStatements(sink);
+
+        assertThat(outcome.statementsProduced())
+                .as("the 52nd card overruns the baseline's outer table at app/cbl/CBSTM03A.CBL "
+                        + "line 226; the migrated run must hold no card table")
+                .isEqualTo(BASELINE_OUTER_TABLE_ARITY + 1);
+        assertThat(outcome.index()).hasSize(BASELINE_OUTER_TABLE_ARITY + 1);
+
+        long accountedRecords = 0;
+        for (int position = 0; position < outcome.index().size(); position++) {
+            assertThat(outcome.index().get(position).firstRecord())
+                    .as("statement %d must begin where statement %d ended", position, position - 1)
+                    .isEqualTo(accountedRecords);
+            accountedRecords += outcome.index().get(position).recordCount();
+        }
+        assertThat(accountedRecords)
+                .as("the index must account for every plain-text record all 52 statements wrote")
+                .isEqualTo(sink.plainRecords.size());
+        verify(cardXrefs).findHeadingChunk(MASKED_CARD,
+                distinctFingerprint(BASELINE_OUTER_TABLE_ARITY - 1),
+                StatementService.HEADING_CHUNK_SIZE);
+    }
+
     // WHY : Refactoring Rationale: this case exists because the run aborted on it. Two of the projected
     //       customer attributes are nullable in the owning relation -- the middle name and the second
     //       address line -- and the band assembler refuses a null because a band field is required, so
@@ -841,6 +991,112 @@ class StatementServiceTest {
         return new AccountView(ACCOUNT_ID, "Y", Money.of("100.00"), Money.of("5000.00"),
                 LocalDate.of(2020, 1, 1), LocalDate.of(2027, 1, 1), LocalDate.of(2024, 1, 1),
                 "DEFAULT   ");
+    }
+
+    /**
+     * Builds a window of transaction projections, distinct by identifier, for the arity cases.
+     *
+     * <p>Assumptions: the projection has no public constructor and no setters -- it is an entity whose
+     * no-argument constructor is protected so the persistence provider can reach it -- so it is both
+     * INSTANTIATED and populated reflectively. Field access is the same mechanism
+     * {@code com.carddemo.reporting.domain.DiagnosticRenderingTest} already uses for this type; that
+     * class calls the constructor directly because it sits in the projection's own package, and this one
+     * cannot. Widening the constructor to satisfy a test was rejected outright: protected is the
+     * narrowest visibility the persistence contract admits and the projection's own documentation says
+     * so, and a production visibility loosened for a fixture is a change to the type's contract. Only
+     * the three members a statement line reads are assigned, because the assembler at
+     * {@code StatementService.writeTransaction} prepares a line from the transaction identifier, the
+     * description and the amount alone; assigning the other ten would suggest they were load-bearing
+     * here.</p>
+     *
+     * <p>Assumptions: every row carries a DISTINCT identifier, so a truncation that preserved a count by
+     * repeating one row cannot pass the identity assertion the consuming case makes on the last line.</p>
+     *
+     * @param count the number of rows to build, which must be positive
+     * @return the window in identifier order; never {@code null}
+     */
+    private static List<StatementTransactionView> transactionWindow(int count) {
+        List<StatementTransactionView> window = new ArrayList<>(count);
+        for (int index = 0; index < count; index++) {
+            StatementTransactionView row = newProjection();
+            setMember(row, "key", new StatementTransactionView.StatementTransactionKey(
+                    SEED_CARD_NUMBER, transactionId(index)));
+            setMember(row, "description", "SPECIMEN LINE");
+            setMember(row, "amount", Money.of("-1.00"));
+            window.add(row);
+        }
+        return window;
+    }
+
+    /**
+     * Instantiates the transaction projection through its protected no-argument constructor.
+     *
+     * @return a projection with every member unassigned; never {@code null}
+     * @throws IllegalStateException if the constructor cannot be reached, which means the projection's
+     *     declared shape changed rather than that a case under test failed
+     */
+    private static StatementTransactionView newProjection() {
+        try {
+            java.lang.reflect.Constructor<StatementTransactionView> declared =
+                    StatementTransactionView.class.getDeclaredConstructor();
+            declared.setAccessible(true);
+            return declared.newInstance();
+        } catch (ReflectiveOperationException unreachable) {
+            throw new IllegalStateException(
+                    "the transaction projection declares no reachable no-argument constructor",
+                    unreachable);
+        }
+    }
+
+    /**
+     * Renders the sixteen-character transaction identifier of one window position.
+     *
+     * <p>Assumptions: sixteen characters with the position zero-padded into the tail, matching the width
+     * the transaction key declares. A shorter rendering would be refused while the line is prepared, so
+     * the padding is part of the fixture rather than decoration.</p>
+     *
+     * @param index the zero-based window position
+     * @return that position's identifier; never {@code null}
+     */
+    private static String transactionId(int index) {
+        return "TRN" + String.format("%013d", index);
+    }
+
+    /**
+     * Renders a distinct sixty-four-character card fingerprint for one position in a run.
+     *
+     * <p>Assumptions: the width is the fingerprint's declared sixty-four and the position is rendered
+     * into the tail, so every value is distinct and every value is well formed. The run orders cards by
+     * the whole heading tuple, so distinctness here is what makes a skipped or repeated card visible.</p>
+     *
+     * @param index the zero-based position in the run
+     * @return that position's fingerprint; never {@code null}
+     */
+    private static String distinctFingerprint(int index) {
+        return "c".repeat(58) + String.format("%06d", index);
+    }
+
+    /**
+     * Assigns one declared member of a projection by field access.
+     *
+     * <p>Assumptions: a failure to reach a member is rethrown unchecked rather than reported as an
+     * assertion failure, because a renamed member is a fault in this fixture and not a property the
+     * consuming cases measure. Surfacing the two differently keeps them attributable.</p>
+     *
+     * @param target the instance to assign on; must not be {@code null}
+     * @param member the declared field name; must not be {@code null}
+     * @param value the value to assign
+     * @throws IllegalStateException if the member cannot be reached or assigned
+     */
+    private static void setMember(Object target, String member, Object value) {
+        try {
+            java.lang.reflect.Field field = target.getClass().getDeclaredField(member);
+            field.setAccessible(true);
+            field.set(target, value);
+        } catch (ReflectiveOperationException unreachable) {
+            throw new IllegalStateException(
+                    "the projection declares no assignable member " + member, unreachable);
+        }
     }
 
     /**

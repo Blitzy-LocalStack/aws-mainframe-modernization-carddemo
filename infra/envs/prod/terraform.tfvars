@@ -25,23 +25,105 @@ tags = {
   ManagedBy   = "terraform"
 }
 
-aurora_engine_version               = "16.6"
-aurora_parameter_group_family       = "aurora-postgresql16"
-aurora_min_capacity                 = 2
-aurora_max_capacity                 = 32
-aurora_seconds_until_auto_pause     = 300
-aurora_backup_retention_period      = 35
+# WHY : Refactoring Rationale: this pin was "16.6", whose Aurora STANDARD SUPPORT
+#       ended on 2026-05-31 -- a cluster created from it would either be force
+#       upgraded on Aurora's schedule or attract Extended Support charges, and in
+#       either case the version this file claims to deploy would stop being the
+#       version running. Trade-offs: 16.8 is chosen over the newest available
+#       16.x because AWS designates it a LONG-TERM SUPPORT release (published
+#       2025-04-07), which carries a minimum three-year availability horizon
+#       instead of the twelve months a standard minor gets, so this pin needs
+#       reviewing once every few years rather than every year. What is given up
+#       is new engine features added after 16.8 -- nothing this workload uses,
+#       since the schemas need only ordinary relational features -- while
+#       critical security and stability patches still arrive, because Aurora
+#       patches LTS clusters to that release's latest patch version annually.
+#       Alternatives Considered: 17.x LTS would also be supported, but a major
+#       version change would also move aurora_parameter_group_family below and
+#       is a larger change than closing a support-calendar gap. Assumptions: 16.8
+#       is comfortably above the 16.3 minor that Serverless v2 scale-to-zero
+#       requires, which dev depends on through aurora_min_capacity = 0.
+#
+#       The marker line below is MACHINE-READ by the "Verify the Aurora engine
+#       pin against its support review horizon" gate in infra-ci.yml, which fails
+#       the build once the horizon is reached or passed. WHY a declared horizon
+#       rather than a live lookup: the static validation job holds no AWS
+#       credentials and must run offline, so a gate that queried the support
+#       calendar would be skipped exactly when it mattered; a declared date
+#       cannot silently age out because its expiry is what breaks the build.
+# aurora-engine-support-review: 16.8 by 2028-04-07
+aurora_engine_version         = "16.8"
+aurora_parameter_group_family = "aurora-postgresql16"
+# WHY : Capacity. Trade-offs: a MINIMUM of 2 rather than the zero dev uses. Scaling to
+#       zero would save money between the nightly window and the working day, and it is
+#       declined here because the first request after a pause waits roughly fifteen
+#       seconds for a resume -- a latency an interactive operator would read as an
+#       outage, and one the batch chain would absorb into its own window. Holding two
+#       capacity units keeps the writer warm at the smallest size that is always
+#       available. Assumptions: because the minimum is non-zero, pausing can never occur,
+#       so the auto-pause delay is inert here and is set only to keep the two roots'
+#       inputs identical in shape -- the aurora module passes nothing when the minimum is
+#       non-zero.
+#       Alternatives Considered: a maximum of 4 as in dev. Rejected because the posting
+#       and interest jobs are set-based and read the whole ledger, so the ceiling has to
+#       admit a burst the nightly chain genuinely produces; 32 bounds a runaway rather
+#       than sizing the workload, which scaling does.
+aurora_min_capacity             = 2
+aurora_max_capacity             = 32
+aurora_seconds_until_auto_pause = 300
+# WHY : Retention. Trade-offs: 35 days, the maximum Aurora's automated backups allow.
+#       Production ledger rows are not reproducible from any source -- the baseline
+#       extracts seeded the migration once and every posting since is original -- so the
+#       recovery objective is a true point-in-time restore and the window is bought at
+#       its longest. Dev holds 1 for the opposite reason.
+aurora_backup_retention_period = 35
+# WHY : Windows. Assumptions: both windows sit AFTER the nightly batch chain, which
+#       batch_schedule_expression below starts at 02:00 UTC. A maintenance restart of a
+#       single-writer cluster is a full outage rather than a rolling one, so overlapping
+#       it with the chain would fail a run mid-posting; the backup window is placed
+#       first so a snapshot captures the night's posted state before maintenance may
+#       restart anything. Trade-offs: identical to dev's windows on purpose, so that a
+#       maintenance night rehearsed in development happens at the same point relative to
+#       the chain here.
 aurora_preferred_backup_window      = "07:00-08:00"
 aurora_preferred_maintenance_window = "sun:09:00-sun:10:00"
 
+# WHY : Task sizing. Trade-offs: double dev's CPU and memory, and TWO tasks per service
+#       rather than one. The second task is not for throughput; it is what makes a rolling
+#       ECS deployment a rolling one -- with a single task the deployment is an outage, and
+#       with two the load balancer always has a healthy target. Assumptions: the services
+#       are stateless with no session store (AAP section 0.7.1), so a second task needs no
+#       sticky routing and adds no coordination.
 ecs_task_cpu      = 1024
 ecs_task_memory   = 2048
 ecs_desired_count = 2
 
-log_retention_days        = 365
-cloudfront_price_class    = "PriceClass_All"
+# WHY : Log retention and edge reach. Trade-offs: 365 days of logs, against 7 in dev.
+#       These logs are the audit trail for a financial workload and are the only record of
+#       who read which account, so retention is set to a year rather than to what
+#       debugging needs. PriceClass_All serves cardholders from every edge location,
+#       accepting the higher per-request cost that dev declines with PriceClass_100.
+log_retention_days     = 365
+cloudfront_price_class = "PriceClass_All"
+# WHY : Schedule. Assumptions: 02:00 UTC, and the SAME expression in both roots. It is
+#       placed before the backup and maintenance windows above so the chain completes
+#       against a cluster nothing else is restarting, and it is identical across
+#       environments so a rehearsal in development exercises the same ordering against
+#       those windows that production will. This is the EventBridge Scheduler expression
+#       that replaces the CA-7 and Control-M definitions under app/scheduler, whose
+#       intent -- one nightly chain rather than per-job triggers -- is what the single
+#       expression carries.
 batch_schedule_expression = "cron(0 2 * * ? *)"
 
+# WHY : Destructive-operation flags. Trade-offs: all three inverted from dev, and each is
+#       a deliberate obstacle rather than a default. deletion_protection true makes
+#       `terraform destroy` FAIL on the cluster rather than succeed, skip_final_snapshot
+#       false forces a final snapshot before any deletion Aurora does permit, and a
+#       30-day secret recovery window keeps a deleted secret restorable for a month.
+#       Assumptions: the cost is that tearing production down is not one command -- which
+#       is the intent, and docs/runbooks/teardown.md documents the two-step procedure.
+#       An accidental destroy of production data is unrecoverable, so the flags are set
+#       to make the accident impossible rather than merely unlikely.
 deletion_protection            = true
 skip_final_snapshot            = false
 secret_recovery_window_in_days = 30

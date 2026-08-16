@@ -134,11 +134,28 @@
  *       calendar month rather than a month-to-date range, asserted over a year roll and a leap
  *       February. {@code ReportController} declares no clock of any kind; the clock is a constructor
  *       parameter of the execution service.</li>
- *   <li>The report line being exactly 133 columns with byte-exact edit masks belongs to
- *       {@code TransactionReportServiceTest}, and the per-band byte arithmetic beneath it to the
- *       sibling {@code com.carddemo.reporting.mapper} test package.</li>
- *   <li>Correct statement output for one card carrying far more than 512 transactions, and for far more
- *       than 51 distinct cards, both belong to {@code StatementServiceTest}.</li>
+ *   <li>The report line being exactly 133 columns with byte-exact edit masks belongs to the sibling
+ *       {@code com.carddemo.reporting.mapper} test package, and specifically to
+ *       {@code TransactionReportMapperTest}, whose {@code REPORT_RECORD_LENGTH} is asserted on the
+ *       header, the separator rule, the blank band, the detail line and every band of the emitted
+ *       block, and to {@code ReportBandLayoutsTest}, whose {@code DECLARED_RECORD_LENGTH} pins the same
+ *       width against the three places the baseline declares it. Refactoring Rationale: this entry
+ *       previously named {@code TransactionReportServiceTest} as the owner. That class contains no
+ *       occurrence of the width at all -- the mapper owns the assembly and the service owns the
+ *       selection -- so a reader who went looking for the control where this list sent them would have
+ *       found none and could reasonably have concluded the control was missing rather than misfiled.</li>
+ *   <li>Correct statement output for one card carrying more transactions than the baseline's inner table
+ *       admits, and for more distinct cards than its outer table admits, belongs to
+ *       {@code StatementServiceTest}, at
+ *       {@code aCardPastTheBaselineInnerTableThresholdStatementsEveryTransaction} and
+ *       {@code aRunPastTheBaselineOuterTableThresholdStatementsEveryCard}. Refactoring Rationale: this
+ *       entry named that class before either case existed, so it described intent as though it were
+ *       coverage. Both cases now exist and are named individually here rather than by class, because
+ *       naming the class is what let the claim survive their absence. They drive 513 transactions and 52
+ *       distinct cards -- the first value past each measured threshold rather than a comfortable figure
+ *       above it -- and they assert that the migrated service imposes NO arity, which is divergence
+ *       {@code D-2} in {@code docs/architecture/cobol-to-service-traceability.md} and not a repair of
+ *       {@code app/cbl/CBSTM03A.CBL}, which is reference-only and unchanged.</li>
  *   <li>This module's login role being provably unable to write, and no migration directory or
  *       migration tooling existing anywhere in it, belongs to {@code ServiceCatalogInventoryTest} for
  *       the directory census, to {@code DataSourceConfigTest} in the sibling
@@ -309,7 +326,7 @@
  *
  * <p>Assumptions: those checks reach this tree because the gate is configured to include the test
  * source directory, which was established by observation rather than by inference. The setting is
- * declared at {@code services/pom.xml} line 1005, this module's own build file does not override it,
+ * declared at {@code services/pom.xml} line 994, this module's own build file does not override it,
  * and rendering the effective build file for this module resolves it to true inside the documentation
  * gate execution. That value is what makes this FILE mandatory rather than merely conventional.
  * Refactoring Rationale: it was read from the declaring build file and then confirmed against the

@@ -32,7 +32,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * <p>Assumptions: the assertion is deliberately that the beans exist and not that a query returned
  * rows. No relation is created in the container at all, so a query cannot be executed here -- and it
  * does not need to be, because parsing happens against the metamodel rather than against the
- * catalogue. Alternatives Considered: creating the seven views in the container and asserting on rows,
+ * catalogue. Alternatives Considered: creating the eight views in the container and asserting on rows,
  * which would additionally prove the mapping matches the relations. Rejected because those views read
  * base tables that four <em>other</em> services' migrations create, so reproducing them here would
  * mean reproducing four migrations this module does not own, and the copy would drift from the

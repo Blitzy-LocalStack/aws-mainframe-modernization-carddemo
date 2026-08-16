@@ -793,7 +793,7 @@ This is stated plainly, because overclaiming it would itself breach the rule thi
 document exists to satisfy.
 
 [`config/checkstyle/checkstyle.xml`](../../../../../../config/checkstyle/checkstyle.xml)
-configures its checker with `fileExtensions` set to `java`, at line 185.
+configures its checker with `fileExtensions` set to `java`, at line 178.
 **Every `.txt` and `.md` file in this folder is therefore outside the audit set
 and is mechanically unchecked** -- including this document.
 

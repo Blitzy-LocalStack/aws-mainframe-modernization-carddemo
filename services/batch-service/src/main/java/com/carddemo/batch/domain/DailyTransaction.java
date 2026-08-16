@@ -224,9 +224,8 @@ import org.hibernate.type.SqlTypes;
  * interest job derives a transaction identifier per generated row, so a scan whose order varies
  * between runs shifts the contents of files that are compared byte for byte and the comparison then
  * fails for a reason that has nothing to do with logic. The ordering column is {@code ingestSeq},
- * not {@code transactionId}: both finders on {@code DailyTransactionRepository} name it -- the whole
- * scan as {@code findAllByOrderByIngestSeqAsc} and the resumable one as
- * {@code findByIngestSeqGreaterThanOrderByIngestSeqAsc} -- and it is the arrival ordinal described
+ * not {@code transactionId}: the sole finder on {@code DailyTransactionRepository} names it, as
+ * {@code findByIngestSeqGreaterThanOrderByIngestSeqAsc}, and it is the arrival ordinal described
  * two paragraphs above, so ordering by it reproduces the sequence
  * {@code app/cbl/CBTRN02C.cbl:202-219} reads the physical dataset in.</p>
  *

@@ -28,25 +28,39 @@ import org.springframework.stereotype.Service;
  *
  * <p>Assumptions: the asynchronous date-and-time inquiry that
  * {@code app/app-vsam-mq/cbl/CODATE01.cbl} serves over its queue pair is a SEPARATE route with a
- * separate implementation, {@link DateInquiryMessageListener}, and that route does not call this
- * class. The two do not share an evaluation because they do not answer the same question: this one
- * judges a date a caller submits, while the queue route emits the current system date and time and
- * reads no field of its request. The baseline itself keeps them apart -- a search for
+ * separate implementation, and that route does not call this class. The two do not share an evaluation
+ * because they do not answer the same question: this one judges a date a caller submits, while the
+ * queue route emits the current system date and time and reads no field of its request.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: that route is no longer implemented in THIS module. Both inquiry flows
+ * arrive on the ONE request queue the baseline defines at {@code app/app-vsam-mq/README.md} L53,
+ * aliased to CICS as {@code MQQUEUE(CARDREQ)} at L71, and a queue admits exactly one owning consumer,
+ * because a receive hides the message from every other consumer rather than delivering a copy to each.
+ * The owning consumer is {@code com.carddemo.account.service.InquiryMessageListener}, which dispatches
+ * on the request's four-character function code and renders the date answer from
+ * {@code com.carddemo.common.codec.DateInquiryReplyCodec} in the shared kernel. This module keeps the
+ * date EVALUATION -- the rules of {@code app/cbl/CSUTLDTC.cbl}, which this class holds -- and answers
+ * it on the synchronous endpoint only. Alternatives Considered: keeping the consumer here and making
+ * the account context forward date requests to it. Rejected because the routing decision has to be
+ * taken by whoever receives the message, so forwarding would add a pairwise machine-identity signing
+ * key, its rotation obligation, IAM grants and a network hop on the message path to obtain a value
+ * that is the clock formatted two ways. The baseline itself keeps them apart -- a search for
  * {@code CSUTLDTC} across all 524 lines of {@code app/app-vsam-mq/cbl/CODATE01.cbl} returns zero
  * occurrences, so the queue-borne program never calls the date-edit utility.</p>
  *
  * <p>Refactoring Rationale: this class supersedes a type named {@code DateConversionMessageListener}
  * that carried BOTH this evaluation and a second {@code @SqsListener} bound to the same request queue
- * as {@link DateInquiryMessageListener}. Two consumers on one queue is not a redundancy, it is a
+ * as the module's other consumer. Two consumers on one queue is not a redundancy, it is a
  * defect: the transport hands each message to whichever container polled first, and the two answered
  * with different reply widths, different reply routing, different content types and different expiry
  * handling, so the wire behaviour of the flow depended on a race. The queue side of that type was
  * removed rather than repaired because everything it did already existed on the surviving consumer
- * and existed in a better form there -- the reply rendering in
- * {@code com.carddemo.reference.mapper.DateInquiryReplyMapper}, the error sink in
- * {@code DateInquiryMessageListener.publishError}, and a requester-expiry check the removed consumer
- * did not honour at all. What remains here is the one member that had no counterpart: this
- * evaluation, which is reached only from the synchronous endpoint. Alternatives Considered: keeping
+ * and existed in a better form there -- the reply rendering, the error sink and a requester-expiry
+ * check the removed consumer did not honour at all. What remains here is the one member that had no
+ * counterpart: this evaluation, which is reached only from the synchronous endpoint. Assumptions: the
+ * surviving consumer has since moved to the account context for the topology reason recorded above, so
+ * the queue side of this flow is now absent from this module entirely rather than reduced to one
+ * consumer. Alternatives Considered: keeping
  * both types and disabling one listener behind a condition. Rejected because two implementations of
  * one wire contract drift whichever of them is switched off, and the condition would have to be
  * correct in every environment for the contract to hold.</p>

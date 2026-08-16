@@ -137,6 +137,26 @@
 # -----------------------------------------------------------------------------
 
 locals {
+  # WHY : Assumptions: this is the write-only VERSION every initial credential
+  #       document below is written at, hoisted out of the resource so that
+  #       outputs.tf can publish it. It stays a literal in this file rather than
+  #       becoming an input, for the reason recorded at the resource: an increment
+  #       is a deliberate re-issue of every stored value and belongs in a reviewed
+  #       edit rather than in a tfvars number an unrelated change can nudge.
+  # WHY : Refactoring Rationale: the literal used to appear only inside
+  #       aws_secretsmanager_secret_version.service, and a consumer had no way to
+  #       observe it. That mattered because the stored VALUE changes when this number
+  #       changes while every name, ARN and identifier stays exactly the same -- so a
+  #       root that binds these credentials to PostgreSQL roles could not tell a
+  #       re-issue from a no-op and would leave the database holding passwords the
+  #       tasks no longer present. Publishing the revision is what lets that root
+  #       trigger the rebinding; the alternative considered was publishing
+  #       `version_id`, which is rejected at the bottom of outputs.tf because a
+  #       rotation function supplied by a root moves AWSCURRENT to a version this
+  #       module has never seen, making that identifier confidently wrong exactly
+  #       when it is reached for.
+  service_credential_revision = 1
+
   # WHY : Assumptions: the shape `<prefix>/<environment>/aurora/<leaf>` is not
   #       this file's invention and cannot be chosen freely here.
   #       data-migration/src/carddemo_migration/config.py derives exactly that
@@ -371,7 +391,13 @@ resource "aws_secretsmanager_secret_version" "service" {
   #       variables.tf states, and neither environment root supplies a rotation
   #       function, so there is no externally-managed value for an increment to
   #       displace.
-  secret_string_wo_version = 1
+  # WHY : Assumptions: the number is read from local.service_credential_revision so
+  #       that the value written here and the value outputs.tf publishes are the same
+  #       expression rather than two copies. A consumer that must re-bind these
+  #       credentials to their PostgreSQL roles keys on that output, so a second copy
+  #       of the literal is the one drift that would leave the rebinding un-triggered
+  #       while the stored passwords had already changed.
+  secret_string_wo_version = local.service_credential_revision
 }
 
 # WHY : Assumptions: this resource is CONDITIONAL, and the condition is the whole

@@ -21,11 +21,6 @@ None
     is consulted and no query is executed at import time, so this module costs one compile even
     on a host with no database driver installed.
 
-Raises
-------
-None
-    Importing raises nothing. Every failure this pass can have belongs to a call, and each of
-    :exc:`RowCountVerificationError`'s three subclasses names one of them.
 
 What this pass CANNOT prove
 ---------------------------
@@ -121,7 +116,7 @@ __all__ = [
     "verify_row_counts",
 ]
 
-# WHY : Assumptions: the six names and their ORDER are the published contract of
+# Assumptions: the six names and their ORDER are the published contract of
 #   `data-migration/sql/verify/row_counts.sql`, whose final SELECT projects dataset, target_table,
 #   expected_rows, actual_rows, delta and status in exactly this sequence. They are named here so
 #   that a result set of the wrong arity is reported as a contract breach against a named column
@@ -137,14 +132,14 @@ ROW_COUNT_COLUMNS: Final[tuple[str, ...]] = (
     "status",
 )
 
-# WHY : Assumptions: the query spells the absent-dataset label exactly this way, as a quoted
+# Assumptions: the query spells the absent-dataset label exactly this way, as a quoted
 #   literal in its baseline VALUES list, and this module matches on that spelling to recognise the
 #   row. An empty string or a SQL NULL would have been the tempting encodings and the query uses
 #   neither, because a visible token survives a copy into an issue tracker where an empty cell
 #   does not.
 NO_DATASET_LABEL: Final[str] = "(none)"
 
-# WHY : Assumptions: `ledger.transactions` is the one migrated table with no seed dataset of its
+# Assumptions: `ledger.transactions` is the one migrated table with no seed dataset of its
 #   own, and TRAN is the layout that describes it. The fact is corroborated three ways rather than
 #   asserted here: no `app/data/ASCII/transact.txt` and no TRANSACT dataset under
 #   `app/data/EBCDIC` exist; `app/jcl/TRANFILE.jcl` primes the cluster at STEP15 by REPROing
@@ -155,19 +150,19 @@ NO_DATASET_LABEL: Final[str] = "(none)"
 #   baseline that has quietly become wrong.
 UNSEEDED_LAYOUT_NAME: Final[str] = "TRAN"
 
-# WHY : Assumptions: `reporting` is one of the eight schema names `config` publishes, and the role
+# Assumptions: `reporting` is one of the eight schema names `config` publishes, and the role
 #   this pass connects as is resolved FROM it rather than spelled out, so the role name lives in
 #   exactly one place -- `config.SCHEMA_ROLES`. Writing "carddemo_reporting" here would be a second
-#   copy that keeps answering plausibly after the first is corrected.
+#   copy that keeps answering plausibly once the two disagree.
 REPORTING_SCHEMA: Final[str] = "reporting"
 
-# WHY : Assumptions: the file NAME is a constant and the DIRECTORY is resolved at call time by
+# Assumptions: the file NAME is a constant and the DIRECTORY is resolved at call time by
 #   `row_count_query_path`, because the two have different lifetimes: the name is part of this
 #   pass's contract with its SQL sibling, while the directory depends on where the distribution
 #   was unpacked and is therefore an argument a caller may override.
 ROW_COUNT_QUERY_NAME: Final[str] = "row_counts.sql"
 
-# WHY : Assumptions: the two relations the committed query is entitled to read are named here, so
+# Assumptions: the two relations the committed query is entitled to read are named here, so
 #   that "this text is the row-count query" becomes a checkable property of the TEXT rather than a
 #   claim about a filename. `sql/V3__verification_surfaces.sql` creates both as owner-created
 #   security-barrier views projecting counts only -- no key, no identifier, no row value -- and the
@@ -179,12 +174,12 @@ ROW_COUNT_QUERY_RELATIONS: Final[frozenset[str]] = frozenset(
     {"reporting.v_verification_row_counts", "auth.v_verification_row_counts"}
 )
 
-# WHY : Assumptions: the committed query's IDENTITY is pinned, not just its shape. The shape checks
+# Assumptions: the committed query's IDENTITY is pinned, not just its shape. The shape checks
 #   establish that a text is a harmless read of the allow-listed views; they cannot establish that
 #   it is the report an operator believes is being run, and `--sql-root` exists precisely so a
 #   caller can say where the file is. Pinning the digest closes the remaining substitution: a
 #   well-formed, allow-listed text that is nevertheless not the shipped query is refused.
-# WHY : Trade-offs: the accepted cost is that editing `sql/verify/row_counts.sql` requires
+# Trade-offs: the accepted cost is that editing `sql/verify/row_counts.sql` requires
 #   re-measuring this constant. That cost is bounded by a test which compares the pin against the
 #   shipped file and reports the measured digest in its failure, so an edit that forgets the pin
 #   fails immediately with the value to paste rather than at an operator's next verification run.
@@ -193,7 +188,7 @@ ROW_COUNT_QUERY_DIGEST: Final[str] = (
     "3ed794296878932c9385059fa4441f3132aaee966216830e7de9324269ba881d"
 )
 
-# WHY : Assumptions: the query executes under a statement timeout, set for its transaction only, and
+# Assumptions: the query executes under a statement timeout, set for its transaction only, and
 #   the value matches the money pass's own so an operator learns one number. Five minutes never
 #   bounds a healthy run -- the views aggregate eleven tables whose largest is the
 #   three-hundred-thousand-row transaction master, seconds of sequential scan on the smallest
@@ -201,21 +196,21 @@ ROW_COUNT_QUERY_DIGEST: Final[str] = (
 #   is meant to gate, which then fails with a named timeout instead of holding the window open.
 _STATEMENT_TIMEOUT_MILLISECONDS: Final[int] = 300_000
 
-# WHY : Assumptions: read-only-ness is asserted by the SERVER for the transaction the query runs in,
+# Assumptions: read-only-ness is asserted by the SERVER for the transaction the query runs in,
 #   in addition to the role holding no write privilege. The two fail differently and that is why
 #   both are kept: the role is what makes writing impossible, and the transaction setting is what
 #   makes an ATTEMPT to write fail loudly on a cluster where the role was mis-provisioned. The
 #   spelling is `SET TRANSACTION` so the setting lasts exactly as long as the read it protects.
 _READ_ONLY_TRANSACTION_STATEMENT: Final[str] = "SET TRANSACTION READ ONLY"
 
-# WHY : Assumptions: only these two keywords may OPEN the query, and the pair is an allow-list
+# Assumptions: only these two keywords may OPEN the query, and the pair is an allow-list
 #   rather than a list of refused verbs. A single statement beginning `SELECT` or `WITH` cannot
 #   modify data unless one of its own expressions does, which the relation check also catches,
 #   whereas enumerating write verbs leaves the set open-ended -- a statement type nobody listed
 #   would pass a deny-list and fail this allow-list.
 _READING_KEYWORDS: Final[frozenset[str]] = frozenset({"SELECT", "WITH"})
 
-# WHY : Assumptions: a relation is recognised after FROM or JOIN, optionally schema-qualified, over
+# Assumptions: a relation is recognised after FROM or JOIN, optionally schema-qualified, over
 #   the COMMENT-STRIPPED text so the query's own prose cannot contribute a match. It is a shape
 #   check rather than a parse: the accepted cost is that a sub-select's FROM is treated like a
 #   top-level one, which is the safe direction because every relation anywhere must be accounted
@@ -224,7 +219,7 @@ _RELATION_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(?i)\b(?:from|join)\s+([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)?)"
 )
 
-# WHY : Assumptions: a common table expression is recognised by its `<name> [(columns)] AS (` form
+# Assumptions: a common table expression is recognised by its `<name> [(columns)] AS (` form
 #   after the opening WITH or a comma, which is how the shipped query declares `expected` and
 #   `actual`. Recognising them is what lets the relation check insist on the allow-listed views
 #   without rejecting the query's own inline vocabulary.
@@ -252,11 +247,6 @@ class RowCountVerificationError(RuntimeError):
     -------
     None
         Exception classes are raised, not returned.
-
-    Raises
-    ------
-    None
-        Declaring an exception class raises nothing.
     """
 
 
@@ -280,11 +270,6 @@ class ResultSetContractError(RowCountVerificationError):
     -------
     None
         Exception classes are raised, not returned.
-
-    Raises
-    ------
-    None
-        Declaring an exception class raises nothing.
     """
 
 
@@ -307,11 +292,6 @@ class VerificationQueryError(RowCountVerificationError):
     -------
     None
         Exception classes are raised, not returned.
-
-    Raises
-    ------
-    None
-        Declaring an exception class raises nothing.
     """
 
 
@@ -334,11 +314,6 @@ class RowCountVerdict(enum.Enum):
     -------
     None
         Enumeration classes are referenced, not returned.
-
-    Raises
-    ------
-    None
-        Declaring an enumeration raises nothing.
     """
 
     MATCH = "MATCH"
@@ -359,26 +334,17 @@ class RowCountVerdict(enum.Enum):
         bool
             True for :attr:`MATCH` and :attr:`MISMATCH`, both of which weighed a baseline against
             a count. False for :attr:`NO_BASELINE`, where there was nothing to weigh.
-
-        Raises
-        ------
-        None
-            Reading a member cannot fail.
         """
         return self is not RowCountVerdict.NO_BASELINE
 
-    # WHY : Refactoring Rationale: this enumeration published a `verified` property returning True
-    #   for MATCH and NO_BASELINE and False only for MISMATCH, and it is REMOVED rather than
-    #   corrected. A member knows which of the three outcomes it is and knows nothing about how many
-    #   rows the table holds, so "NO_BASELINE is acceptable" could only be expressed here
-    #   unconditionally -- and it is not unconditional. The one line reaching this verdict is
+    # Assumptions: this enumeration publishes no "is this acceptable" property, and deliberately
+    #   cannot. A member knows which of the three outcomes it is and knows nothing about how many
+    #   rows the table holds, so a member-level rule could only treat NO_BASELINE as acceptable
+    #   unconditionally -- and it is conditional. The one line reaching that verdict is
     #   `ledger.transactions`, which the ETL leaves EMPTY because the posting job fills it, so a
     #   nonzero count there is stale data from an earlier cutover attempt, a load pointed at the
-    #   wrong table, or a posting run that started before verification. Every one of those was
-    #   certified as a pass. The rule now lives on :class:`RowCountRow`, which holds the count it
-    #   needs. Removing the property rather than leaving it is deliberate: a published name that
-    #   answers a question it cannot answer correctly is how the same defect returns by another
-    #   caller.
+    #   wrong table, or a posting run that started before verification. The acceptability rule
+    #   therefore lives on :class:`RowCountRow`, which holds the count it needs to apply it.
 
 
 @dataclass(frozen=True)
@@ -409,12 +375,6 @@ class DatasetBaseline:
         Construction binds the three declared values. The inapplicability is stated rather than
         left silent, so a reader can tell a value object with no return from a docstring that
         forgot to document one.
-
-    Raises
-    ------
-    None
-        Construction cannot fail. The layout name is resolved lazily by :attr:`reclen`, so a
-        name that is not registered is reported when the length is asked for rather than here.
     """
 
     dataset: str
@@ -441,13 +401,13 @@ class DatasetBaseline:
             Propagated from :mod:`carddemo_migration.copybook.layouts` if the layout name is not
             registered, which is a typo in this module rather than a data fault.
         """
-        # WHY : Assumptions: the length is resolved from `copybook.layouts` and is never declared
+        # Assumptions: the length is resolved from `copybook.layouts` and is never declared
         #   in this module. Offsets, widths and record lengths are single-sourced there and every
         #   reader resolves them from it, so a second copy here is exactly the drift
-        #   single-sourcing exists to prevent -- the copy would keep dividing dataset sizes
-        #   plausibly after the original was corrected, and this pass would then certify a load
-        #   against a geometry the readers no longer use.
-        # WHY : Assumptions: the export record is reached through EXPORT_HEADER_LAYOUT rather than
+        #   single-sourcing exists to prevent -- a copy keeps dividing dataset sizes plausibly
+        #   once it disagrees with the layout, and this pass would then certify a load against a
+        #   geometry the readers do not use.
+        # Assumptions: the export record is reached through EXPORT_HEADER_LAYOUT rather than
         #   through `reclen_of`, because EXPORT is not in that registry -- `reclen_of("EXPORT")`
         #   raises. Its length and its record count are BOTH 500 and they are unrelated facts: 500
         #   bytes a record, 250000 bytes of dataset, 500 records. Conflating them is the specific
@@ -471,13 +431,8 @@ class DatasetBaseline:
             ``schema.table`` for a dataset with a declared load target; ``None`` for the export
             record, which is a round-trip artifact rather than a load target and therefore has no
             line in the row-count report.
-
-        Raises
-        ------
-        None
-            Membership is tested before resolution, so no lookup can fail.
         """
-        # WHY : Assumptions: the table name comes from `loaders.aurora.TARGETS`, the same
+        # Assumptions: the table name comes from `loaders.aurora.TARGETS`, the same
         #   declaration the loader writes through, so this pass cannot disagree with the loader
         #   about which table a dataset lands in. Membership is tested rather than catching the
         #   loader's refusal, because "this dataset has no load target" is a normal property of the
@@ -514,7 +469,7 @@ class DatasetBaseline:
         return count_fixed_length_records(size_bytes, self.reclen)
 
 
-# WHY : Assumptions: every count below was cross-checked TWO independent ways against the
+# Assumptions: every count below was cross-checked TWO independent ways against the
 #   immutable seed data -- the line count of `app/data/ASCII/<dataset>.txt`, and the byte size of
 #   the matching `app/data/EBCDIC` dataset divided by the record length its copybook declares --
 #   and both derivations agree on every row with every division exact and no remainder, which is
@@ -522,17 +477,17 @@ class DatasetBaseline:
 #   literals rather than measurements taken at run time so that this module needs no access to the
 #   seed files in order to know what a correct load looks like, and so that a drift in either the
 #   data or the loader shows up as a delta instead of moving the yardstick with it.
-# WHY : Assumptions: `discgrp` is 51 where every other master is 50, and the odd number is the
+# Assumptions: `discgrp` is 51 where every other master is 50, and the odd number is the
 #   correct one. `app/data/ASCII/discgrp.txt` holds 51 lines and the EBCDIC dataset holds 2550
 #   bytes of a 50-byte record. The extra rows are the mandatory 'DEFAULT' disclosure group the
 #   interest calculation falls back to when an account's own group key is not found; carrying 50
 #   here would report a correct load as holding one row too many and send an operator hunting a
 #   duplicate that does not exist.
-# WHY : Assumptions: `usrsec` is derived from the EBCDIC dataset alone, because it is the one
+# Assumptions: `usrsec` is derived from the EBCDIC dataset alone, because it is the one
 #   master with no `app/data/ASCII` counterpart: 800 bytes over the 80-byte record its copybook
 #   declares. Nothing about its content is recorded here -- see the disclosure note on
 #   `describe`.
-# WHY : Trade-offs: the export record is listed even though it has no target table and therefore
+# Trade-offs: the export record is listed even though it has no target table and therefore
 #   no line in the SQL report. The cost is one entry a caller must know to skip when building the
 #   report's expected pair set, which `_expected_report_pairs` does from `target_table` rather
 #   than from a hand-kept exclusion list. The benefit is that the eleventh committed seed dataset
@@ -621,7 +576,7 @@ def count_dataset_records(source: pathlib.Path, dataset: str) -> int:
     RecordLengthError
         If the file's size is not an exact multiple of the record length.
     """
-    # WHY : Assumptions: only the SIZE of the file is read, never a byte of its content, so this
+    # Assumptions: only the SIZE of the file is read, never a byte of its content, so this
     #   function cannot decode anything and cannot therefore mis-decode anything. That also means
     #   it never has a value to disclose -- the count is derived from `stat`, and the EBCDIC
     #   decode stays where it belongs, behind the readers and their per-field codec.
@@ -660,13 +615,6 @@ class RowCountComparison:
     None
         Construction binds the four compared values; the verdict is derived by :attr:`matched`
         and :attr:`difference` rather than stored, so the two cannot disagree.
-
-    Raises
-    ------
-    None
-        Construction validates nothing and cannot fail. The inapplicability is stated rather
-        than left silent, so a reader can tell a value object that cannot refuse from a
-        docstring that forgot to say how it does.
     """
 
     record_name: str
@@ -687,11 +635,6 @@ class RowCountComparison:
         -------
         bool
             True when the source and target counts are equal.
-
-        Raises
-        ------
-        None
-            Comparing two integers cannot fail.
         """
         return self.source_records == self.target_rows
 
@@ -708,11 +651,6 @@ class RowCountComparison:
         -------
         int
             ``target_rows - source_records``.
-
-        Raises
-        ------
-        None
-            Subtracting two integers cannot fail.
         """
         return self.target_rows - self.source_records
 
@@ -729,11 +667,6 @@ class RowCountComparison:
         str
             A line naming the dataset, the table and both counts. No field value appears,
             because a count comparison never needs one.
-
-        Raises
-        ------
-        None
-            Rendering cannot fail.
         """
         verdict = "MATCH" if self.matched else "DIFFER"
         return (
@@ -755,14 +688,8 @@ def count_source_records(records: Iterable[Mapping[str, str | Decimal | bytes]])
     -------
     int
         The number of records.
-
-    Raises
-    ------
-    None
-        Counting raises nothing of its own. A decode fault surfaces from the iterator being
-        consumed, because a reader validates each record as it is pulled.
     """
-    # WHY : Trade-offs: the records are consumed and discarded one at a time rather than
+    # Trade-offs: the records are consumed and discarded one at a time rather than
     #   collected, so counting a three-hundred-thousand-record dataset costs one record of
     #   memory. The cost is that the caller cannot reuse the iterator afterwards, which is why
     #   the checksum verifier takes its own.
@@ -792,7 +719,7 @@ def count_target_rows(connection: Any, schema: str, table: str) -> int:
         If the count query returns no row, which a well-formed COUNT never does and which
         therefore indicates a driver or double that is not behaving as one.
     """
-    # WHY : Assumptions: the identifiers are quoted through the shared helper rather than
+    # Assumptions: the identifiers are quoted through the shared helper rather than
     #   interpolated raw. A schema named `authorization` is a reserved word in PostgreSQL and an
     #   unquoted reference to it is a syntax error, which is the same reason the schema
     #   bootstrap quotes it.
@@ -810,15 +737,15 @@ def count_target_rows(connection: Any, schema: str, table: str) -> int:
             f"counting {schema}.{table} returned no row at all; a COUNT always returns one, so"
             " the connection is not behaving as a database connection"
         )
-    # WHY : Refactoring Rationale: the value is validated by the same exact-whole-number rule the
-    #   whole-migration report parser uses, where this coerced with `int(row[0])`. That coercion
-    #   accepted every representation a count must not arrive as: `True` counted as one row, `2.9`
-    #   truncated to two, `Decimal("2.5")` truncated to two, and the text `"2"` parsed as two -- so
-    #   a driver or a double substituting any of them produced a count this pass then compared
-    #   against the extract and reported as agreement or disagreement with equal confidence. Beyond
-    #   2**53 a float cannot represent a bigint exactly either, which is the failure that would
-    #   arrive silently on a large table. Reusing the validator also keeps the two count paths --
-    #   this one and the report's -- refusing the same set for the same stated reason.
+    # Assumptions: the value is validated by the same exact-whole-number rule the whole-migration
+    #   report parser applies, rather than coerced with `int(row[0])`. Coercion accepts every
+    #   representation a count must not arrive as: `True` counts as one row, `2.9` truncates to
+    #   two, `Decimal("2.5")` truncates to two, and the text `"2"` parses as two -- so a driver or
+    #   a double substituting any of them yields a count this pass would compare against the
+    #   extract and report as agreement or disagreement with equal confidence. Beyond 2**53 a float
+    #   cannot represent a bigint exactly either, which is the failure that arrives silently on a
+    #   large table. Sharing the validator also keeps the two count paths -- this one and the
+    #   report's -- refusing the same set for the same stated reason.
     return _require_whole_number(row[0], "count", f"{schema}.{table}")
 
 
@@ -863,14 +790,14 @@ def compare_counts(
     )
 
 
-# WHY : Assumptions: the two renderings of an absent value are constants rather than inline
+# Assumptions: the two renderings of an absent value are constants rather than inline
 #   literals, because the report's whole value is that two runs over unchanged data diff to
 #   nothing. Two spellings of "no baseline" drifting apart between the per-line and the summary
 #   form would show up as a diff an operator has to read before dismissing.
 _ABSENT: Final[str] = "n/a"
 _NOT_COMPARABLE: Final[str] = "not comparable"
 
-# WHY : Assumptions: the expectation a baseline-free line IS held to is named as a constant, and the
+# Assumptions: the expectation a baseline-free line IS held to is named as a constant, and the
 #   wording matches `money_parity._EXPECTED_EMPTY` deliberately so the two reports an operator reads
 #   in the same run speak one vocabulary. A dataset that ships no seed extract must leave its target
 #   empty, so the report states which expectation was applied rather than only that no comparison
@@ -878,7 +805,7 @@ _NOT_COMPARABLE: Final[str] = "not comparable"
 #   holding unaccounted rows identically, while only the first of the two passes.
 _EXPECTED_EMPTY: Final[str] = "expected empty:"
 
-# WHY : Assumptions: the summary counts the lines that FAILED rather than the lines that mismatched,
+# Assumptions: the summary counts the lines that FAILED rather than the lines that mismatched,
 #   because the two stopped being the same set when the expected-empty rule arrived: a baseline-free
 #   line can now fail without any baseline to have disagreed with. Labelling that count "mismatched"
 #   would name a comparison that never happened, and an operator reconciling "1 mismatched" against
@@ -910,11 +837,11 @@ def _require_whole_number(value: object, column: str, dataset: str) -> int:
         other type. The message names the column, the dataset and the offending type, and never
         the value itself.
     """
-    # WHY : Assumptions: `bool` is refused before `int` even though it IS an `int` in Python.
+    # Assumptions: `bool` is refused before `int` even though it IS an `int` in Python.
     #   `True` would otherwise parse as a count of 1 and a driver or double returning a boolean
     #   where a count belongs is a contract breach that must be reported, not silently coerced
     #   into the smallest plausible count.
-    # WHY : Alternatives Considered: `float` is refused outright rather than converted through
+    # Alternatives Considered: `float` is refused outright rather than converted through
     #   `int()`. A count arrives as `bigint`, and beyond 2**53 a float cannot represent one
     #   exactly -- so accepting it would let a report certify a load on the strength of a number
     #   that had already lost its last digits. Decimal is accepted because a driver may hand back
@@ -1002,12 +929,12 @@ class RowCountRow:
             baseline is present, if the delta is not the difference of the two counts, or if a
             delta is present without a baseline.
         """
-        # WHY : Assumptions: cross-field consistency is checked HERE rather than only in the
+        # Assumptions: cross-field consistency is checked HERE rather than only in the
         #   parser, so a `RowCountRow` cannot exist in an inconsistent state whichever way it was
         #   built -- including from a test that constructs one directly. A parser-only check would
         #   leave every other construction path unguarded, and the report's arithmetic is the one
         #   thing a reader trusts without re-deriving.
-        # WHY : Assumptions: the checks RAISE rather than assert. `python -O` strips `assert`
+        # Assumptions: the checks RAISE rather than assert. `python -O` strips `assert`
         #   entirely, so an assertion is not a validation -- it is a validation that disappears in
         #   exactly the configuration an operator is most likely to run in production.
         if self.status not in {verdict.value for verdict in RowCountVerdict}:
@@ -1059,11 +986,6 @@ class RowCountRow:
         -------
         RowCountVerdict
             The matching enumeration member.
-
-        Raises
-        ------
-        None
-            The token was validated at construction, so the lookup cannot fail.
         """
         return RowCountVerdict(self.status)
 
@@ -1080,11 +1002,6 @@ class RowCountRow:
         -------
         bool
             False for the one line whose baseline is absent; True for every other.
-
-        Raises
-        ------
-        None
-            Reading a validated token cannot fail.
         """
         return self.verdict.comparable
 
@@ -1103,21 +1020,15 @@ class RowCountRow:
             True when the baseline and the count agreed, and -- for the one line with no baseline --
             when the target table is EXACTLY EMPTY. False for a disagreement, and false for a
             baseline-free line whose table nevertheless holds rows.
-
-        Raises
-        ------
-        None
-            Reducing a validated token and a validated count to one verdict cannot fail.
         """
-        # WHY : Refactoring Rationale: a NO_BASELINE line used to pass unconditionally, and this is
-        #   the expected-empty rule that replaces it. The state being checked is a real,
-        #   determinable one: no seed extract ships for the transaction master, so the ETL leaves
-        #   `ledger.transactions` empty, and a nonzero count is therefore evidence of exactly the
-        #   failures a verification run exists to catch -- rows left behind by an earlier attempt
-        #   into a table nothing in this package can empty (no role holds DELETE), a load pointed
-        #   at the wrong table, or a posting run that ran ahead of its gate. The shipped
-        #   `sql/verify/row_counts.sql` already documents the NULL baseline as "reported for
-        #   completeness"; what was missing was a rule that makes the completeness mean something.
+        # Assumptions: a line with no baseline is held to an expected-EMPTY rule rather than
+        #   waved through, because the state it describes is determinable: no seed extract ships
+        #   for the transaction master, so the ETL leaves `ledger.transactions` empty. A nonzero
+        #   count there is evidence of exactly the failures a verification run exists to catch --
+        #   rows left behind by an earlier attempt into a table nothing in this package can empty
+        #   (no role holds DELETE), a load pointed at the wrong table, or a posting run that ran
+        #   ahead of its gate. The shipped `sql/verify/row_counts.sql` reports the NULL baseline
+        #   "for completeness"; this rule is what makes that completeness mean something.
         if self.verdict is RowCountVerdict.NO_BASELINE:
             return self.actual_rows == 0
         return self.verdict is RowCountVerdict.MATCH
@@ -1136,13 +1047,8 @@ class RowCountRow:
             The status token, the dataset label, the target table and the three numbers, with an
             absent baseline and delta rendered as :data:`_ABSENT` and annotated
             ``not comparable``. No field value, key or record content appears.
-
-        Raises
-        ------
-        None
-            Rendering cannot fail.
         """
-        # WHY : Trade-offs: this pass renders NO field value at all -- not a masked one -- which is
+        # Trade-offs: this pass renders NO field value at all -- not a masked one -- which is
         #   stricter than the masking the readers apply, and the strictness is deliberate. A
         #   verification report is the artifact most likely to be pasted whole into an issue
         #   tracker, and these datasets carry primary account numbers, national identifiers and
@@ -1159,11 +1065,10 @@ class RowCountRow:
         )
         if self.comparable:
             return line
-        # WHY : Refactoring Rationale: a baseline-free line's note now states the verdict reached
-        #   over it, where it read only `(not comparable)`. That described the COMPARISON accurately
-        #   and the OUTCOME misleadingly, because the line is no longer waved through: a target with
-        #   no seed extract must be empty, so the reader is told which expectation was applied and
-        #   whether it held, instead of having to infer a pass from the absence of a baseline.
+        # Assumptions: a baseline-free line's note states the VERDICT reached over it rather than
+        #   only that no comparison was possible. A target with no seed extract must be empty, so
+        #   the reader is told which expectation was applied and whether it held instead of having
+        #   to infer a pass from the absence of a baseline.
         return (
             f"{line} ({_NOT_COMPARABLE}; {_EXPECTED_EMPTY}"
             f" {'held' if self.verified else 'VIOLATED'})"
@@ -1197,7 +1102,7 @@ def parse_row_count_rows(rows: Iterable[Sequence[object]]) -> tuple[RowCountRow,
         If any row has other than six values, if a label or token is not text, if a count is not
         an exact whole number, or if a line's six values contradict one another.
     """
-    # WHY : Assumptions: the query's order is PRESERVED and never re-sorted. The query orders by an
+    # Assumptions: the query's order is PRESERVED and never re-sorted. The query orders by an
     #   integer ordinal it deliberately does not project, precisely so the order cannot depend on
     #   the database collation -- under which '(none)' may sort either side of 'acctdata'. Sorting
     #   here would reintroduce exactly the collation dependence the query removed and break the
@@ -1226,7 +1131,7 @@ def parse_row_count_rows(rows: Iterable[Sequence[object]]) -> tuple[RowCountRow,
             RowCountRow(
                 dataset=dataset,
                 target_table=target_table,
-                # WHY : Assumptions: an absent baseline is carried through as None and is never
+                # Assumptions: an absent baseline is carried through as None and is never
                 #   coerced to zero. The query emits NULL for the one target table that has no seed
                 #   dataset, and zero would be a claim -- "the source held nothing" -- rather than
                 #   the absence of a claim, so a correct fresh load would read as a mismatch.
@@ -1263,11 +1168,11 @@ def _require_unseeded_layout() -> str:
         or if its reader now reports that a seed dataset DOES ship -- in which case the NULL
         baseline has become wrong and the table needs a real count rather than an exemption.
     """
-    # WHY : Assumptions: the reader is reached through the readers' name-keyed dispatch mapping
+    # Assumptions: the reader is reached through the readers' name-keyed dispatch mapping
     #   rather than by importing `readers.transaction` directly, which is the surface `cli.py`
     #   uses for the same purpose. Importing one reader by name here would work today and would
     #   silently stop tracking the mapping the moment a layout was re-homed to another module.
-    # WHY : Trade-offs: exactly ONE reader is resolved, not twelve. Driving the whole mapping to
+    # Trade-offs: exactly ONE reader is resolved, not twelve. Driving the whole mapping to
     #   discover which layouts are unseeded would import every reader in the package -- roughly
     #   seven hundred kilobytes of source -- to learn one boolean, and the mapping is consulted
     #   for the lookup either way.
@@ -1311,7 +1216,7 @@ def _expected_report_pairs() -> Mapping[str, str]:
         Propagated from :func:`_require_unseeded_layout` if the unseeded target can no longer be
         established.
     """
-    # WHY : Assumptions: the pair set is DERIVED from the baselines' own load targets rather than
+    # Assumptions: the pair set is DERIVED from the baselines' own load targets rather than
     #   listed a second time, so a dataset added to the baselines appears here with no edit. The
     #   export record drops out by construction because it has no load target -- it is a
     #   round-trip artifact, so no table holds its 500 records and no line of the report belongs
@@ -1344,12 +1249,6 @@ class RowCountReport:
     None
         Construction binds the already-validated lines. The single binary verdict is derived by
         :attr:`verified` rather than stored, so it cannot fall out of step with the lines.
-
-    Raises
-    ------
-    None
-        Construction validates nothing, because every line was already validated when it was
-        parsed. The inapplicability is stated rather than left silent.
     """
 
     rows: tuple[RowCountRow, ...]
@@ -1368,11 +1267,6 @@ class RowCountReport:
         tuple[RowCountRow, ...]
             The failing lines, in report order: a line whose baseline and count disagreed, and a
             baseline-free line whose target holds rows it should not. Empty when the load verifies.
-
-        Raises
-        ------
-        None
-            Filtering validated lines cannot fail.
         """
         return tuple(row for row in self.rows if not row.verified)
 
@@ -1389,11 +1283,6 @@ class RowCountReport:
         -------
         tuple[RowCountRow, ...]
             The lines whose verdict is :attr:`RowCountVerdict.NO_BASELINE`, in report order.
-
-        Raises
-        ------
-        None
-            Filtering validated lines cannot fail.
         """
         return tuple(row for row in self.rows if not row.comparable)
 
@@ -1411,13 +1300,8 @@ class RowCountReport:
         bool
             True when no line mismatched, False otherwise. An empty report is NOT verified,
             because a run that judged nothing has proved nothing.
-
-        Raises
-        ------
-        None
-            Reducing validated lines to one verdict cannot fail.
         """
-        # WHY : Alternatives Considered: the verdict is BINARY -- verified or not -- and this
+        # Alternatives Considered: the verdict is BINARY -- verified or not -- and this
         #   module deliberately borrows nothing from the graded aggregate return-code rubric the
         #   COBOL parity suite under `tests/**` uses, in which 4 is a soft warn, 8 a failure and 16
         #   an abend, aggregated worst-wins. A graded tier was considered for the not-comparable
@@ -1426,7 +1310,7 @@ class RowCountReport:
         #   which. That rubric belongs to the parity oracle; the migration CLI commits to a
         #   strictly binary exit status, and a not-comparable line is a PASS here rather than a
         #   third tier.
-        # WHY : Assumptions: an empty report fails rather than vacuously passing. `all()` over no
+        # Assumptions: an empty report fails rather than vacuously passing. `all()` over no
         #   rows is True, which would turn "the query returned nothing" -- a lost connection, a
         #   projection that dropped every line -- into a clean bill of health.
         if not self.rows:
@@ -1446,19 +1330,14 @@ class RowCountReport:
         str
             One header line, one line per report line with the columns aligned, and one summary
             line. No trailing newline, so a caller decides how it is emitted.
-
-        Raises
-        ------
-        None
-            Rendering cannot fail.
         """
-        # WHY : Assumptions: NOTHING run-varying appears anywhere in this text -- no timestamp, no
+        # Assumptions: NOTHING run-varying appears anywhere in this text -- no timestamp, no
         #   duration, no run identifier, no hostname, no process id, no connection detail. The
         #   query already guarantees a fixed row order for exactly this reason, and a single
         #   varying value in the rendering would defeat it: two runs over unchanged data must diff
         #   to nothing, so that a real change stands out instead of arriving inside a diff an
         #   operator has learned to skim.
-        # WHY : Assumptions: the column widths are computed from THESE rows, so they are a function
+        # Assumptions: the column widths are computed from THESE rows, so they are a function
         #   of the data and not of the run. Padding to a hard-coded width would either clip a
         #   longer table name later or leave a ragged column now.
         status_width = max((len(row.status) for row in self.rows), default=0)
@@ -1520,7 +1399,7 @@ def verify_row_count_rows(rows: Iterable[Sequence[object]]) -> RowCountReport:
     parsed = parse_row_count_rows(rows)
     expected_pairs = _expected_report_pairs()
     reported = {row.dataset: row.target_table for row in parsed}
-    # WHY : Assumptions: coverage is checked in BOTH directions, and the missing direction is the
+    # Assumptions: coverage is checked in BOTH directions, and the missing direction is the
     #   dangerous one. A report that silently drops a table reads as a passing verification of a
     #   load that was never checked, which is the failure this whole pass exists to prevent. The
     #   unknown direction is refused as well, because a line whose baseline this module cannot
@@ -1570,13 +1449,13 @@ def row_count_query_path(root: pathlib.Path | None = None) -> pathlib.Path:
         If nothing readable is at that path. The message names the path and says why it may be
         absent, because the commonest cause is not a missing file but a packaging boundary.
     """
-    # WHY : Assumptions: the `sql` directory is NOT part of the installed distribution -- the
+    # Assumptions: the `sql` directory is NOT part of the installed distribution -- the
     #   package configuration finds packages under `src` only -- so this default is correct in a
     #   source checkout and in an editable install and is expected to fail in a plain wheel
     #   install. That is why the root is a parameter: an operator running from an unpacked
     #   distribution supplies it, and the failure below names the path rather than reporting an
     #   empty report.
-    # WHY : Alternatives Considered: reading the query through `importlib.resources` was rejected
+    # Alternatives Considered: reading the query through `importlib.resources` was rejected
     #   because it would require the SQL to be packaged as module data, which would put a second
     #   copy of the operator-facing query inside the wheel and let the two drift -- the file an
     #   operator runs with `psql` would no longer be the file this pass executes.
@@ -1604,21 +1483,15 @@ def _executable_text(text: str) -> str:
     str
         The same lines with every line whose first non-blank characters are ``--`` removed,
         rejoined with newlines.
-
-    Raises
-    ------
-    None
-        Stripping cannot fail. A file that is comment-only strips to blank text, which the
-        caller's own blank check reports.
     """
-    # WHY : Assumptions: the guards below MUST read the executable text rather than the file,
+    # Assumptions: the guards below MUST read the executable text rather than the file,
     #   because the shipped query documents its own decisions in comments -- and two of those
     #   comments would otherwise trip them. It shows an operator the exact psql invocation,
     #   whose line continuation is a backslash, and it uses semicolons in ordinary prose. A guard
     #   reading the raw file would therefore refuse the very file it exists to protect, and the
     #   remedy would have been to remove the documentation Rule 1 requires. This is the same
     #   accommodation `data-migration/tests/test_verification.py` makes for the same reason.
-    # WHY : Trade-offs: whole LINE comments only, matched on the first non-blank characters, with
+    # Trade-offs: whole LINE comments only, matched on the first non-blank characters, with
     #   no SQL lexer. A trailing comment on a code line survives, and a `--` inside a string
     #   literal would be misread as a comment. Both are accepted because this is a guard over one
     #   committed file whose shape is asserted by that file's own tests, and because the text that
@@ -1670,7 +1543,7 @@ def read_row_count_query(path: pathlib.Path | None = None) -> str:
             f"the row-count query at {resolved} holds no executable statement; every line of it"
             " is a comment, so running it would produce no report at all"
         )
-    # WHY : Alternatives Considered: the three properties checked here are the ones that silently
+    # Alternatives Considered: the three properties checked here are the ones that silently
     #   corrupt the RESULT, and read-only-ness is deliberately NOT among them. Scanning the text for
     #   write verbs was considered and rejected as the weaker guarantee: it would have to strip
     #   comments to avoid matching the file's own prose, and it would still only prove something
@@ -1733,14 +1606,14 @@ def _require_committed_query(resolved: pathlib.Path, text: str) -> None:
     VerificationQueryError
         If the digest of ``text`` is not :data:`ROW_COUNT_QUERY_DIGEST`.
     """
-    # WHY : Assumptions: the WHOLE file is digested, comments and all, rather than the
+    # Assumptions: the WHOLE file is digested, comments and all, rather than the
     #   comment-stripped remainder the shape checks read. The comments carry the query's own
     #   rationale and its published column contract, so a revision that rewrote them while leaving
     #   the SQL alone has changed the artifact an operator reads -- and the digest is the identity
     #   of that artifact, not of its executable subset.
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     if digest != ROW_COUNT_QUERY_DIGEST:
-        # WHY : Trade-offs: the refusal reports both digests and no part of the text. Two hex
+        # Trade-offs: the refusal reports both digests and no part of the text. Two hex
         #   strings are enough to tell "this is a different file" from "this file was moved", and
         #   quoting the text would put a query -- which may hold literals -- into a retained log.
         raise VerificationQueryError(
@@ -1779,13 +1652,13 @@ def _require_harmless_query(resolved: pathlib.Path, executable: str) -> None:
         If the text does not begin with a reading keyword, or if it reads any relation other than
         those in :data:`ROW_COUNT_QUERY_RELATIONS` and its own declared expressions.
     """
-    # WHY : Refactoring Rationale: these two checks are ADDED because the three that preceded them
-    #   -- no meta-command, no bound parameter, one statement -- established that the text was
-    #   RUNNABLE through a cursor and established nothing about what it did. The privilege boundary
-    #   was the whole defence, and it is the right defence for a role provisioned as documented; it
-    #   is not a defence at all on a cluster where the role was mis-provisioned, and it says nothing
-    #   about whether the text is the report an operator believes is being run. The identical pair
-    #   of checks guards the money pass, so both verification queries are held to one rule.
+    # Assumptions: these two checks establish what the text DOES, which the three above it -- no
+    #   meta-command, no bound parameter, one statement -- do not: those establish only that the
+    #   text is RUNNABLE through a cursor. The privilege boundary is the right defence for a role
+    #   provisioned as documented, but it is no defence on a cluster where the role was
+    #   mis-provisioned and it says nothing about whether the text is the report an operator
+    #   believes is being run. The identical pair guards the money pass, so both verification
+    #   queries are held to one rule.
     leading = executable.strip().split(None, 1)[0].upper() if executable.strip() else ""
     if leading not in _READING_KEYWORDS:
         raise VerificationQueryError(
@@ -1797,7 +1670,7 @@ def _require_harmless_query(resolved: pathlib.Path, executable: str) -> None:
     read = {match.group(1).lower() for match in _RELATION_PATTERN.finditer(executable)}
     unexpected = sorted(read - declared - ROW_COUNT_QUERY_RELATIONS)
     if unexpected:
-        # WHY : Trade-offs: the refusal names the RELATIONS it did not expect and quotes no other
+        # Trade-offs: the refusal names the RELATIONS it did not expect and quotes no other
         #   part of the text. That is enough for an operator to see which artifact is wrong, and it
         #   keeps a query holding a literal out of a log line that is retained.
         raise VerificationQueryError(
@@ -1871,7 +1744,7 @@ def _require_reporting_role(settings: AuroraConnectionSettings) -> AuroraConnect
         If they name any other role. The message names both roles and nothing else about the
         settings, so no host, database or credential reaches the message.
     """
-    # WHY : Assumptions: a verification pass must be structurally incapable of mutating what it
+    # Assumptions: a verification pass must be structurally incapable of mutating what it
     #   verifies, and the role is what makes that true rather than the query text. The reporting
     #   role holds SELECT on nine views of one schema and EXECUTE on one read-only lookup
     #   function, and it holds no privilege on a base table, no write privilege of any kind and no
@@ -1916,7 +1789,7 @@ def open_reporting_connection(settings: AuroraConnectionSettings | None = None) 
     RowCountVerificationError
         If the settings name a role other than the reporting role.
     """
-    # WHY : Alternatives Considered: the connection is opened through
+    # Alternatives Considered: the connection is opened through
     #   `carddemo_migration.loaders.aurora.connect`, which the loaders package publishes, rather
     #   than by importing the driver here. That module declares itself the only place in this tree
     #   permitted to import psycopg -- and it keeps that import inside the function body -- so
@@ -1950,7 +1823,7 @@ def _one_scalar(connection: Any, statement: str) -> object:
         object supplied is not behaving as a connection, which is reported as such rather than
         surfaced later as an index error naming nothing.
     """
-    # WHY : Assumptions: the cursor may or may not be a context manager, so both shapes are
+    # Assumptions: the cursor may or may not be a context manager, so both shapes are
     #   handled -- the same accommodation fetch_row_count_rows below makes, for the same reason.
     #   The driver's cursor is one and this package's in-process double returns a plain object.
     candidate = connection.cursor()
@@ -1984,6 +1857,11 @@ def require_reporting_session(connection: Any) -> str:
     that connection, so that a pass which cannot write is a property of the session rather than a
     property of the settings some earlier call happened to be handed.
 
+    Assumptions: the caller executes ``SET TRANSACTION READ ONLY`` before reaching here, so this
+    probe runs inside a transaction the server has already been told cannot write. That ordering
+    belongs to the caller because only the caller knows which transaction the report runs in; what
+    is owned here is the identity question alone.
+
     Parameters
     ----------
     connection : Any
@@ -2003,23 +1881,22 @@ def require_reporting_session(connection: Any) -> str:
     ResultSetContractError
         If the connection does not answer the probe as a connection would.
     """
-    # WHY : Refactoring Rationale: this check is on the SESSION and it is new. The settings check
-    #   beside it, _require_reporting_role, inspects the parameters handed to
-    #   open_reporting_connection -- so it protects only callers who open a connection through
-    #   that function, and every published entry point here also accepts an already-open
-    #   connection so the in-process double can stand in. That acceptance was the hole: the
-    #   command-line verification path opened a schema-owner connection and there was nothing to
-    #   refuse it, so the pass ran with write authority over the very tables it was certifying.
-    #   Asking the server closes it for every caller, including one holding a connection this
-    #   module never opened.
+    # Assumptions: this check interrogates the SESSION, where the settings check beside it,
+    #   _require_reporting_role, inspects the parameters handed to open_reporting_connection. That
+    #   one protects only callers who open a connection through that function, and every published
+    #   entry point here also accepts an already-open connection so the in-process double can stand
+    #   in -- so without this check the command-line verification path could open a schema-owner
+    #   connection and nothing would refuse it, running the pass with write authority over the very
+    #   tables it is certifying. Asking the server covers every caller, including one holding a
+    #   connection this module never opened.
     #
-    # WHY : Alternatives Considered: trusting the settings alone, and requiring every caller to
-    #   route through open_reporting_connection. The first is what shipped and is what this
-    #   replaces. The second was rejected because it would remove the injection seam the suite
+    # Alternatives Considered: trusting the settings alone, and requiring every caller to
+    #   route through open_reporting_connection. The first cannot see a connection this module did
+    #   not open. The second was rejected because it would remove the injection seam the suite
     #   depends on, and because settings do not determine a session anyway: a connection may be
     #   pooled, handed on, or have executed SET ROLE between being opened and being used here.
     #
-    # WHY : Assumptions: `select current_user` is the probe rather than `session_user`, because
+    # Assumptions: `select current_user` is the probe rather than `session_user`, because
     #   current_user is the identifier privilege decisions are actually made against -- it follows
     #   a SET ROLE where session_user does not. A session that authenticated as the reporting role
     #   and then assumed a writable one would pass a session_user check and could still write.
@@ -2065,14 +1942,13 @@ def fetch_row_count_rows(
         If the cursor yields no result set at all, which a ``SELECT`` always does and which
         therefore means the object supplied is not behaving as a connection.
     """
-    # WHY : Refactoring Rationale: this function used to accept query TEXT, and it is published --
-    #   so the one entry point an orchestration step reaches for could be handed a statement nobody
-    #   committed, executed on the session this pass had just certified as the sole authority
-    #   entitled to judge the load. The text parameter existed because the sql directory ships
-    #   BESIDE the package rather than inside it, so a caller running from a wheel needs a way to
-    #   say where the file is -- and a path says that exactly, without also saying what to run. The
-    #   injectable seam is retained privately, for the tests that must drive a substituted result
-    #   set, and is unreachable from the published surface.
+    # Assumptions: the published entry point accepts a query PATH and never query TEXT. Accepting
+    #   text would let the one function an orchestration step reaches for be handed a statement
+    #   nobody committed, executed on the session this pass has just certified as the sole
+    #   authority entitled to judge the load. A path answers the only question packaging raises --
+    #   the sql directory ships BESIDE the package rather than inside it, so a caller running from
+    #   a wheel has to say where the file is -- without also saying what to run. The injectable
+    #   seam the tests need is private and unreachable from the published surface.
     return _row_count_rows(connection, read_row_count_query(query_path))
 
 
@@ -2105,28 +1981,41 @@ def _row_count_rows(connection: Any, query: str) -> tuple[tuple[object, ...], ..
     ResultSetContractError
         If the cursor yields no result set at all.
     """
-    # WHY : Assumptions: the session check is made HERE, at the one place in this module where a
-    #   query is executed, rather than in `verify_row_counts` above it. A check placed only in the
-    #   caller would leave every other path to this helper unguarded, and one guard at the single
-    #   execution site cannot be bypassed.
-    require_reporting_session(connection)
     # WHY : Assumptions: the cursor may or may not be a context manager, so both shapes are
     #   handled. The driver's cursor is one and the in-process double used by this package's suite
     #   returns a plain object, and this is the same accommodation both sibling passes make.
     candidate = connection.cursor()
     cursor = candidate.__enter__() if hasattr(candidate, "__enter__") else candidate
     try:
-        # WHY : Assumptions: both settings are issued as ORDINARY STATEMENTS on the same cursor,
-        #   before the query, so they apply to the transaction the query runs in. `SET TRANSACTION
-        #   READ ONLY` must be the first statement of a transaction, which it is because the driver
-        #   opens one implicitly on this first execute; `SET LOCAL statement_timeout` is
-        #   transaction-scoped for the same reason, so neither leaks into a later use of the
-        #   connection the way a session-level setting would.
+        # WHY : Assumptions: the ORDER of these four statements is load-bearing and it begins with
+        #   the read-only setting. The driver opens a transaction implicitly on the first execute,
+        #   so whichever statement runs first decides what the transaction is for every statement
+        #   after it -- including the identity probe. Issuing `SET TRANSACTION READ ONLY` first is
+        #   what makes the WHOLE transaction read-only rather than only the part after the probe.
+        # WHY : Refactoring Rationale: the probe used to run first, and the read-only setting
+        #   second. Measured against PostgreSQL 17 rather than assumed: that order is ACCEPTED --
+        #   the engine allows a transaction's access mode to be tightened mid-transaction, and only
+        #   `SET TRANSACTION ISOLATION LEVEL` is refused after a query, with SQLSTATE 25001. So the
+        #   old order worked, and it worked by relying on engine leniency the SQL standard does not
+        #   grant: the standard's `SET TRANSACTION` applies to the next transaction, and a
+        #   connection pooler or proxy that opens the transaction itself may present the statement
+        #   out of that position. Two things are gained by leading with it and nothing is lost: the
+        #   probe itself now executes in a transaction the server has already been told cannot
+        #   write, and the sequence no longer depends on a vendor-specific allowance for a rule this
+        #   module states in its own comments.
+        # WHY : Assumptions: the identity probe follows in the SAME transaction, through the
+        #   published guard, and it is not moved out to the caller. A guard at the one execution
+        #   site cannot be bypassed by another path into this helper, and the probe reads
+        #   `current_user` from the server rather than trusting the settings a connection was opened
+        #   with -- see `require_reporting_session`. It shares this transaction because every cursor
+        #   on a connection does.
         # WHY : Trade-offs: the timeout is interpolated from a module constant rather than bound as
         #   a parameter, because `SET` accepts no bound parameter. The value is an `int` constant
         #   declared in this module and never caller supplied, so no text from outside this file
-        #   reaches the statement.
+        #   reaches the statement. `SET LOCAL` is transaction-scoped, so it expires with the read it
+        #   bounds instead of leaking into a later use of the connection.
         cursor.execute(_READ_ONLY_TRANSACTION_STATEMENT)
+        require_reporting_session(connection)
         cursor.execute(f"SET LOCAL statement_timeout = {_STATEMENT_TIMEOUT_MILLISECONDS}")
         cursor.execute(query)
         fetched = cursor.fetchall()
@@ -2184,9 +2073,9 @@ def verify_row_counts(
         If the connection's live session is not the reporting role, or if the one legitimately
         unbaselined target table can no longer be established.
     """
-    # WHY : Refactoring Rationale: the caller supplies a query PATH and can no longer supply query
-    #   TEXT. The text parameter existed for packaging -- the sql directory ships beside the package
-    #   rather than inside it -- and the ROOT already answers that question, so accepting text as
-    #   well only added a way to run an uncommitted statement under the one authority this pass
-    #   certifies. The money pass took the same correction, so both are held to one rule.
+    # Assumptions: the caller supplies a query PATH and never query TEXT. Packaging is the only
+    #   reason text would be needed -- the sql directory ships beside the package rather than
+    #   inside it -- and the ROOT parameter already answers that, so accepting text would add
+    #   nothing but a way to run an uncommitted statement under the one authority this pass
+    #   certifies. The money pass is held to the same rule.
     return verify_row_count_rows(fetch_row_count_rows(connection, query_path=query_path))

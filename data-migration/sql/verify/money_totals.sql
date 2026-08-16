@@ -199,7 +199,7 @@ WITH money_columns (sort_key, target_table, money_column, cobol_field,
         -- WHY : Assumptions: every column name on the right of this descriptor is
         --       TRANSCRIBED from the migration that declares it -- V1__account.sql
         --       L243-L317, V1__ledger.sql L198, L449 and L869, V1__reference.sql
-        --       L337 -- and never derived from the COBOL field name beside it. No
+        --       L326 -- and never derived from the COBOL field name beside it. No
         --       derivation rule could be correct, because the baseline-to-column
         --       mapping is not mechanical and disagrees with itself: TRAN-AMT
         --       keeps neither its prefix nor its abbreviation and becomes plain

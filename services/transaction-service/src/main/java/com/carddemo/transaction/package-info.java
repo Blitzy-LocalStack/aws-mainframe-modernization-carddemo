@@ -62,11 +62,20 @@
  *       {@code README.md} line 281, sits between {@code CT02} and {@code CB00}
  *       in the inventory and so reads as a fifth transaction of this context.
  *       It belongs to the reporting bounded context, which owns no TABLE of its
- *       own -- its {@code reporting} schema holds views and nothing else, and is
- *       owned in the database by {@code carddemo_reporting_owner}, a role created
- *       {@code NOLOGIN} -- and which reaches these tables through those
- *       read-only cross-schema views under a role holding {@code SELECT} on the
- *       views alone.</li>
+ *       own -- its {@code reporting} schema is owned in the database by
+ *       {@code carddemo_reporting_owner}, a role created {@code NOLOGIN}, and
+ *       holds eight read-only cross-schema views plus exactly one table,
+ *       {@code card_grouping_key}, that the reporting service's own login role is
+ *       revoked from reading -- and it reaches THESE tables through those views
+ *       under a role holding {@code SELECT} on the views alone.
+ *       Refactoring Rationale: this said the reporting schema "holds views and
+ *       nothing else". It does hold one table, and the difference matters from
+ *       here as well as from there: that table holds the secret behind the
+ *       per-card statement grouping token, so a reader who believed the schema
+ *       held only views would read the {@code REVOKE} that withholds it as dead
+ *       code. The reporting context's own charters and
+ *       {@code docs/architecture/data-model-and-schema-mapping.md} state the
+ *       distinction; this entry is brought into line with them.</li>
  *   <li>{@code app/cbl/CBTRN02C.cbl}, the nightly posting program, writes three
  *       of the four tables this context owns and is nonetheless the batch
  *       context's program. It is read here for the schema contract only: for
@@ -148,10 +157,23 @@
  * plan assigns it and a measurement of the directory, because all eight
  * charters are now present -- this root and the charters in {@code api},
  * {@code service}, {@code repository}, {@code domain}, {@code dto},
- * {@code mapper} and {@code config}. Beside them the module holds thirty-two
- * production classes: two controllers, six service types, six repository
- * types, four entities, seven request and response records, two mappers,
+ * {@code mapper} and {@code config}. Beside them the module holds thirty-seven
+ * production classes: two controllers, six service types, seven repository
+ * types, four entities, eleven request and response records, two mappers,
  * four configuration classes and the application entry point.
+ *
+ * <p>Refactoring Rationale: that total read thirty-two, over a breakdown naming
+ * six repository types and seven request and response records. Three of the four
+ * request-response pairs the bill-payment and transaction-add previews need, and
+ * the category-balance writer split into an interface and its implementation,
+ * arrived after the figure was written, so the total and two of its eight terms
+ * were short. All nine numbers are re-measured from the directory: 1 root, 2
+ * {@code api}, 4 {@code config}, 4 {@code domain}, 11 {@code dto}, 2
+ * {@code mapper}, 7 {@code repository} and 6 {@code service}. The trade-off
+ * recorded below anticipated exactly this and is unchanged -- the total ages
+ * because nothing re-derives it -- so the correction is stated with its terms
+ * rather than as a bare number, which is what lets the next reader re-check it by
+ * eye instead of trusting it.
  *
  * <p>Refactoring Rationale: this paragraph used to record that the {@code api}
  * package did not exist, that seven of the eight charters were present, and
@@ -177,15 +199,46 @@
  * copybook record codecs, the problem shape and the structured abend detail,
  * correlation-id propagation and the keyset page envelope, the group-claim
  * conversion, the metric tag set, the timestamp form, and the date-edit and
- * field-flag validators. The eight subpackages holding them are {@code money},
+ * field-flag validators. The kernel holds TEN subpackages beside its own root;
+ * the eight this module draws those concerns from are {@code money},
  * {@code codec}, {@code error}, {@code web}, {@code security},
  * {@code observability}, {@code time} and {@code validation}.
+ *
+ * <p>Refactoring Rationale: this roster read "the eight subpackages holding them",
+ * which invited -- and received -- the reading that the kernel has eight
+ * subpackages in total. It has ten: {@code common.messaging} and
+ * {@code common.control} arrived after the sentence was written, and
+ * {@code SharedKernelInventoryTest} re-derives ten subpackages and eleven charters
+ * from that directory on every build. The eight named above are unchanged and were
+ * re-measured from this module's own imports, which name exactly those eight and
+ * neither of the two later ones. Neither omission is an oversight and they are
+ * omissions of different kinds: {@code common.messaging} is genuinely unused here,
+ * this context publishing no queue producer or consumer, whereas
+ * {@code common.control} reaches this module's mutating routes WITHOUT an import --
+ * the kernel's auto-configuration registers the online-write gate as an
+ * interceptor, so every write here is behind it and no handler calls it. That
+ * second case is why the roster is a roster of imports rather than of dependencies,
+ * and saying so is the point: a reader auditing which shared concerns apply here
+ * cannot answer it from the import list alone. Both facts are now stated, because
+ * the ambiguous form was true of this module's imports while being false of the
+ * kernel, and a reader cannot tell which claim a bare "the eight" is making.
+ * Trade-offs: a fact about another module's shape is one this module cannot see
+ * change, which is why it drifted; it is kept rather than replaced by a pointer
+ * because T2's whole claim is that a shared concern has exactly one home, and a
+ * reader checking that claim needs the homes named.
  *
  * <p>Assumptions: {@code MetricsConfig} lives under
  * {@code com.carddemo.common.observability}, not under any package named
  * {@code config}. Looking for it by the name of its layer rather than by the
  * name of its concern is the predictable wrong turn, because this module does
- * have a {@code config} package and it holds three unrelated classes.
+ * have a {@code config} package and it holds four unrelated classes:
+ * {@code DataSourceConfig}, {@code InternalIdentityConfig}, {@code OpenApiConfig}
+ * and {@code SecurityConfig}. Refactoring Rationale: this said three, while the
+ * inventory eleven paragraphs above counted four configuration classes in the
+ * same directory, so the file disagreed with itself; {@code InternalIdentityConfig}
+ * arrived with the internal service-token contract and only the inventory moved.
+ * The four are now named, because the point of the sentence is that none of them
+ * is the metric configuration a reader came looking for.
  *
  * <p>Refactoring Rationale: re-declaring a shared type locally is the failure
  * this rule exists to prevent. The baseline compiles every program against a

@@ -119,9 +119,17 @@
  *       {@code CDEMO-USER-TYPE PIC X(01)} at line 26, whose administrator
  *       and user domain is bounded by the condition names at lines 27 and
  *       28 for {@code 'A'} and {@code 'U'}.</li>
- *   <li>Selection context becomes REST path and query parameters, taken
+ *   <li>Selection context becomes a member of the REST request BODY, taken
  *       from the customer, account and card fields at lines 33, 38, 39 and
- *       41.</li>
+ *       41. Refactoring Rationale: this read "REST path and query
+ *       parameters", the wording of §0.7.1 of the technical specification.
+ *       This context departs from it -- no handler in the module binds a
+ *       path variable, and only the paging cursor and direction are query
+ *       parameters -- and the departure is registered as
+ *       {@code D-ACCOUNT-SELECTION-IN-BODY} in
+ *       {@code docs/architecture/cobol-to-service-traceability.md} §7.4,
+ *       which holds the load-balancer access-record reasoning that decides
+ *       it and the costs it accepts.</li>
  *   <li>The re-entry discriminator is removed entirely. It is
  *       {@code CDEMO-PGM-CONTEXT} at line 29, with
  *       {@code 88 CDEMO-PGM-ENTER VALUE 0.} at line 30 and

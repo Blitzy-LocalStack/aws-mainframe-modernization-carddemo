@@ -26,8 +26,15 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 /**
- * Pins the three address value-domain edits of {@link AddressValidationService} against the five
- * allow-lists the reference copybook declares.
+ * Pins the four public edits of {@link AddressValidationService} against the five allow-lists the
+ * reference copybook declares.
+ *
+ * <p>Refactoring Rationale: this class opened by naming THREE edits, and the fourth -- the
+ * whole-number telephone edit that composes the area code with the prefix and the line number --
+ * had no direct case anywhere. The count was not merely understated: the composition it performs
+ * is where the accumulate-every-failing-part behaviour and the fifteen-character split live, and
+ * both were unasserted while the three part-level edits below were covered in detail. The cases at
+ * the end of this class close that, and the opening sentence now names what is actually pinned.
  *
  * <h2>Five allow-lists, three validation targets</h2>
  *
@@ -945,5 +952,372 @@ class AddressValidationServiceTest {
         verify(this.lookup).stateCodeExists(UNLISTED_STATE_CODE);
         verify(this.lookup, times(1)).findAreaCodeClass(anyString());
         verify(this.lookup, never()).stateZipPrefixExists(anyString());
+    }
+
+    // WHY : Refactoring Rationale: the cases from here to the end of the class drive the FOURTH
+    //       public entry point of the service, and it had no direct case at all. The three edits
+    //       above reach it only in part -- the area-code edit is one of the three parts it composes
+    //       -- so nothing exercised the split of a stored number into its three parts, the optional
+    //       whole-number path, the accumulation across parts, or either of the two part edits that
+    //       are private and reachable only through it. A validator that returned after its first
+    //       failing part, or that read the parts from the wrong offsets, would have passed every
+    //       assertion in this class as it stood while reporting one part per submission where the
+    //       baseline reports every wrong part at once.
+    // WHY : Assumptions: the stored layout these cases submit is the one app/cbl/COACTUPC.cbl
+    //       declares at its lines 82 to 100 -- a three-character area code, a separator, a
+    //       three-character prefix, a separator, then a four-character line number, fifteen
+    //       characters in total -- so a vector is written as the whole stored value and never as
+    //       three arguments. Writing the parts separately would test a composition this class
+    //       invented rather than the one the field carries.
+
+    /**
+     * Builds a stored telephone number in the fifteen-character layout of lines 82 to 100.
+     *
+     * <p>Assumptions: the two separators are round brackets and a hyphen exactly as the program's
+     * own layout declares them, and they are written here rather than taken from a constant on the
+     * service because the service publishes offsets and widths and not the punctuation between
+     * them. A vector built with different punctuation would still occupy the declared positions, so
+     * these characters are inert to the edit and are chosen to read as a telephone number.</p>
+     *
+     * @param areaCode the three characters occupying the area-code position, which may be blank
+     * @param phonePrefix the three characters occupying the prefix position, which may be blank
+     * @param lineNumber the four characters occupying the line-number position, which may be blank
+     * @return the fifteen-character stored value; never {@code null}
+     */
+    private static String storedPhone(String areaCode, String phonePrefix, String lineNumber) {
+        return "(" + areaCode + ")" + phonePrefix + "-" + lineNumber;
+    }
+
+    /**
+     * Confirms an entirely unsupplied telephone number is acceptable and reads no allow-list.
+     *
+     * <p>Assumptions: a telephone number is optional, which the program states in its own comment at
+     * {@code app/cbl/COACTUPC.cbl} line 2233 and implements at lines 2234 to 2241 by setting the
+     * valid marker and leaving the paragraph before any part is edited. The two vectors are the two
+     * spellings of "not supplied" that reach this code -- a value padded with the space character
+     * and a value absent altogether -- and both must answer acceptable rather than reporting three
+     * failing parts.</p>
+     *
+     * <p>Returns no value. Any entry reported for an unsupplied number, a message on the outcome, or
+     * a probe issued for a number nobody filled in, is reported as a JUnit assertion failure.</p>
+     *
+     * @param storedPhoneNumber the stored value as it reaches the edit, either blank throughout or
+     *     absent altogether
+     */
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"(   )   -    ", "               ", ""})
+    @DisplayName("an entirely unsupplied telephone number is acceptable and reads no allow-list")
+    void anEntirelyUnsuppliedTelephoneNumberIsAcceptable(String storedPhoneNumber) {
+        AddressValidationService.AddressValidationResult result =
+                this.service.validateUsPhoneNumber(storedPhoneNumber, "phoneNumber1", PHONE_LABEL);
+
+        assertThat(result.isValid()).isTrue();
+        assertThat(result.fieldErrors()).isEmpty();
+        assertThat(result.message()).isNull();
+
+        // WHY : Assumptions: the absence of any probe is asserted rather than only the outcome,
+        //       because a validator that padded a blank number to width and looked its area code up
+        //       would also answer acceptable here -- it would find nothing in the list and then be
+        //       overruled by the optional-number rule -- while issuing a call per empty form.
+        verifyNoInteractions(this.lookup);
+    }
+
+    /**
+     * Confirms a supplied and listed telephone number is acceptable and is reported under no field.
+     *
+     * <p>Assumptions: the area code is the general-purpose member the baseline's list test admits,
+     * because the area-code part of a whole number is edited by the same paragraph the area-code
+     * case above pins and that paragraph accepts nothing weaker. The prefix and line number carry no
+     * allow-list of their own -- the program tests them for presence, digits and non-zero only, at
+     * lines 2316 to 2367 and 2370 to 2421 -- so their values are ordinary digits.</p>
+     *
+     * <p>Returns no value. An entry reported for an acceptable number, a message on the outcome, or
+     * more than the single area-code probe, is reported as a JUnit assertion failure.</p>
+     */
+    @Test
+    @DisplayName("a supplied telephone number whose area code is listed is acceptable")
+    void aSuppliedListedTelephoneNumberIsAcceptable() {
+        when(this.lookup.findAreaCodeClass(GENERAL_PURPOSE_AREA_CODE))
+                .thenReturn(Optional.of(AddressValidationService.AreaCodeClass.GENERAL_PURPOSE));
+
+        AddressValidationService.AddressValidationResult result = this.service.validateUsPhoneNumber(
+                storedPhone(GENERAL_PURPOSE_AREA_CODE, "555", "0123"), "phoneNumber1", PHONE_LABEL);
+
+        assertThat(result.isValid()).isTrue();
+        assertThat(result.fieldErrors()).isEmpty();
+        assertThat(result.message()).isNull();
+
+        // WHY : Assumptions: exactly one probe, for the area code alone. The prefix and the line
+        //       number have no allow-list, so a probe issued for either would mean the edit was
+        //       reading a reference table for a part the baseline validates locally.
+        verify(this.lookup, times(1)).findAreaCodeClass(GENERAL_PURPOSE_AREA_CODE);
+        verifyNoMoreInteractions(this.lookup);
+    }
+
+    /**
+     * Confirms each part is read from its own declared position within the stored value.
+     *
+     * <p>Assumptions: the three positions are the ones the service publishes as offsets and widths,
+     * and this case is what makes an off-by-one in any of them visible. Only ONE part is made
+     * unacceptable per vector, and it is made unacceptable by a shape the other two parts would not
+     * be refused for, so the identity in the reported entry names the part that actually held the
+     * bad characters. The area-code vector uses a non-digit, and the two remaining vectors use an
+     * all-zero part, because zero is a refusal the part owns rather than one inherited from the
+     * digits test.</p>
+     *
+     * <p>Returns no value. An entry reported under a different part's identity, a wording belonging
+     * to another part, or more than one entry, is reported as a JUnit assertion failure.</p>
+     *
+     * @param storedPhoneNumber the stored value carrying exactly one unacceptable part
+     * @param expectedSuffix the identity suffix the failing part must be reported under
+     * @param expectedMessage the wording, without its label prefix, the failing part must carry
+     */
+    @ParameterizedTest
+    @MethodSource("singleFailingPartVectors")
+    @DisplayName("each telephone part is read from its own position and reported under its own name")
+    void eachTelephonePartIsReportedUnderItsOwnName(
+            String storedPhoneNumber, String expectedSuffix, String expectedMessage) {
+
+        // WHY : Assumptions: the listed answer is stubbed for every vector including the one whose
+        //       area code never reaches the probe, because the alternative -- stubbing only where the
+        //       probe is issued -- would make the stub itself part of what each vector asserts. The
+        //       area-code vector fails its digits test first, at app/cbl/COACTUPC.cbl line 2264 ahead
+        //       of line 2298, so the stub is simply never consulted there. No strictness check
+        //       objects, because this class substitutes its port through a direct call rather than
+        //       through the framework's JUnit extension.
+        when(this.lookup.findAreaCodeClass(GENERAL_PURPOSE_AREA_CODE))
+                .thenReturn(Optional.of(AddressValidationService.AreaCodeClass.GENERAL_PURPOSE));
+
+        AddressValidationService.AddressValidationResult result =
+                this.service.validateUsPhoneNumber(storedPhoneNumber, "phoneNumber1", PHONE_LABEL);
+
+        assertUnacceptableValue(onlyEntryOf(result), "phoneNumber1" + expectedSuffix,
+                PHONE_LABEL + expectedMessage);
+    }
+
+    /**
+     * Supplies one vector per telephone part, each with that part alone unacceptable.
+     *
+     * <p>Assumptions: the expected identities and wordings are read from the service's own published
+     * constants rather than spelled here, so a case cannot pass by agreeing with a transcription of
+     * the baseline literal that has drifted from the one the service actually emits.</p>
+     *
+     * @return the vectors, each carrying the stored value, the identity suffix of the failing part
+     *     and that part's expected wording; never {@code null}
+     */
+    private static Stream<Arguments> singleFailingPartVectors() {
+        return Stream.of(
+                Arguments.of(storedPhone("7O3", "555", "0123"),
+                        AddressValidationService.FIELD_SUFFIX_AREA_CODE,
+                        AddressValidationService.MSG_AREA_CODE_NOT_THREE_DIGITS),
+                Arguments.of(storedPhone(GENERAL_PURPOSE_AREA_CODE, "000", "0123"),
+                        AddressValidationService.FIELD_SUFFIX_PHONE_PREFIX,
+                        AddressValidationService.MSG_PREFIX_ZERO),
+                Arguments.of(storedPhone(GENERAL_PURPOSE_AREA_CODE, "555", "0000"),
+                        AddressValidationService.FIELD_SUFFIX_PHONE_LINE_NUMBER,
+                        AddressValidationService.MSG_LINE_NUMBER_ZERO));
+    }
+
+    /**
+     * Confirms a partly-filled number reports the missing parts rather than being treated as absent.
+     *
+     * <p>Assumptions: the optional-number rule requires ALL THREE parts to be unsupplied, so a
+     * number with one part filled is a supplied number with two parts missing. This is the case that
+     * separates the two readings of the baseline's line 2234 condition: a validator testing "any part
+     * blank" instead of "every part blank" would accept this input silently and store a fragment.</p>
+     *
+     * <p>Returns no value. An acceptable outcome, an entry count other than two, or an entry that is
+     * not the never-supplied state, is reported as a JUnit assertion failure.</p>
+     */
+    @Test
+    @DisplayName("a number with only one part filled reports the two missing parts")
+    void aNumberWithOnlyOnePartFilledReportsTheMissingParts() {
+        when(this.lookup.findAreaCodeClass(GENERAL_PURPOSE_AREA_CODE))
+                .thenReturn(Optional.of(AddressValidationService.AreaCodeClass.GENERAL_PURPOSE));
+
+        AddressValidationService.AddressValidationResult result = this.service.validateUsPhoneNumber(
+                storedPhone(GENERAL_PURPOSE_AREA_CODE, "   ", "    "), "phoneNumber1", PHONE_LABEL);
+
+        assertThat(result.isValid()).isFalse();
+        assertThat(result.fieldErrors()).hasSize(2);
+        assertThat(result.fieldErrors().get(0).field())
+                .isEqualTo("phoneNumber1" + AddressValidationService.FIELD_SUFFIX_PHONE_PREFIX);
+        assertThat(result.fieldErrors().get(0).message())
+                .isEqualTo(PHONE_LABEL + AddressValidationService.MSG_PREFIX_BLANK);
+        assertThat(result.fieldErrors().get(0).screenMarker())
+                .isEqualTo(FieldValidationFlag.BLANK_SCREEN_MARKER);
+        assertThat(result.fieldErrors().get(1).field())
+                .isEqualTo("phoneNumber1" + AddressValidationService.FIELD_SUFFIX_PHONE_LINE_NUMBER);
+        assertThat(result.fieldErrors().get(1).message())
+                .isEqualTo(PHONE_LABEL + AddressValidationService.MSG_LINE_NUMBER_BLANK);
+    }
+
+    /**
+     * Confirms every failing part is reported, in order, with the FIRST wording latched.
+     *
+     * <p>Assumptions: the parts accumulate rather than short-circuiting, which the baseline states by
+     * transferring from each failing area-code branch to the PREFIX sub-paragraph -- at
+     * {@code app/cbl/COACTUPC.cbl} lines 2259, 2277 and 2291 -- and from each failing prefix branch
+     * to the line-number sub-paragraph at lines 2330, 2348 and 2362. Not one of those transfers names
+     * the exit. This case is therefore the one that fails if the composition is rewritten to return
+     * on its first failing part, which would ask an operator to correct one part per submission.</p>
+     *
+     * <p>Assumptions: the aggregate message is the FIRST part's wording and not the last, because
+     * every emitting site in the baseline is wrapped in a guard that writes the single message line
+     * only while it still holds its off value, at line 2251 and its siblings. Three joined wordings
+     * would also exceed the seventy-five characters that field is declared at on line 479.</p>
+     *
+     * <p>Returns no value. A missing part entry, entries out of evaluation order, or an aggregate
+     * message other than the first part's, is reported as a JUnit assertion failure.</p>
+     */
+    @Test
+    @DisplayName("every failing telephone part is reported in order with the first wording latched")
+    void everyFailingTelephonePartIsReportedInOrder() {
+        AddressValidationService.AddressValidationResult result = this.service.validateUsPhoneNumber(
+                storedPhone("00A", "0B0", "00C0"), "phoneNumber1", PHONE_LABEL);
+
+        assertThat(result.isValid()).isFalse();
+        assertThat(result.fieldErrors()).hasSize(3);
+        assertThat(result.fieldErrors().stream().map(ApiError.FieldError::field).toList())
+                .containsExactly(
+                        "phoneNumber1" + AddressValidationService.FIELD_SUFFIX_AREA_CODE,
+                        "phoneNumber1" + AddressValidationService.FIELD_SUFFIX_PHONE_PREFIX,
+                        "phoneNumber1" + AddressValidationService.FIELD_SUFFIX_PHONE_LINE_NUMBER);
+        assertThat(result.message())
+                .isEqualTo(PHONE_LABEL + AddressValidationService.MSG_AREA_CODE_NOT_THREE_DIGITS);
+
+        // WHY : Assumptions: the later wordings are asserted to be PRESENT on their own entries even
+        //       though the aggregate carries only the first. The two are different contracts -- one
+        //       message line, but a per-field array -- and a composition that dropped the later
+        //       wordings while keeping the identities would still satisfy the aggregate assertion.
+        assertThat(result.fieldErrors().get(1).message())
+                .isEqualTo(PHONE_LABEL + AddressValidationService.MSG_PREFIX_NOT_THREE_DIGITS);
+        assertThat(result.fieldErrors().get(2).message())
+                .isEqualTo(PHONE_LABEL + AddressValidationService.MSG_LINE_NUMBER_NOT_FOUR_DIGITS);
+
+        // WHY : Assumptions: no probe is issued, because the area code failed its digits test and the
+        //       baseline reaches the list test only for a value that passed it, at line 2264 ahead of
+        //       line 2298.
+        verifyNoInteractions(this.lookup);
+    }
+
+    /**
+     * Confirms an area code the allow-lists do not hold is refused through the whole-number edit too.
+     *
+     * <p>Assumptions: the refusal has to survive composition, and this is the case that proves it.
+     * The two vectors are the two ways the list test can refuse -- a code in none of the three lists,
+     * and a code the broad list holds but the general-purpose list does not -- and the baseline
+     * accepts only the general-purpose member, testing it at line 2298. The prefix and line number
+     * are acceptable in both vectors, so the single entry attributes the refusal to the area code.</p>
+     *
+     * <p>Returns no value. An acceptable outcome, an entry under another part's identity, or a
+     * missing probe, is reported as a JUnit assertion failure.</p>
+     *
+     * @param areaCode the area code the substituted probe is asked about
+     * @param storedClass the classification the probe answers with, or {@link #NO_CLASS_TOKEN} when
+     *     it finds the code in none of the three lists
+     */
+    @ParameterizedTest
+    @CsvSource({
+        "111, -",
+        "999, E",
+    })
+    @DisplayName("an unlisted area code is refused through the whole-number edit as well")
+    void anUnlistedAreaCodeIsRefusedThroughTheWholeNumberEdit(String areaCode, String storedClass) {
+        when(this.lookup.findAreaCodeClass(areaCode)).thenReturn(answerFor(storedClass));
+
+        AddressValidationService.AddressValidationResult result = this.service.validateUsPhoneNumber(
+                storedPhone(areaCode, "555", "0123"), "phoneNumber1", PHONE_LABEL);
+
+        assertUnacceptableValue(onlyEntryOf(result),
+                "phoneNumber1" + AddressValidationService.FIELD_SUFFIX_AREA_CODE,
+                PHONE_LABEL + AddressValidationService.MSG_AREA_CODE_NOT_GENERAL_PURPOSE);
+        verify(this.lookup, times(1)).findAreaCodeClass(areaCode);
+    }
+
+    /**
+     * Confirms a stored value shorter or longer than the declared width is brought to width first.
+     *
+     * <p>Assumptions: a stored value is normalised to the declared fifteen characters before any part
+     * is extracted, so a short value pads on the right and a long one truncates there -- which is
+     * what a COBOL move into a fixed-width field does. The short vector therefore has an area code
+     * and nothing else, and its two remaining parts read as never supplied rather than as absent
+     * positions; the long vector's trailing characters fall outside every part and change nothing.
+     * Without normalisation a short value would either raise from a substring or silently shift the
+     * later parts leftwards, and both would attribute characters to the wrong part.</p>
+     *
+     * <p>Returns no value. A raised exception, or an entry set other than the one the normalised
+     * value implies, is reported as a JUnit assertion failure.</p>
+     */
+    @Test
+    @DisplayName("a stored telephone value is brought to the declared width before it is split")
+    void aStoredTelephoneValueIsBroughtToTheDeclaredWidth() {
+        when(this.lookup.findAreaCodeClass(GENERAL_PURPOSE_AREA_CODE))
+                .thenReturn(Optional.of(AddressValidationService.AreaCodeClass.GENERAL_PURPOSE));
+
+        AddressValidationService.AddressValidationResult truncated =
+                this.service.validateUsPhoneNumber("(" + GENERAL_PURPOSE_AREA_CODE,
+                        "phoneNumber1", PHONE_LABEL);
+
+        assertThat(truncated.fieldErrors().stream().map(ApiError.FieldError::field).toList())
+                .containsExactly(
+                        "phoneNumber1" + AddressValidationService.FIELD_SUFFIX_PHONE_PREFIX,
+                        "phoneNumber1" + AddressValidationService.FIELD_SUFFIX_PHONE_LINE_NUMBER);
+
+        AddressValidationService.AddressValidationResult overlong =
+                this.service.validateUsPhoneNumber(
+                        storedPhone(GENERAL_PURPOSE_AREA_CODE, "555", "0123") + "9999",
+                        "phoneNumber1", PHONE_LABEL);
+
+        assertThat(overlong.isValid()).isTrue();
+    }
+
+    /**
+     * Confirms an unreachable reference propagates instead of becoming a telephone refusal.
+     *
+     * <p>Assumptions: the whole-number edit must inherit the same disposition the area-code edit has
+     * -- a failure to READ the allow-list is not evidence that the value is wrong -- and inheritance
+     * is not automatic here, because this method composes three edits and merges their outcomes. A
+     * composition that caught the failure and reported the area code as invalid would turn a
+     * reference-data outage into a wave of refused telephone numbers that look like user error.</p>
+     *
+     * <p>Returns no value. A refusal outcome in place of a propagated failure, or a different failure
+     * instance reaching the caller, is reported as a JUnit assertion failure.</p>
+     */
+    @Test
+    @DisplayName("an unreachable allow-list propagates from the whole-number edit unchanged")
+    void anUnreachableAllowListPropagatesFromTheWholeNumberEdit() {
+        RuntimeException unreachable = new IllegalStateException("reference service unreachable");
+        when(this.lookup.findAreaCodeClass(GENERAL_PURPOSE_AREA_CODE)).thenThrow(unreachable);
+
+        assertThatThrownBy(() -> this.service.validateUsPhoneNumber(
+                storedPhone(GENERAL_PURPOSE_AREA_CODE, "555", "0123"), "phoneNumber1", PHONE_LABEL))
+                .isSameAs(unreachable);
+    }
+
+    /**
+     * Confirms the whole-number edit refuses a missing identity or label before doing any work.
+     *
+     * <p>Assumptions: both are refused with an unchecked failure rather than defaulted, because an
+     * entry has to be reported under some identity and a message has to be prefixed with some label;
+     * inventing either would produce a per-field entry no client could bind to a control, or a
+     * message an operator reads as belonging to a different field. The check is asserted to happen
+     * before any probe, so a caller's programming error is not mixed with a reference read.</p>
+     *
+     * <p>Returns no value. An accepted null identity or label, or a probe issued despite one, is
+     * reported as a JUnit assertion failure.</p>
+     */
+    @Test
+    @DisplayName("the whole-number edit refuses a missing identity or label before any lookup")
+    void theWholeNumberEditRefusesAMissingIdentityOrLabel() {
+        String stored = storedPhone(GENERAL_PURPOSE_AREA_CODE, "555", "0123");
+
+        assertThatThrownBy(() -> this.service.validateUsPhoneNumber(stored, null, PHONE_LABEL))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> this.service.validateUsPhoneNumber(stored, "phoneNumber1", null))
+                .isInstanceOf(NullPointerException.class);
+
+        verifyNoInteractions(this.lookup);
     }
 }

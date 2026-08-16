@@ -142,8 +142,8 @@
  * <p>Assumptions: there is no {@code BatchConfig} here and there must never be one. Chunk-oriented jobs
  * and the durable job repository belong to {@code batch-service}, which is also where the posting unit of
  * work that needs cross-schema write grants is owned. The batch starter is version-managed centrally at
- * {@code services/pom.xml} L712 but is deliberately <strong>not</strong> declared by this module, and
- * {@code services/account-service/pom.xml} records that exclusion in prose at L596 to L600. The
+ * {@code services/pom.xml} L703 but is deliberately <strong>not</strong> declared by this module, and
+ * {@code services/account-service/pom.xml} records that exclusion in prose at L587 to L591. The
  * consequence is stronger than a convention: the framework types such a class would reference are absent
  * from this module's compile classpath, so the omission is enforced by the compiler and not merely by
  * agreement.</p>

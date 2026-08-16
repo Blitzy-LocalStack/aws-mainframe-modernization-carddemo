@@ -252,7 +252,7 @@ The service reads every endpoint, credential and key identifier from its
 environment. Nothing is compiled in, and the two profiles change values only —
 never topology.
 
-Both profiles carry the **same ten keys** and differ only in their values, so the
+Both profiles carry the **same twelve keys** and differ only in their values, so the
 two files can be diffed side by side; a key present in one and absent from the
 other would be a topology difference in disguise. The four permitted axes are
 pool sizing, SQS listener sizing, log level and retention.
@@ -264,11 +264,22 @@ pool sizing, SQS listener sizing, log level and retention.
 | `spring.datasource.hikari.connection-timeout` | `30000` | `10000` |
 | `spring.cloud.aws.sqs.listener.max-concurrent-messages` | `2` | `10` |
 | `spring.cloud.aws.sqs.listener.max-messages-per-poll` | `2` | `10` |
+| `carddemo.account.inquiry.max-concurrent-messages` | `2` | `10` |
+| `carddemo.account.inquiry.max-messages-per-poll` | `2` | `10` |
 | `logging.level.root` | `INFO` | `WARN` |
 | `logging.level.com.carddemo` | `DEBUG` | `INFO` |
 | `logging.level.io.awspring.cloud.sqs` | `DEBUG` | `WARN` |
 | `logging.level.org.hibernate.SQL` | `DEBUG` | `WARN` |
 | `logging.level.org.hibernate.orm.jdbc.bind` | `WARN` | `WARN` |
+
+Refactoring Rationale: the last two rows did not exist, and their absence is why the
+two rows above them bounded nothing. The consumer's `@SqsListener` attributes read
+`carddemo.account.inquiry.max-concurrent-messages` and `max-messages-per-poll`, and an
+annotation attribute takes precedence over the container factory's own setting — so
+while those attributes carried an inline fallback of `10`, the `dev` profile's
+deliberately smaller pair was overridden and had no effect at all. The fallbacks are
+gone, the properties are declared in the base document where a profile can reach them,
+and both profiles now carry the pair so the two files still diff key for key.
 
 Three of those rows are worth reading together rather than as separate numbers.
 
@@ -355,9 +366,9 @@ CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY=
 CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY=
 CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY=
 CARDDEMO_REFERENCE_CONTEXT_BASE_URL=
-CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE=
-CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE=
-CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE=
+CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE_URL=
+CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE_URL=
+CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE_URL=
 ```
 
 ```bash
@@ -558,9 +569,9 @@ value column is `—` throughout, by design.
 | `CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY` | — | Secrets Manager | none |
 | `CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY` | — | Secrets Manager | none |
 | `CARDDEMO_REFERENCE_CONTEXT_BASE_URL` | — | Terraform output (internal load balancer) | none |
-| `CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE` | — | Terraform output (SQS) | none |
-| `CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE` | — | Terraform output (SQS) | none |
-| `CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE` | — | Terraform output (SQS) | none |
+| `CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE_URL` | — | Terraform output (SQS) | none |
+| `CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE_URL` | — | Terraform output (SQS) | none |
+| `CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE_URL` | — | Terraform output (SQS) | none |
 | `CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD` | — | minted per task by the image entry point | none |
 | `AWS_REGION` | — | ECS task definition | none |
 | `CARDDEMO_ONLINE_WRITES_PARAMETER` | — | ECS task definition (SSM parameter name) | none in effect |
@@ -1100,7 +1111,7 @@ cross-service error as the outbox question below.
 ### Listener posture
 
 The listener is a `@Service` carrying
-`@SqsListener(queueNames = "${carddemo.account.inquiry.request-queue}")`, and its
+`@SqsListener(queueNames = "${carddemo.account.inquiry.request-queue-url}")`, and its
 acknowledgement model is **delete-on-success under the queue's own visibility
 period**. Nothing is acknowledged for a request that was not answered; a failed
 handling returns without acknowledging, the message reappears after the
@@ -1508,16 +1519,29 @@ session store is among them:
 |---|---|
 | Navigation (`CDEMO-FROM-*`, `CDEMO-TO-*`, `CDEMO-LAST-MAP*`) | Client-side router history. **No server-side "next program" field exists at all.** |
 | Identity (`CDEMO-USER-ID`, `CDEMO-USER-TYPE`) | Validated JWT claims |
-| Selection context (`CDEMO-ACCT-ID`, `CDEMO-CARD-NUM`, `CDEMO-CUST-ID`) | REST path and query parameters |
+| Selection context (`CDEMO-ACCT-ID`, `CDEMO-CARD-NUM`, `CDEMO-CUST-ID`) | A member of the REST request **body**; only the paging cursor and direction are query parameters |
 | Re-entry discriminator (`CDEMO-PGM-CONTEXT`) | **Gone entirely** |
 
 Two of those rows carry more weight than the table shows. Moving identity into a
 signed claim is a **security improvement**, not a like-for-like port: the
 `COMMAREA` was storage the client echoed back, so in principle a client could
 assert its own user type; a signed group claim cannot be asserted by the client at
-all. And moving selection context into the request path is what makes every
-request **self-describing** and therefore independently authorizable — the server
-never has to consult remembered state to know which account a call is about.
+all. And moving selection context into the request is what makes every request
+**self-describing** and therefore independently authorizable — the server never has
+to consult remembered state to know which account a call is about.
+
+The row above says **body** rather than path, and that is a departure from the
+wording of AAP §0.7.1, which says "path and query parameters". It is deliberate and
+it is registered centrally as `D-ACCOUNT-SELECTION-IN-BODY` in
+[`docs/architecture/cobol-to-service-traceability.md`](../../docs/architecture/cobol-to-service-traceability.md)
+§7.4. In short: the load balancer composes its access record from the request line
+before any application code runs, so an identifier in a path or query string is
+persisted where nothing this service does can withdraw it, while a body is not part
+of that record. Every account and customer operation this module publishes is
+therefore a `POST` at a fixed segment — including the reads, which is why the
+online write gate exempts them by name — and the entry holds the costs that buys:
+no intermediary caching of a read, and no bookmarkable account URL. Self-describing
+requests are unaffected either way, because the key is still in the request.
 
 `TWASIZE(0)` on both transactions (CSD lines 308 and 318) confirms there was no
 other hiding place. This module is consequently fully stateless: **no sticky
@@ -1599,8 +1623,8 @@ preserved too, for the same reason as the double space.
 
 ## Testing
 
-<!-- test-inventory: 35 tests + 8 integration tests -->
-**43** test classes: **35** unit and web-layer tests matching `*Test`, run by
+<!-- test-inventory: 36 tests + 8 integration tests -->
+**44** test classes: **36** unit and web-layer tests matching `*Test`, run by
 Surefire, and **8** integration tests matching `*IT`, run by Failsafe. Every one of
 the seven test packages also carries a `package-info.java`, because the
 documentation gate audits test sources too.
@@ -1661,11 +1685,22 @@ the command is re-run instead of the number being adjusted.
 Refactoring Rationale: `AddressValidationServiceTest` is not a duplicate of
 `AccountAddressValidationTest`, which is why both are named. The two ask different
 questions of the same rules: the older class asserts that the update path RUNS the
-three edits and refuses a submission when one of them fails, while the new one asserts
+edits and refuses a submission when one of them fails, while the new one asserts
 WHAT each edit decides — that the telephone target is gated on the general-purpose
 allow-list rather than the broader assigned one, that the state-and-postal pairing
 compares exactly four characters, and that the postal characters after the first two
 are carried with no rule applied to them at all.
+
+Refactoring Rationale: that class now covers ALL FOUR public edits rather than three.
+The composed telephone edit — the one that splits a stored fifteen-character number
+into its area code, prefix and line number at the positions `app/cbl/COACTUPC.cbl`
+declares at L82 to L100 — had no direct case, so neither the optional-whole-number
+path nor the accumulate-every-failing-part behaviour the transfers at L2259 to L2362
+require was asserted anywhere. Both are now, together with the two part edits that are
+private and reachable only through that composition. The distinction matters for the
+same reason the pair above does: a validator that returned on its first failing part
+would satisfy every part-level case while asking an operator to correct one part of a
+telephone number per submission.
 
 Refactoring Rationale: `AccountViewServiceTest` covers what no sibling did: which
 sentence each of the three composition outcomes carries, the exact bytes of the
@@ -1713,7 +1748,7 @@ deliberately behaves differently from the reference.
 |---|---|---|
 | `api` | `AccountControllerTest`, `AccountDispatcherTest`, `AccountContextContractTest`, `CustomerReadRouteTest`, `CardXrefControllerTest`, `CustomerControllerTest` | Web-layer binding, routing, status selection and the published contract, including the cross-reference and customer read routes |
 | `service` | `AccountViewServiceTest`, `AccountUpdateServiceTest`, `AccountUpdatePreservationTest`, `AccountViewRevisionTest`, `CustomerMasterReadTest`, `CardXrefByAccountReadTest`, `AccountAddressValidationTest`, `AddressValidationServiceTest`, `InquiryMessageListenerTest`, `RestReferenceAddressLookupTest`, `CustomerIdentifierCipherTest` | The transcribed rules — the three-hop view composition with the verbatim sentence each of its four outcomes carries and the filter edit's four sentinels, all seventeen edit routines of the update path with the two validation-marker regimes and both concurrency signal sites, the update path including the 409-on-version-conflict branch, the view and the concurrency revision beside it, the read composition, the by-account cross-reference read, that the update path runs the address edits, what each address edit decides against the five copybook allow-lists, the inquiry consumer, and identifier protection |
-| `config` | `SecurityConfigTest`, `InternalApiSecurityConfigTest`, `SecurityChainDispatchTest`, `SqsConfigTest`, `OpenApiDocumentTest`, `AccountApiContractGateTest`, `AccountConfigPackageTest`, `CustomerIdentifierProtectionConfigTest`, `CustomerIdentifierProtectionWiringTest`, `AwsIntegrationStartupTest`, `AwsStarterRuntimeIT` | Filter chain and authority mapping, the internal-token chain, how BOTH chains decide a container ERROR dispatch, listener wiring, the served OpenAPI document, the committed contract's agreement with the runtime it describes, and startup |
+| `config` | `SecurityConfigTest`, `InternalApiSecurityConfigTest`, `SecurityChainDispatchTest`, `SqsConfigTest`, `OpenApiDocumentTest`, `AccountApiContractGateTest`, `AccountConfigPackageTest`, `CustomerIdentifierProtectionConfigTest`, `CustomerIdentifierProtectionWiringTest`, `AwsIntegrationStartupTest`, `AwsStarterRuntimeIT`, `DevProfileContractTest` | Filter chain and authority mapping, the internal-token chain, how BOTH chains decide a container ERROR dispatch, listener wiring, the served OpenAPI document, the committed contract's agreement with the runtime it describes, and startup |
 | `mapper` | `AccountMapperTest`, `CardXrefMapperTest`, `AccountInquiryReplyMapperTest` | The anti-corruption layer — masking at the shared contract width, the misspelling correction, `FILLER` removal, the fixed-width reply |
 | `repository` | `AccountRepositoryIT`, `AccountScreenProjectionIT`, `AccountUpdateAtomicityIT`, `CardXrefRepositoryIT`, `CustomerMasterRepositoryIT`, `CustomerRepositoryIT`, `InquiryReplyLedgerIT` | Testcontainers-backed PostgreSQL — the account master's column contract, exact-decimal scale, date narrowing, version conflict and keyed windows; the joined screen projection and its outer-join arms; the two-write commit boundary of the update path; the cross-reference table's own contract together with the query plan the engine chooses for the by-account read that replaces `CXACAIX`; the customer master's column widths and schema ownership; the customer record's own contract — its layout, fixture bytes, keyed read, version column and keyed windows; and the inquiry reply ledger's second-delivery conflict |
 | `domain` | `DiagnosticRenderingTest`, `ProtectedValueIsolationTest` | Entity rendering — that no protected value leaks into a diagnostic string — and that a protected-value update intent is fixed when it is created, so neither the caller's array nor the value handed back can alter what is stored |

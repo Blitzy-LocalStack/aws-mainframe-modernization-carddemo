@@ -505,3 +505,36 @@ variable "tags" {
   #       resource in an environment already arrive without being restated
   #       here, and this input is for the ones specific to this module.
 }
+
+# -----------------------------------------------------------------------------
+# The maximum permissions the role this module creates may ever hold
+# -----------------------------------------------------------------------------
+# WHY : Assumptions: a permissions boundary is the only control that bounds what
+#       this module's composed inline policies can add up to, because it is
+#       evaluated IN ADDITION TO every identity policy -- a statement the boundary
+#       does not permit is denied even where an inline policy allows it. Attaching
+#       it here rather than trusting the caller means a root that widens an
+#       ARN list passed into this module cannot widen past the account's ceiling.
+# WHY : ⚠️ Refactoring Rationale: this input did not exist, and the role
+#       created here carried NO boundary at all, while
+#       infra/envs/*/variables.tf described its `permissions_boundary_arn` as
+#       applying to "every role this deployment creates". That description was the
+#       promise; this input is what makes it true. infra/modules/ecs-service already
+#       bounded its two roles this way, so the shape here is deliberately identical
+#       to that one rather than a second convention.
+# WHY : Assumptions: the boundary is owned by the ACCOUNT and is supplied, never
+#       created here. A boundary a deployment can rewrite bounds nothing.
+#       Trade-offs: the input is required and has no default, so a caller must own a
+#       boundary policy before it can use this module. Accepted for the same reason
+#       ecs-service accepts it: making it optional leaves the control switched off in
+#       exactly the environments least likely to notice.
+variable "permissions_boundary_arn" {
+  description = "Same-account customer-managed IAM policy ARN used as the permissions boundary on the scheduler invocation role this module creates. Required so no capability this module composes can exceed the account's deployment boundary. Supplied by the caller; never created here."
+  type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:policy/[A-Za-z0-9+=,.@_/-]+$", var.permissions_boundary_arn))
+    error_message = "permissions_boundary_arn must be an anchored customer-managed IAM policy ARN in a twelve-digit AWS account."
+  }
+}

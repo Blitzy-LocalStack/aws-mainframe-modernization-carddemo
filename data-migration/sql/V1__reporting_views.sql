@@ -2,13 +2,13 @@
 -- data-migration/sql/V1__reporting_views.sql
 -- -----------------------------------------------------------------------------
 -- Purpose:
---   Create the seven read-only views the reporting bounded context reads, plus the
+--   Create the eight read-only views the reporting bounded context reads, plus the
 --   one protected table and the one lookup function they depend on, in the
 --   `reporting` schema, owned by carddemo_reporting_owner. reporting-service owns
 --   no table, no index and no relational object of its own; the role it connects
---   as holds USAGE on this schema, SELECT on the seven views named here and
+--   as holds USAGE on this schema, SELECT on the eight views named here and
 --   EXECUTE on the function named below, and nothing else -- notably not on the
---   one table this file creates. Those seven views ARE that context's entire
+--   one table this file creates. Those eight views ARE that context's entire
 --   readable data surface, so the JPA projections in
 --   services/reporting-service/src/main/java/com/carddemo/reporting/domain map
 --   one relation each and map nothing outside this file.
@@ -20,9 +20,25 @@
 --   enumeration is deliberate: the enumeration is what a reader checks against the
 --   file, and the sentence is what a reader reads first and carries away.
 --   V3__verification_surfaces.sql adds two further views to this same schema, so
---   the schema's whole population is nine views, this one table and this one
+--   the schema's whole population is ten views, this one table and this one
 --   function -- stated here because a reader auditing the reporting role's read
 --   surface arrives at this file and must not conclude the surface stops with it.
+--
+--   Refactoring Rationale: every view figure in this header, and the enumeration
+--   below it, said SEVEN and listed seven, while this file has created EIGHT since
+--   reporting.v_transaction_category_balances was added for the category-balance
+--   report of app/jcl/PRTCATBL.jcl -- so the file's own header disagreed with its
+--   own CREATE statements, and the derived population figure was nine where it is
+--   ten. The eighth relation is added to the enumeration rather than the counts
+--   alone being raised, because the enumeration is what a reader checks the file
+--   against and a count raised without its member is how the drift began. All of
+--   the figures here are now re-derived from this file's eight CREATE VIEW
+--   statements and V3's two in this schema. Trade-offs: a header that counts its
+--   own contents has to be edited by whoever adds a relation, and nothing
+--   mechanical enforces it from inside SQL; the alternative -- dropping the counts
+--   and keeping only the enumeration -- was rejected because the counts are what
+--   let a reader auditing the reporting role's read surface confirm they have seen
+--   all of it, which is a security question rather than a stylistic one.
 --
 --   Relation                              Read by
 --   reporting.v_report_transactions       ReportTransactionView
@@ -32,6 +48,8 @@
 --   reporting.v_accounts                  the account-backed projection
 --   reporting.v_customers                 the customer-backed projection
 --   reporting.v_card_xref                 the cross-reference projection
+--   reporting.v_transaction_category_balances
+--                                         TransactionCategoryBalanceView
 --
 --   Refactoring Rationale: an earlier revision of this file created only the
 --   first FOUR of those relations and recorded, here, that the remaining three
@@ -93,18 +111,21 @@
 -- WHY : Trade-offs: one explicit transaction for the whole file. CREATE TABLE,
 --       CREATE VIEW and GRANT are all transactional in PostgreSQL, so an
 --       interrupted run leaves no half-built surface -- either the grouping-key
---       table, all seven views and all seven grants exist, or none of them do.
+--       table, all eight views and all eight grants exist, or none of them do.
 --       The alternative, letting each object commit independently, can leave
 --       reporting able to read some relations and not others, which presents as a
 --       partly-working report rather than as a failed migration.
 -- WHY : Refactoring Rationale: this note said "all four views and all four grants"
---       and offered "four independent statements" as the alternative. The file has
---       created seven views since the statement and reference projections were
---       added, so the figure was falsified by the file it describes -- and it is
---       the shape of claim that goes stale silently, because nothing fails when a
---       comment undercounts. The counts are restated from the CREATE and GRANT
+--       and offered "four independent statements" as the alternative. The statement
+--       and reference projections took the file to seven, so the figure was
+--       falsified by the file it describes -- and it is the shape of claim that goes
+--       stale silently, because nothing fails when a comment undercounts. It then
+--       went stale a second time in exactly the same way, reading seven after
+--       v_transaction_category_balances took the file to eight, which is what the
+--       note above now states. The counts are restated from the CREATE and GRANT
 --       statements below, and the alternative is described by its mechanism rather
---       than by a number so that adding an eighth view cannot invalidate it again.
+--       than by a number so that the next added view cannot invalidate it again --
+--       a precaution this paragraph is the second demonstration of the need for.
 BEGIN;
 
 -- WHY : Assumptions: the owner is asserted rather than assumed. A run as any
@@ -716,7 +737,7 @@ ALTER VIEW reporting.v_transaction_category_balances OWNER TO carddemo_reporting
 -- WHY : Trade-offs: EXECUTE is revoked from PUBLIC and granted to one role by name. A
 --       SECURITY DEFINER function is executable by PUBLIC on creation, so omitting the
 --       revoke would make this lookup reachable by every login in the database, which is
---       a strictly wider reach than the seven views it sits beside.
+--       a strictly wider reach than the eight views it sits beside.
 CREATE FUNCTION reporting.resolve_card(p_card_num character varying)
 RETURNS TABLE (
     card_num          character(16),
@@ -786,7 +807,7 @@ GRANT EXECUTE ON FUNCTION reporting.resolve_card(character varying) TO carddemo_
 -- app/jcl/PRTCATBL.jcl produces, which had no target path at all -- the report state
 -- claimed lineage from that job while emitting only the transaction-detail report.
 --
--- WHY : Assumptions: the grants name the seven views individually and never use
+-- WHY : Assumptions: the grants name the eight views individually and never use
 --       GRANT ... ON ALL TABLES IN SCHEMA reporting. The two forms differ in
 --       future scope, not in effect today: ON ALL TABLES would also cover any
 --       relation later created in this schema, so a view added for one purpose
@@ -810,10 +831,14 @@ GRANT SELECT ON reporting.v_transaction_category_balances TO carddemo_reporting;
 --       above, and the absence is stated as a REVOKE rather than left implicit. A
 --       simple view over one table is AUTOMATICALLY UPDATABLE in PostgreSQL, so a
 --       projection that reads as read-only would accept a write the moment the
---       privilege existed -- and four of the seven views here are simple enough to
+--       privilege existed -- and five of the eight views here are simple enough to
 --       qualify, every one except the three whose join to the grouping-key table
 --       disqualifies them: v_statement_transactions, v_report_transactions and
---       v_card_xref. Refactoring Rationale: that count was six-of-seven while the
+--       v_card_xref. Refactoring Rationale: that count then read four-of-seven, and
+--       v_transaction_category_balances has since been added as a single-table
+--       projection over ledger.transaction_category_balances -- automatically
+--       updatable, so it joins the qualifying group and the count is five of eight.
+--       Refactoring Rationale: before that it was six-of-seven while the
 --       fingerprint was projected on the statement view alone; the two relations that
 --       gained it also lost automatic updatability, and the number is restated rather
 --       than left stale because a reader checking this claim against the file would

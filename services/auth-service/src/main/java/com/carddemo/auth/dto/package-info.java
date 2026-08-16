@@ -31,11 +31,11 @@
  *
  * <p>Assumptions: the inventory below is this package's <b>closed set</b>, and every
  * member of it now has a file, so it is both the contract the plan assigns and a
- * measurement of the directory. Thirteen {@code .java} files constitute this package
- * and no more: this descriptor, one sealed interface, one enum and ten records.
+ * measurement of the directory. Fourteen {@code .java} files constitute this package
+ * and no more: this descriptor, one sealed interface, one enum and eleven records.
  *
  * <pre>
- * this directory: 13 java files = 12 classes + 1 charter
+ * this directory: 14 java files = 13 classes + 1 charter
  * </pre>
  *
  * <ul>
@@ -51,13 +51,18 @@
  *   <li>{@code SignOnChallenge} -- the second success shape of that exchange, for
  *       the outcome in which the pool accepts the credential but requires a
  *       permanent password before issuing tokens;</li>
- *   <li>{@code SignOnChallengeRequest} and {@code TokenRefreshRequest} -- the two
- *       bodies that have <b>no reference counterpart at all</b>. Both exist
- *       because the credential moved to a managed user pool: seeded accounts
- *       arrive with temporary passwords, and a bearer token has a finite lifetime
- *       where a terminal session did not. Each states that absence in its own
- *       documentation rather than borrowing a reference citation it has no claim
- *       to;</li>
+ *   <li>{@code SignOnChallengeRequest}, {@code TokenRefreshRequest} and
+ *       {@code SignOutRequest} -- the three bodies that have <b>no reference
+ *       counterpart at all</b>. All three exist because the credential moved to a
+ *       managed user pool: seeded accounts arrive with temporary passwords, a bearer
+ *       token has a finite lifetime where a terminal session did not, and a session
+ *       that outlives the terminal it was opened from has to be endable at the pool.
+ *       Each states that absence in its own documentation rather than borrowing a
+ *       reference citation it has no claim to. Assumptions: {@code SignOutRequest}
+ *       carries ONE component where the other two carry more, and the asymmetry is
+ *       the provider's: revocation accepts the token and the client's own
+ *       credentials and no user name, so an identifier on that body would be read by
+ *       nothing;</li>
  *   <li>{@code UserSummary} and {@code UserResponse} -- the two read shapes, the
  *       first one row of the {@code COUSR00C} list and the second the whole row
  *       that {@code COUSR02C} and {@code COUSR03C} display;</li>
@@ -81,9 +86,12 @@
  * exchanges, so the qualified wording had become the stale half: it described five
  * of seven files existing in a directory holding eleven. A third revision then
  * stated eleven files and named ten members, omitting {@code PageDirection}, which
- * had landed with the cursor-and-direction request parameters. The count and the
- * membership are therefore restated as measured, and the planned-versus-present
- * distinction is withdrawn because nothing in this package is now planned. The
+ * had landed with the cursor-and-direction request parameters. A fourth revision
+ * restates both figures again for {@code SignOutRequest}, which landed with the
+ * revocation exchange that makes a sign-out an event at the pool rather than a change
+ * of local browser state. The count and the membership are therefore restated as
+ * measured, and the planned-versus-present distinction is withdrawn because nothing
+ * in this package is now planned. The
  * closed-set claim is retained, because it is the useful part of this charter -- it
  * tells an author which types belong here and forbids a thirteenth.
  *

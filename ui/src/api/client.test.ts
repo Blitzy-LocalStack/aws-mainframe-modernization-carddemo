@@ -23,11 +23,11 @@
  * so the rejection is settled by Axios's code rather than constructed by this file's.
  */
 
-// Assumptions: every test API is imported rather than taken from an ambient
-// global, because ui/vitest.config.ts sets `globals: false` and records that as a
-// contract: ambient test globals are declared per PROJECT, so admitting them here
-// would make `expect` and `vi` visible to production screens as well, where a
-// stray call would compile.
+// Assumptions: every test API is imported rather than taken from an ambient global, because
+// ui/tsconfig.json keeps its `types` list EMPTY -- so nothing is declared ambiently and an omitted
+// import fails to compile on the symbol it omitted. The runner's own `globals` option is set to
+// `true`, for the separate reason recorded beside it, so the enforcing mechanism is the empty
+// `types` list and never that option.
 import { AxiosError } from 'axios';
 import type { AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -86,16 +86,26 @@ const CORRELATION_ID_MAX_LENGTH = 24;
 // hexadecimal form this client used to mint. That form is within the bound and within
 // the alphabet and is still refused by the service roughly one time in seventy-eight
 // thousand, because a value of twenty-four characters that happen to be all digits is
-// account-number-shaped. Requiring the prefix is what makes that refusal
+// protected-identifier-shaped. Requiring the prefix is what makes that refusal
 // unrepresentable, and the exhaustive case below proves it rather than sampling it.
+// Assumptions: that rate is unchanged by the floor below moving from thirteen to nine,
+// because a bare hexadecimal value is refused only when EVERY one of its twenty-four
+// characters is a digit -- one letter disqualifies it before any digit is counted -- and
+// twenty-four clears either floor. The figure is restated rather than recomputed.
 const MINTED_SHAPE = /^CD[0-9A-F]{22}$/u;
 
-// Assumptions: thirteen, taken from `ACCOUNT_NUMBER_MIN_DIGITS` in the same filter.
+// Assumptions: nine, taken from `PROTECTED_IDENTIFIER_MIN_DIGITS` in the same filter.
 // It refuses an inbound identifier whose digits -- counted with the accepted
-// separators removed -- number this many or more, because the shortest primary
-// account number in circulation is thirteen digits and a conforming identifier is
-// published to the mapped diagnostic context.
-const ACCOUNT_NUMBER_MIN_DIGITS = 13;
+// separators removed -- number this many or more, because nine is the shortest
+// protected identifier this system holds (a customer identifier and a national
+// identifier are both `PIC 9(09)`; an account identifier is eleven digits and a card
+// number sixteen) and a conforming identifier is published to the mapped diagnostic
+// context and echoed on the response.
+// Refactoring Rationale: this mirrored thirteen while the filter did, and moved with it.
+// The mirror is asserted rather than imported because the rule lives in Java and no build
+// step spans the two languages -- which is precisely why it is restated here with its
+// derivation, so a future divergence is visible as a contradiction rather than silent.
+const PROTECTED_IDENTIFIER_MIN_DIGITS = 9;
 
 // Assumptions: the three separator characters `ACCEPTED_PUNCTUATION` admits. They are
 // stripped before the digit count, so the refusal is about the VALUE rather than about
@@ -181,9 +191,9 @@ async function correlatesEachRequestSeparately(): Promise<void> {
 }
 
 /**
- * Reproduces the service filter's account-number-shaped refusal for one candidate identifier.
+ * Reproduces the service filter's protected-identifier refusal for one candidate identifier.
  *
- * Assumptions: this is `isAccountNumberShaped` in
+ * Assumptions: this is `isProtectedIdentifierShaped` in
  * `services/common-lib/src/main/java/com/carddemo/common/web/CorrelationIdFilter.java`, restated in
  * TypeScript rather than imported, because the rule lives in Java and no build step spans the two
  * languages. Restating it is what lets this file assert the browser's own output against the exact
@@ -191,10 +201,11 @@ async function correlatesEachRequestSeparately(): Promise<void> {
  * @param {string} candidate - An identifier the browser might transmit.
  * @returns {boolean} `true` when the services would answer HTTP 400 rather than accept it.
  */
-function wouldBeRefusedAsAccountNumberShaped(candidate: string): boolean {
+function wouldBeRefusedAsProtectedIdentifierShaped(candidate: string): boolean {
   const withoutSeparators = candidate.replace(ACCEPTED_PUNCTUATION, '');
   return (
-    /^[0-9]*$/u.test(withoutSeparators) && withoutSeparators.length >= ACCOUNT_NUMBER_MIN_DIGITS
+    /^[0-9]*$/u.test(withoutSeparators) &&
+    withoutSeparators.length >= PROTECTED_IDENTIFIER_MIN_DIGITS
   );
 }
 
@@ -213,15 +224,15 @@ function wouldBeRefusedAsAccountNumberShaped(candidate: string): boolean {
  */
 function neverMintsAnIdentifierTheServicesRefuse(): void {
   const allDigitEntropy = '0'.repeat(CORRELATION_ID_LENGTH - 2);
-  expect(wouldBeRefusedAsAccountNumberShaped(allDigitEntropy)).toBe(true);
-  expect(wouldBeRefusedAsAccountNumberShaped(`CD${allDigitEntropy}`)).toBe(false);
+  expect(wouldBeRefusedAsProtectedIdentifierShaped(allDigitEntropy)).toBe(true);
+  expect(wouldBeRefusedAsProtectedIdentifierShaped(`CD${allDigitEntropy}`)).toBe(false);
 
   for (let byte = 0; byte < 256; byte += 1) {
     const rendered = byte.toString(16).toUpperCase().padStart(2, '0');
     const minted = `CD${rendered.repeat((CORRELATION_ID_LENGTH - 2) / 2)}`;
     expect(minted).toHaveLength(CORRELATION_ID_LENGTH);
     expect(minted).toMatch(MINTED_SHAPE);
-    expect(wouldBeRefusedAsAccountNumberShaped(minted)).toBe(false);
+    expect(wouldBeRefusedAsProtectedIdentifierShaped(minted)).toBe(false);
   }
 }
 
@@ -240,7 +251,7 @@ function mintsThePublishedWidthAndShape(): void {
     const minted = newCorrelationId();
     expect(minted).toHaveLength(CORRELATION_ID_LENGTH);
     expect(minted).toMatch(MINTED_SHAPE);
-    expect(wouldBeRefusedAsAccountNumberShaped(minted)).toBe(false);
+    expect(wouldBeRefusedAsProtectedIdentifierShaped(minted)).toBe(false);
   }
 }
 
@@ -256,7 +267,7 @@ function requestCorrelationContract(): void {
   it('correlates each request separately', correlatesEachRequestSeparately);
   it('mints the published width and shape on every draw', mintsThePublishedWidthAndShape);
   it(
-    'never mints an identifier the services refuse as account-number-shaped',
+    'never mints an identifier the services refuse as protected-identifier-shaped',
     neverMintsAnIdentifierTheServicesRefuse,
   );
 }
@@ -610,11 +621,24 @@ const EVERY_PUBLISHED_OPERATION: readonly ContractOperation[] = [
  * The measured size of that surface, and of the parameterised subset within it.
  *
  * Assumptions: both figures are pinned, because the exhaustive case below is only exhaustive if the
- * iteration really covers the surface. Fifty-three operations of which twenty-three carry at least one
+ * iteration really covers the surface. Fifty-four operations of which twenty-three carry at least one
  * path parameter is the measured state; a manifest that stopped being spread into the array above would
  * otherwise leave the case passing over a smaller set, which is the way an exhaustive gate goes quiet.
+ *
+ * Refactoring Rationale: it is now 54. The account client gained the no-write validation turn the
+ * reference screen's first turn needs, and the PARAMETERISED figure is unchanged at twenty-three because
+ * that operation carries its account in a body rather than in its target -- which is the whole point of
+ * the account contract's addressing and is what this case exists to keep true.
+ *
+ * ⚠️ Refactoring Rationale: it is now 55, and the PARAMETERISED figure is again unchanged at twenty-three.
+ * The auth client gained `POST /api/v1/auth/sign-out`, which carries the renewal token to be revoked in a
+ * body -- a target-borne token would reach every access log between the browser and the service -- so it
+ * adds to the surface without adding a path parameter. The figure is re-measured against the seven
+ * manifests rather than incremented, which is what makes the disagreement between it and
+ * `ui/src/api/contracts.test.ts` impossible to leave standing: that file measures the same surface from
+ * the contract documents, so the two figures are the same measurement taken from opposite ends.
  */
-const PUBLISHED_OPERATION_COUNT = 53;
+const PUBLISHED_OPERATION_COUNT = 55;
 
 /** The measured number of published operations whose target carries a value. */
 const PARAMETERISED_OPERATION_COUNT = 23;
@@ -1589,8 +1613,15 @@ const UNAUTHORIZED = 401;
 /** Status a service answers when a valid token is refused one particular route. */
 const FORBIDDEN = 403;
 
-/** The session-storage key the client owns the access token under. */
-const ACCESS_TOKEN_KEY = 'carddemo.access-token';
+/*
+ * WHY : ⚠️ Refactoring Rationale: a `carddemo.access-token` session-storage key was named here and read
+ *       by two cases below. It no longer exists: a review found every credential this application held
+ *       sitting in script-readable Web Storage, and the bearer moved into a module variable that nothing
+ *       outside `ui/src/api/client.ts` can reach. Those two cases now observe the bearer through the
+ *       header a DISPATCHED request carries, which is both the only route left to it and the better
+ *       observable -- what a service sees is the property under assertion, and a stored value that never
+ *       reached a request was only ever a proxy for it.
+ */
 
 let plannedStatus = UNAUTHORIZED;
 
@@ -1639,18 +1670,25 @@ async function settleNotifications(): Promise<void> {
   await Promise.resolve();
 }
 
-/** Plans a refusal carrying the complete problem document and clears any stored session. */
+/** Plans a refusal carrying the complete problem document and discards any held bearer. */
 function stubProblemFixture(): void {
   stubBuildConfiguration();
-  sessionStorage.clear();
+  setAccessToken(null);
   plannedStatus = 400;
   plannedBody = COMPLETE_PROBLEM;
 }
 
-/** Restores the environment and empties storage so no later case inherits either. */
+/**
+ * Restores the environment and discards the bearer so no later case inherits either.
+ *
+ * Assumptions: ⚠️ the bearer is discarded rather than `sessionStorage` cleared. It never lived in a
+ * store as far as these cases are concerned any more, and clearing a store that holds nothing would
+ * read as isolation this file no longer has.
+ * @returns {void} Nothing; no bearer is held.
+ */
 function restoreProblemFixture(): void {
   restoreBuildConfiguration();
-  sessionStorage.clear();
+  setAccessToken(null);
 }
 
 /** Asserts a complete problem document is carried through verbatim and classified as one. */
@@ -1751,20 +1789,27 @@ function recordSignal(failure: ApiRequestError): void {
   signalled.push(failure);
 }
 
-/** Plans a refusal, stores a session, and empties the observed signals. */
+/** Plans a refusal, installs a bearer, and empties the observed signals. */
 function stubSessionFixture(): void {
   stubBuildConfiguration();
-  sessionStorage.clear();
+  setAccessToken(null);
   signalled = [];
   plannedStatus = UNAUTHORIZED;
   plannedBody = { ...COMPLETE_PROBLEM, status: UNAUTHORIZED, code: 'CARDDEMO-0401' };
-  setAccessToken('a-held-access-token');
+  setAccessToken(HELD_TOKEN);
 }
 
-/** Restores the environment and empties storage and the observed signals. */
+/**
+ * Restores the environment and discards the bearer and the observed signals.
+ *
+ * Assumptions: ⚠️ the bearer is discarded explicitly, where this used to clear `sessionStorage`. It is a
+ * module variable now, so it outlives every case in this file rather than every file in this worker —
+ * one case's bearer left in place would attach itself to the requests of every case after it.
+ * @returns {void} Nothing; no bearer is held and no signal is recorded.
+ */
 function restoreSessionFixture(): void {
   restoreBuildConfiguration();
-  sessionStorage.clear();
+  setAccessToken(null);
   signalled = [];
 }
 
@@ -1776,7 +1821,10 @@ async function discardsTheSessionOnUnauthorized(): Promise<void> {
     await settleNotifications();
 
     expect(failure.status).toBe(UNAUTHORIZED);
-    expect(sessionStorage.getItem(ACCESS_TOKEN_KEY)).toBeNull();
+    expect(
+      await transmitWith(),
+      'the discarded bearer must not reach the next request',
+    ).toBeUndefined();
     expect(signalled).toHaveLength(1);
     expect(signalled[0]?.status).toBe(UNAUTHORIZED);
   } finally {
@@ -1798,7 +1846,9 @@ async function keepsTheSessionOnForbidden(): Promise<void> {
     await settleNotifications();
 
     expect(failure.status).toBe(FORBIDDEN);
-    expect(sessionStorage.getItem(ACCESS_TOKEN_KEY)).toBe('a-held-access-token');
+    expect(await transmitWith(), 'the retained bearer must still reach the next request').toBe(
+      `Bearer ${HELD_TOKEN}`,
+    );
     expect(signalled).toHaveLength(0);
   } finally {
     unsubscribe();
@@ -1892,17 +1942,16 @@ async function transmitWith(configuration?: AxiosRequestConfig): Promise<string 
   return authorizationSent;
 }
 
-/** Stores a token and the build configuration for one case. */
+/** Installs a bearer and the build configuration for one case. */
 function stubHeldToken(): void {
   stubBuildConfiguration();
-  sessionStorage.clear();
   setAccessToken(HELD_TOKEN);
 }
 
-/** Discards the token and the build configuration so no later case inherits either. */
+/** Discards the bearer and the build configuration so no later case inherits either. */
 function restoreHeldToken(): void {
   restoreBuildConfiguration();
-  sessionStorage.clear();
+  setAccessToken(null);
 }
 
 /** Asserts an ordinary request carries the stored bearer. */
@@ -1954,3 +2003,97 @@ function storedSessionAttachmentContract(): void {
 }
 
 describe('stored session attachment contract', storedSessionAttachmentContract);
+
+/**
+ * Builds the client once against one configured base URL and reports what the factory did.
+ *
+ * Assumptions: the memoised instance is discarded first, because the factory validates the base URL
+ * exactly once and hands back the cached client on every later call — so a case that did not reset
+ * would assert against whichever URL a previous case happened to configure.
+ * @param {string} baseUrl - The value the runtime document is taken to have published.
+ * @returns {Error | undefined} The error the factory threw, or `undefined` when it built a client.
+ */
+function buildAgainst(baseUrl: string): Error | undefined {
+  resetApiClient();
+  vi.stubEnv('VITE_API_BASE_URL', baseUrl);
+  try {
+    getApiClient();
+    return undefined;
+  } catch (refusal) {
+    return refusal instanceof Error ? refusal : new Error(String(refusal));
+  }
+}
+
+/** Asserts a loopback API over plain HTTP is admitted, by name and by both literal addresses. */
+function admitsPlainHttpOnlyOnLoopback(): void {
+  // Assumptions: the three spellings are asserted separately rather than as one representative
+  //   case. A dual-stack host resolves `localhost` to the IPv6 loopback, and `URL` keeps the
+  //   brackets on that hostname, so a guard written for the IPv4 address alone admits a developer's
+  //   configuration on one machine and refuses the identical configuration on another.
+  expect(buildAgainst('http://localhost:8000/api/v1')).toBeUndefined();
+  expect(buildAgainst('http://127.0.0.1:8000/api/v1')).toBeUndefined();
+  expect(buildAgainst('http://[::1]:8000/api/v1')).toBeUndefined();
+}
+
+/** Asserts the loopback exemption does not depend on how the bundle was built. */
+function admitsLoopbackIndependentlyOfTheBuildMode(): void {
+  // Refactoring Rationale: this case exists because the exemption USED to be conditioned on
+  //   `import.meta.env.DEV`, which a production build inlines as `false` — so the whole branch was
+  //   folded out of the shipped asset and the built SPA refused the local edge's published
+  //   `http://localhost:8000/api/v1`, throwing inside this factory before any request was
+  //   dispatched. A test cannot read the folded artifact, so it asserts the property that folding
+  //   destroyed instead: the decision is made from the resolved host, and stubbing the build mode
+  //   to production leaves the outcome unchanged.
+  vi.stubEnv('DEV', false);
+  vi.stubEnv('PROD', true);
+  expect(buildAgainst('http://localhost:8000/api/v1')).toBeUndefined();
+}
+
+/** Asserts every host other than loopback still has to be reached over HTTPS. */
+function refusesPlainHttpOnAnyOtherHost(): void {
+  // Assumptions: a private address and a resolvable public name are both asserted, because the
+  //   requirement is not about reachability from the internet — a body carrying a primary account
+  //   number crosses a network interface in both cases, which is the whole of what the scheme
+  //   protects.
+  const named = buildAgainst('http://api.carddemo.example/api/v1');
+  const private4 = buildAgainst('http://10.0.3.14:8080/api/v1');
+  const lookalike = buildAgainst('http://localhost.attacker.example/api/v1');
+
+  expect(named?.message).toContain('only HTTPS is accepted');
+  expect(private4?.message).toContain('only HTTPS is accepted');
+  // Assumptions: the look-alike host is the reason the check compares the WHOLE hostname rather
+  //   than testing for a `localhost` prefix or substring. `localhost.attacker.example` resolves
+  //   wherever its owner points it, so a substring test would exempt an attacker-controlled host
+  //   from the scheme requirement.
+  expect(lookalike?.message).toContain('only HTTPS is accepted');
+}
+
+/** Asserts an HTTPS API is admitted on any host, which is the deployed shape. */
+function admitsHttpsAnywhere(): void {
+  expect(buildAgainst('https://api.carddemo.example/api/v1')).toBeUndefined();
+  expect(buildAgainst('https://localhost:8443/api/v1')).toBeUndefined();
+}
+
+/**
+ * Restores the stubbed environment and discards the memoised client after each scheme case.
+ *
+ * Assumptions: the client is reset as well as the environment, because the factory caches its
+ * instance — leaving one built against a loopback URL would make a later file's first request
+ * travel to this file's configuration rather than to its own.
+ */
+function restoreConfigurationAndClient(): void {
+  restoreBuildConfiguration();
+  resetApiClient();
+}
+
+/** Groups the assertions that fix which API base URLs this client will build against. */
+function apiBaseUrlSchemeContract(): void {
+  beforeEach(stubBuildConfiguration);
+  afterEach(restoreConfigurationAndClient);
+  it('admits plain HTTP on loopback, by name and by both addresses', admitsPlainHttpOnlyOnLoopback);
+  it('admits loopback whatever the build mode says', admitsLoopbackIndependentlyOfTheBuildMode);
+  it('refuses plain HTTP on every other host', refusesPlainHttpOnAnyOtherHost);
+  it('admits HTTPS on any host', admitsHttpsAnywhere);
+}
+
+describe('API base URL scheme contract', apiBaseUrlSchemeContract);

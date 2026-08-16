@@ -26,7 +26,7 @@ obligation:
 **There is no mechanical gate behind either of them**, and both halves of that were
 checked in the gate files themselves rather than taken from a description of them.
 `config/checkstyle/checkstyle.xml` sets `<property name="fileExtensions" value="java"/>`
-on its `Checker` at L216, with its own adjacent note at L207 recording that only Java
+on its `Checker` at L209, with its own adjacent note at L200 recording that only Java
 carries Javadoc, so **no file in this directory is ever scanned.** The
 `config/checkstyle/suppressions.xml` entry matching `src/test/resources/fixtures/` at
 L182 describes itself at L167 as **defensive** and as one that may never fire, precisely

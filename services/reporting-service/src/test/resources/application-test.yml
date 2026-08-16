@@ -20,10 +20,23 @@
 #
 #   Who consumes this document, established by reading the module's own test tree
 #   rather than assumed:
-#     - repository/ReportingQueryBootstrapIT is the ONLY test in this module that
-#       loads a Spring context. It is annotated @ActiveProfiles("test"), so what
-#       follows is its effective configuration, and it reaches its database through
-#       a @Container @ServiceConnection PostgreSQLContainer.
+#     - the THREE integration tests under repository/ are the only tests in this
+#       module that load a Spring context, and each is annotated
+#       @ActiveProfiles("test"), so what follows is the effective configuration of
+#       all three. ReportingQueryBootstrapIT and StatementHeadingChunkIT reach their
+#       databases through a @Container @ServiceConnection PostgreSQLContainer, the
+#       second of them additionally applying a harness init script.
+#       ReportingDeployedRelationIT does NOT use @ServiceConnection: it starts its
+#       container from a static initialiser and supplies the three connection
+#       coordinates through @DynamicPropertySource, because it authenticates as the
+#       SELECT-only login role rather than as the container owner and because the
+#       shipped DDL it applies has to be in place before the pool opens its first
+#       connection. Everything else below reaches it unchanged, which is the point:
+#       it asserts the DEPLOYED pool posture, including the search-path pin.
+#       Refactoring Rationale: this entry previously named one class as the only
+#       context-loading test in the module. Two more have since been added, and a
+#       consumer list that undercounts its consumers is what lets somebody change a
+#       value here believing only one class reads it.
 #     - config/DataSourceConfigTest PARSES this document and reads
 #       spring.datasource.hikari.connection-init-sql out of it, then requires the
 #       startup guard to accept that exact statement. That value is therefore
@@ -31,9 +44,14 @@
 #     - config/JwtDecoderConfigTest PARSES this document too, and requires that no
 #       audience key appear under the resource-server subtree under any spelling.
 #       It tolerates the subtree being absent, which is what it is below.
-#     The other 27 classes matching *Test are plain unit tests that load no context,
-#     so they never read this document at all. Surefire runs those; Failsafe runs
-#     the single *IT after packaging and asserts its result in `verify`.
+#     The other 31 of the 33 classes matching *Test load no application context and
+#     carry no @ActiveProfiles annotation -- measured, not assumed: the three *IT
+#     classes are the only annotated ones in the tree -- so they never read this
+#     document at all. Surefire runs the 33; Failsafe runs the three *IT after
+#     packaging and asserts their results in `verify`.
+#     Refactoring Rationale: this said "the other 27" and "the single *IT". Both
+#     figures had drifted as classes were added. They are restated as a total and a
+#     remainder so the two can be checked against each other and against the tree.
 #
 #   NO CREDENTIAL, NO NETWORK LOCATION, NO RESOURCE IDENTIFIER AND NO ACCOUNT
 #   IDENTIFIER APPEARS ANYWHERE BELOW, and no stand-in for one either. The register
@@ -315,7 +333,7 @@ spring:
       #       what several sibling test profiles do and which would catch mapping
       #       drift against the real relations. Rejected because validation inspects
       #       every mapped object, and against a container holding only this module's
-      #       classpath it would abort the context refresh on seven views nothing
+      #       classpath it would abort the context refresh on eight views nothing
       #       here can produce. Copying the peer migrations onto this classpath so
       #       validation could succeed was rejected in turn: the copies would drift
       #       from their authorities and a passing validation would then assert

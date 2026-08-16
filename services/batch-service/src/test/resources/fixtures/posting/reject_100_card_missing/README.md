@@ -397,9 +397,20 @@ which is the least informative place it could surface. A loadable single row cos
 record and removes that failure mode entirely.
 
 Assumptions: this row also differs from `../happy_path/tcatbal.txt` in exactly one byte, at offset
-23 -- an opening balance of `+0.00` here against `+10.00` there -- and that difference **cannot**
-affect this scenario's outcome, because the category-balance row is not consulted anywhere in
-validation. It is read and rewritten only by `2700-UPDATE-TCATBAL` at `:467`, reached from `:440` on
+23 -- an opening `TRAN-CAT-BAL` of `0000000000{` = `+0.00` here against `0000001000{` = `+100.00`
+there -- and that difference **cannot** affect this scenario's outcome, because the category-balance
+row is not consulted anywhere in validation.
+
+Assumptions: this sentence said `+10.00` rather than `+100.00`, and the correction is recorded because
+the decode is the exact place a reader is most likely to make the same slip. The field is
+`PIC S9(09)V99` and therefore **eleven** byte positions, of which the last carries both the eleventh
+digit and the sign: `0000001000{` decodes to the digits `00000010000` and the overpunch `{` is a
+positive trailing `0`, so the value is `+100.00` and not `+10.00`. Reading the ten leading characters
+as the whole number and the overpunch as a sign carrying no digit is what produces the answer that was
+written here, and it is off by a factor of ten in every field of this shape. `../happy_path`'s own
+section 4 states `+100.00` for the same bytes, so the two documents disagreed until now -- and a
+disagreement between two fixture READMEs about one byte is the kind of thing a reader resolves by
+guessing, which is why the decode is shown here rather than only the result. It is read and rewritten only by `2700-UPDATE-TCATBAL` at `:467`, reached from `:440` on
 the posting path. The precise statement about what makes this folder reject is therefore narrower
 than "one file differs": `dailytran.txt` and `acctdata.txt` are byte-identical to `../happy_path`,
 `tcatbal.txt` differs by one byte that no validation path reads, and `cardxref.txt` is the only
@@ -593,29 +604,45 @@ COBOL baseline or the parity oracle.
 
 ## 10. What drives this corpus, and what reads it
 
-This corpus is a **driven input**, not a reference mirror. `PostTransactionsJobParityIT` resolves
-each scenario under the classpath root `/fixtures/posting/`, seeds the account master, the
+This corpus is a **driven input**, and **three** classes read it. `PostTransactionsJobParityIT`
+resolves each scenario under the classpath root `/fixtures/posting/`, seeds the account master, the
 cross-reference, the category balances and the feed from these four files, launches the posting job,
 and compares the resulting transaction master, category balances, account master and reject stream
-against `tests/golden/posting/reject_100_card_missing`. **An edit to these bytes changes what the
-parity run asserts.**
+against `tests/golden/posting/reject_100_card_missing`. `PostTransactionsJobTest` resolves the same
+scenario under `fixtures/posting/` at the unit tier and seeds the same four relations from the same
+bytes. **An edit to these bytes changes what both runs assert.**
 
 `BatchFixtureContractTest` additionally holds every file here to its declared geometry, to
 `LF`-only line endings and the one-trailing-newline rule, to a successful decode under its declared
-layout, and to the one relation that makes this scenario discriminating -- that `XREF-CARD-NUM` and
-`DALYTRAN-CARD-NUM` differ here, where `../happy_path` requires them equal. A layout mistake is
-therefore caught in this module rather than surfacing later as a comparison failure.
+layout, to its committed SHA-256, and to the one relation that makes this scenario discriminating --
+that `XREF-CARD-NUM` and `DALYTRAN-CARD-NUM` differ here, where `../happy_path` requires them equal. A
+layout mistake or an unintended byte change is therefore caught in this module rather than surfacing
+later as a comparison failure.
 
-Assumptions: a reader must not assume these bytes are inert. Two families in this tree behave
-differently -- `preflight/**` and `interest/**` are mirrors, because no test in this module declares
-either as a seed root, while `posting/**` is a seed root for the parity class -- so the tree serves
-two purposes and only this one changes what a run asserts. The distinction is recorded because the
-cost of getting it wrong is asymmetric: editing a mirrored byte is harmless, and editing one of these
-is a silent change to an assertion. The split is stated here as **measured from the consuming
-classes** -- `PostTransactionsJobParityIT` declares the classpath seed root, and master section 10
-records the same for the posting family -- rather than by pointing at a per-scenario table, because a
-tabulated inventory of consumers is the kind of claim that goes stale the moment a class starts or
-stops reading a directory, and this sentence should not outlive its own accuracy.
+Assumptions: this section exists because two record files sitting in the same tree can differ in
+whether a job opens them, and the difference is invisible from the layout. Master section 1.5 holds the
+measurement, taken from the resource root each consuming class declares rather than from prose: all four
+files in every one of the NINE `posting/**` scenarios are opened -- by `PostTransactionsJobTest` under
+the classpath prefix `fixtures/posting/` and by `PostTransactionsJobParityIT` under `/fixtures/posting/`
+-- all four files in every one of the THREE `interest/**` scenarios are opened by
+`CalculateInterestJobTest` under `fixtures/interest/`, and `PreflightDailyTransactionsJobTest` opens the
+three `preflight/**` feed files plus `preflight/unmatched_card/acctdata.txt` under
+`fixtures/preflight/`. **53 of the 62 record files in this tree are live job input**; master section 1.5
+names the nine that are not.
+
+Assumptions: this paragraph previously said the sibling `preflight/**` and `interest/**` families were
+mirrors that no test in this module read, and that `CalculateInterestJobTest` resolved its inputs from
+the repository-root `tests/fixtures/interest/` tree. Both claims were false. That class declares
+`FIXTURE_INTEREST_ROOT` as the classpath prefix `fixtures/interest/` and loads through
+`getClassLoader().getResourceAsStream(...)`, so it reads this tree; it DISCUSSES the reference oracle
+tree in its prose, and the two were conflated -- a path named in a docstring is not a path being opened.
+The correction matters in exactly the direction the paragraph was warning about: a reader told that a
+sibling directory was inert would carry that belief into it and edit a live job input believing the
+change was free.
+
+Assumptions: the inventory is cited to master section 1.5 rather than restated per scenario here,
+because a per-folder copy of it is the claim that goes stale the moment a class starts or stops
+reading a directory -- which is precisely how the withdrawn paragraph above came to be wrong.
 
 ---
 

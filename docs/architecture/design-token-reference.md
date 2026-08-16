@@ -42,16 +42,19 @@
 > **`ui/src/theme/antdTheme.ts`**, which assembles it into the provider theme
 > object. This document is **upstream** of both.
 >
-> **Gaps and boundaries.** Six gaps are inventoried in [§8](#8-gaps-inventory)
+> **Gaps and boundaries.** Eight gaps are inventoried in [§8](#8-gaps-inventory)
 > and none of them blocks the migration. One boundary is stated plainly up front
 > rather than buried: **no Figma or other design source was supplied**, so the
 > Figma-to-token mapping a reader might look for here is **not applicable** — see
 > [§1](#1-there-is-no-figma-source--gap-g6). A second boundary is equally plain:
-> **this mapping is not verified by any test that renders it.** **No screen has been
-> rendered in a browser**, no visual regression test has run, no accessibility audit
-> has been performed and no conformance level of any kind is claimed; what the
-> document *is* grounded in — measured baseline attributes and the pinned package's
-> own declarations — and what that does not establish are stated in full in
+> the mapping is verified by test only where a test can reach it. **Text contrast IS
+> asserted**: `ui/src/theme/textContrast.test.ts` recomputes every pairing in
+> [§4.2.1](#421-the-text-grade-companion-mapping) from the pinned package's own token
+> accessor and fails below the WCAG 2.1 AA threshold for normal text. Everything else
+> about *appearance* remains unverified here — no visual regression test runs from this
+> document, and no broader conformance level is claimed; what the document *is* grounded
+> in — measured baseline attributes and the pinned package's own declarations — and what
+> that does not establish are stated in full in
 > [§11](#11-caveats-and-boundaries).
 >
 > **Convention.** This document follows
@@ -434,6 +437,58 @@ literally true rather than approximately true:
   the programs, and why the two columns are reported side by side rather than
   summed. Summing them would double-count every field the error template touches.
 
+### 4.2.1 The text-grade companion mapping
+
+The table above resolves each source colour to the **semantic role** it carries. That
+answers which token a value belongs to; it does not answer whether that token may be
+**read as text**, and the two answers differ for six of the eight roles.
+
+Every semantic colour the library ships is a **mid-ramp palette anchor** intended for
+fills, borders, icons and focus rings. Measured as text against the surface the shell
+paints — `colorBgContainer`, which `SURFACE_TOKENS.screen` names and
+`ui/src/layout/AppShell.tsx` applies to all three of its zones — those anchors give
+`colorPrimary` **4.104:1**, `colorInfo` **2.205:1**, `colorError` **3.268:1**,
+`colorSuccess` **2.265:1** and `colorWarning` **1.900:1**, where WCAG 2.1 AA requires
+**4.5:1** for normal text. An earlier revision of this reference recorded those figures
+and accepted them. That is withdrawn: a recorded measurement does not make text
+readable, and the 3270 source has no large-text role that could claim the weaker 3:1
+allowance — every one of its text values is one terminal cell high.
+
+`ui/src/theme/tokens.ts` therefore publishes a second map, `BMS_TEXT_COLOR_TOKENS`,
+used by every consumer that paints a colour as text, with `BMS_COLOR_TOKENS` retained
+for fills, borders and icons. `BMS_TEXT_CONTRAST_AUDIT` carries the same evidence as
+data, and `ui/src/theme/textContrast.test.ts` recomputes every ratio from the pinned
+package's own token accessor and fails below the threshold, so the table below cannot
+drift from what the theme produces.
+
+| Role | Darkest shade its own ramp publishes | That shade measures | Text-grade token | Measures | Resolution |
+|---|---|---|---|---|---|
+| `BLUE` | `colorPrimaryTextActive` | 6.159:1 | `colorPrimaryTextActive` | **6.159:1** | **Exact** — the hue family survives. |
+| `RED` | `colorErrorTextActive` | 4.618:1 | `colorErrorTextActive` | **4.618:1** | **Exact** — the hue family survives, which is what keeps the field-error contract of [§5](#5-the-field-error-contract) red. |
+| `TURQUOISE` | `colorInfoTextActive` | 3.549:1 | `colorTextLabel` | **6.978:1** | **Snap** — the cyan ramp publishes no AA-capable shade at this version, and the role's measured job is labels and informational prompts, which is what the label text token denotes. |
+| `GREEN` | `colorSuccessTextActive` | 3.463:1 | `colorText` | **16.558:1** | **Snap** — same reason; and the role's measured job is the *input affordance* recorded under **G4**, not text. |
+| `YELLOW` | `colorWarningTextActive` | 2.867:1 | `colorText` | **16.558:1** | **Snap** — the worst-contrasting of the three, so legend text takes the base text role. The **border** of a rule painted `COLOR=YELLOW` still resolves through `colorWarning`, because a border carries no contrast obligation for text. |
+| `NEUTRAL` | `colorTextSecondary` | 6.978:1 | `colorTextSecondary` | **6.978:1** | **Exact** — already a text role. |
+| `DEFAULT` | `colorText` | 16.558:1 | `colorText` | **16.558:1** | **Exact** — already a text role. |
+| `PINK` | `colorTextHeading` | 16.558:1 | `colorTextHeading` | **16.558:1** | **Exact** — already a text role. |
+
+Two consequences are worth stating because each is easy to mistake for a defect:
+
+- **The message band collapses all three severities onto the base text role.**
+  `ui/src/layout/MessageBand.tsx` paints its sentence inside the design system's alert,
+  which tints its **own** background per severity, and against those tints the darkest
+  in-family shades measure 4.224:1, 3.168:1 and 3.247:1 — so no severity can be
+  expressed in its own hue as text there. Severity is instead carried by three channels
+  the colour was never the only one of: the alert's `type` (background and border), its
+  icon, and its ARIA role. That is also the component's own default treatment.
+- **The shell paints one surface across all three zones.** The design system fills
+  `Layout.Header` with a dark navy and the frame with a layout grey by default, so one
+  text token measured three different ratios depending on the zone it appeared in — and
+  the header pairing measured **4.491:1**, failing by 0.009. No token map can fix a
+  deficient *background*, which is why `SURFACE_TOKENS` exists and why the ratios above
+  are stated against exactly one surface. Nothing transcribed is lost: the dark band is
+  an antd default, not a measured source value.
+
 ### 4.3 Non-colour resolutions
 
 | Category | Source value | Token | Resolution |
@@ -659,6 +714,19 @@ whose reason is "consistency" is a rule that gets traded away under pressure.
    duplicate a token — it **silently opts that component out of the theme**. A
    later change to the token leaves that one component behind, and nothing fails,
    so the divergence is found by eye rather than by build.
+   **Where a needed value has no token at all**, the rule is not relaxed at the
+   component — the value moves *here*, into `ui/src/theme/tokens.ts`, and the
+   component consumes it by name. Exactly two such values exist, both recorded in
+   [§8](#8-gaps-inventory): the frame's viewport-relative height (**G8**), and the
+   proportional widths of the reference-type browse's three columns, which are
+   **derived** from counts of `DFHMDF` character cells by
+   `characterCellWidthShare` rather than chosen — a **G1** artefact, since G1
+   surrenders absolute positioning while undertaking to preserve relative
+   emphasis. **Reason for centralising rather than exempting:** an exemption
+   granted at a component is invisible from here, so the next reader cannot tell
+   how many exist; a registry entry is countable, and both of these are asserted
+   by tests (`ui/src/router.test.tsx` for the frame height, and the bridge's own
+   range checks for a mis-read cell count).
 2. **Library components over raw HTML.** No raw `<button>`, `<input>`,
    `<select>`, `<table>` or heading element where the system provides an
    equivalent. **Reason:** the system components carry the focus management,
@@ -695,6 +763,8 @@ No element in the CardDemo interface required step 4 — see
 | **G4** | `HILIGHT=UNDERLINE` has no token | **175** occurrences | **No token is needed** — the input component's own border carries the affordance. Recorded here precisely so that the absence of an underline token is not mistaken for an oversight in the mapping. |
 | **G5** | The 3270 has no radius, elevation or motion vocabulary at all | — | `borderRadiusLG`, `boxShadowSecondary` and the `motionDuration*` family are **purely additive**. They are applied **through tokens** rather than as literals, so the additions remain inside the theme and stay subject to rule 1 of [§7](#7-the-three-non-negotiable-rules). |
 | **G6** | No Figma design source exists | — | **Not a system gap.** The Figma-to-token mapping table is **not applicable**; the BMS attributes are the design source and were measured exhaustively. See [§1](#1-there-is-no-figma-source--gap-g6). |
+| **G7** | Three snapped colours measure below the WCAG AA minimum for normal text **on at least one surface they are actually painted on** | `COLOR=BLUE` on the design system's own dark chrome, measured at **4.49:1** across the skip link and both header rows, and on the shell's own lighter fill at **3.76:1** across the band's **8** slots; `COLOR=TURQUOISE` on the light surfaces, measured at **2.21:1** across **6** prompt nodes on **4** screens; `COLOR=YELLOW` on the shell fill, measured at **1.74:1** across both title strings | **Substituted per surface, in the theme bridge, once for every screen.** `ACCESSIBLE_TEXT_TOKENS` in `ui/src/theme/tokens.ts` resolves blue-on-chrome to `colorPrimaryHover` (**6.17:1**, four steps up the same primary ramp, so the band still renders blue on navy), blue-on-shell-surface to `colorPrimaryActive` (**5.65:1**, the darkest step of that same ramp, so it still renders blue on grey), turquoise prompt text to `colorTextLabel` (**6.76:1** where it paints, on the shell fill), and the two title strings on the shell fill to `colorTextHeading` (**15.97:1**), while `COLOR=YELLOW` keeps its `colorWarning` operand on the dark chrome where it measures **9.70:1** and needs no help. The two blues are separate entries rather than one accessible blue because the corrections run in opposite directions and neither step clears the minimum on the other fill — `colorPrimaryHover` measures 2.74:1 on the light surface and `colorPrimaryActive` 2.99:1 on the chrome — so the surface is a parameter of the lookup, not a detail a caller may omit. **The yellow substitute leaves its hue family for the same measured reason the turquoise one does:** the darkest warning-family token, `colorWarningActive` at `#d48806`, reaches only **2.63:1** on that fill, and clearing 4.5:1 requires the eighth step of the gold ramp, `#874d00` at 6.23:1, a dark brown that is a palette entry rather than a semantic token and no longer reads as the mapsets' yellow. The turquoise substitute leaves the hue family, and that is a **measured impossibility** rather than a preference: every cyan-family token the system derives was computed against the document surface and the darkest of them — `colorInfoActive` and `colorInfoTextActive`, both `#08979c` — reaches only **3.55:1**. Three alternatives were rejected with numbers: re-seeding the informational colour dark enough for text (a cyan-8 seed gives 6.09:1) moves the whole informational ramp and contradicts the accepted 2.21:1 decision recorded for that role in `ui/src/theme/antdTheme.ts`; `colorPrimaryActive` (`#0958d9`, 6.16:1) keeps a cool accent but puts a distinct operand onto the primary ramp, which is the collapse the pink row of [§4.2](#42-colour-and-attribute-mapping) rejects by name — note that this rejection is specific to TURQUOISE and is not in tension with that same token being adopted for blue on the light surface, where the operand already IS `COLOR=BLUE`, so its own ramp collapses nothing; and a tinted background from the same ramp measures **3.39:1**, which is worse. **Both operands and their counts stay recorded** in `BMS_SOURCE_HISTOGRAM`, and the message band's informational variant is deliberately unchanged, because it pairs against its own alert background with a per-severity icon and ARIA role rather than against the document surface. **Both ratios are asserted on every run** by `ui/src/theme/contrast.test.ts`, which also asserts that the two operand tokens still fall short — a substitution whose reason has gone away should be retired, not kept. |
+| **G8** | No token scale can express a viewport-relative height | `DFHMDI SIZE=(24,80)` fills the display and fixes the key legend on row 24; **one** value is needed, by **one** element — the application frame in `ui/src/layout/AppShell.tsx` | **Registered as a value in the bridge and consumed from there.** `ADDITIVE_LAYOUT_VALUES.viewportMinimumHeight` holds `100dvh`, so the frame stays one visible viewport tall and the legend sits at the bottom edge of the display as row 24 did. `dvh` rather than `vh` because a mobile browser's collapsing toolbar makes `vh` describe a viewport taller than the visible one, which would push the legend out of view on exactly the narrow viewports the **G1** reflow exists to serve. Recorded here rather than left in the component because a value the token scales cannot express is precisely what this register is for; `ui/src/router.test.tsx` asserts the frame's minimum height still comes from the registry, so the value cannot be re-hardcoded in the component without failing a test. |
 
 ### 8.1 G2 in detail: the five jobs of `DRK`
 
@@ -731,14 +801,34 @@ slots in job 3.
   a fraction of the total and concludes a figure is wrong. Every row above therefore
   publishes the exact list to grep for alongside the count it produces.
 
-**Summary — six gaps exist and none of them blocks the migration.** One is a
+**Summary — eight gaps exist and none of them blocks the migration.** One is a
 deliberate architectural deviation (G1); one is an attribute carrying five
 unrelated jobs, each resolved separately in [§8.1](#81-g2-in-detail-the-five-jobs-of-drk)
 and only one of which is a cosmetic difference (G2); two are documented token snaps
 whose originals are retained (G3, G4); one is a set of purely additive affordances
-applied through tokens (G5); and the last is simply the absence of a Figma source
-(G6). **No gap requires a placeholder component**, and no gap requires follow-up
-from a design-system team.
+applied through tokens (G5); one is simply the absence of a Figma source (G6); one is
+a set of four contrast substitutions made per surface and asserted on every run (G7); and
+the last is a single registered value the token scales cannot express (G8). **No gap
+requires a placeholder component**, and no gap requires follow-up from a
+design-system team.
+
+- Refactoring Rationale: **why the register grew from six to eight.** The first six
+  are derived from the mapsets, which is why they could all be enumerated before a
+  screen existed. G7 and G8 could not be: a contrast shortfall exists only once a
+  token is painted onto a particular background, and a viewport-relative height is a
+  need the browser target introduces and the terminal had no equivalent of. Both had
+  been recorded as inline markers at the single element where each was measured —
+  which put a design-system decision inside a screen, left this register claiming to
+  be complete while two entries lived elsewhere, and in G7's case left two measured
+  accessibility shortfalls flagged rather than fixed. Refactoring Rationale: G7 then
+  grew again, for a reason worth recording rather than smoothing over. Fixing the
+  shortfall where it had been *reported* — the band on the shell's dark chrome — left
+  the same shared component failing worse on the surface nobody had measured, at
+  3.76:1 for the blue and 1.74:1 for the two title strings. Parameterising the
+  component by surface is what made the second surface visible, and an automated audit
+  of the built bundle is what proved it: ten failing nodes on the body mount, none on
+  the delegated one. A gap register that recorded only the reported half would have
+  been accurate about its source and wrong about the delivery.
 
 ---
 
@@ -937,10 +1027,14 @@ because they are the contract the user-interface work is written against.
 
 ## 11. Caveats and boundaries
 
-- **What has not been rendered.** **No screen has been rendered in a browser. The
-  mapping is authored and statically reviewable only. No visual regression test has
-  run, no accessibility audit has been performed, and no conformance level is
-  claimed.** Assumptions: every value in this document is derived from an artifact a
+- **What has not been rendered.** **No visual regression test has run and no broad
+  conformance level is claimed.** One exception is stated precisely rather than folded
+  into the general disclaimer: the **text-contrast** pairings of
+  [§4.2.1](#421-the-text-grade-companion-mapping) are computed and asserted against the
+  WCAG 2.1 AA threshold for normal text by `ui/src/theme/textContrast.test.ts`, which
+  fails the build if any colour role falls below it. That is a claim about those
+  pairings only — it says nothing about focus order, non-text contrast, or any other
+  success criterion.** Assumptions: every value in this document is derived from an artifact a
   reader can open — the attribute frequencies from the seventeen mapsets under
   `app/bms`, re-derivable by the commands in
   [§4.4](#44-re-deriving-the-counts), and the token names from the pinned package's

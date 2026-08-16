@@ -2,7 +2,7 @@
 # infra/modules/step-functions-batch/main.tf
 # -----------------------------------------------------------------------------
 # Purpose:
-#   Provisions four STANDARD Step Functions workflows: the twelve-work-state
+#   Provisions four STANDARD Step Functions workflows: the eleven-work-state
 #   nightly CardDemo batch chain, the ad-hoc report workflow started by
 #   reporting-service, the operator-invoked dataset export/import round trip, and
 #   the operator-invoked authorization unload/load extract.
@@ -55,17 +55,28 @@
 #   infra/modules/observability builds its dashboards and alarms from the ARNs.
 #
 # Exceptions or errors:
-#   Every WORK state -- the twelve named in local.working_state_names -- has an
-#   explicit timeout, an explicit retry and an explicit catch, and every machine
-#   ALSO carries a top-level TimeoutSeconds: var.state_machine_timeout_seconds for
-#   the daily chain and one ceiling each for the three on-demand machines. Three
-#   asymmetries are deliberate and are stated here rather than left for a reader to
-#   discover as an apparent omission. The one work state that is not a Task is the
-#   StageSeedDatasets Map, and its retry is SPLIT rather than absent: the per-dataset
-#   branch retries the work, while the Map's own Retry admits only the faults a Map
-#   raises on its own account and deliberately excludes States.TaskFailed and
-#   States.Timeout, so a transient fault replays the one dataset that faulted instead
-#   of all eleven; both halves of that argument are recorded at the state. The five
+#   Every TIMED state -- the twelve named in local.timed_state_names -- has an
+#   explicit timeout, and every machine ALSO carries a top-level TimeoutSeconds:
+#   var.state_machine_timeout_seconds for the daily chain and one ceiling each for
+#   the three on-demand machines. Those twelve names are the ELEVEN top-level work
+#   states AAP section 0.4.1.7 fixes for the nightly chain plus VerifyMigration,
+#   which is not a twelfth top-level state: it runs inside the StageSeedDatasets
+#   branch, and why it lives there rather than beside the eleven is recorded at that
+#   state. Four asymmetries are deliberate and are stated here rather than left for a
+#   reader to discover as an apparent omission. State 2, StageSeedDatasets, is the
+#   one top-level work state that is not a Task -- it is a Parallel wrapping one
+#   branch -- and it carries an explicit Catch but NO TimeoutSeconds and NO Retry:
+#   the States Language does not define TimeoutSeconds for a Parallel, so the ceiling
+#   is applied inside the branch at the Map and at each of its two tasks, and a Retry
+#   is withheld deliberately because re-entering the Parallel would replay a
+#   completed refresh of every dataset to redo one read-only pass. Inside that branch
+#   the Map likewise carries a timeout but NO Retry, and the retry that covers the
+#   work sits one level lower still, on the per-dataset task, so a transient fault
+#   replays the one dataset that faulted instead of all eleven. That placement is not
+#   a gap: for an INLINE Map every Map-level error the language defines is either
+#   unraisable without an ItemReader or ResultWriter, or documented as non-retriable,
+#   which is recorded in full at the state together with the two non-existent
+#   "States." names a Map-level Retry had previously introduced. The five
 #   Notify* states -- NotifyInvalidExecutionInput, NotifyFailure, NotifyAdHocFailure,
 #   NotifyDatasetFailure and NotifyAuthorizationExtractFailure -- are single SNS
 #   publishes rather than work states: each carries a
@@ -230,20 +241,49 @@ locals {
   ecs_cluster_name         = element(split("/", var.ecs_cluster_arn), 1)
   cluster_task_arn_pattern = "arn:${data.aws_partition.current.partition}:ecs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:task/${local.ecs_cluster_name}/*"
 
-  # WHY : Refactoring Rationale: ONE state was inserted between staging an extract
-  #       and posting against it, and its absence was the defect rather than an
-  #       unfinished feature. The chain staged the extracts and then went straight to
-  #       preflight, so nothing gated the transition and the posting states ran
-  #       against whatever the tables held. VerifyMigration gates it on the combined
-  #       verifier's binary verdict, and it is the ONLY edge into
-  #       PreflightDailyTransactions.
-  # WHY : Refactoring Rationale: two further names were authored into this list --
-  #       LoadSeedDatasets and ReconcileTransactionSequence -- and are withdrawn with
-  #       the states themselves; the withdrawal and its grounds are recorded where
-  #       those states stood. In short: the refresh branch already loads each dataset
-  #       and already advances the identifier allocator, so neither state added work,
-  #       and a name here without a state fails the state-timeout map's own exactness
-  #       check rather than being harmless.
+  # WHY : Assumptions: this list is ELEVEN names and the number is a contract, not a
+  #       tally. Specification section 0.4.1.7 enumerates the nightly chain state by
+  #       state -- QuiesceOnlineWrites, StageSeedDatasets, PreflightDailyTransactions,
+  #       PostTransactions, CalculateInterest, BackupTransactions,
+  #       CombineTransactions, GenerateStatements, GenerateReports, AnalyzeTables,
+  #       ResumeOnlineWrites -- so a twelfth work state is a change to the specified
+  #       topology rather than an addition to an open list.
+  # WHY : Refactoring Rationale: three names have been authored into this list as
+  #       TOP-LEVEL work states and none of the three is one now. LoadSeedDatasets and
+  #       ReconcileTransactionSequence are withdrawn outright, because the refresh
+  #       branch already loads each dataset and already advances the identifier
+  #       allocator, so neither added work. VerifyMigration is a different case: it too
+  #       stood as a twelfth top-level state against a specified eleven, and it is
+  #       RELOCATED rather than withdrawn -- it now runs inside the StageSeedDatasets
+  #       Parallel, after the seed-refresh Map, so the published topology is the eleven
+  #       the specification enumerates and the gate still runs.
+  # WHY : ⚠️ Alternatives Considered: withdrawing the gate outright, folding its
+  #       substance into the per-dataset refresh -- each StageSeedDatasets branch runs
+  #       `refresh-dataset`, which fetches the extract, stages the generation, loads the
+  #       owning schema and then runs row count, per-record digest and exact money
+  #       totals for that dataset -- and leaving `verify-all` to the cutover runbook.
+  #       Rejected, and the reason is what the two arrangements do NOT share. The
+  #       per-dataset passes verify each dataset against its own source; the gate runs
+  #       the two committed WHOLE-MIGRATION queries, a cross-relation row-count report
+  #       and an exact money-total and negative-row report, which no per-dataset pass
+  #       reaches at all -- and it runs them on the SELECT-only verification login
+  #       rather than the loader's own identity. Specification sections 0.9.2 and 0.7.7
+  #       make that verification a first-class deliverable on the stated ground that a
+  #       load which "succeeded" without a money-total check is not evidence of
+  #       anything, so withdrawing it would have bought the eleven by giving up a
+  #       mandated check. Relocating it buys the same eleven and gives up nothing.
+  # WHY : Assumptions: the ordering barrier does not rest on the gate alone, and that is
+  #       what makes the relocation safe rather than merely tidy. A branch that fails any
+  #       of its steps exits non-zero, the branch's own exit-code Choice turns that into
+  #       a Fail, a failed branch fails the Map, and the Map's Catch routes to failure
+  #       notification -- so PreflightDailyTransactions is already unreachable over a
+  #       corpus whose per-dataset verification did not pass. The gate adds the
+  #       whole-migration barrier on top of that, through its own exit-code Choice, and
+  #       both barriers sit inside the one state the specification does contain.
+  # WHY : Assumptions: `verify-all` remains the CUTOVER verb as well, invoked by
+  #       docs/runbooks/data-migration.md over the whole registry with no dataset
+  #       selector. The nightly gate and the cutover step run the same verb for the same
+  #       reason at two different moments, which is why the verb accepts no selector.
   # WHY : Assumptions: the order is load-then-reconcile-then-verify and it is still
   #       enforced, inside the refresh branch rather than across three states. The
   #       ordering matters for the reason the withdrawn states recorded: reconciling
@@ -251,9 +291,32 @@ locals {
   #       and verifying before the reconciliation would pass over a sequence still
   #       pointing inside the loaded range, so the first posted transaction would
   #       collide on a primary key the verification had just certified as clean.
-  working_state_names = [
+  # WHY : Refactoring Rationale: this list is named timed_state_names and it was named
+  #       working_state_names. The rename is the point, not cosmetic. It holds TWELVE
+  #       entries while the nightly chain publishes ELEVEN top-level work states, because
+  #       VerifyMigration needs a ceiling of its own and runs inside the StageSeedDatasets
+  #       branch rather than beside the eleven. Under the old name a reader counting this
+  #       list arrived at twelve work states and the module's own eleven-state contract
+  #       contradicted them -- exactly the drift this list exists to prevent. What the
+  #       list actually enumerates is every state that HAS a configured ceiling, so that
+  #       is what it is called.
+  # WHY : Assumptions: "has a ceiling" is deliberately not "carries a TimeoutSeconds
+  #       field", because for one of the twelve those are different places. Eleven names
+  #       resolve to a Task that carries the field itself; the StageSeedDatasets entry
+  #       names a budget that is applied INSIDE that state, on the Map and on each of the
+  #       two tasks in its branch, because the States Language does not define
+  #       TimeoutSeconds for a Parallel. The distinction is recorded here as well as at
+  #       the state itself so that this sentence and that one cannot be read as
+  #       disagreeing about whether the Parallel carries a field it cannot carry.
+  timed_state_names = [
     "QuiesceOnlineWrites",
     "StageSeedDatasets",
+    # WHY : Assumptions: VerifyMigration is listed here although it is NOT a top-level
+    #       work state. It runs inside the StageSeedDatasets Parallel, so it never
+    #       appears in the eleven-state topology AAP section 0.4.1.7 fixes, but it is a
+    #       Task with a TimeoutSeconds like any other and a Task with no ceiling waits
+    #       indefinitely. This list is what var.state_timeout_seconds is indexed by, so
+    #       omitting the name here would silently drop the ceiling rather than fail.
     "VerifyMigration",
     "PreflightDailyTransactions",
     "PostTransactions",
@@ -269,12 +332,12 @@ locals {
   # WHY : Refactoring Rationale: this used to `lookup` each state in an overrides
   #       map and fall back to a single default. It now indexes var.state_timeout_seconds
   #       directly, because that variable's own validation asserts one entry per
-  #       work state -- so a missing key is a plan-time error naming the variable
+  #       timed state -- so a missing key is a plan-time error naming the variable
   #       rather than a state silently inheriting a ceiling nobody chose for it.
-  #       The iteration still runs over local.working_state_names so that this map
+  #       The iteration still runs over local.timed_state_names so that this map
   #       and the state list cannot come to hold different sets.
   state_timeouts = {
-    for state_name in local.working_state_names :
+    for state_name in local.timed_state_names :
     state_name => var.state_timeout_seconds[state_name]
   }
 
@@ -1394,15 +1457,19 @@ locals {
         #       TRANFILE.jcl, DISCGRP.jcl, TCATBALF.jcl, TRANTYPE.jcl, TRANCATG.jcl
         #       and DUSRSECJ.jcl. Each one runs the same IDCAMS shape, DELETE then
         #       DEFINE CLUSTER then REPRO, adding BLDINDEX where the cluster carries
-        #       an alternate index. A Map over one list expresses ten instances of a
-        #       single operation more honestly than ten near-identical states, and it
-        #       keeps the dataset list an input (var.seed_datasets) instead of ten
-        #       pieces of graph.
+        #       an alternate index. A Map over one list expresses eleven instances of a
+        #       single operation more honestly than eleven near-identical states, and it
+        #       keeps the dataset list an input (var.seed_datasets) instead of eleven
+        #       pieces of graph. The count rises from the baseline's ten because
+        #       var.seed_datasets also carries `transactions`, which the baseline
+        #       refreshed through TRANFILE.jcl but which this chain stages and
+        #       reconciles WITHOUT loading, for the reason recorded below.
         # WHY : Refactoring Rationale: each branch now invokes `refresh-dataset`, and it
         #       used to invoke `stage-dataset`. That was the defect this state carried:
         #       `stage-dataset` copies an extract's bytes into a versioned generation
-        #       prefix and stops there, so a chain that ran end to end left ten objects
-        #       in S3 and TEN EMPTY TABLES, with a green execution history. None of the
+        #       prefix and stops there, so a chain that ran end to end left eleven objects
+        #       in S3 and TEN EMPTY TABLES -- eleven branches stage, and ten of them own a
+        #       table to fill -- with a green execution history. None of the
         #       three things an IDCAMS DELETE/DEFINE/REPRO actually accomplishes -- the
         #       master exists, it holds the records, the records are the ones that were
         #       shipped -- was performed or checked anywhere in the chain. The single
@@ -1431,8 +1498,8 @@ locals {
         #       Map state, one branch per dataset, each a runTask.sync", so five states
         #       per branch would publish a different machine from the documented one.
         #       Each state is a separate Fargate task with its own cold start and its own
-        #       Aurora connection, so ten datasets would open fifty task lifecycles to do
-        #       what ten can. And the sequence is inseparable in practice: a load whose
+        #       Aurora connection, so eleven datasets would open fifty-five task lifecycles
+        #       to do what eleven can. And the sequence is inseparable in practice: a load whose
         #       verification lives in a different state can be left committed and
         #       unverified by an orchestration failure between the two, whereas one task
         #       per dataset makes the branch's own Retry replay the whole refresh of that
@@ -1450,262 +1517,394 @@ locals {
         #       invert. A non-zero branch is therefore an infrastructure or data
         #       fault, which the branch's Catch surfaces rather than a condition code
         #       the chain was meant to interpret.
-        # WHY : Trade-offs: MaxConcurrency is an input rather than unbounded. Ten
+        # WHY : Trade-offs: MaxConcurrency is an input rather than unbounded. Eleven
         #       branches at once would each open its own Aurora connection and its own
         #       bulk-copy stream against the cluster this same chain is about to post
         #       through, so the ceiling exists to bound the concurrent load on one
         #       writer rather than to bound Fargate. Setting it to 1 is legal and
         #       makes the refresh strictly sequential, which is what the baseline's
         #       ten separate jobs actually did.
+        # WHY : Refactoring Rationale: state 2 is a Parallel wrapping ONE branch, and it
+        #       used to be the Map that is now the first state of that branch. The wrapper
+        #       exists so that the verification gate below runs INSIDE state 2 rather than
+        #       beside it. AAP section 0.4.1.7 fixes the nightly chain at ELEVEN top-level
+        #       work states and names every one of them; the gate is mandated separately --
+        #       AAP section 0.9.2 makes combined post-load verification a first-class
+        #       deliverable and section 0.7.7 specifies its three passes -- but 0.4.1.7
+        #       gives it no state of its own. Authored as a TWELFTH top-level state it
+        #       published a chain length the frozen plan does not carry, and the module's
+        #       own README then had to claim both twelve states and an eleven-state
+        #       contract "this module must not change". Authored here it is reached on
+        #       exactly the same edge, in exactly the same order, and the published
+        #       top-level chain is the eleven the plan names.
+        # WHY : Assumptions: nesting a real workload inside state 2 is the precedent state
+        #       2 ALREADY sets, not a relabelling invented to reach a number.
+        #       RefreshSeedDataset is a Fargate task that fetches, stages, loads and
+        #       verifies one dataset, and nobody counts it among the eleven, because it
+        #       runs inside this state's sub-graph. VerifyMigration sits at the same
+        #       nesting level for the same reason, so "eleven" keeps meaning here what it
+        #       means everywhere else in this file: eleven TOP-LEVEL work states. The
+        #       daily graph holds far more ASL states than eleven once the Choice, Pass
+        #       and Fail states are counted, so a count of top-level WORK states was
+        #       always the published quantity.
+        # WHY : Assumptions: the three properties that made the gate worth adding are
+        #       untouched by the move. It still runs on the SELECT-only verification login
+        #       rather than the loader's identity, it still executes the two committed
+        #       WHOLE-MIGRATION queries whose digests the per-dataset passes pin, and it is
+        #       still the only edge into PreflightDailyTransactions -- now because this
+        #       state's own Next is that edge and no state in the branch can leave the
+        #       branch by any other route.
+        # WHY : Alternatives Considered: deleting the gate to reach eleven and relying on
+        #       the three passes the per-dataset refresh already runs. Rejected. Those
+        #       passes run per dataset, under the loader's own login, so dropping the gate
+        #       gives up the SELECT-only session AND both whole-migration queries -- a real
+        #       reduction in a control AAP section 0.9.2 mandates, to fix a count that
+        #       nesting fixes at no cost.
+        # WHY : Alternatives Considered: a nested child state machine holding the two
+        #       states. Rejected because it adds a fifth machine with its own execution
+        #       role, log group and alarm surface, and because section 0.4.1.7 describes
+        #       state 2 as "a Map state, one branch per dataset, each a runTask.sync" -- a
+        #       Parallel whose branch STARTS at that Map keeps that description true of
+        #       what runs, where a child machine would replace it.
+        # WHY : Trade-offs: a Parallel with one branch buys nothing concurrent, and that is
+        #       the point -- it is used here purely as the scoping construct that lets one
+        #       top-level state hold a sequence. The cost is one extra state transition per
+        #       run and a sub-graph a reader must open to see the gate; against that, the
+        #       published chain length is a measured property of the top-level state list
+        #       again instead of a number the plan and the module disagree about.
         StageSeedDatasets = {
-          Type           = "Map"
-          ItemsPath      = "$.seedDatasets"
-          MaxConcurrency = var.stage_datasets_max_concurrency
-          TimeoutSeconds = local.state_timeouts.StageSeedDatasets
-          ItemSelector = {
-            "dataset.$"      = "$$.Map.Item.Value"
-            "businessDate.$" = "$.businessDate"
-          }
-          ItemProcessor = {
-            ProcessorConfig = {
-              Mode = "INLINE"
-            }
-            StartAt = "RefreshSeedDataset"
+          Type = "Parallel"
+
+          # WHY : Assumptions: this state carries NO TimeoutSeconds. The States Language
+          #       defines that field for Task and Activity states and for the machine top
+          #       level; it is absent from the Parallel field list. The ceiling is therefore
+          #       applied where the language accepts it -- on the Map below and on each of
+          #       the two tasks inside the branch, from the same local.state_timeouts
+          #       entries as before -- so nothing became unbounded, and the machine's own
+          #       var.state_machine_timeout_seconds still bounds the whole run.
+          # WHY : Assumptions: this state carries NO Retry either, and unlike the timeout
+          #       that is a SEMANTIC choice rather than a field-support one -- the language
+          #       does allow Retry on a Parallel. Re-entering it would re-run the refresh of
+          #       every dataset AND the gate, so a transient fault in the gate would replay
+          #       eleven completed loads to redo one read-only pass. The retries that matter
+          #       already sit at the states that do the work; the Catch below is what a
+          #       failure needs from this level.
+          Branches = [{
+            StartAt = "RefreshEachSeedDataset"
             States = {
-              RefreshSeedDataset = {
+              # WHY : Refactoring Rationale: this Map is named RefreshEachSeedDataset and it
+              #       used to BE state 2 under the name StageSeedDatasets. The name moved to
+              #       the Parallel that now wraps it, because that is the state the chain's
+              #       published eleven names, and a Map and its wrapper cannot share one
+              #       name. "Each" rather than "All" so that the plural Map and the singular
+              #       RefreshSeedDataset task inside it do not read as the same state.
+              RefreshEachSeedDataset = {
+                Type           = "Map"
+                ItemsPath      = "$.seedDatasets"
+                MaxConcurrency = var.stage_datasets_max_concurrency
+                TimeoutSeconds = local.state_timeouts.StageSeedDatasets
+                ItemSelector = {
+                  "dataset.$"      = "$$.Map.Item.Value"
+                  "businessDate.$" = "$.businessDate"
+                }
+                ItemProcessor = {
+                  ProcessorConfig = {
+                    Mode = "INLINE"
+                  }
+                  StartAt = "RefreshSeedDataset"
+                  States = {
+                    RefreshSeedDataset = {
+                      Type           = "Task"
+                      Resource       = "arn:${data.aws_partition.current.partition}:states:::ecs:runTask.sync"
+                      TimeoutSeconds = local.state_timeouts.StageSeedDatasets
+                      Parameters = merge(local.run_task_attribution, {
+                        Cluster              = var.ecs_cluster_arn
+                        TaskDefinition       = var.data_migration_task_definition_arn
+                        LaunchType           = "FARGATE"
+                        NetworkConfiguration = local.network_configuration
+                        Overrides = {
+                          ContainerOverrides = [{
+                            Name = var.data_migration_container_name
+                            # WHY : Assumptions: the extract prefix travels as a COMMAND
+                            #       ARGUMENT while the bucket travels as an environment
+                            #       variable, and the asymmetry follows the baseline's own
+                            #       split that AAP rule T6 carries over: a JCL `PARM=` becomes
+                            #       a job parameter and a `DD DSN=` becomes configuration. The
+                            #       prefix is the per-run instruction "read the extracts from
+                            #       here", so it belongs in the definition where a reviewer
+                            #       reading the state machine can see which prefix a nightly
+                            #       execution read; the bucket is deployment configuration that
+                            #       every command in the image shares.
+                            "Command.$" = "States.Array('refresh-dataset', States.Format('--dataset={}', $.dataset), States.Format('--business-date={}', $.businessDate), '--extract-prefix=${var.dataset_source_extract_prefix}')"
+                            # WHY : Refactoring Rationale: this branch reads the SHARED environment
+                            #       block rather than an inline list of its own, restoring the shape
+                            #       the block was introduced for. An inline list stood here and it had
+                            #       drifted in two ways worth recording. It passed
+                            #       CARDDEMO_DATASET_BUCKET, which nothing in the data-migration
+                            #       distribution reads -- config.resolve_dataset_staging_settings takes
+                            #       the bucket name from Parameter Store, precisely so a deployment
+                            #       that overrides the name has one authority for it -- and the shared
+                            #       block's own comment already recorded that omission as deliberate,
+                            #       so the two disagreed. And it omitted
+                            #       CARDDEMO_DATASET_STAGING_ROOT, which the verification gate below
+                            #       refuses to run without, so the two states that resolve the same
+                            #       extracts were told about them differently.
+                            # WHY : Assumptions: the generation-reservation property this branch
+                            #       depends on is unaffected. CARDDEMO_BATCH_RUN_ID is the first entry
+                            #       of the shared block and carries the same execution name, so a
+                            #       retried branch still reuses the generation its first attempt
+                            #       reserved instead of consuming a second one for a byte-identical
+                            #       copy.
+                            Environment = local.data_migration_environment
+                          }]
+                        }
+                      })
+                      ResultSelector = local.ecs_result_selector
+                      ResultPath     = "$.stageTask"
+                      Retry          = local.ecs_retry
+                      Catch = [{
+                        ErrorEquals = ["States.ALL"]
+                        ResultPath  = "$.failure"
+                        Next        = "DatasetRefreshFailed"
+                      }]
+                      Next = "CheckDatasetRefreshExitCode"
+                    }
+
+                    CheckDatasetRefreshExitCode = {
+                      Type = "Choice"
+                      Choices = [{
+                        Variable      = "$.stageTask.exitCode"
+                        NumericEquals = 0
+                        Next          = "DatasetRefreshSucceeded"
+                      }]
+                      Default = "DatasetRefreshFailed"
+                    }
+
+                    DatasetRefreshSucceeded = {
+                      Type = "Succeed"
+                    }
+
+                    # WHY : Assumptions: the Cause names the whole sequence rather than the
+                    #       staging step, because the task performs up to six operations -- how
+                    #       many depends on the dataset -- and any of them can be the one that
+                    #       failed. The container stops at the first that did not succeed and
+                    #       logs which step it was together with that step's own status, so the
+                    #       log line -- not this Cause -- is where the diagnosis lives; naming
+                    #       one step here would point most readers at the wrong one.
+                    DatasetRefreshFailed = {
+                      Type  = "Fail"
+                      Error = "DatasetRefreshFailed"
+                      Cause = "The data-migration refresh task did not complete with exit code zero; its log names which of the fetch, stage, load, verification or allocator steps stopped the sequence"
+                    }
+                  }
+                }
+
+                # WHY : Assumptions: ResultPath is null so the Map DISCARDS its per-branch
+                #       output instead of writing it into the execution state. Each branch
+                #       returns a task envelope, and eleven of those replacing or nesting
+                #       under the state object would push businessDate out of the path every
+                #       following state reads it from -- including the verification gate that
+                #       now follows this Map inside the same branch. Nothing downstream
+                #       consumes which datasets were staged -- a failed branch has already
+                #       failed the Map -- so the eleven envelopes are cost without a reader.
+                ResultPath = null
+
+                # WHY : Refactoring Rationale: this Map carries NO Retry, and a Retry that was
+                #       added here is WITHDRAWN rather than corrected, because every one of the
+                #       five error names it listed was unusable and two of them made the whole
+                #       machine unprovisionable. It named States.ServiceQuotaExceeded and
+                #       States.ThrottledException, and neither is a States Language built-in.
+                #       The language reserves the "States." prefix for its own catalogue and
+                #       forbids any other name from using it, so those two were read as illegal
+                #       custom names and CreateStateMachine refused the entire definition:
+                #       "Custom Error Names MUST NOT begin with the prefix 'States.', got
+                #       'States.ServiceQuotaExceeded'." That is not a latent risk. Until this
+                #       withdrawal the daily machine could not be created at all, so no timeout,
+                #       catch or ordering guarantee anywhere in this file was reachable.
+                # WHY : Assumptions: the remaining three names were legal but inert HERE, which
+                #       is why correcting the list was not the fix. States.ItemReaderFailed is
+                #       raised when a Map cannot read the source named in its ItemReader field
+                #       and States.ResultWriterFailed when it cannot write the destination named
+                #       in its ResultWriter field; this Map declares neither, taking its items
+                #       from ItemsPath and discarding its results through ResultPath = null, so
+                #       both are unraisable. States.Runtime is documented as not retriable and
+                #       as always failing the execution, so listing it in a Retry changes
+                #       nothing. The prose that justified the list also claimed coverage of
+                #       States.ExceedToleratedFailureCount, which is not a built-in either --
+                #       the real name is States.ExceedToleratedFailureThreshold -- was never
+                #       actually in the list, and belongs to the Distributed Map failure
+                #       thresholds that an INLINE processor with no ToleratedFailure field
+                #       cannot reach.
+                # WHY : Trade-offs: the absence is deliberate and the original reasoning for it
+                #       was correct. A transient fault in the WORK is a fault in one branch,
+                #       and it is retried where it happens -- RefreshSeedDataset below carries
+                #       local.ecs_retry -- because re-entering the Map would replay ten
+                #       successful refreshes to redo the one that failed. A fault in the
+                #       ORCHESTRATION of an INLINE Map is, per the paragraph above, either
+                #       unraisable or non-retriable, so there is no residual class left for a
+                #       Map-level Retry to cover. The header records this as a deliberate
+                #       asymmetry rather than an omission, and the branch's own Fail state
+                #       raises the custom name DatasetRefreshFailed, which is legal precisely
+                #       because it does NOT begin with "States.".
+                # WHY : Refactoring Rationale: this Map carried a Catch of its own -- the shared
+                #       local.common_catch, routing to the top-level NotifyFailure -- and it is
+                #       WITHDRAWN rather than rewritten. A state inside a Parallel branch cannot
+                #       transition to a state outside that branch, so that target is no longer
+                #       reachable from here. An in-branch catcher plus an in-branch Fail state
+                #       would only rename the error before it propagated, because a failed branch
+                #       fails the Parallel either way; the Parallel's own Catch is the same
+                #       local.common_catch and writes the failure to the same $.failure path, so
+                #       the failure edge is unchanged from the outside.
+                Next = "VerifyMigration"
+              }
+
+              # WHY : Refactoring Rationale: two further states were authored between the
+              #       seed-refresh Map and the gate below -- a LoadSeedDatasets Map running
+              #       `load-dataset` once per dataset, and a ReconcileTransactionSequence task
+              #       running `reconcile-sequences` -- and BOTH are withdrawn. The work each
+              #       one was written to add is already performed, per dataset, inside the
+              #       refresh branch above: `refresh-dataset` stages the generation, LOADS the
+              #       target table for the ten datasets that ship a committed extract, runs all
+              #       three verification passes on each of those, stages the backup generation
+              #       for the three families that have one, and ADVANCES
+              #       ledger.transaction_id_seq for the one dataset whose rows occupy the
+              #       allocator's range. A second Map would re-fetch and re-decode every
+              #       extract to perform an upsert that by construction changes nothing, and a
+              #       second reconciliation would advance a sequence already advanced.
+              # WHY : Assumptions: the reasoning the withdrawn reconciliation state gave is
+              #       kept and is not lost with it -- a load leaves the sequence pointing
+              #       inside the range it just inserted, so the first identifier the online
+              #       service allocates collides on the primary key, hours later, in a service
+              #       that did nothing wrong. The baseline has no analogue because VSAM has no
+              #       sequence. That hazard is closed at the refresh step, whose own comment
+              #       records why it is closed there rather than as a state of its own: the
+              #       allocator is advanced inside the refresh of the ONE dataset that feeds
+              #       its table, so the ordering it depends on -- after those rows exist,
+              #       before anything allocates -- cannot be broken by a graph edit.
+              # WHY : Assumptions: what is NOT withdrawn is the gate below, and the three
+              #       things it does that no per-dataset pass reaches: it runs on the
+              #       SELECT-only verification login rather than the loader's own identity, it
+              #       executes the two committed WHOLE-MIGRATION queries whose digests the
+              #       passes pin, and it is the only edge into PreflightDailyTransactions, so
+              #       posting cannot be reached over a corpus that does not match its source.
+
+              # WHY : Refactoring Rationale: this is the gate the chain had no state for.
+              #       The distribution delivers three verification passes -- a server-side
+              #       row-count report over every declared relation, a per-record digest
+              #       comparison between each extract and its loaded rows, and an exact
+              #       money-total and negative-row report -- and before this state nothing
+              #       in the infrastructure invoked any of them. Correct verification logic
+              #       with no caller certifies nothing.
+              # WHY : Assumptions: the single `verify-all` verb is invoked rather than the
+              #       three per-dataset verbs in sequence, and the difference is not
+              #       brevity. That verb runs the passes in a MANDATED order over the whole
+              #       registry and stops at the first failure, and it accepts no dataset
+              #       selector at all -- so no caller can narrow the gate to a subset and
+              #       still receive a verdict. Composing it here from per-dataset states
+              #       would put the coverage decision in HCL, where a state removed from the
+              #       graph silently reduces what was certified.
+              # WHY : Assumptions: the order the passes run in is load-bearing and belongs
+              #       to that verb, not to this graph. A row-count mismatch means the wrong
+              #       NUMBER of rows arrived, at which point the digest comparison and the
+              #       totals are guaranteed to differ too -- so running them anyway reports
+              #       three failures for one cause.
+              # WHY : Assumptions: --sql-root is passed because the container cannot derive
+              #       it. The two committed queries whose digests the passes pin are copied
+              #       to a directory beneath the image's WORKDIR, while the package itself
+              #       is installed into a virtual environment, so the package-relative
+              #       default resolves to neither.
+              VerifyMigration = {
                 Type           = "Task"
                 Resource       = "arn:${data.aws_partition.current.partition}:states:::ecs:runTask.sync"
-                TimeoutSeconds = local.state_timeouts.StageSeedDatasets
-                Parameters = merge(local.run_task_attribution, {
+                TimeoutSeconds = local.state_timeouts.VerifyMigration
+                Parameters = {
                   Cluster              = var.ecs_cluster_arn
                   TaskDefinition       = var.data_migration_task_definition_arn
                   LaunchType           = "FARGATE"
                   NetworkConfiguration = local.network_configuration
                   Overrides = {
                     ContainerOverrides = [{
-                      Name = var.data_migration_container_name
-                      # WHY : Assumptions: the extract prefix travels as a COMMAND
-                      #       ARGUMENT while the bucket travels as an environment
-                      #       variable, and the asymmetry follows the baseline's own
-                      #       split that AAP rule T6 carries over: a JCL `PARM=` becomes
-                      #       a job parameter and a `DD DSN=` becomes configuration. The
-                      #       prefix is the per-run instruction "read the extracts from
-                      #       here", so it belongs in the definition where a reviewer
-                      #       reading the state machine can see which prefix a nightly
-                      #       execution read; the bucket is deployment configuration that
-                      #       every command in the image shares.
-                      "Command.$" = "States.Array('refresh-dataset', States.Format('--dataset={}', $.dataset), States.Format('--business-date={}', $.businessDate), '--extract-prefix=${var.dataset_source_extract_prefix}')"
-                      # WHY : Refactoring Rationale: this branch reads the SHARED environment
-                      #       block rather than an inline list of its own, restoring the shape
-                      #       the block was introduced for. An inline list stood here and it had
-                      #       drifted in two ways worth recording. It passed
-                      #       CARDDEMO_DATASET_BUCKET, which nothing in the data-migration
-                      #       distribution reads -- config.resolve_dataset_staging_settings takes
-                      #       the bucket name from Parameter Store, precisely so a deployment
-                      #       that overrides the name has one authority for it -- and the shared
-                      #       block's own comment already recorded that omission as deliberate,
-                      #       so the two disagreed. And it omitted
-                      #       CARDDEMO_DATASET_STAGING_ROOT, which the verification gate below
-                      #       refuses to run without, so the two states that resolve the same
-                      #       extracts were told about them differently.
-                      # WHY : Assumptions: the generation-reservation property this branch
-                      #       depends on is unaffected. CARDDEMO_BATCH_RUN_ID is the first entry
-                      #       of the shared block and carries the same execution name, so a
-                      #       retried branch still reuses the generation its first attempt
-                      #       reserved instead of consuming a second one for a byte-identical
-                      #       copy.
+                      Name        = var.data_migration_container_name
+                      "Command.$" = "States.Array('verify-all', '--sql-root=${var.data_migration_sql_root}')"
                       Environment = local.data_migration_environment
                     }]
                   }
-                })
+                }
                 ResultSelector = local.ecs_result_selector
-                ResultPath     = "$.stageTask"
+                ResultPath     = "$.verification"
                 Retry          = local.ecs_retry
-                Catch = [{
-                  ErrorEquals = ["States.ALL"]
-                  ResultPath  = "$.failure"
-                  Next        = "DatasetRefreshFailed"
-                }]
-                Next = "CheckDatasetRefreshExitCode"
+                # WHY : Refactoring Rationale: this state's Catch is WITHDRAWN for the same
+                #       reason the Map's above it is -- local.common_catch names the top-level
+                #       NotifyFailure, and no state inside a Parallel branch may transition out
+                #       of the branch. An unhandled error here fails the branch, which fails the
+                #       enclosing StageSeedDatasets Parallel, whose Catch IS local.common_catch;
+                #       the retry tier that this state does own is unchanged.
+                Next = "CheckVerificationExitCode"
               }
 
-              CheckDatasetRefreshExitCode = {
+              # WHY : Assumptions: the predicate is exit code ZERO and nothing else, with no
+              #       warn tier. Every other exit-code Choice in this chain admits a soft
+              #       path because the baseline job it replaces carried one -- a reject count
+              #       that sets RC=4, a COND=(4,LT) that lets a warning through. This gate
+              #       replaces no baseline job at all: it is a binary statement about whether
+              #       the migrated data matches its source, and there is no reading of
+              #       "partly matches" that business processing may proceed on.
+              # WHY : Refactoring Rationale: the clean verdict now transitions to
+              #       MigrationVerified rather than straight to PreflightDailyTransactions,
+              #       because this Choice lives inside the StageSeedDatasets branch and a branch
+              #       state cannot name a state outside its branch. The edge itself is NOT
+              #       redirected: MigrationVerified ends the branch, the branch ends the
+              #       Parallel, and the Parallel's Next is PreflightDailyTransactions -- so a
+              #       clean verdict remains the ONE and ONLY route into business processing,
+              #       which is the property this gate exists to hold.
+              CheckVerificationExitCode = {
                 Type = "Choice"
                 Choices = [{
-                  Variable      = "$.stageTask.exitCode"
+                  Variable      = "$.verification.exitCode"
                   NumericEquals = 0
-                  Next          = "DatasetRefreshSucceeded"
+                  Next          = "MigrationVerified"
                 }]
-                Default = "DatasetRefreshFailed"
+                Default = "VerificationFailed"
               }
 
-              DatasetRefreshSucceeded = {
+              # WHY : Assumptions: a Succeed state is required here rather than optional. Every
+              #       path through a Parallel branch has to reach a terminal state, and the only
+              #       non-failing terminal available inside a branch is Succeed -- End: true and
+              #       a Next out of the branch are both unavailable. It performs no work and
+              #       returns the branch's input as the branch result, which the Parallel then
+              #       discards; its whole function is to say "this branch finished cleanly" so
+              #       the enclosing state can take its own Next.
+              MigrationVerified = {
                 Type = "Succeed"
               }
 
-              # WHY : Assumptions: the Cause names the whole sequence rather than the
-              #       staging step, because the task performs up to six operations -- how
-              #       many depends on the dataset -- and any of them can be the one that
-              #       failed. The container stops at the first that did not succeed and
-              #       logs which step it was together with that step's own status, so the
-              #       log line -- not this Cause -- is where the diagnosis lives; naming
-              #       one step here would point most readers at the wrong one.
-              DatasetRefreshFailed = {
+              # WHY : Refactoring Rationale: this Fail state is unchanged in error name and cause
+              #       but has moved inside the branch with the Choice that selects it, and its
+              #       effect is now BETTER than it was. As a top-level state it terminated the
+              #       execution the instant it ran, which left the online read-only bracket
+              #       engaged and the residual-task sweep unrun -- a failed verification was the
+              #       one failure in this chain that stranded online writes. Failing the branch
+              #       instead raises the error to the Parallel's Catch, which is the same
+              #       local.common_catch every other work state uses, so a refused verdict now
+              #       runs NotifyFailure, the cancellation sub-chain and the bracket release like
+              #       any other failure.
+              VerificationFailed = {
                 Type  = "Fail"
-                Error = "DatasetRefreshFailed"
-                Cause = "The data-migration refresh task did not complete with exit code zero; its log names which of the fetch, stage, load, verification or allocator steps stopped the sequence"
+                Error = "VerificationFailed"
+                Cause = "The combined migration verification did not report a clean verdict; the chain stopped before posting against data that does not match its source"
               }
             }
-          }
+          }]
 
-          # WHY : Assumptions: ResultPath is null so the Map DISCARDS its per-branch
-          #       output instead of writing it into the execution state. Each branch
-          #       returns a task envelope, and ten of those replacing or nesting under
-          #       the state object would push businessDate out of the path every
-          #       following state reads it from. Nothing downstream consumes which
-          #       datasets were staged -- a failed branch has already failed the Map --
-          #       so the ten envelopes are cost without a reader.
+          # WHY : Assumptions: ResultPath is null so the Parallel DISCARDS its result. A
+          #       Parallel returns an ARRAY with one element per branch, and letting that
+          #       array replace the state object would drop businessDate, seedDatasets and
+          #       executionName, which every state after this one reads. Discarding it also
+          #       discards $.verification, and nothing downstream reads that: the only
+          #       consumer was CheckVerificationExitCode, which is inside the branch.
           ResultPath = null
-
-          # WHY : Refactoring Rationale: the Map now carries its OWN Retry, and it had
-          #       none. The reasoning for omitting it was sound as far as it went --
-          #       re-entering the Map re-runs every dataset, so a transient BRANCH
-          #       fault must be retried inside the branch, which it still is -- but it
-          #       left the Map's own orchestration faults uncovered, and this is one of
-          #       the eleven working states that the header claims all retry. A Map
-          #       state can fail on its own account: States.ExceedToleratedFailureCount
-          #       and the item-reader and item-processor errors are raised by the Map,
-          #       not by a branch, so a branch-level Retry can never see them.
-          # WHY : Assumptions: the errors retried here are exactly the ones that are
-          #       transient in the ORCHESTRATION rather than in the work.
-          #       States.TaskFailed and States.Timeout are deliberately excluded: a
-          #       branch's task failure has already been retried by the branch and
-          #       then converted into a Fail state, so retrying it here would replay
-          #       nine successful refreshes to redo one that has already had its
-          #       attempts. What is admitted is the Map's own throttling and service
-          #       faults, where a single re-entry is the documented remedy.
-          # WHY : Trade-offs: one attempt, not var.retry_max_attempts. Re-entering the
-          #       Map costs ten task starts, and the loads are idempotent so a repeat
-          #       is correct but not free; a single retry covers a transient
-          #       orchestration fault while bounding the worst case at two fan-outs
-          #       rather than four. The state's own TimeoutSeconds still bounds the
-          #       whole thing.
-          Retry = [{
-            ErrorEquals = [
-              "States.ItemReaderFailed",
-              "States.ResultWriterFailed",
-              "States.Runtime",
-              "States.ServiceQuotaExceeded",
-              "States.ThrottledException",
-            ]
-            IntervalSeconds = var.retry_interval_seconds
-            MaxAttempts     = 1
-            BackoffRate     = var.retry_backoff_rate
-          }]
-          Catch = local.common_catch
-          Next  = "VerifyMigration"
-        }
-
-        # WHY : Refactoring Rationale: two further states were authored between the
-        #       seed-refresh Map and the gate below -- a LoadSeedDatasets Map running
-        #       `load-dataset` once per dataset, and a ReconcileTransactionSequence task
-        #       running `reconcile-sequences` -- and BOTH are withdrawn. The work each
-        #       one was written to add is already performed, per dataset, inside the
-        #       refresh branch above: `refresh-dataset` stages the generation, LOADS the
-        #       target table for the ten datasets that ship a committed extract, runs all
-        #       three verification passes on each of those, stages the backup generation
-        #       for the three families that have one, and ADVANCES
-        #       ledger.transaction_id_seq for the one dataset whose rows occupy the
-        #       allocator's range. A second Map would re-fetch and re-decode every
-        #       extract to perform an upsert that by construction changes nothing, and a
-        #       second reconciliation would advance a sequence already advanced.
-        # WHY : Assumptions: the reasoning the withdrawn reconciliation state gave is
-        #       kept and is not lost with it -- a load leaves the sequence pointing
-        #       inside the range it just inserted, so the first identifier the online
-        #       service allocates collides on the primary key, hours later, in a service
-        #       that did nothing wrong. The baseline has no analogue because VSAM has no
-        #       sequence. That hazard is closed at the refresh step, whose own comment
-        #       records why it is closed there rather than as a state of its own: the
-        #       allocator is advanced inside the refresh of the ONE dataset that feeds
-        #       its table, so the ordering it depends on -- after those rows exist,
-        #       before anything allocates -- cannot be broken by a graph edit.
-        # WHY : Assumptions: what is NOT withdrawn is the gate below, and the three
-        #       things it does that no per-dataset pass reaches: it runs on the
-        #       SELECT-only verification login rather than the loader's own identity, it
-        #       executes the two committed WHOLE-MIGRATION queries whose digests the
-        #       passes pin, and it is the only edge into PreflightDailyTransactions, so
-        #       posting cannot be reached over a corpus that does not match its source.
-
-        # WHY : Refactoring Rationale: this is the gate the chain had no state for.
-        #       The distribution delivers three verification passes -- a server-side
-        #       row-count report over every declared relation, a per-record digest
-        #       comparison between each extract and its loaded rows, and an exact
-        #       money-total and negative-row report -- and before this state nothing
-        #       in the infrastructure invoked any of them. Correct verification logic
-        #       with no caller certifies nothing.
-        # WHY : Assumptions: the single `verify-all` verb is invoked rather than the
-        #       three per-dataset verbs in sequence, and the difference is not
-        #       brevity. That verb runs the passes in a MANDATED order over the whole
-        #       registry and stops at the first failure, and it accepts no dataset
-        #       selector at all -- so no caller can narrow the gate to a subset and
-        #       still receive a verdict. Composing it here from per-dataset states
-        #       would put the coverage decision in HCL, where a state removed from the
-        #       graph silently reduces what was certified.
-        # WHY : Assumptions: the order the passes run in is load-bearing and belongs
-        #       to that verb, not to this graph. A row-count mismatch means the wrong
-        #       NUMBER of rows arrived, at which point the digest comparison and the
-        #       totals are guaranteed to differ too -- so running them anyway reports
-        #       three failures for one cause.
-        # WHY : Assumptions: --sql-root is passed because the container cannot derive
-        #       it. The two committed queries whose digests the passes pin are copied
-        #       to a directory beneath the image's WORKDIR, while the package itself
-        #       is installed into a virtual environment, so the package-relative
-        #       default resolves to neither.
-        VerifyMigration = {
-          Type           = "Task"
-          Resource       = "arn:${data.aws_partition.current.partition}:states:::ecs:runTask.sync"
-          TimeoutSeconds = local.state_timeouts.VerifyMigration
-          Parameters = {
-            Cluster              = var.ecs_cluster_arn
-            TaskDefinition       = var.data_migration_task_definition_arn
-            LaunchType           = "FARGATE"
-            NetworkConfiguration = local.network_configuration
-            Overrides = {
-              ContainerOverrides = [{
-                Name        = var.data_migration_container_name
-                "Command.$" = "States.Array('verify-all', '--sql-root=${var.data_migration_sql_root}')"
-                Environment = local.data_migration_environment
-              }]
-            }
-          }
-          ResultSelector = local.ecs_result_selector
-          ResultPath     = "$.verification"
-          Retry          = local.ecs_retry
-          Catch          = local.common_catch
-          Next           = "CheckVerificationExitCode"
-        }
-
-        # WHY : Assumptions: the predicate is exit code ZERO and nothing else, with no
-        #       warn tier. Every other exit-code Choice in this chain admits a soft
-        #       path because the baseline job it replaces carried one -- a reject count
-        #       that sets RC=4, a COND=(4,LT) that lets a warning through. This gate
-        #       replaces no baseline job at all: it is a binary statement about whether
-        #       the migrated data matches its source, and there is no reading of
-        #       "partly matches" that business processing may proceed on.
-        CheckVerificationExitCode = {
-          Type = "Choice"
-          Choices = [{
-            Variable      = "$.verification.exitCode"
-            NumericEquals = 0
-            Next          = "PreflightDailyTransactions"
-          }]
-          Default = "VerificationFailed"
-        }
-
-        VerificationFailed = {
-          Type  = "Fail"
-          Error = "VerificationFailed"
-          Cause = "The combined migration verification did not report a clean verdict; the chain stopped before posting against data that does not match its source"
+          Catch      = local.common_catch
+          Next       = "PreflightDailyTransactions"
         }
 
         CheckPreflightExitCode = {
@@ -3524,9 +3723,34 @@ resource "aws_iam_role" "this" {
   name               = local.execution_role_names[each.key]
   assume_role_policy = data.aws_iam_policy_document.assume_role[each.key].json
 
+  # WHY : ⚠️ Refactoring Rationale: all FOUR roles this resource creates -- one per
+  #       machine in local.machines -- carried no boundary, while both environment
+  #       roots described their `permissions_boundary_arn` as applying to "every role
+  #       this deployment creates". These are the widest roles in the deployment: each
+  #       holds ecs:RunTask, iam:PassRole over the task roles, and lambda:InvokeFunction.
+  #       iam:PassRole in particular is a privilege-escalation primitive -- a role that
+  #       can pass any role can act as any role -- so a ceiling above the inline
+  #       documents is worth more here than anywhere else in the module.
+  # WHY : Assumptions: one boundary covers all four rather than one input per machine.
+  #       A boundary is an account-level ceiling, not a per-machine grant; the
+  #       narrowing BETWEEN machines is already done by the per-machine assume-role and
+  #       inline documents keyed by each.key, and a second per-machine axis here would
+  #       let one machine be given a wider ceiling than its siblings by accident.
+  permissions_boundary = var.permissions_boundary_arn
+
   tags = merge(var.tags, {
     Name = local.execution_role_names[each.key]
   })
+
+  lifecycle {
+    precondition {
+      # WHY : Assumptions: a boundary ARN naming another account is accepted by IAM and
+      #       then bounds nothing, because the policy does not resolve here. Comparing
+      #       the ARN's account field against the caller's makes that a plan failure.
+      condition     = split(":", var.permissions_boundary_arn)[4] == data.aws_caller_identity.current.account_id
+      error_message = "permissions_boundary_arn must belong to the same AWS account as the state-machine execution roles."
+    }
+  }
 }
 
 data "aws_iam_policy_document" "permissions" {

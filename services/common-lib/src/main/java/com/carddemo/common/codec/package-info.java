@@ -84,7 +84,7 @@
  *       intermediate one.</li>
  * </ul>
  *
- * <h2>The six contracts this package owns</h2>
+ * <h2>The seven contracts this package owns</h2>
  *
  * <ul>
  *   <li><b>{@code CopybookLayout}</b> -- the layout descriptor. For one record
@@ -110,6 +110,14 @@
  *       and the six-field reply. Because both payloads are declared in string
  *       format, the field order and the delimiter <em>are</em> the interface,
  *       not a serialisation detail of it.</li>
+ *   <li><b>{@code DateInquiryReplyCodec}</b> -- the positional reply body the
+ *       date-and-time inquiry answers with: two fourteen-character labels, a
+ *       month-first ten-character date and an eight-character time, forty-six
+ *       characters in all, framed to the shared message length by the codec below.
+ *       It is here rather than in a bounded context because the wire is shared and
+ *       the answer is a function of the clock alone -- one queue carries both
+ *       inquiry flows, so the consumer that owns that queue renders this answer,
+ *       and no reference data enters it.</li>
  *   <li><b>{@code InquiryRequestCodec}</b> -- the 1000-character inquiry wire, in
  *       both directions and both outcomes: the four-character function and
  *       eleven-digit key of the request, the space-padded framing every reply is
@@ -305,12 +313,25 @@
  *
  * <p>The business tuple across the pair is the card number of sixteen
  * characters followed by the transaction identifier of fifteen, thirty-one
- * characters in total. Before it becomes transport metadata,
- * {@code CsvAuthCodec} converts that tuple to a purpose-scoped opaque HMAC
- * token; the raw tuple remains inside the encrypted payload. Both fields lead
- * each payload -- lines 21 and 36 of the request copybook, lines 19 and 20 of
- * the reply copybook -- so the codec can derive the same token without decoding
- * the remainder of either message.
+ * characters in total. Both fields lead each payload -- lines 21 and 36 of the
+ * request copybook, lines 19 and 20 of the reply copybook -- so either value can
+ * be read without decoding the remainder of a message. As transport metadata the
+ * two travel LITERALLY: {@code MessageGroupId} is the card number itself and
+ * {@code MessageDeduplicationId} the transaction identifier itself, which
+ * specification section 0.4.1.8 states in those words.
+ *
+ * <p>Refactoring Rationale: this paragraph said {@code CsvAuthCodec} converts the
+ * tuple to a purpose-scoped opaque HMAC token "before it becomes transport
+ * metadata", and that no longer describes anything. The codec still OFFERS keyed
+ * derivations -- {@code orderGroup} and {@code correlationKey}, each taking a
+ * tokeniser -- and each carries its own note saying it is not the published queue
+ * identity and that no publisher in this repository calls it; what was withdrawn is
+ * the derivation's use as the FIFO identity, because a group identity orders one
+ * card only while every producer computes the same value for it and a deduplication
+ * identity suppresses a resend only while the requester can predict it. The
+ * exposure the literal values accept is registered as
+ * {@code D-AUTHORIZATION-FIFO-IDENTITY-METADATA} in
+ * {@code docs/architecture/cobol-to-service-traceability.md}.
  *
  * <p>Alternatives Considered: a JSON envelope for these two payloads was
  * evaluated and is offered additively for new consumers, never as a replacement.
@@ -578,8 +599,8 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel holds <b>44 production classes</b> and <b>11</b> package
- * charter files, for <b>55</b> compilation units in total.
+ * <p>The shared kernel holds <b>46 production classes</b> and <b>11</b> package
+ * charter files, for <b>57</b> compilation units in total.
  *
  * <p>Refactoring Rationale: the per-package TABLE that stood here is gone, and its
  * removal is the point rather than an economy. It was a second copy of the table in
@@ -594,28 +615,28 @@
  * <p>Cross-check by production class:
  *
  * <pre>
- * root 1 + money 2 + codec 6 + error 7 + web 4 + security 9 + observability 4 + time 1 + validation 2 + messaging 4 + control 4 = 44
+ * root 1 + money 2 + codec 7 + error 7 + web 4 + security 9 + observability 4 + time 1 + validation 2 + messaging 5 + control 4 = 46
  * </pre>
  *
  * <p>Cross-check by compilation unit:
  *
  * <pre>
- * root 2 + money 3 + codec 7 + error 8 + web 5 + security 10 + observability 5 + time 2 + validation 3 + messaging 5 + control 5 = 55
+ * root 2 + money 3 + codec 8 + error 8 + web 5 + security 10 + observability 5 + time 2 + validation 3 + messaging 6 + control 5 = 57
  * </pre>
  *
  * <p>Both sums agree, and this file is one of the eleven charters. Each sum is kept
  * whole on one line, and each addend is labelled with the package it counts, so
  * that a single wrong figure is locatable rather than merely detectable.
  *
- * <p>Assumptions: the authoritative figures are <strong>44 production classes
- * across 10 subpackages and the root, in 55 compilation units, of which 11 are charters</strong>.
+ * <p>Assumptions: the authoritative figures are <strong>46 production classes
+ * across 10 subpackages and the root, in 57 compilation units, of which 11 are charters</strong>.
  * Both cross-checks above re-derive them independently, by class and by
  * compilation unit, so any other class count fails both sums and is wrong.
  *
  * <p>This package's own share of that canon is:
  *
  * <pre>
- * this package: codec 6 production + 1 charter = 7 compilation units
+ * this package: codec 7 production + 1 charter = 8 compilation units
  * </pre>
  *
  * <p>There are no subpackages beneath it. Stating the closed figure here is what
@@ -625,9 +646,10 @@
  * <p>Refactoring Rationale: this section stated the migration plan's TARGET
  * inventory -- 21 production classes, 9 charters, 30 compilation units, and five
  * classes in this package -- and presented it as the canon. The roster above now
- * names all six, so this paragraph and that list agree. The delivered module had
+ * names all seven, so this paragraph and that list agree. The delivered module had
  * already exceeded every one of those figures, this package included:
- * {@code InquiryRequestCodec} is a sixth codec, and a tenth subpackage,
+ * {@code InquiryRequestCodec} was a sixth codec and {@code DateInquiryReplyCodec} is
+ * a seventh, and a tenth subpackage,
  * {@code messaging}, existed with no row at all. A target the delivery has overshot
  * reads as a closed inventory and is therefore worse than no figure, because it tells
  * a reader that classes which are present were never admitted. The figures above are

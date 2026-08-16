@@ -25,6 +25,7 @@ import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminCreate
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminDeleteUserRequest;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminRemoveUserFromGroupRequest;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminUpdateUserAttributesRequest;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminUserGlobalSignOutRequest;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AttributeType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.MessageActionType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.UserNotFoundException;
@@ -851,6 +852,29 @@ public class CognitoUserProvisioningService {
     public void withdraw(String userId) {
         discardCredential(userId);
 
+        // WHY : ⚠️ Refactoring Rationale: the sessions are ended BEFORE the account is deleted, and this
+        //       call is new. Deleting an account does not invalidate the tokens already minted from it: a
+        //       resource server validates a signature and an expiry against the pool's public keys, so a
+        //       deleted administrator's token goes on being accepted, with its administrative group claim
+        //       intact, until it expires. Deletion is the largest privilege reduction this service performs
+        //       and it was the one that revoked nothing.
+        // WHY : Assumptions: it must run before the delete and cannot run after it, because the operation
+        //       is addressed by username -- once the account is gone there is nothing left to sign out and
+        //       the call answers with the not-found condition instead.
+        // WHY : Assumptions: the not-found condition is swallowed HERE for the same reason the delete
+        //       swallows it below -- an account that was never created has no sessions to end, and this
+        //       method's contract is about the state it leaves behind rather than about what it found. Every
+        //       other provider failure propagates, because a session that could not be ended outlives the
+        //       row that authorised it.
+        try {
+            this.provider.adminUserGlobalSignOut(AdminUserGlobalSignOutRequest.builder()
+                    .userPoolId(this.userPoolId)
+                    .username(userId)
+                    .build());
+        } catch (UserNotFoundException absent) {
+            LOG.info("event=auth.identity.signout-noop userId={}", userId);
+        }
+
         try {
             this.provider.adminDeleteUser(AdminDeleteUserRequest.builder()
                     .userPoolId(this.userPoolId)
@@ -867,6 +891,79 @@ public class CognitoUserProvisioningService {
             //       deleted is an orphan an operator has to know about.
             LOG.info("event=auth.identity.withdraw-noop userId={}", userId);
         }
+    }
+
+    /**
+     * Withdraws administrative authority from one account and ends every session that carries it.
+     *
+     * <p><b>Purpose.</b> A signed group claim is what every authorization decision in the fleet is
+     * actually made on -- the resource servers read {@code cognito:groups} out of a presented token and
+     * consult no row -- so lowering a user's type is not effective until two things have happened at the
+     * provider: the account no longer holds the administrative group, and the tokens already minted under
+     * it can no longer be used or renewed. This method does both, in that order.
+     *
+     * <p>⚠️ Refactoring Rationale: this exists because a demotion used to be reported as done before either
+     * step had happened. The row committed, an intention was recorded, the provider was called AFTER the
+     * commit and its outcome was explicitly discarded -- so a caller received a success while the account
+     * could still be holding the administrative group, and a reconciliation pass that kept failing left it
+     * holding it indefinitely. {@link #synchronise} still owns the projection; what it did not own, and
+     * could not, is the ordering guarantee a privilege REDUCTION needs.
+     *
+     * <p>Assumptions: the group removal precedes the sign-out, and the order is not interchangeable.
+     * Signing out first revokes the refresh tokens, so a renewal racing in that window would mint a fresh
+     * token still carrying the administrative group and outlive the very revocation meant to end it.
+     * Removing the group first means every token minted from that instant carries the ordinary group, and
+     * the sign-out then ends the ones minted before it. Both steps fail closed: neither can grant authority
+     * and either failing propagates.
+     *
+     * <p>Assumptions: the sign-out is GLOBAL rather than a single token revocation, because the caller is
+     * an administrator acting on somebody else's account and holds none of that user's tokens. It is the
+     * only operation that reaches every session an account has.
+     *
+     * <p>Trade-offs: what this cannot do is invalidate an access token that a resource server validates
+     * offline against the pool's public keys. The provider marks it revoked for its own operations, but a
+     * service checking a signature and an expiry accepts it until it expires -- which is why the access
+     * token's life is one hour and not longer, and which is the same residual the sign-out operation's own
+     * divergence entry records. What this DOES guarantee is that no further administrative token can be
+     * minted, and that the window is bounded by that lifetime rather than by the thirty-day life of a
+     * refresh token or by a reconciliation pass that may never succeed.
+     *
+     * <p>Assumptions: idempotent, and both calls are so individually. Removing an account from a group it
+     * does not hold is not an error at the provider, and signing out an account with no sessions is a
+     * no-op, so a retry of a partially applied withdrawal completes it rather than failing.
+     *
+     * <p>Assumptions: this operation has no baseline counterpart at all, because the reference re-reads
+     * authority from its security file on each turn while a signed bearer validated offline does not. The
+     * difference, its ordering and its residual are registered as
+     * {@code D-AUTHORITY-WITHDRAWN-ON-DEMOTION} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}.
+     *
+     * @param userId the row identifier, which is also the provider username; must not be {@code null}
+     * @throws software.amazon.awssdk.services.cognitoidentityprovider.model.UserNotFoundException if the
+     *     pool holds no account for the identifier, which means a row exists whose account was never
+     *     provisioned or was removed outside this service; the condition is deliberately not translated
+     *     into a client-facing status, because it is operational
+     */
+    public void withdrawAdministrativeAuthority(String userId) {
+        Objects.requireNonNull(userId, "userId must not be null");
+
+        this.provider.adminRemoveUserFromGroup(AdminRemoveUserFromGroupRequest.builder()
+                .userPoolId(this.userPoolId)
+                .username(userId)
+                .groupName(this.adminGroupName)
+                .build());
+
+        this.provider.adminUserGlobalSignOut(AdminUserGlobalSignOutRequest.builder()
+                .userPoolId(this.userPoolId)
+                .username(userId)
+                .build());
+
+        // WHY : Assumptions: logged at warning level and under its own event name, because a change of
+        //       what a user may do is the line an audit reads and is not an ordinary attribute update. The
+        //       group name is recorded and the subject is not, for the reason the provisioning line
+        //       records: the subject is the value a presented token is matched on.
+        LOG.warn("event=auth.identity.authority-withdrawn userId={} group={}", userId,
+                this.adminGroupName);
     }
 
     /**

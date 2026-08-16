@@ -23,7 +23,7 @@ import type { ReactElement, ReactNode } from 'react';
 import { Navigate } from 'react-router';
 
 import { useAuth } from '../hooks/useAuth';
-import { ACCESS_DENIED_ADMIN_ONLY } from '../messages/messages';
+import { ACCESS_DENIED_ADMIN_ONLY, ACCESS_DENIED_HEADING } from '../messages/messages';
 
 /** Route the guards send an unauthenticated caller to. */
 export const SIGN_ON_ROUTE = '/signon';
@@ -65,6 +65,13 @@ export function RequireSignOn({ children }: GuardProps): ReactElement {
  *
  * Assumptions: the refusal text is the baseline's own wording for this condition, taken from the
  * catalog rather than composed here, so an operator meets the same sentence the 3270 menu gave them.
+ *
+ * Refactoring Rationale: BOTH strings on the refusal surface now come from the catalog. The heading was
+ * previously the literal `'Access denied'` written at the call site, which a review named a
+ * Transformation Rule T8 violation: the rule's point is that one module answers "where does this
+ * sentence come from" for every readable string, and a heading with no baseline source needs that
+ * answer more than a transcribed one rather than less. {@link ACCESS_DENIED_HEADING} records that it is
+ * authored and why the baseline has no heading to transcribe.
  * @param {GuardProps} props - The subtree to protect.
  * @returns {ReactElement} The protected subtree, a redirect to sign-on, or a refusal.
  */
@@ -74,7 +81,17 @@ export function RequireAdmin({ children }: GuardProps): ReactElement {
     return <Navigate to={SIGN_ON_ROUTE} replace />;
   }
   if (!isAdmin) {
-    return <Result status="403" title="Access denied" subTitle={ACCESS_DENIED_ADMIN_ONLY} />;
+    /*
+     * WHY : Assumptions: `status="403"` is a design-system VARIANT selector and not a visible string,
+     *       which is why it stays at the call site while the two sentences move to the catalog. antd
+     *       answers this status with an illustration and no text of its own, so nothing an operator
+     *       reads is declared here. Trade-offs: the literal is the HTTP status a service would answer
+     *       the same caller with, so the surface and the transport agree on the refusal's identity
+     *       without this component importing anything from the API layer to say so.
+     */
+    return (
+      <Result status="403" title={ACCESS_DENIED_HEADING} subTitle={ACCESS_DENIED_ADMIN_ONLY} />
+    );
   }
   return <>{children}</>;
 }

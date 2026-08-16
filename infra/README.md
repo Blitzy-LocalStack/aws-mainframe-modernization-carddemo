@@ -50,7 +50,7 @@ bounded-context services, an internal Application Load Balancer behind an API
 Gateway HTTP API, a Cognito user pool, six primary SQS queues with six dead-letter
 queues, a Step Functions state machine replacing the nightly JCL chain, a
 versioned S3 bucket for dataset generations, a CloudFront-fronted bucket for the
-single-page application, eleven ECR repositories, four KMS customer-managed keys,
+single-page application, ten ECR repositories, four KMS customer-managed keys,
 Secrets Manager entries, and the log groups, dashboards and alarms replacing the
 job log.
 
@@ -195,7 +195,7 @@ resources yet.
 
 | Module | Target responsibility | REFERENCE source in the untouched baseline |
 |---|---|---|
-| `network` | Three-AZ VPC; public, private-app and **isolated-data** subnets; NAT; interface endpoints for `ecr.api`, `ecr.dkr`, `logs`, `secretsmanager`, `kms`, `sqs`, `states`, `ssm`, `xray` and `cognito-idp`; an S3 gateway endpoint reached by a **prefix-list** egress rule from both the app and data tiers; a NAT-bound egress rule for the Cognito JWK set, which has no interface endpoint in that set; **four** security groups (edge load balancer, application, data, interface endpoints — the VPC Link's fifth group is owned by `api-gateway-http`) | *(net-new — the baseline expresses no network topology)* |
+| `network` | Three-AZ VPC; public, private-app and **isolated-data** subnets; NAT; interface endpoints for `ecr.api`, `ecr.dkr`, `logs`, `secretsmanager`, `kms`, `sqs`, `states` and `ssm` — the eight AAP §0.4.1.9 names; an S3 gateway endpoint reached by a **prefix-list** egress rule from both the app and data tiers; an **opt-in, empty-by-default** NAT-bound egress rule for in-task identity-provider resolution, which has no interface endpoint in that set; **four** security groups (edge load balancer, application, data, interface endpoints — the VPC Link's fifth group is owned by `api-gateway-http`) | *(net-new — the baseline expresses no network topology)* |
 | `kms` | Four customer-managed keys **with rotation** — for Aurora, S3, Secrets Manager and SQS | `app/csd/CARDDEMO.CSD` — all eight file resources are defined `RECOVERY(NONE)` and `JOURNAL(NO)` (8 occurrences each, L1–L89), so this is encryption at rest where the baseline had none |
 | `secrets` | Secrets Manager entries, and the random initial passwords generated at apply time | `app/cpy/CSUSR01Y.cpy:L21` — `05 SEC-USR-PWD PIC X(08).`, the plaintext password field this designs out |
 | `ecr` | **Ten** repositories, with scan-on-push and a lifecycle policy | `app/csd/CARDDEMO.CSD:L489-L496` — two `DEFINE LIBRARY` stanzas, both naming the single `AWS.M2.CARDDEMO.LOADLIB` load library |
@@ -206,13 +206,13 @@ resources yet.
 | `api-gateway-http` | HTTP API, Cognito JWT authorizer, VPC Link to the internal ALB | *(net-new)* |
 | `cognito` | User pool, app client, the groups `carddemo-admin` and `carddemo-user`, seed users | `app/cpy/CSUSR01Y.cpy:L22` — `SEC-USR-TYPE PIC X(01)` with its `'A'`/`'U'` values — and `app/cbl/COSGN00C.cbl` |
 | `sqs` | Two FIFO and four standard queues, each with a dead-letter queue at `maxReceiveCount` 5, all SSE-KMS | the five message-queue names in the extension trees: `AWS.M2.CARDDEMO.PAUTH.REQUEST`, `AWS.M2.CARDDEMO.PAUTH.REPLY`, `CARDDEMO.REQUEST.QUEUE`, `CARDDEMO.RESPONSE.QUEUE`, `CARD.DEMO.ERROR`; the shared request queue becomes separate account/date request queues so competing consumers cannot steal each other's messages |
-| `step-functions-batch` | The **twelve-state** `carddemo-daily-batch` state machine, its IAM role and task-definition wiring, plus a **second, smaller** state machine for ad-hoc reports | all 38 files in `app/jcl/`; the ad-hoc path from `app/csd/CARDDEMO.CSD:L499-L505`, where `DEFINE TDQUEUE(JOBS)` maps to `DDNAME(INREADER)` |
+| `step-functions-batch` | The **eleven-state** `carddemo-daily-batch` state machine, its IAM role and task-definition wiring, plus a **second, smaller** state machine for ad-hoc reports | all 38 files in `app/jcl/`; the ad-hoc path from `app/csd/CARDDEMO.CSD:L499-L505`, where `DEFINE TDQUEUE(JOBS)` maps to `DDNAME(INREADER)` |
 | `eventbridge-scheduler` | The nightly cron schedule, with a dead-letter target | `app/scheduler/CardDemo.ca7` and `app/scheduler/CardDemo.controlm` — their **intent**, not their syntax |
 | `s3-datasets` | A versioned bucket, with prefixes and lifecycle configuration for **ten** generation-dataset families | `app/jcl/DEFGDGB.jcl:L25-L56` (six), `app/jcl/DEFGDGD.jcl:L28-L75` (three), `app/jcl/DALYREJS.jcl:L25-L26` (one) |
 | `cloudfront-spa` | S3 origin with an origin access control, the distribution, and single-page-application error routing | `app/bms/*.bms` — the delivery path that replaces the 3270 terminal |
 | `observability` | Log groups, dashboards, alarms and an SNS topic | the `SYSOUT` and `SYSPRINT` DD statements across the 38 jobs — 116 occurrences of `SYSOUT=*` and 80 `SYSPRINT DD`, which is what the job log actually was |
 
-### 4.1 Why `ecr` provisions exactly eleven repositories
+### 4.1 Why `ecr` provisions exactly ten repositories
 
 Assumptions: an ECR repository is needed per **container image**, not per Maven
 module, and those two counts differ by one. There are **nine** Maven modules under
@@ -223,19 +223,20 @@ images gives **ten** deployables built from this repository: the eight
 bounded-context services plus `ui` plus `data-migration`. Counting Maven modules
 instead would invent a repository that nothing ever pushes to.
 
-The eleventh repository is a different kind of thing and is not one of this
-repository's builds: `aws-otel-collector` **mirrors** a pinned third-party image.
-Refactoring Rationale: this section read "exactly ten" while the module declared
-eleven, because the mirror was added with the telemetry sidecar and the count was
-not re-derived. The mirror is not optional — `ecs-service` gives every workload the
-sidecar by default, and `network` enumerates the application tier's egress instead
-of allowing every destination on 443, so the public registry the collector was
-pulled from is unreachable from a task: without the mirror no task can pull its
-sidecar and therefore no task starts at all, and that failure plans cleanly.
-Alternatives Considered: pushing the collector into one of the ten deployable
-repositories under its own tag, which would have kept this count at ten. Rejected
-because a repository expires images by count, so ordinary service releases would
-expire the third-party image out from under the sidecar.
+Refactoring Rationale: this section briefly read **eleven**, the eleventh being
+`aws-otel-collector`, a mirror of a pinned third-party telemetry image that this
+repository does not build. Both the mirror and the eleventh repository are
+**withdrawn**. The argument for the mirror was sound as far as it went —
+`ecs-service` attached a collector sidecar to every workload, `network` enumerates
+the application tier's egress instead of allowing every destination on 443, and
+Amazon ECR Public is not served by the `ecr.api` and `ecr.dkr` endpoints, so
+without a mirror no task could pull its sidecar. It was the wrong thing to fix.
+Neither the collector nor an eleventh repository appears in the frozen AAP, so the
+resolution is to remove the component rather than to keep defending the repository
+it needed: `ecs-service` no longer composes the sidecar and records there what is
+kept for the observability concern — container logs, the Actuator Prometheus
+surface, `common-lib`'s common metric tags and end-to-end request correlation.
+Ten is therefore both what this repository builds and what the registry holds.
 
 ---
 
@@ -794,26 +795,33 @@ contract.
   application subnets carry the ECS tasks. **Isolated data subnets carry Aurora
   and have no internet route at all** — isolating the data tier with no route out
   is the strongest blast-radius control available here.
-- **AWS API traffic stays inside the VPC for every service an endpoint covers.**
+- **AWS API traffic stays inside the VPC, without exception.**
   Ten interface endpoints cover the ECR API and Docker registry, CloudWatch
   Logs, Secrets Manager, KMS, SQS, Step Functions, SSM, X-Ray and the Cognito
   identity provider; a gateway endpoint
-  covers S3 — nine endpointed services in total. **Two dependencies are
-  deliberately reached over NAT instead:** Cognito, for the token operations
-  `auth-service` performs, and X-Ray, for trace delivery, have no endpoint in the
-  frozen eight-service set that AAP §0.4.1.6 fixes. The bounded claim is the true
-  one; see [ADR-008](../docs/adr/ADR-008-security-and-identity.md) for why adding
-  endpoints for the two, or narrowing their egress rule to published address
-  ranges, were both rejected.
-- **Security groups permit six flows and nothing else** — four security groups
-  (`alb`, `app`, `data`, `vpc_endpoints`) carry them, and every flow is declared
-  as a paired egress and ingress rule except the two that have no security group
+  covers S3 — eleven endpointed services in total, which is every managed service
+  a task calls. Refactoring Rationale: this bullet said two dependencies were
+  "deliberately reached over NAT instead" because Cognito and X-Ray "have no
+  endpoint in the frozen eight-service set that AAP §0.4.1.6 fixes", and pointed at
+  ADR-008 for why adding endpoints for them was rejected. Both endpoints exist —
+  the set is a documented superset of §0.4.1.6's enumeration, adopted because
+  §0.4.1.9's security-group contract permits the application tier no internet
+  destination at all, and ADR-008's Rationale now records that reasoning in place
+  of the rejection.
+- **Security groups permit five declared flows and nothing else** — three security
+  groups (`alb`, `app`, `data`) carry them, and every flow is declared
+  as a paired egress and ingress rule except those that have no security group
   on the far side: load balancer to application on the container port,
   application to Aurora on **5432**, application to the interface endpoints on
   **443**, application back to the load balancer on **443** (this is how one
   service resolves an account context from another), application to the S3
-  gateway endpoint on **443** by prefix list, and the single wide **443** egress
-  rule that reaches Cognito and X-Ray. Assumptions: this list is the complete
+  gateway endpoint on **443** by prefix list, and the isolated data tier to that
+  same prefix list on **443**. The application-to-endpoint flow is a SELF reference
+  on the `app` group, because the endpoint ENIs carry that group rather than a
+  fourth one. No rule on any group names an internet destination: the
+  identity-provider egress rule keyed over `identity_provider_egress_cidrs` is
+  withdrawn along with its input, and the identity provider is reached through the
+  `cognito-idp` interface endpoint instead. Assumptions: this list is the complete
   set the network module declares. A flow present here but absent from the module
   — or absent from both — is dropped by the application security group at run
   time, with no build failure and a hung request as the first symptom, so the
@@ -846,12 +854,40 @@ contract.
 ## 11. Batch orchestration and datasets
 
 The target `step-functions-batch` module is specified to provision the
-**twelve-state** `carddemo-daily-batch` state machine, invoked by the authored
+**eleven-state** `carddemo-daily-batch` state machine, invoked by the authored
 EventBridge Scheduler module. The state-machine resource graph is not yet
 authored. Its contract calls for each work state to run a Fargate task
-synchronously with timeout, retry and catch handling, while states 1 and 12
+synchronously with timeout, retry and catch handling, while states 1 and 11
 bracket the run with a read-only flag. `docs/architecture/batch-orchestration.md`
-maps the target states to the JCL jobs they replace.
+maps the states to the JCL jobs they replace.
+
+⚠️ Refactoring Rationale: two claims here are corrected. The count read
+**twelve**, which counted `VerifyMigration` among the top-level states — specification
+section 0.4.1.7 enumerates eleven by name, and the gate runs INSIDE state 2's `Parallel`
+rather than beside them. ⚠️ The module's `var.state_timeout_seconds` validation therefore
+asserts **twelve** keys, not eleven: every state that carries a ceiling, which is the
+eleven top-level states plus the nested gate. This sentence claimed eleven keys, which
+would have read as a contradiction against the module's own validation message; the
+checkable count is the timed one, and the topology count it must not be confused with is
+recorded at the state list in `infra/modules/step-functions-batch/main.tf`. And this paragraph said the
+resource graph "is not yet authored" and described the module in the future tense; the
+module is authored and both environment roots instantiate it, so the sentence described
+a state of the repository that had already passed. What is still true, and is stated
+where it belongs in [§14](#14-scope-boundaries), is the narrower caveat: authored
+and validated is not the same as **deployed**, because applying to a live account is an
+operator action outside this repository.
+
+> ⚠️ Assumptions: this document's **opening banner** and [§14](#14-scope-boundaries) still
+> describe the IaC as "partially authored", name "thirteen of the sixteen" module resource
+> graphs as complete, say both roots await "missing composition files", and cite "86 known
+> incompleteness findings" from TFLint. Those statements no longer hold and are flagged
+> here rather than silently contradicted: all **16** modules carry a `main.tf`, both roots
+> carry all seven composition files, and `terraform fmt`, `terraform validate`, TFLint and
+> the `terraform-docs` drift check are clean across all **19** Terraform directories.
+> Reconciling that narrative in full is deliberately not done in this pass, because it is
+> the delivery-boundary claim of the whole document rather than a count in this section,
+> and correcting it belongs with a review of the document as a whole rather than as a side
+> effect of a batch-chain fix. Trust the measured statements in this note over the banner.
 
 > Assumptions: the retry count of five is the baseline's own number, not an
 > arbitrary choice. Every job in `app/scheduler/CardDemo.controlm` carries
@@ -903,24 +939,49 @@ hygiene, while the writer's prefix cleanup is the `LIMIT(5) SCRATCH` analogue.
 
 ## 12. Messaging
 
-The authored `sqs` module defines six primary queues, each with its own
-dead-letter queue at `maxReceiveCount` 5 and SSE-KMS encryption.
+The authored `sqs` module defines **five** primary queues — two FIFO and three
+standard, one per baseline queue — each with its own
+dead-letter queue at `maxReceiveCount` 5 and SSE-KMS encryption, so the module
+creates **ten** queues.
 `docs/architecture/messaging-contracts.md` carries the payload contracts.
 
 | Queue | Type | Replaces |
 |---|---|---|
 | Authorization request | FIFO | `AWS.M2.CARDDEMO.PAUTH.REQUEST` |
 | Authorization reply | FIFO | `AWS.M2.CARDDEMO.PAUTH.REPLY` |
-| Account-inquiry request | Standard | Account inquiry traffic formerly sharing `CARDDEMO.REQUEST.QUEUE` |
-| Date-inquiry request | Standard | Date conversion traffic formerly sharing `CARDDEMO.REQUEST.QUEUE` |
+| Inquiry request | Standard | `CARDDEMO.REQUEST.QUEUE` — **shared**, as the baseline shares it |
 | Inquiry reply | Standard | `CARDDEMO.RESPONSE.QUEUE` |
 | Error sink | Standard | `CARD.DEMO.ERROR` |
 
+⚠️ Refactoring Rationale: this said **six** primaries and split the shared request
+queue into an account-inquiry queue and a date-inquiry queue, on the argument that
+competing consumers would otherwise steal each other's messages. That split is
+withdrawn. The baseline runs **one** request queue, and specification section
+0.4.1.8 specifies four inquiry/error primaries and not five; the stealing hazard is
+real but is answered where the baseline answers it — `COACCT01` guards on the
+four-character function code in the request record, so the target's single consumer
+dispatches on that same field rather than relying on the transport to separate the
+two traffics. Splitting the queue would have been a divergence from both the
+baseline and the specification, adopted to avoid a problem neither has.
+
 Assumptions: the FIFO/standard split is not uniform because the baseline's two
 messaging disciplines are not the same. The authorization pair is FIFO because
-per-card ordering is observable behaviour in the baseline, and a purpose-scoped
-opaque HMAC token supplies one stable message group per card without placing the
-card number in queue metadata. The guarantee holds on the source queue; dead-letter
+per-card ordering is observable behaviour in the baseline, and specification
+sections 0.4.1.8 and 0.7.6 freeze the identities that deliver it as **literal**
+values — `MessageGroupId = card_num` and `MessageDeduplicationId = transaction_id`.
+⚠️ Refactoring Rationale: this paragraph previously credited a purpose-scoped
+opaque HMAC token with supplying the message group "without placing the card number
+in queue metadata." No such derivation is in effect, and it would not have been free:
+a group identity orders only while it is equal for equal cards across **every**
+producer on the queue, and a deduplication identity suppresses a duplicate only
+while the requester that may resend can predict it — so keying either from one
+service's own secret removes both guarantees for anyone else on the queue. The
+metadata exposure that the literal values entail is registered instead, as
+divergence `D-AUTHORIZATION-FIFO-IDENTITY-METADATA`, bounded by the queue's
+customer-managed-key encryption, its private-network-only reachability and
+task-role-scoped read access. The HMAC key this root still provisions keys the
+service's own correlation and diagnostic identities, and nothing on the queue.
+The guarantee holds on the source queue; dead-letter
 transfer is an explicit quarantine boundary with exact source admission and no
 native bulk redrive. The inquiry pair has no ordering requirement, and a standard
 queue costs less and scales without group-level serialisation.

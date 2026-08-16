@@ -26,8 +26,10 @@
  */
 
 // Assumptions: every test API is imported rather than taken from an ambient global, because
-// ui/vitest.config.ts records `globals` as a per-project contract, and admitting them here would make
-// `expect` and `vi` visible to production screens as well, where a stray call would compile.
+// ui/tsconfig.json keeps `types` EMPTY, and DECLARING them here would make `expect` and `vi`
+// visible to production screens as well, where a stray call would compile. (ui/vitest.config.ts
+// sets `globals: true`; an injected global is not a declared one, so the import still carries the
+// compiler's side of this.)
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { RenderHookResult } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';

@@ -52,29 +52,42 @@
 #   to read as a decision.
 #
 #   Because so much is inherited, the reasoning for what is NOT written here
-#   matters as much as the reasoning for what is. Seven keys a reader would
+#   matters as much as the reasoning for what is. Six keys a reader would
 #   reasonably expect this overlay to carry are absent on purpose, and each is
 #   accounted for in the closing block, which is where an absent key's rationale
-#   can sit adjacent to something.
+#   can sit adjacent to something. Refactoring Rationale: this read seven. The
+#   seventh was the pair of queue-consumer bounds, and it is no longer an ABSENCE
+#   of a key this overlay could have set -- the module consumes no queue, so the
+#   keys do not exist in the base either. The closing block records that
+#   withdrawal separately from the six absences, because the two are different
+#   facts: an absence is a value declined, a withdrawal is a capability moved.
 #
 #   The base file is the property-key contract for this module. This file is an
 #   overlay on it, never a replacement, so everything the base settles continues
 #   to hold here unrestated: the datasource kind and driver, the owned schema
 #   and the pool statement that pins it, the migration locations, the listener
-#   port, TLS on it, the queue family and its message format, and the
-#   resource-server configuration with the authority model built from it.
+#   port, TLS on it, and the resource-server configuration with the authority model
+#   built from it. Refactoring Rationale: this sentence also named "the queue family
+#   and its message format" among the base settlements; the base settles no queue at
+#   all now, because the single shared inquiry request queue of
+#   app/app-vsam-mq/README.md L53 has exactly one owning consumer and that consumer
+#   is in the account context.
 #
 #   The behaviour being sized belongs to programs that are REFERENCE ONLY and
 #   are never modified: app/app-transaction-type-db2/cbl/COTRTLIC.cbl and
 #   COTRTUPC.cbl (the transaction-type screens), COBTUPDT.cbl (the sequential
 #   reference update, which migrates to a reference-maintenance service method
-#   rather than to a batch job), and app/app-vsam-mq/cbl/CODATE01.cbl (the
-#   queue-driven date conversion). The date-edit rules are not configured here
+#   rather than to a batch job). The date-edit rules are not configured here
 #   at all: they live in common-lib as
 #   com.carddemo.common.validation.DateEditValidator, transcribed from
-#   app/cbl/CSUTLDTC.cbl. Two baseline citations below are load-bearing and were
-#   read from disk rather than recalled: CODATE01.cbl L146, L147, L243 and L286,
-#   and app/cbl/CBACT04C.cbl L436-L439, L455, L458 and L628-L632.
+#   app/cbl/CSUTLDTC.cbl. One baseline citation below is load-bearing and was read
+#   from disk rather than recalled: app/cbl/CBACT04C.cbl L436-L439, L455, L458 and
+#   L628-L632.
+#   Refactoring Rationale: app/app-vsam-mq/cbl/CODATE01.cbl was listed here as a
+#   fourth sized program and four of its lines as load-bearing citations. Neither
+#   applies: its QUEUE route is answered by the owner of the shared request queue,
+#   in the account context, and this profile no longer inherits or sizes a
+#   consumer.
 #
 # Parameters:
 #   SPRING_PROFILES_ACTIVE
@@ -142,8 +155,8 @@
 #   - Refactoring Rationale: this file and application-dev.yml differ from each
 #     other, and from the base, ONLY in sizing and verbosity. Neither varies
 #     topology: not the datasource kind, not the driver, not the owned schema,
-#     not the migration locations, not the listener port, not the queue family
-#     or its message format, and not the identity mechanism. The failure mode
+#     not the migration locations, not the listener port, and not the identity
+#     mechanism. The failure mode
 #     that constraint exists to prevent is specific rather than stylistic: once
 #     two environments differ in SHAPE rather than in SIZE, a dev pass stops
 #     being evidence about prod, and every defect dev cannot reproduce is first
@@ -294,16 +307,21 @@ springdoc:
     enabled: false
 
 # =============================================================================
-# Closing notes: seven deliberate absences
+# Closing notes: six deliberate absences and one withdrawal
 # -----------------------------------------------------------------------------
 #   Each entry below is a key a reader would reasonably expect a production
 #   overlay to carry. An absent key has no line of its own to sit beside, so the
 #   reasoning is collected here rather than left to be re-derived. Under the
 #   governing Explainability rule the PRESENCE of a key in an overlay is itself a
 #   decision; so is its absence, when a reasonable author would have written it.
-#   Four of the seven are keys application-dev.yml DOES set, so a reader
-#   comparing the two files finds a value on one side and this block on the
-#   other, which is the comparison that has to be answerable.
+#   Four of the six are keys application-dev.yml DOES set -- the pool ceiling, the
+#   three pool timeouts, the two health-detail keys and the two logger levels -- so
+#   a reader comparing the two files finds a value on one side and this block on
+#   the other, which is the comparison that has to be answerable. Refactoring
+#   Rationale: this said four of SEVEN, counting the queue-consumer bounds as a
+#   fifth dev-set entry among them; the arithmetic and the denominator both move
+#   with the withdrawal, so both are re-derived from the two files rather than
+#   adjusted by one.
 #
 # WHY : Assumptions: spring.datasource.hikari.maximum-pool-size is NOT raised and
 #       stays at the base's ten, which is the one absence in this block that would
@@ -423,35 +441,24 @@ springdoc:
 #       That divergence is recorded in
 #       docs/architecture/cobol-to-service-traceability.md.
 #
-# WHY : Assumptions: the queue-consumer bounds are inherited and the long-poll wait
-#       is inherited, and the second of those is the one no profile may touch. The
-#       wait is not an environment-sized value: app/app-vsam-mq/cbl/CODATE01.cbl
-#       L286 is MOVE 5000 TO MQGMO-WAITINTERVAL -- five seconds -- as the wait on
-#       the baseline get, and the comment above it at L285 says so in the source.
-#       Varying it here would make prod poll differently from both dev and the
-#       program being migrated. The concurrency bound is inherited for a different
-#       reason, and it is the one place a production overlay is tempting and wrong:
-#       raising it above the pool size is not a throughput change but a
-#       redelivery mechanism, because every date-conversion handler holds a pooled
-#       connection while it resolves its request, so handlers admitted beyond the
-#       pool wait out the acquisition timeout, fail, and are redelivered until the
-#       dead-letter queue accepts them at the fifth receive. The base's ten already
-#       equals the inherited pool ceiling, and the messages-per-poll bound cannot
-#       usefully rise at all: the queue service accepts at most ten messages per
-#       receive, and the framework refuses to start a listener whose per-poll bound
-#       exceeds its concurrency bound, so the base's pair is simultaneously at the
-#       protocol ceiling and correctly ordered.
-#       Assumptions: the queue NAMES stay unresolved placeholders in the base and
-#       no literal appears here, for two independent reasons. The baseline does not
-#       hold its own input queue name either -- CODATE01.cbl L146 is
-#       MOVE MQTM-QNAME TO INPUT-QUEUE-NAME, taking it from the trigger message --
-#       and the names it does hold are dotted and uppercase, L147
-#       'CARD.DEMO.REPLY.DATE' and L243 'CARD.DEMO.ERROR', a form the target queue
-#       service does not accept, so the reply and error names could not be carried
-#       across verbatim even if a profile were the place to write them. The target
-#       names each queue per environment and provisions each with a dead-letter
-#       queue at a maximum receive count of five and encryption with a managed key,
-#       which is infrastructure rather than configuration.
+# WHY : Refactoring Rationale: a paragraph here explained why this overlay inherits
+#       the queue-consumer bounds and the long-poll wait rather than varying them,
+#       and it is withdrawn rather than reworded because there is nothing left to
+#       inherit. This module consumes no queue: the baseline drives BOTH inquiry
+#       programs from ONE request destination -- DEFINE
+#       QLOCAL('CARDDEMO.REQUEST.QUEUE') at app/app-vsam-mq/README.md L53, aliased
+#       to CICS as MQQUEUE(CARDREQ) at L71 -- and a queue admits exactly one owning
+#       consumer, because a receive hides the message from every other consumer
+#       rather than delivering a copy to each. The owner is
+#       com.carddemo.account.service.InquiryMessageListener, which dispatches on the
+#       request's four-character function code, so the sizing question and the
+#       queue-naming question are both answered in that module's profiles now.
+#       Assumptions: what stays here is the date EVALUATION of app/cbl/CSUTLDTC.cbl,
+#       reached synchronously, which has no polling bound to size. Trade-offs: the
+#       withdrawn paragraph also recorded that raising a concurrency bound above the
+#       pool size is a redelivery mechanism rather than a throughput change; that
+#       reasoning is preserved where it still applies, on the surviving consumer's
+#       own profiles, rather than kept here against no key.
 #
 # WHY : Alternatives Considered: widening management.endpoint.health.show-details,
 #       or the actuator exposure list, so an on-call reader could see which

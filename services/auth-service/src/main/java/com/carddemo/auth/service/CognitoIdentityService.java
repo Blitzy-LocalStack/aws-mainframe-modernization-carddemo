@@ -5,10 +5,14 @@ import com.carddemo.auth.dto.SignOnChallengeRequest;
 import com.carddemo.auth.dto.SignOnOutcome;
 import com.carddemo.auth.dto.SignOnRequest;
 import com.carddemo.auth.dto.SignOnResponse;
+import com.carddemo.auth.dto.SignOutRequest;
 import com.carddemo.auth.dto.TokenRefreshRequest;
 import com.carddemo.auth.repository.UserRepository;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.time.Duration;
@@ -29,12 +33,17 @@ import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityPr
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AuthFlowType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AuthenticationResultType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.ChallengeNameType;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.GetTokensFromRefreshTokenRequest;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.GetTokensFromRefreshTokenResponse;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.InitiateAuthRequest;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.InitiateAuthResponse;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.InvalidPasswordException;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.NotAuthorizedException;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.RefreshTokenReuseException;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.RespondToAuthChallengeRequest;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.RespondToAuthChallengeResponse;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.RevokeTokenRequest;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.UnsupportedTokenTypeException;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.UserNotFoundException;
 
 /**
@@ -45,7 +54,10 @@ import software.amazon.awssdk.services.cognitoidentityprovider.model.UserNotFoun
  * <p>This is the target successor to {@code READ-USER-SEC-FILE}, the paragraph whose label sits at
  * {@code app/cbl/COSGN00C.cbl} line 209 and whose body runs to line 257. The traceability register
  * records the pairing directly: {@code docs/architecture/cobol-to-service-traceability.md} maps that
- * paragraph onto {@code CognitoIdentityService.authenticate}, which is the single public method below.
+ * paragraph onto {@code CognitoIdentityService.authenticate}, the first of the four public methods
+ * below. The other three have no reference counterpart at all: the pool raises a challenge the reference
+ * had no notion of, a bearer token expires where a terminal session did not, and a session that outlives
+ * the terminal it was opened from has to be endable at the pool rather than at the screen.
  * The baseline paragraph issues one keyed read and then classifies its outcome three ways; this class
  * performs one local existence probe and one provider exchange and classifies the outcome against the
  * published contract at {@code services/auth-service/src/main/resources/openapi/auth-api.yaml}.
@@ -243,11 +255,43 @@ public class CognitoIdentityService {
     /** The provider's parameter name for the confidential-client proof. */
     private static final String AUTH_PARAM_SECRET_HASH = "SECRET_HASH";
 
-    /** The provider's parameter name for the refresh token presented on a renewal. */
-    private static final String AUTH_PARAM_REFRESH_TOKEN = "REFRESH_TOKEN";
-
     /** The provider's response name for the permanent credential a challenge answer sets. */
     private static final String CHALLENGE_PARAM_NEW_PASSWORD = "NEW_PASSWORD";
+
+    /**
+     * The identity-token claim carrying the pool user name a renewed token set was issued for.
+     *
+     * <p>Refactoring Rationale: this claim is read because the renewal exchange lost the binding that
+     * used to make the submitted identifier verifiable. The previous flow sent a keyed digest computed
+     * over the submitted user name, and the pool verified that digest against the user the token
+     * belonged to -- so a token replayed under another identifier was refused by the pool itself. The
+     * rotation-compatible operation this class now issues accepts the client secret directly and no user
+     * name at all, so nothing in the request or the response ties the submitted identifier to the
+     * subject unless this claim is read. Without it the local membership gate below could be satisfied
+     * by naming ANY still-present identifier while renewing a different user's session, which defeats
+     * the one control that gate exists to apply.
+     *
+     * <p>Assumptions: {@code cognito:username} rather than {@code sub}, because {@code sub} is the
+     * pool's own subject identifier and the key of {@code auth.users} is the eight-character
+     * {@code SEC-USR-ID} the baseline declares at {@code app/cpy/CSUSR01Y.cpy} line 18. Comparing
+     * against {@code sub} would compare two different identifier spaces and refuse every renewal.
+     */
+    private static final String ID_TOKEN_USERNAME_CLAIM = "cognito:username";
+
+    /** The number of dot-separated segments a compact-serialised identity token carries. */
+    private static final int ID_TOKEN_SEGMENT_COUNT = 3;
+
+    /** The zero-based index of the claim segment within a compact-serialised identity token. */
+    private static final int ID_TOKEN_CLAIM_SEGMENT_INDEX = 1;
+
+    /**
+     * The reader that turns an identity token's claim segment into addressable claims.
+     *
+     * <p>Assumptions: one instance is shared because the type is safe for concurrent use once
+     * configured, and nothing here configures it after construction. Creating one per renewal would
+     * rebuild a serialiser cache on the critical path of a caller mid-session for no benefit.
+     */
+    private static final ObjectMapper CLAIM_READER = new ObjectMapper();
 
     /** The keyed-digest algorithm the confidential-client proof is computed with. */
     private static final String SECRET_HASH_ALGORITHM = "HmacSHA256";
@@ -294,43 +338,35 @@ public class CognitoIdentityService {
      */
     private static final int MINIMUM_TOKEN_LIFETIME_SECONDS = 1;
 
-    /**
-     * The least time any refusal of a submitted credential takes before it is reported.
-     *
-     * <p>Refactoring Rationale: this exists to close a user-enumeration channel the merged refusal
-     * sentence left open. Both an unknown identifier and a wrong credential are answered with the one
-     * sentence, which removes the channel that told the two apart by WORDING -- but the two paths do
-     * different amounts of work. A locally-unknown identifier is refused after one indexed primary-key
-     * probe and never reaches the pool, while a known identifier with a wrong credential is refused
-     * after a network round trip to the pool. The difference is on the order of a hundred milliseconds
-     * and is measurable from outside, so an unauthenticated caller could still enumerate identifiers by
-     * timing the refusals. Padding every refusal up to one floor makes the two indistinguishable in
-     * duration as well as in wording.
-     *
-     * <p>Assumptions: 750 milliseconds is chosen to sit ABOVE a healthy provider round trip rather than
-     * at a typical one, which is what makes the padding effective on the slow path as well as the fast
-     * one. A floor at or below typical provider latency would leave the pool-refused path exceeding it
-     * and therefore still distinguishable; a much larger floor would hold a request thread for longer
-     * than the enumeration risk warrants. It remains far below the five-second total exchange budget
-     * above, so a refusal cannot outlast the timeout that bounds the exchange it refused.
-     *
-     * <p>Alternatives Considered: relaying every submitted credential to the pool and testing the local
-     * record afterwards, which removes the difference with no padding at all. Rejected because it
-     * presents a caller's credential to a third party for an identifier this context does not own,
-     * which widens the credential's exposure to buy uniformity -- and the ownership check exists
-     * precisely to prevent that relay. Alternatives Considered: padding to a RANDOM duration rather
-     * than to a floor. Rejected because random padding raises the number of samples an attacker needs
-     * without removing the signal, whereas a floor above both paths removes it.
-     *
-     * <p>Trade-offs: the padding holds a request thread that has already finished its work, so a burst
-     * of refused sign-ons occupies threads for longer than the work they perform. That is accepted
-     * because the throttle that bounds such a burst is applied one layer out rather than here: the
-     * edge applies a tighter rate and burst limit to the three unauthenticated routes than to any
-     * other, declared as {@code public_route_throttling_rate_limit} and
-     * {@code public_route_throttling_burst_limit} in {@code infra/modules/api-gateway-http}, so the
-     * number of refusals that can be in flight is capped before it reaches this service.
-     */
-    private static final Duration MINIMUM_REFUSAL_DURATION = Duration.ofMillis(750);
+    // WHY : ⚠️ Refactoring Rationale: a 750-millisecond FLOOR on every refusal stood here, and it was
+    //       removed along with the helper that applied it. It existed to close a user-enumeration
+    //       channel, and it could not: the two refusal paths did different amounts of work -- one
+    //       indexed primary-key probe for a locally-unknown identifier, or that probe plus a network
+    //       round trip for a known one with a wrong credential -- and a MINIMUM equalises only the fast
+    //       side of that difference. A provider round trip that exceeded the floor left the pool-refused
+    //       path longer than the locally-refused one by exactly the amount it exceeded it, so the two
+    //       remained distinguishable over repeated samples and an unauthenticated caller could still
+    //       enumerate identifiers by timing the tails. Keeping a control that measurably did not close
+    //       the channel it was documented as closing would have been worse than having none, because it
+    //       reads as protection.
+    //       Refactoring Rationale: what replaces it is EQUAL WORK rather than equal duration. All three
+    //       exchanges below now perform their provider call FIRST and consult local membership only
+    //       after the pool has answered, so an unknown identifier and a known one with a wrong
+    //       credential traverse the same code, issue the same provider request and are refused from the
+    //       same arm. There is no difference left for a floor to hide.
+    //       Alternatives Considered: keeping the floor as a brute-force cost. Rejected because it blocks
+    //       a request thread that has finished its work, and the throughput of these three
+    //       unauthenticated routes is already bounded one layer out by the tighter rate and burst limits
+    //       the edge applies to them -- declared as `public_route_throttling_rate_limit` and
+    //       `public_route_throttling_burst_limit` in infra/modules/api-gateway-http -- which caps guess
+    //       rate without holding a thread.
+    //       Trade-offs: relaying a submitted credential to the pool for an identifier this context does
+    //       not hold is the cost accepted, and the previous rationale named it as the reason NOT to. It
+    //       is accepted now because the pool is the credential store of this system rather than a third
+    //       party, the pool is provisioned to answer an unknown and a wrong-credential case identically
+    //       (`PreventUserExistenceErrors` is fixed ENABLED in infra/modules/cognito/main.tf), and the
+    //       exposure it adds -- one more recipient of a value already destined for that same pool -- is
+    //       nil, whereas the timing channel it closes was real and measurable.
 
     // WHY : Trade-offs: the two bounds below are the whole of this operation's resilience posture, and
     //       the numbers are chosen against what a caller is waiting on rather than against what the
@@ -426,11 +462,15 @@ public class CognitoIdentityService {
     /**
      * Verifies a submitted identifier and credential and returns the token set the pool issued.
      *
-     * <p>The four steps below are the baseline paragraph's own order, kept because the order is
-     * observable rather than incidental. Presence is checked first and stops at the first offending
-     * field, which is what decides the one sentence a caller submitting an empty screen is told. The
-     * identifier is then normalised. The local record is probed next, so no credential is relayed for
-     * an identifier this context does not own. Only then is the credential presented to the pool.
+     * <p>The four steps below are: presence, normalisation, the provider exchange, then the local
+     * membership gate. The first two are the baseline paragraph's own order and are kept because the
+     * order is observable -- presence stops at the first offending field, which is what decides the one
+     * sentence a caller submitting an empty screen is told, and the identifier is folded before it is
+     * used as a key. The last two were the other way round and were swapped deliberately; the reasoning
+     * is recorded at the code and once above the resilience bounds. In short, probing local membership
+     * first made an identifier this context does not hold refusable without a network call, and that
+     * made the two refusals distinguishable by duration -- an enumeration channel no minimum delay
+     * closes. Both refusals now traverse the same provider call.
      *
      * <p>Assumptions: the baseline gates its file read on an error flag at
      * {@code app/cbl/COSGN00C.cbl} lines 138 to 140, so a presence failure never reaches the read.
@@ -449,12 +489,12 @@ public class CognitoIdentityService {
      *
      * <p>Trade-offs: no transaction is declared on this method, and the omission is deliberate. The
      * read-only transaction the probe needs is the one Spring Data opens around the repository call
-     * itself, which is narrower than this method and closes before the provider is reached. Declaring
-     * one here would instead hold a pooled connection for the duration of an outbound network
-     * exchange -- {@code application.yml} sizes this service's pool at ten -- so a slow pool would
-     * consume connections that no longer have a query to run. What is given up is that the probe and
-     * the exchange are not one atomic unit, which costs nothing here because the probe only reads and
-     * the method writes nothing at all.
+     * itself, which is narrower than this method and opens only after the provider exchange has already
+     * returned. Declaring one here would instead hold a pooled connection for the duration of an
+     * outbound network exchange -- {@code application.yml} sizes this service's pool at ten -- so a slow
+     * pool would consume connections with no query to run. What is given up is that the probe and the
+     * exchange are not one atomic unit, which costs nothing here because the probe only reads and the
+     * method writes nothing at all.
      *
      * <p>Trade-offs: the target's read-only transaction is stricter than the baseline's file access,
      * which declares {@code READINTEG(UNCOMMITTED)} at {@code app/csd/CARDDEMO.CSD} line 90 and so
@@ -502,36 +542,34 @@ public class CognitoIdentityService {
 
         String userId = normaliseUserId(request.userId());
 
-        // WHY : Refactoring Rationale: the instant is taken before any work so that a refusal can be
-        //       padded to a floor measured from here. Both refusal paths below do different amounts of
-        //       work -- one indexed probe, or one probe plus a network round trip -- and the merged
-        //       refusal sentence removes the wording channel that told them apart while leaving the
-        //       duration channel open. The floor closes it; the constant it pads to records why.
-        long startedAt = System.nanoTime();
+        // WHY : ⚠️ Refactoring Rationale: the credential now reaches the pool BEFORE local membership is
+        //       consulted, where the probe used to run first and short-circuit. The order is the whole
+        //       of this method's user-enumeration control and it replaces a padding floor that did not
+        //       work; the reasoning is recorded once, above the resilience bounds. In this order an
+        //       identifier this context does not hold and an identifier it holds with a wrong credential
+        //       execute the same statements and issue the same provider request, so the two refusals are
+        //       indistinguishable in work as well as in wording.
+        InitiateAuthResponse answer = exchangeCredential(userId, request.password());
 
-        try {
-            // WHY : Assumptions: the probe stands in for the keyed read at app/cbl/COSGN00C.cbl lines
-            //       211 to 219, which carries no UPDATE option and so is a plain positioned read rather
-            //       than a read for update. Nothing here acquires a lock for the same reason: no row is
-            //       written.
-            if (!isKnownLocally(userId)) {
-                throw refusedCredential("local-record-absent");
-            }
-
-            InitiateAuthResponse answer = exchangeCredential(userId, request.password());
-
-            return outcomeFrom(answer, userId);
-
-            // WHY : Assumptions: only the refusal is padded, and the two other outcomes are answered as
-            //       soon as they are known. A success discloses nothing about which identifiers exist
-            //       that the caller did not already know -- it holds the caller's own identifier -- and
-            //       an unevaluable credential is a fault of this deployment rather than a statement
-            //       about the submitted identifier, so neither carries the signal the floor exists to
-            //       suppress. Padding them too would slow every healthy sign-on for nothing.
-        } catch (BadCredentialsException refused) {
-            padTo(startedAt, MINIMUM_REFUSAL_DURATION);
-            throw refused;
+        // WHY : Assumptions: the probe stands in for the keyed read at app/cbl/COSGN00C.cbl lines 211 to
+        //       219, which carries no UPDATE option and so is a plain positioned read rather than a read
+        //       for update. Nothing here acquires a lock for the same reason: no row is written.
+        // WHY : Assumptions: it still runs, and running it AFTER the exchange changes nothing about what
+        //       it decides. This context owns auth.users, so a pool identity with no local row is not a
+        //       user of this system and must not receive a token set -- the pool and the local table are
+        //       provisioned together and a row removed from one is meant to end access through the
+        //       other. What moved is only when the answer is known.
+        // WHY : Trade-offs: reaching this line means the pool ACCEPTED the credential, so a locally
+        //       absent row is refused after the provider has done its work rather than before. The cost
+        //       is one provider call for an identifier that cannot sign on either way; what it buys is
+        //       that the timing of this refusal says nothing about which identifiers exist. No token
+        //       reaches the caller on this path, and nothing the pool minted here is usable by anyone,
+        //       because the response is discarded before it is rendered.
+        if (!isKnownLocally(userId)) {
+            throw refusedCredential("local-record-absent");
         }
+
+        return outcomeFrom(answer, userId);
     }
 
     /**
@@ -585,36 +623,45 @@ public class CognitoIdentityService {
         requireChallengeFields(request);
 
         String userId = normaliseUserId(request.userId());
-        long startedAt = System.nanoTime();
 
-        try {
-            if (!isKnownLocally(userId)) {
-                throw refusedSession("local-record-absent");
-            }
+        // WHY : ⚠️ Refactoring Rationale: the pool is asked first here too, and the probe follows. The
+        //       previous order refused a locally-absent identifier without a network call, which is the
+        //       same timing oracle the sign-on exchange carried: a caller needs no session to submit a
+        //       guessed identifier with a made-up one, so this operation was as usable for enumeration
+        //       as sign-on was. The reordering is the same fix and is argued once, above the resilience
+        //       bounds.
+        RespondToAuthChallengeResponse answer =
+                answerNewPasswordChallenge(userId, request.session(), request.newPassword());
 
-            RespondToAuthChallengeResponse answer =
-                    answerNewPasswordChallenge(userId, request.session(), request.newPassword());
-
-            // WHY : Assumptions: a second challenge is treated as unevaluable rather than returned,
-            //       which is the trade-off recorded above. The name is logged so an operator can see
-            //       which pool configuration produced it and is withheld from the caller, who has no
-            //       published way to act on it.
-            if (answer.authenticationResult() == null) {
-                LOG.warn("event=auth.challenge.unevaluable reason=further-challenge challenge={}",
-                        answer.challengeNameAsString());
-                throw unableToVerify("further-challenge-" + answer.challengeNameAsString());
-            }
-
-            return tokensFrom(answer.authenticationResult(), userId);
-
-        } catch (SessionRefusedException refused) {
-            padTo(startedAt, MINIMUM_REFUSAL_DURATION);
-            throw refused;
+        // WHY : Assumptions: a second challenge is treated as unevaluable rather than returned, which is
+        //       the trade-off recorded above. The name is logged so an operator can see which pool
+        //       configuration produced it and is withheld from the caller, who has no published way to
+        //       act on it.
+        if (answer.authenticationResult() == null) {
+            LOG.warn("event=auth.challenge.unevaluable reason=further-challenge challenge={}",
+                    answer.challengeNameAsString());
+            throw unableToVerify("further-challenge-" + answer.challengeNameAsString());
         }
+
+        // WHY : Assumptions: the probe is not redundant just because the caller holds a session this
+        //       service issued: a row deleted between the sign-on and the answer must not be able to
+        //       complete an exchange that ends in a usable token set.
+        // WHY : Trade-offs: the pool has by now ACCEPTED the proposed password and stored it, so a
+        //       locally-absent row is refused after a state change the caller asked for has already
+        //       happened. That is accepted because the caller reaching this line held a pool-minted
+        //       session for that identity, so it had already authenticated with the temporary credential
+        //       the session was issued against -- setting the permanent one grants it nothing it could
+        //       not already do, and the token set the pool issued is discarded here rather than
+        //       returned.
+        if (!isKnownLocally(userId)) {
+            throw refusedSession("local-record-absent");
+        }
+
+        return tokensFrom(answer.authenticationResult(), userId);
     }
 
     /**
-     * Exchanges a refresh token for a fresh access token and identity token.
+     * Exchanges a refresh token for a fresh access token, identity token and refresh token.
      *
      * <p>Purpose: this is the operation the published contract declares as
      * {@code POST /api/v1/auth/refresh}. It exists so a session outlives one access-token lifetime
@@ -622,19 +669,43 @@ public class CognitoIdentityService {
      * it would carry is the one being renewed -- a caller whose access token has already expired must
      * still be able to renew.
      *
-     * <p>Assumptions: the renewed set carries a null renewal token, because the pool does not reissue
-     * one: the caller keeps the token it already holds until that token itself expires. The response
-     * record declares that component nullable for exactly this reason, which is what lets one shape
-     * serve sign-on, challenge and renewal rather than a second nearly identical shape existing for this
-     * path alone. Substituting a placeholder would report a token the caller cannot use.
+     * <p>⚠️ Refactoring Rationale: the renewed set carries a NEW refresh token and the caller must
+     * replace the one it sent. This paragraph previously stated the opposite -- that the pool does not
+     * reissue one and the caller keeps the token it holds -- and that claim was false against the
+     * provisioned pool and dangerous to act on. {@code infra/modules/cognito/main.tf} declares the app
+     * client with {@code RefreshTokenRotation} at {@code Feature = "ENABLED"} and
+     * {@code RetryGracePeriodSeconds = 0}, so the pool mints a replacement and invalidates the submitted
+     * token immediately; a caller that kept the token it sent would have its SECOND renewal refused as a
+     * reuse, making the operation appear to work once and then fail permanently for the rest of the
+     * refresh token's thirty-day life. The committed contract already described the correct behaviour on
+     * this operation's 200 response, so the code and the prose here were the two artifacts out of step
+     * with it. The response component stays nullable because the sign-on direction may legitimately
+     * return none, and the value is passed through exactly as the pool supplied it.
      *
-     * <p>Assumptions: the identifier is required on this request even though a refresh token identifies
-     * its own subject to the pool, and the reason is the confidential-client proof rather than
-     * bookkeeping. The pool requires that proof on every flow of a client that has a secret, and the
-     * proof is a keyed digest over the USER NAME and the client identifier -- so without the identifier
-     * this service cannot compute a proof the pool will accept. Requiring it also lets the local
-     * existence probe run, which is what stops a token minted for a user this context has since removed
-     * from being renewed into a fresh one.
+     * <p>⚠️ Refactoring Rationale: the provider operation is
+     * {@code GetTokensFromRefreshToken} and no longer {@code InitiateAuth} with the
+     * {@code REFRESH_TOKEN_AUTH} flow. The old call could not have succeeded even once. Rotation and
+     * that flow are mutually exclusive at the provider, and the module refuses to configure them
+     * together -- {@code infra/modules/cognito/variables.tf} validates
+     * {@code explicit_auth_flows} to REJECT {@code ALLOW_REFRESH_TOKEN_AUTH} while rotation is enabled,
+     * and its default permits {@code ALLOW_USER_PASSWORD_AUTH} alone -- so the app client this service
+     * authenticates through does not permit the flow the renewal was asking for. Every renewal was
+     * refused by the pool, and because a refused renewal is reported as a refused session, the browser
+     * treated it as an ended session: a signed-on user was returned to the sign-on screen one access
+     * token lifetime after signing on, with no diagnostic naming the cause.
+     *
+     * <p>Assumptions: the rotation-compatible operation takes the client secret DIRECTLY rather than a
+     * keyed digest over a user name, and it accepts no user name at all. That is the one thing the change
+     * of operation costs, and it is repaid below: the previous request proved the caller knew the user
+     * name the token belonged to, because the pool verified the digest against the token's own subject,
+     * whereas this one proves only that the caller holds the token and the client secret. The subject is
+     * therefore read back out of the identity token the pool just issued and compared with the submitted
+     * identifier, which restores the binding rather than trusting the request for it.
+     *
+     * <p>Assumptions: the identifier remains required on this request even though the provider call does
+     * not use it. It is what the local membership gate is applied to and what the response echoes, and
+     * both are now checked against the pool's own answer rather than accepted as submitted. Withdrawing
+     * it would change the published contract and leave the response with no identifier to carry.
      *
      * <p>Assumptions: this method has no reference counterpart of any kind. A sign-on under the
      * transaction monitor lasted as long as the terminal session did, so no reference program, screen
@@ -643,17 +714,18 @@ public class CognitoIdentityService {
      *
      * @param request the identifier the token set was issued for and the refresh token to renew it
      *     with; must not be {@code null}
-     * @return the renewed token set, carrying a new access token and identity token, a null renewal
-     *     token and the normalised identifier; never {@code null}
+     * @return the renewed token set, carrying a new access token, a new identity token, the rotated
+     *     refresh token that replaces the one submitted, and the normalised identifier; never
+     *     {@code null}
      * @throws NullPointerException if {@code request} is {@code null}
      * @throws ClientInputException if either submitted value is absent or blank
-     * @throws SessionRefusedException if the refresh token was expired, revoked or not issued to the
-     *     identifier supplied, or if this context holds no record for the identifier, carrying the
-     *     sign-on-again sentence and no field key
+     * @throws SessionRefusedException if the refresh token was expired, revoked, already rotated away,
+     *     or issued for an identifier other than the one submitted, or if this context holds no record
+     *     for that identifier, carrying the sign-on-again sentence and no field key
      * @throws IllegalStateException if the renewal could not be evaluated at all -- the pool being
-     *     unreachable or answering a fault, the request proof being rejected, the local store being
-     *     unreadable, the pool answering with a challenge, or the pool answering with a token set that
-     *     is incomplete
+     *     unreachable or answering a fault, the local store being unreadable, the pool answering with no
+     *     token set, the pool answering with a token set that is incomplete, or the issued identity token
+     *     carrying no subject to bind the submitted identifier against
      */
     public SignOnResponse refresh(TokenRefreshRequest request) {
 
@@ -662,31 +734,113 @@ public class CognitoIdentityService {
         requireRefreshFields(request);
 
         String userId = normaliseUserId(request.userId());
-        long startedAt = System.nanoTime();
 
-        try {
-            if (!isKnownLocally(userId)) {
-                throw refusedSession("local-record-absent");
-            }
+        // WHY : ⚠️ Refactoring Rationale: the pool is asked before local membership is consulted, where
+        //       the probe used to run first. The old order made a locally-absent identifier refusable
+        //       without a network call, and since this operation needs no credential to call -- a
+        //       made-up token is enough to get a refusal -- that difference in duration was a
+        //       user-enumeration oracle as usable as the sign-on one. The reordering is argued once,
+        //       above the resilience bounds. It costs nothing here: the provider call no longer takes
+        //       the identifier at all, so there is no work the probe could have saved.
+        GetTokensFromRefreshTokenResponse answer = exchangeRefreshToken(request.refreshToken());
 
-            InitiateAuthResponse answer = exchangeRefreshToken(userId, request.refreshToken());
-
-            // WHY : Assumptions: a renewal flow has no challenge to raise, so an answer carrying none
-            //       of a token set is a pool fault rather than a step in a flow. It is reported as
-            //       unevaluable, and the null-safe access below is in tokensFrom rather than repeated
-            //       here.
-            if (answer.authenticationResult() == null) {
-                LOG.warn("event=auth.refresh.unevaluable reason=no-authentication-result challenge={}",
-                        answer.challengeNameAsString());
-                throw unableToVerify("refresh-no-result");
-            }
-
-            return tokensFrom(answer.authenticationResult(), userId);
-
-        } catch (SessionRefusedException refused) {
-            padTo(startedAt, MINIMUM_REFUSAL_DURATION);
-            throw refused;
+        // WHY : Assumptions: a renewal flow has no challenge to raise, so an answer carrying no token
+        //       set is a pool fault rather than a step in a flow. It is reported as unevaluable, and the
+        //       null-safe access to each member is in tokensFrom rather than repeated here.
+        if (answer.authenticationResult() == null) {
+            LOG.warn("event=auth.refresh.unevaluable reason=no-authentication-result");
+            throw unableToVerify("refresh-no-result");
         }
+
+        // WHY : Assumptions: the subject the pool issued for is compared with the identifier submitted,
+        //       and a mismatch is refused as a refused session rather than answered. This is the binding
+        //       the withdrawn keyed digest used to provide: without it a caller holding one user's
+        //       refresh token could name ANY other still-present identifier, satisfy the membership gate
+        //       below with that name, and renew the first user's session -- so the gate would be
+        //       trivially bypassable by exactly the party it exists to stop.
+        // WHY : Assumptions: the comparison is against the FOLDED submitted value, because the identifier
+        //       is folded before it is used as a key and the pool stores the user name in the form it was
+        //       created with. normaliseUserId applies the same fold to the claim, so the two sides are
+        //       compared in one form.
+        String subject = normaliseUserId(subjectOfIdentityToken(answer.authenticationResult().idToken()));
+        if (!subject.equals(userId)) {
+            throw refusedSession("refresh-subject-mismatch");
+        }
+
+        // WHY : Assumptions: the probe is what stops a token minted for a user this context has since
+        //       removed from being renewed into a fresh one, and it is applied to the subject the pool
+        //       reported rather than to the value the caller sent -- the two are equal by the check above,
+        //       and reading the pool's value keeps that the case if the check is ever relaxed.
+        if (!isKnownLocally(subject)) {
+            throw refusedSession("local-record-absent");
+        }
+
+        return tokensFrom(answer.authenticationResult(), subject);
+    }
+
+    /**
+     * Ends a session at the pool by revoking the refresh token it was renewed from.
+     *
+     * <p>Purpose: this is the operation the published contract declares as
+     * {@code POST /api/v1/auth/signout}, and it is the provider-side half of signing out. It exists
+     * because discarding a token in a browser does not end anything: the refresh token is provisioned
+     * with a thirty-day life -- {@code refresh_token_validity_days} defaults to 30 in
+     * {@code infra/modules/cognito/variables.tf} -- so a copy taken from a browser store, a synchronised
+     * profile or a shared workstation could mint access tokens for a month after the user believed the
+     * session was over. Revoking the token is what makes a sign-out an event at the pool rather than a
+     * change of local state.
+     *
+     * <p>Assumptions: it is published unauthenticated, and the reason is the same one that publishes the
+     * renewal unauthenticated rather than a relaxation of it. Authority here IS the refresh token: the
+     * provider's revocation operation takes the token and the client credentials and no user name, so a
+     * caller that cannot produce the token can revoke nothing, and a caller that can produce it could
+     * already have used it for something worse. Requiring a valid access token instead would refuse the
+     * revocation in exactly the case it matters most -- an access token that has already expired, which
+     * is the state of every session an operator abandons rather than closes -- and would leave the
+     * thirty-day token live.
+     *
+     * <p>Assumptions: no identifier is accepted on this operation, unlike the other three. The provider
+     * call has nowhere to put one, this method has no membership decision to make -- revoking a token is
+     * the right answer whether or not this context still holds a row for its subject, and REFUSING it
+     * for a removed user would leave that user's token live -- and requiring a value nothing reads would
+     * invite a later reader to believe it was checked.
+     *
+     * <p>Assumptions: it is idempotent and answers success for a token the pool will not accept, which
+     * is argued at the revocation helper: an unusable token is the outcome the caller asked for, and
+     * reporting a failure would both misstate that and hand an unauthenticated caller a liveness test.
+     * The one failure it does report is a pool it could not reach, because then the token IS still live.
+     *
+     * <p>Trade-offs: revocation stops RENEWAL and does not invalidate an access token already issued.
+     * Every service in this migration validates a bearer token by signature, issuer and expiry against
+     * the pool's published keys, which is a local decision that consults no revocation state, so a
+     * bearer in flight stays acceptable until it expires -- bounded by
+     * {@code access_token_validity_minutes}, 60 by default. The alternatives were weighed and both
+     * declined for this checkpoint: a token version or deny list would put a shared lookup on every
+     * request of every service, and a shorter bearer lifetime would raise the renewal rate for every
+     * session to shorten a window that only matters after a sign-out. What is bought is that the
+     * long-lived, mintable credential stops working at once; what remains is a bounded tail on the
+     * short-lived one, and it is stated here rather than left for a reader to assume away.
+     *
+     * <p>Assumptions: this method has no reference counterpart. The baseline's sign-off transferred
+     * control back to the sign-on screen -- {@code app/cbl/COMEN01C.cbl} and the sibling menus move the
+     * sign-on program's literal into the next-program field on the exit key -- and ended nothing, because
+     * a terminal session was the session and it lasted until the terminal disconnected. There is
+     * therefore no message literal to transcribe, and this operation returns no body at all.
+     *
+     * @param request the refresh token to revoke; must not be {@code null}
+     * @throws NullPointerException if {@code request} is {@code null}
+     * @throws ClientInputException if the submitted token is absent or blank, carrying the
+     *     sign-on-again sentence and the token's field key
+     * @throws IllegalStateException if the pool could not be reached or answered a fault, so the token
+     *     may still be live, carrying the sentence this service reports for an unevaluable exchange
+     */
+    public void signOut(SignOutRequest request) {
+
+        Objects.requireNonNull(request, "request");
+
+        requireSignOutFields(request);
+
+        revokeRefreshToken(request.refreshToken());
     }
 
     /**
@@ -1104,8 +1258,17 @@ public class CognitoIdentityService {
      * response, and none that the contract declares nullable is checked. The required set is the
      * outcome, the identifier, the access token, the identity token, the token type and the lifetime;
      * the renewal token is the one nullable member and is passed through exactly as supplied, including
-     * when the pool supplies none. Checking it would refuse every renewal, since the pool never reissues
-     * one on that flow.
+     * when the pool supplies none.
+     *
+     * <p>Assumptions: ⚠️ Refactoring Rationale: this block justified not checking the renewal token by
+     * saying the pool "never reissues one on that flow", which was true of the legacy refresh flow and is
+     * false of the flow this service now uses. Rotation is enabled on the app client --
+     * {@code RefreshTokenRotation} carries {@code Feature = "ENABLED"} with a zero retry grace period in
+     * {@code infra/modules/cognito/main.tf} -- so a renewal ORDINARILY answers with a replacement token
+     * and invalidates the one submitted. The member is still not checked, for a different and narrower
+     * reason: the retry grace period is a pool-side setting, and configured above zero it leaves the
+     * submitted token current and the answer without a replacement. Requiring one would turn a supported
+     * pool configuration into a refused session.
      *
      * <p>Assumptions: blankness rather than nullity is the test on each token, because an empty or
      * whitespace-only token is as unusable as an absent one and a provider stub or a partially populated
@@ -1340,6 +1503,34 @@ public class CognitoIdentityService {
     }
 
     /**
+     * Refuses a sign-out whose submitted token is absent.
+     *
+     * <p>Assumptions: there is one value to check, so there is no ordering to preserve and no reference
+     * chain to reproduce. The sentence reported is the sign-on-again one the renewal uses for the same
+     * member, because the remedy a caller has is identical: without a token there is nothing to revoke
+     * and the local state should simply be discarded.
+     *
+     * <p>Alternatives Considered: treating an absent token as a no-op success, on the reasoning that a
+     * sign-out with nothing to revoke has already achieved its outcome. Rejected because it would make
+     * a client that never stored the token look indistinguishable from one that revoked it, which is
+     * exactly the mistake this operation exists to catch -- the browser must learn that its sign-out
+     * revoked nothing, even though it will clear its own state either way.
+     *
+     * @param request the submitted token to check for presence; must not be {@code null}
+     * @throws ClientInputException if the token is absent or blank, carrying the sign-on-again sentence
+     *     and the token's field key
+     */
+    private void requireSignOutFields(SignOutRequest request) {
+
+        if (isAbsent(request.refreshToken())) {
+            LOG.info("event=auth.signout.rejected reason=refresh-token-absent field={}",
+                    FIELD_REFRESH_TOKEN);
+            throw new ClientInputException(ApiError.CODE_VALIDATION, FIELD_REFRESH_TOKEN,
+                    MESSAGE_SESSION_REFUSED);
+        }
+    }
+
+    /**
      * Answers the pool's new-credential challenge and returns whatever the pool answered.
      *
      * <p>Assumptions: the challenge answer is a distinct provider operation from the initial
@@ -1512,48 +1703,205 @@ public class CognitoIdentityService {
     }
 
     /**
-     * Presents a refresh token to the pool and returns whatever the pool answered.
+     * Presents a refresh token to the pool's rotation-compatible renewal operation.
      *
-     * <p>Assumptions: the renewal uses the same provider operation as the initial authentication with a
-     * different flow selector, because that is how the pool models it. The parameter map carries the
-     * refresh token and the confidential-client proof; it carries no user name, because the renewal flow
-     * does not accept one -- the token identifies its own subject. The proof is nonetheless computed over
-     * the submitted identifier, which is the reason this operation requires an identifier at all: the
-     * pool verifies the proof against the user the token belongs to, so a token replayed with a different
-     * identifier produces a proof the pool refuses.
+     * <p>⚠️ Refactoring Rationale: this issued {@code InitiateAuth} with the
+     * {@code REFRESH_TOKEN_AUTH} flow, and that request was refused by the pool every time it was made.
+     * The flow is not permitted on a client whose refresh-token rotation is enabled, and the module that
+     * provisions this client both enables rotation and validates the permitted flow list to REJECT the
+     * flow this call was selecting -- so the two halves of the deployment were configured correctly and
+     * consistently while this line asked for something neither permitted. The failure was silent in the
+     * worst available way: a refused renewal is reported as a refused session, so the browser ended the
+     * session and returned the user to sign-on exactly one access-token lifetime after every sign-on,
+     * with nothing in the response naming a cause an operator could act on.
+     *
+     * <p>Assumptions: the rotation-compatible operation carries the client secret as its own member
+     * rather than a keyed digest in a parameter map, so no proof is computed here and no user name is
+     * sent. That is the provider's contract for this call and not a simplification: the operation accepts
+     * {@code refreshToken}, {@code clientId}, {@code clientSecret}, an optional device key and optional
+     * client metadata, and nothing that could carry a user name. The consequence -- that the pool no
+     * longer verifies the submitted identifier against the token's subject -- is repaired by the caller,
+     * which reads the subject out of the issued identity token and compares it.
+     *
+     * <p>Assumptions: a token the pool has already rotated away raises its own refusal type, which is
+     * caught with the other refusals rather than separately. Reuse of a rotated token is what a caller
+     * that failed to store the replacement produces, and the remedy is identical to an expired token's:
+     * sign on again. Telling the two apart on the response would describe the pool's rotation state to an
+     * unauthenticated caller for nothing it could act on.
      *
      * <p>Assumptions: the same two time bounds are applied for the same reason as on the other two
      * exchanges. A renewal is on the critical path of a caller mid-session, so an unbounded wait here
      * would stall a request the user believes is already authenticated.
      *
-     * @param userId the folded identifier the token set was issued for, used to compute the proof
      * @param refreshToken the refresh token as submitted, forwarded unaltered
-     * @return the pool's answer, carrying the renewed token set; never {@code null}
-     * @throws SessionRefusedException if the pool refused the token or the identifier it was presented
-     *     against
+     * @return the pool's answer, carrying the renewed and rotated token set; never {@code null}
+     * @throws SessionRefusedException if the pool refused the token, whether expired, revoked or already
+     *     rotated away
      * @throws IllegalStateException if the pool could not be reached or answered a fault
      */
-    private InitiateAuthResponse exchangeRefreshToken(String userId, String refreshToken) {
+    private GetTokensFromRefreshTokenResponse exchangeRefreshToken(String refreshToken) {
 
-        InitiateAuthRequest renewal = InitiateAuthRequest.builder()
-                .authFlow(AuthFlowType.REFRESH_TOKEN_AUTH)
+        GetTokensFromRefreshTokenRequest renewal = GetTokensFromRefreshTokenRequest.builder()
+                .refreshToken(refreshToken)
                 .clientId(clientId)
-                .authParameters(Map.of(
-                        AUTH_PARAM_REFRESH_TOKEN, refreshToken,
-                        AUTH_PARAM_SECRET_HASH, secretHash(userId)))
+                .clientSecret(clientSecret)
                 .overrideConfiguration(override -> override
                         .apiCallTimeout(TOTAL_EXCHANGE_TIMEOUT)
                         .apiCallAttemptTimeout(SINGLE_ATTEMPT_TIMEOUT))
                 .build();
 
         try {
-            return provider.initiateAuth(renewal);
+            return provider.getTokensFromRefreshToken(renewal);
 
-        } catch (NotAuthorizedException | UserNotFoundException refused) {
+        } catch (RefreshTokenReuseException | NotAuthorizedException | UserNotFoundException refused) {
             throw refusedSession(refused.getClass().getSimpleName());
 
         } catch (SdkException unavailable) {
             throw unableToVerify("refresh-provider-" + unavailable.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Reads the pool user name out of an identity token the pool has just issued.
+     *
+     * <p>Purpose: this recovers the subject a renewed token set belongs to, so the submitted identifier
+     * can be checked against it rather than trusted. It exists because the rotation-compatible renewal
+     * operation accepts no user name and therefore verifies none; see the renewal exchange above.
+     *
+     * <p>Assumptions: the token is NOT validated here and does not need to be, which is the one point a
+     * reader is most likely to challenge. Signature, issuer and expiry validation exist to establish that
+     * a token presented by an untrusted party is genuine; this token was not presented by anyone -- it is
+     * the body of the response to an outbound call this service just made to the pool over TLS, so its
+     * provenance is the call itself. Verifying it here would re-derive a fact already established and
+     * would put key retrieval on the renewal path. Tokens arriving from a CALLER are validated, by the
+     * resource-server filter chain in {@code com.carddemo.auth.config.SecurityConfig}, which is a
+     * different direction and a different trust question.
+     *
+     * <p>Assumptions: only the claim segment is decoded, with the URL-safe alphabet and without padding,
+     * which is the compact serialisation's own encoding. A token that does not carry exactly three
+     * segments, or whose claim segment is not base-64url, or whose claims are not an object, or which
+     * carries no user-name claim, is treated as an unevaluable answer rather than as a refusal: the pool
+     * issuing a token this service cannot read is a fault of the deployment and says nothing about the
+     * caller's credential.
+     *
+     * <p>Alternatives Considered: calling the provider's get-user operation with the issued access token,
+     * which reports the user name authoritatively and needs no parsing. Rejected because it puts a second
+     * network round trip on every renewal -- doubling the latency of an operation a user is waiting on
+     * mid-session -- and adds a failure mode to a path whose whole purpose is to keep a working session
+     * working. The claim is already in hand.
+     *
+     * <p>Alternatives Considered: reading the {@code sub} claim instead. Rejected because it is the
+     * pool's own subject identifier, a UUID, while the key of {@code auth.users} is the eight-character
+     * identifier the baseline declares -- comparing the two identifier spaces would refuse every renewal.
+     *
+     * @param idToken the identity token the pool issued in the answer being processed; may be
+     *     {@code null} or blank, which is refused
+     * @return the user name the token was issued for, exactly as the claim carries it; never
+     *     {@code null} and never blank
+     * @throws IllegalStateException if the token is absent, is not a three-segment compact
+     *     serialisation, cannot be base-64url decoded, does not decode to a JSON object, or carries no
+     *     user-name claim -- each of which leaves the renewal unevaluable rather than refused
+     */
+    private static String subjectOfIdentityToken(String idToken) {
+
+        if (idToken == null || idToken.isBlank()) {
+            throw unableToVerify("refresh-id-token-absent");
+        }
+
+        String[] segments = idToken.split("\\.");
+        if (segments.length != ID_TOKEN_SEGMENT_COUNT) {
+            throw unableToVerify("refresh-id-token-segments-" + segments.length);
+        }
+
+        JsonNode claims;
+        try {
+            claims = CLAIM_READER.readTree(
+                    Base64.getUrlDecoder().decode(segments[ID_TOKEN_CLAIM_SEGMENT_INDEX]));
+
+            // WHY : Assumptions: both faults are caught together because both mean the same thing to
+            //       this method -- the pool sent something this service cannot read as a token -- and
+            //       neither carries a detail a caller could act on. The decoder raises the unchecked
+            //       argument failure for a segment that is not base-64url; the reader declares the
+            //       checked input-output failure, of which its JSON-processing failure is a subtype, so
+            //       the broader type is caught rather than the narrower one the reader actually raises
+            //       from a byte array. The exception's class is recorded in the internal reason and its
+            //       message, which could quote the undecodable material, is not.
+        } catch (IOException | IllegalArgumentException unreadable) {
+            throw unableToVerify("refresh-id-token-" + unreadable.getClass().getSimpleName());
+        }
+
+        JsonNode subject = claims.path(ID_TOKEN_USERNAME_CLAIM);
+        if (!subject.isTextual() || subject.asText().isBlank()) {
+            throw unableToVerify("refresh-id-token-subject-absent");
+        }
+
+        return subject.asText();
+    }
+
+    /**
+     * Asks the pool to revoke a refresh token, so that no further token set can be minted from it.
+     *
+     * <p>Purpose: this is the provider half of sign-out. The app client is provisioned with token
+     * revocation enabled -- {@code EnableTokenRevocation} is fixed true in
+     * {@code infra/modules/cognito/main.tf} -- which is what makes the call available at all.
+     *
+     * <p>Assumptions: the call carries the token, the client identifier and the client secret and no user
+     * name, because the operation accepts none: the token identifies its own subject to the pool, and the
+     * client credentials are what authorise this service to speak for the client the token was minted
+     * under. That is also why the operation this serves needs no identifier and no bearer -- possession
+     * of the token is the whole authority required, exactly as it is for the renewal the revocation
+     * cancels.
+     *
+     * <p>Assumptions: a token the pool will not accept is reported as SUCCESS rather than as a refusal,
+     * and the two provider refusals that mean exactly that are caught and discarded here. An expired,
+     * already-revoked or malformed token cannot mint anything, which is the outcome the caller asked for,
+     * so answering it as a failure would report an unmet goal that has in fact been met. It would also
+     * hand an unauthenticated caller a test for whether a token is live, which is a disclosure this
+     * operation has no reason to make. The published revocation semantics of OAuth 2.0 take the same
+     * position for the same reason: RFC 7009 section 2.2 has the server answer success both for a token
+     * it revoked and for an invalid token a client submitted.
+     *
+     * <p>Trade-offs: a pool that could not be REACHED is reported as a failure, unlike a token it
+     * refused. The distinction is the one that matters to a caller: a refused token is already unusable,
+     * whereas an unreachable pool means the token is still live and still able to mint access tokens, so
+     * answering success would state that a revocation happened when it did not. The browser clears its
+     * own state either way, so the report costs the caller nothing and tells the operator the truth.
+     *
+     * @param refreshToken the refresh token to revoke, as submitted and forwarded unaltered
+     * @throws IllegalStateException if the pool could not be reached or answered a fault, so the token
+     *     may still be live
+     */
+    private void revokeRefreshToken(String refreshToken) {
+
+        RevokeTokenRequest revocation = RevokeTokenRequest.builder()
+                .token(refreshToken)
+                .clientId(clientId)
+                .clientSecret(clientSecret)
+                .overrideConfiguration(override -> override
+                        .apiCallTimeout(TOTAL_EXCHANGE_TIMEOUT)
+                        .apiCallAttemptTimeout(SINGLE_ATTEMPT_TIMEOUT))
+                .build();
+
+        try {
+            provider.revokeToken(revocation);
+            LOG.info("event=auth.signout.revoked");
+
+            // WHY : Assumptions: the token-type refusal is caught alongside the unauthorised one because
+            //       both describe a submitted value the pool will not act on. The pool answers the
+            //       unsupported-token-type refusal when the value is not a refresh token -- an access
+            //       token, say -- and that value mints nothing on presentation to this client either, so
+            //       the caller's goal is met by the value being useless rather than by a revocation.
+        } catch (UnsupportedTokenTypeException | NotAuthorizedException alreadyUnusable) {
+            LOG.info("event=auth.signout.noop reason={}",
+                    alreadyUnusable.getClass().getSimpleName());
+
+            // WHY : Assumptions: every remaining provider and transport fault is one class, on the same
+            //       grounds the credential exchange records -- the common supertype of the client-side
+            //       and service-side hierarchies covers a refused connection, an exceeded time bound and
+            //       a fault response alike, and the two narrower arms above are subtypes of it and so
+            //       must precede it.
+        } catch (SdkException unavailable) {
+            throw unableToVerify("signout-provider-" + unavailable.getClass().getSimpleName());
         }
     }
 
@@ -1587,53 +1935,6 @@ public class CognitoIdentityService {
         //       disclosure the contract does not describe.
         LOG.info("event=auth.session.refused reason={}", reason);
         return new SessionRefusedException(MESSAGE_SESSION_REFUSED);
-    }
-
-    /**
-     * Holds the calling thread until the given elapsed time has passed since a recorded instant.
-     *
-     * <p>Purpose: this is the mechanism behind the refusal floor. It exists so that two refusal paths
-     * doing different amounts of work take indistinguishable time, which is what closes the timing
-     * channel the merged refusal sentence would otherwise leave open.
-     *
-     * <p>Assumptions: the elapsed time is measured with the monotonic timer rather than with a clock, and
-     * that is not interchangeable here. A wall clock can be stepped backwards by a time-synchronisation
-     * daemon, which would make a measured interval negative and skip the padding entirely at exactly the
-     * moment an attacker's samples are cheapest to take. The monotonic timer cannot move backwards.
-     *
-     * <p>Assumptions: the injected clock this class's siblings use for timestamps is deliberately NOT
-     * used, for the same reason: it answers "what time is it", which is a different question from "how
-     * long has this taken", and this method asks the second.
-     *
-     * <p>Trade-offs: the wait is a sleep on the request thread rather than an asynchronous completion.
-     * An asynchronous form would free the thread, and it is not adopted because it would make this
-     * service's one unauthenticated write path reactive for the sake of a padding interval, changing the
-     * shape of every method on the path. The throughput cost is bounded by the edge throttle recorded on
-     * the floor constant.
-     *
-     * <p>Assumptions: an interrupt does not extend the wait and does not swallow the interruption. The
-     * flag is restored and the method returns, so the refusal the caller is in the middle of raising is
-     * still reported and a shutdown in progress is still observable to whatever manages the thread. The
-     * timing guarantee is weakened only in the moment the thread is being interrupted, which is not a
-     * condition an attacker can induce.
-     *
-     * @param startedAt the monotonic reading taken when the work began, as {@code System.nanoTime()}
-     *     returns it
-     * @param floor the least total elapsed time the operation is to take; a floor already exceeded waits
-     *     not at all
-     */
-    private static void padTo(long startedAt, Duration floor) {
-
-        long remainingNanos = floor.toNanos() - (System.nanoTime() - startedAt);
-        if (remainingNanos <= 0) {
-            return;
-        }
-
-        try {
-            Thread.sleep(Duration.ofNanos(remainingNanos));
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-        }
     }
 
     /**

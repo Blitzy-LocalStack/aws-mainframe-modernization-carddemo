@@ -11,6 +11,7 @@ import com.carddemo.auth.dto.SignOnChallenge;
 import com.carddemo.auth.dto.SignOnChallengeRequest;
 import com.carddemo.auth.dto.SignOnRequest;
 import com.carddemo.auth.dto.SignOnResponse;
+import com.carddemo.auth.dto.TokenRefreshRequest;
 import com.carddemo.auth.service.CognitoIdentityService;
 import java.time.Clock;
 import java.time.Instant;
@@ -23,8 +24,8 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 /**
- * Asserts that both published sign-on routes are actually mapped, and that a withheld sign-on reaches a
- * caller as the discriminated challenge body the contract declares.
+ * Asserts that all three published sign-on routes are actually mapped, and that a withheld sign-on
+ * reaches a caller as the discriminated challenge body the contract declares.
  *
  * <h2>Purpose</h2>
  *
@@ -151,19 +152,61 @@ class AuthControllerRoutingTest {
     }
 
     /**
-     * Verifies the two paths this adapter serves are the two the filter chain opens.
+     * Verifies the renewal route is mapped and answers the renewed token set.
+     *
+     * <p>Refactoring Rationale: this route was mapped and served and nothing asserted it. It appeared
+     * in this package only as a path string in an operation census, which passes whether or not a
+     * handler exists, and in the service package only as one parameterised refusal, which is raised
+     * before any mapping is consulted. So the condition the challenge route's own case was written to
+     * catch -- a published path with no handler behind it, answering the container's not-found page --
+     * was live and unguarded for the third route of the same adapter.</p>
+     *
+     * <p>Assumptions: the renewed set is asserted to carry a NULL renewal token, because the pool does
+     * not reissue one and the caller keeps the token it already holds. Asserting the member ABSENT is
+     * what shows the nullable declaration in the shared response shape is doing work here; a body that
+     * echoed a renewal token back would tell a client to replace a token that is still valid.</p>
+     *
+     * @throws Exception when the request cannot be performed
+     */
+    @Test
+    @DisplayName("the renewal route is mapped and returns the renewed token set")
+    void theRenewalRouteIsMapped() throws Exception {
+        when(this.identityService.refresh(any(TokenRefreshRequest.class)))
+                .thenReturn(new SignOnResponse(SignOnResponse.OUTCOME_AUTHENTICATED, USER_ID,
+                        "renewed-access", "renewed-id", null, "Bearer", 3600));
+
+        this.mvc.perform(post(AuthController.REFRESH_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"userId\":\"" + USER_ID
+                                + "\",\"refreshToken\":\"presented-renewal-token\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.outcome").value(SignOnResponse.OUTCOME_AUTHENTICATED))
+                .andExpect(jsonPath("$.accessToken").value("renewed-access"))
+                .andExpect(jsonPath("$.refreshToken").doesNotExist());
+    }
+
+    /**
+     * Verifies the three paths this adapter serves are the three the filter chain opens.
      *
      * <p>Assumptions: the constants are compared rather than the literals repeated, so a rename in either
      * place fails here instead of leaving a route the chain guards and the contract publishes as open.
      * {@code com.carddemo.auth.config.SecurityConfig} is not imported by the adapter itself, which is why
      * this comparison lives in a test rather than in the class.</p>
+     *
+     * <p>Refactoring Rationale: this case compared TWO paths and was named for two, while the adapter has
+     * served three since the renewal was added -- so the one route that most needs the chain to open it
+     * was the one route not compared. The renewal is published without a token deliberately, because the
+     * token it would carry is the one being renewed; if the chain stopped opening it, every expired
+     * session would be pushed back through a credential prompt and nothing here would have noticed.</p>
      */
     @Test
-    @DisplayName("both served paths equal the ones the filter chain opens")
-    void bothServedPathsEqualTheOnesTheChainOpens() {
+    @DisplayName("all three served paths equal the ones the filter chain opens")
+    void allThreeServedPathsEqualTheOnesTheChainOpens() {
         org.assertj.core.api.Assertions.assertThat(AuthController.SIGNON_PATH)
                 .isEqualTo(com.carddemo.auth.config.SecurityConfig.SIGNON_PATH);
         org.assertj.core.api.Assertions.assertThat(AuthController.CHALLENGE_PATH)
                 .isEqualTo(com.carddemo.auth.config.SecurityConfig.CHALLENGE_PATH);
+        org.assertj.core.api.Assertions.assertThat(AuthController.REFRESH_PATH)
+                .isEqualTo(com.carddemo.auth.config.SecurityConfig.REFRESH_PATH);
     }
 }

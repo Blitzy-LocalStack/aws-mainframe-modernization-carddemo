@@ -2,6 +2,7 @@ package com.carddemo.account.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.carddemo.account.mapper.CustomerMapper;
 import com.carddemo.common.security.InternalServiceToken;
 import com.carddemo.common.security.MaskedCardNumber;
 import com.carddemo.common.web.CursorToken;
@@ -216,6 +217,70 @@ class AccountApiContractGateTest {
         assertThat(masked).containsEntry("pattern", MaskedCardNumber.DOMAIN);
         assertThat(masked).containsEntry("minLength", MaskedCardNumber.MASKED_LENGTH);
         assertThat(masked).containsEntry("maxLength", MaskedCardNumber.MASKED_LENGTH);
+    }
+
+    /**
+     * Asserts that every published protected-identifier member is pinned to the marker the mapper emits.
+     *
+     * <p>Refactoring Rationale: this is a sixth defect of the same kind as the five above, found by a later
+     * review. Both protected customer identifiers were published as {@code type: string} with a
+     * {@code maxLength} alone -- 12 and 20, the screen-field widths -- and a bare maximum of 12 admits a
+     * WHOLE formatted national identifier, {@code 123-45-6789} being eleven characters. So a service, a
+     * stub or a proxy returning the clear value satisfied the schema exactly as the ten-character marker
+     * does, and the browser screen reading it would have painted it. The account-view declaration
+     * additionally described a mask "all but the last four" and carried the example
+     * {@code '***-**-6789'}, neither of which the delivered service ever emits, while the sibling
+     * declaration of the same property described the fixed marker correctly -- so the document contradicted
+     * itself about the one property whose whole purpose is non-disclosure.</p>
+     *
+     * <p>Assumptions: the expectation is derived from {@link CustomerMapper#IDENTIFIER_REDACTED} rather than
+     * written as a literal, exactly as the masked-card-number case derives from its own constant. The
+     * pattern is then exercised BOTH ways: it must accept the marker the mapper publishes, and it must
+     * refuse a formatted national identifier. Asserting acceptance alone would pass for a pattern that
+     * accepts everything, which is the state this case was written to end.</p>
+     *
+     * <p>Assumptions: all FOUR declarations are checked -- both properties on the account-view grouping and
+     * both on the standalone customer shape -- because pinning one and leaving the other open would leave a
+     * reader comparing two declarations of one property and guessing which describes the service. The
+     * standalone shape is reachable only with an internal credential, and it is pinned anyway for that
+     * reason.</p>
+     */
+    @Test
+    @DisplayName("every published protected identifier is pinned to the mapper's redaction marker")
+    void everyPublishedProtectedIdentifierIsPinnedToTheRedactionMarker() {
+        Map<String, Object> schemas = schemas(contract());
+        List<String> shapes = List.of("CustomerDetail", "CustomerResponse");
+        List<String> members = List.of("ssnMasked", "governmentIssuedIdMasked");
+
+        for (String shape : shapes) {
+            for (String member : members) {
+                Map<String, Object> declared =
+                        asMap(asMap(asMap(schemas.get(shape)).get("properties")).get(member));
+
+                assertThat(declared)
+                        .as("%s must declare %s", shape, member)
+                        .isNotEmpty();
+                Object pattern = declared.get("pattern");
+                assertThat(pattern)
+                        .as("%s.%s must publish the redaction pattern", shape, member)
+                        .isInstanceOf(String.class);
+
+                String expression = (String) pattern;
+                assertThat(CustomerMapper.IDENTIFIER_REDACTED)
+                        .as("%s.%s must admit the marker the mapper publishes", shape, member)
+                        .matches(expression);
+                // WHY : Assumptions: the counter-example is a formatted national identifier rather than
+                //       nine bare digits, because the formatted form is the one the withdrawn example
+                //       carried and the one that fitted the declared maximum. A pattern that refuses it
+                //       refuses the bare form too, being anchored on a literal.
+                assertThat("123-45-6789")
+                        .as("%s.%s must refuse a whole formatted identifier", shape, member)
+                        .doesNotMatch(expression);
+                assertThat(declared)
+                        .as("%s.%s must carry no example resembling an identifier", shape, member)
+                        .doesNotContainKey("example");
+            }
+        }
     }
 
     /**

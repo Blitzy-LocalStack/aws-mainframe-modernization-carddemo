@@ -623,8 +623,44 @@
               <goal>test-jar</goal>
             </goals>
             <configuration>
+              <!--
+               Assumptions: TWO packages are published, and each is here for a
+               different reason. `architecture` carries the one layering-rule
+               test class the eight services RUN through Surefire's
+               `dependenciesToScan`, which is why `services/pom.xml` names that
+               class in its includes filter. `profile` carries a HARNESS rather
+               than a test - `ProfileConfiguration`, which resolves a service's
+               configuration for a chosen profile using the same config-data
+               component boot itself runs - and it needs only to be on each
+               service's test CLASSPATH, not to be scanned for test classes. It
+               is published from here rather than duplicated into eight modules
+               because a copy per service is eight places for the resolution
+               logic to drift, and each service's dev-profile contract test
+               would then be asserting against its own copy.
+
+               Refactoring Rationale: the `profile` entry names ONE CLASS FILE
+               rather than the package, and the difference is not cosmetic. A
+               package-wide pattern also packaged that harness's own test class,
+               and because the surefire execution below reaches into this
+               artifact for test classes, the harness's test then ran inside
+               every service module - where its fixture documents are absent,
+               since they live in this module's test RESOURCES and no filter
+               puts those in the jar. It failed eight times over, for a
+               packaging reason nothing in the failure named. Publishing the
+               single class the services actually consume keeps the artifact to
+               its purpose.
+
+               Refactoring Rationale: the filter previously named
+               `architecture` alone, and a class added under `profile` was
+               silently absent from the artifact - it compiled here, and every
+               consumer failed to resolve the symbol with no indication that a
+               packaging filter was the cause. The filter is therefore the
+               place a new shared test package has to be declared, and this
+               note is what says so.
+              -->
               <includes>
                 <include>com/carddemo/common/architecture/**</include>
+                <include>com/carddemo/common/profile/ProfileConfiguration.class</include>
               </includes>
             </configuration>
           </execution>

@@ -89,7 +89,7 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>This class asserts the CHILD side of the reference context's single foreign key.
  * {@code app/app-transaction-type-db2/ddl/TRNTYCAT.ddl} declares it across its L6 and L7 as a foreign
  * key on the category table's type column referencing the type table with the restrict action, and
- * {@code src/main/resources/db/migration/V1__reference.sql} reproduces it at its L266 to L268. The
+ * {@code src/main/resources/db/migration/V1__reference.sql} reproduces it at its L255 to L257. The
  * refusal then travels a fixed chain: the baseline platform's referential failure becomes PostgreSQL's
  * foreign-key-violation state, which the framework translates into a data-integrity exception, which
  * {@code com.carddemo.common.error.GlobalExceptionHandler} renders as HTTP 409. Only the first link is
@@ -271,7 +271,7 @@ class TransactionCategoryRepositoryIT extends ReferencePersistenceBase {
      * row and invite the seed to be altered to suit it.</p>
      *
      * <p>Assumptions: the descriptions are compared with no trimming on either side. The column is
-     * {@code VARCHAR(50)} at {@code TRNTYCAT.ddl} L4 and {@code V1__reference.sql} L209, so it stores
+     * {@code VARCHAR(50)} at {@code TRNTYCAT.ddl} L4 and {@code V1__reference.sql} L198, so it stores
      * what it was given rather than padding to its width -- the trailing spaces the 60-byte record
      * carries were dropped by the seed and are not part of the stored value.</p>
      *
@@ -300,7 +300,7 @@ class TransactionCategoryRepositoryIT extends ReferencePersistenceBase {
      * {@code app/cpy/CVTRA04Y.cpy} L7 declares {@code TRAN-CAT-CD PIC 9(04)}, which is numeric, while
      * {@code app/app-transaction-type-db2/ddl/TRNTYCAT.ddl} L3 declares {@code TRC_TYPE_CATEGORY
      * CHAR(4) NOT NULL} and its L5 places that column in the primary key. The data definition is
-     * authoritative and {@code V1__reference.sql} follows it at L203. Assumptions: the consequence of
+     * authoritative and {@code V1__reference.sql} follows it at L192. Assumptions: the consequence of
      * resolving it the other way is concrete rather than stylistic -- an integer column would store
      * {@code 0001} and return {@code 1}, which breaks the composite key and the concatenated
      * {@code 010001} form that every listing and every cursor position is built from.</p>
@@ -367,7 +367,7 @@ class TransactionCategoryRepositoryIT extends ReferencePersistenceBase {
      *
      * <p>Purpose: the identity is the pair, so a read has to be satisfied by both halves at once. The
      * primary key is declared over both columns at {@code TRNTYCAT.ddl} L5 and reproduced at
-     * {@code V1__reference.sql} L234, and the entity maps it as a nested embeddable used through an
+     * {@code V1__reference.sql} L223, and the entity maps it as a nested embeddable used through an
      * embedded identifier.</p>
      *
      * <p>Assumptions: the absent case names a type the seed never loads, so it establishes that the read
@@ -430,7 +430,7 @@ class TransactionCategoryRepositoryIT extends ReferencePersistenceBase {
      *
      * <p>Purpose: {@code app/app-transaction-type-db2/ddl/XTRNTYCAT.ddl} declares a UNIQUE index over
      * the pair and {@code V1__reference.sql} carries the same object as the composite primary key at its
-     * L234. The literal the service compares against when it classifies a duplicate create is only
+     * L223. The literal the service compares against when it classifies a duplicate create is only
      * correct if this engine reports that state for this constraint, and nothing establishes that except
      * a real violation.</p>
      *
@@ -489,10 +489,10 @@ class TransactionCategoryRepositoryIT extends ReferencePersistenceBase {
      *
      * <p>Purpose: this is the load-bearing assertion of the package and it is proven at no other level.
      * The constraint is declared at {@code TRNTYCAT.ddl} L6 and L7 with the restrict action and
-     * reproduced at {@code V1__reference.sql} L266 to L268. Restrict is asserted rather than assumed
+     * reproduced at {@code V1__reference.sql} L255 to L257. Restrict is asserted rather than assumed
      * because the two alternatives an engine could implement are both silent data defects: a cascade
      * would remove the categories of the deleted type, and a set-null would violate the key column's own
-     * not-null declaration at {@code V1__reference.sql} L178.</p>
+     * not-null declaration at {@code V1__reference.sql} L167.</p>
      *
      * <p>Refactoring Rationale: {@code TransactionCategoryService.existsForType} performs a pre-check
      * before it deletes a parent, and that check is ADVISORY only. It is racy by construction -- two
@@ -627,7 +627,7 @@ class TransactionCategoryRepositoryIT extends ReferencePersistenceBase {
      * Confirms an absent description is refused before a statement is ever issued.
      *
      * <p>Purpose: the column is {@code TRC_CAT_DATA VARCHAR(50) NOT NULL} at {@code TRNTYCAT.ddl} L4 and
-     * {@code description VARCHAR(50) NOT NULL} at {@code V1__reference.sql} L209. Assumptions: the entity
+     * {@code description VARCHAR(50) NOT NULL} at {@code V1__reference.sql} L198. Assumptions: the entity
      * refuses an absent value in its constructor and in its mutator, so on the write path this package is
      * permitted to use the value never reaches the engine and the engine's own not-null state is not
      * observable from here. What is asserted is therefore the guard that actually fires, and it is

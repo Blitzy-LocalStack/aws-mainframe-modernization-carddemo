@@ -15,8 +15,10 @@ import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.money.Money;
 import com.carddemo.common.money.MoneyModule;
 import com.carddemo.common.web.CursorToken;
+import com.carddemo.transaction.dto.TransactionAddPreview;
 import com.carddemo.transaction.dto.TransactionAddRequest;
 import com.carddemo.transaction.dto.TransactionAddResponse;
+import com.carddemo.transaction.dto.CopiedTransactionData;
 import com.carddemo.transaction.service.TransactionAddService;
 import com.carddemo.transaction.service.TransactionListService;
 import com.carddemo.transaction.service.TransactionViewService;
@@ -34,6 +36,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import tools.jackson.databind.DeserializationFeature;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
@@ -112,9 +115,19 @@ class TransactionCaptureWireContractTest {
                 mock(TransactionListService.class), mock(TransactionViewService.class),
                 this.addService, mock(CursorToken.class));
 
+        // WHY : Assumptions: the reader is configured to FAIL on an undeclared property, because the
+        //       application's own is. carddemo-common-defaults.yml line 353 and this module's
+        //       application.yml line 654 both pin spring.jackson.deserialization
+        //       .fail-on-unknown-properties to true, and Jackson 3 disables that feature by default -- so
+        //       a builder left at its defaults would silently discard an undeclared member here and would
+        //       let a case asserting the closed request shape pass, or fail, for reasons that have nothing
+        //       to do with the deployed behaviour. Configuring it is what makes this class's readings of
+        //       the wire the deployed readings.
         this.mockMvc = MockMvcBuilders.standaloneSetup(controller)
-                .setMessageConverters(new JacksonJsonHttpMessageConverter(
-                        JsonMapper.builder().addModule(new MoneyModule()).build()))
+                .setMessageConverters(new JacksonJsonHttpMessageConverter(JsonMapper.builder()
+                        .addModule(new MoneyModule())
+                        .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                        .build()))
                 .setControllerAdvice(new GlobalExceptionHandler(
                         Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC)))
                 .build();
@@ -246,6 +259,71 @@ class TransactionCaptureWireContractTest {
                         .value(TransactionAddRequest.KEY_FIELD_REQUIRED));
 
         verify(this.addService, never()).addTransaction(any());
+    }
+
+    /**
+     * A copy request carrying nothing but a key is ADMITTED, which is the turn the copy key produces.
+     *
+     * <p>⚠️ Purpose: this pins the change the CRITICAL review finding forced, and it can only be pinned at
+     * the wire. {@code COPY-LAST-TRAN-DATA} at line 471 of {@code app/cbl/COTRN02C.cbl} performs
+     * {@code VALIDATE-INPUT-KEY-FIELDS} at line 473 and NOTHING else before it reads the stored row, then
+     * overwrites eleven data fields at lines 480 to 493. Pressing the copy key on an empty screen is
+     * therefore the ordinary way to use it -- and the migrated operation used to take the CAPTURE request
+     * shape, whose eleven data members the contract declares {@code @NotBlank}, so exactly that submission
+     * was refused before the handler body ran. Only a request carrying raw JSON can show it now is not: a
+     * service test constructs its argument in Java and never meets the deserialising validator at all.</p>
+     *
+     * <p>Assumptions: the body omits every data member rather than sending it blank, because omission is
+     * what a client with an empty screen sends and blanks are what the wide shape refused. Sending blanks
+     * would exercise the same constraint the change removed and would pass for the wrong reason.</p>
+     *
+     * @throws Exception if the request could not be performed
+     */
+    @Test
+    @DisplayName("admit a copy request carrying only a key, per the lone validation at line 473")
+    void admitsACopyRequestCarryingOnlyAKey() throws Exception {
+        when(this.addService.copyLastTransactionData(any()))
+                .thenReturn(TransactionAddPreview
+                        .prompting(Money.of("42.75"), "Confirm to add this transaction...",
+                                ACCOUNT_ID, "4111111111111111")
+                        .withCopiedSource(new CopiedTransactionData("0000000000000001", "02", "0002",
+                                "ATM TERM", "FUEL PURCHASE", "987654321", "FUEL STOP", "TACOMA",
+                                "98402", "2026-01-10", "2026-01-11")));
+
+        this.mockMvc.perform(post(TransactionController.BASE_PATH
+                                + TransactionController.COPY_LAST_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"accountId\":\"" + ACCOUNT_ID + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.amount").value("42.75"))
+                .andExpect(jsonPath("$.copied.typeCode").value("02"))
+                .andExpect(jsonPath("$.copied.merchantZip").value("98402"));
+
+        verify(this.addService).copyLastTransactionData(any());
+        verify(this.addService, never()).addTransaction(any());
+    }
+
+    /**
+     * A copy request carrying a data member is REFUSED, because the shape is closed against one.
+     *
+     * <p>Assumptions: this is the counterpart of the case above and it exists so the narrowing cannot be
+     * read as a widening. The copy shape declares three members and the pinned deserialiser fails on an
+     * unknown property, so a client that kept sending the capture body learns so at the boundary rather
+     * than having eleven values silently ignored -- which is what "ignored on arrival" and "used on
+     * arrival" being indistinguishable would cost a reader of the request.</p>
+     *
+     * @throws Exception if the request could not be performed
+     */
+    @Test
+    @DisplayName("refuse a copy request carrying a data member the operation does not read")
+    void refusesACopyRequestCarryingADataMember() throws Exception {
+        this.mockMvc.perform(post(TransactionController.BASE_PATH
+                                + TransactionController.COPY_LAST_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"accountId\":\"" + ACCOUNT_ID + "\",\"typeCode\":\"01\"}"))
+                .andExpect(status().isBadRequest());
+
+        verify(this.addService, never()).copyLastTransactionData(any());
     }
 
     /**

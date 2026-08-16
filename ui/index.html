@@ -151,7 +151,58 @@
       ui/src/theme/antdTheme.ts, which breaks both the rule that every value
       resolves to an antd theme variable rather than to a literal, and the rule
       that theming happens in exactly one place.
+
+      Refactoring Rationale: the block below is the ONE exception to that, and it
+      is admitted because it carries no design value at all. It holds a user agent
+      margin reset and the viewport sizing of the mount point, which are the two
+      things a document owns and a component cannot: neither is a colour, a spacing
+      step, a radius, a typographic value or a motion duration, so neither can
+      resolve to an antd token and neither competes with ui/src/theme/antdTheme.ts.
+      What it replaces is a minHeight of 100dvh written inline in
+      ui/src/layout/AppShell.tsx, which was flagged there as an unresolved literal
+      and which a browser measurement showed produced a permanent 16px vertical
+      scrollbar: the frame was exactly one viewport tall and the user agent's own
+      body margin of 8px added 8px above and below it. Compensating inside the
+      component was rejected outright, because subtracting one document's margin
+      from a component's height encodes that document into every other document
+      that might mount the component, and it becomes wrong the moment a reset
+      arrives.
     -->
+    <style>
+      /*
+        Assumptions: the reset is confined to the three elements that wrap the
+        application - the two the user agent gives a margin to, and the mount point
+        - rather than being a general reset. A wildcard reset would silently
+        override padding the design system's own components set on themselves,
+        which is the failure mode a reset sheet is usually blamed for; naming three
+        elements cannot reach a component.
+
+        Trade-offs: the mount point is sized in dvh, which is a literal, and it is
+        accepted HERE and nowhere else because the design system publishes no token
+        that can express "as tall as the window" - its scales cover colour, spacing,
+        radius, typography and motion. dvh rather than vh is used because a mobile
+        browser's dynamic toolbar makes vh overshoot the visible area, which would
+        push the shell's row-24 key legend out of sight on exactly the narrow
+        viewports the responsive reflow exists to serve.
+
+        Assumptions: the mount point is a flex column, which is what lets the shell
+        fill it. antd's own layout primitive sets flex: auto on itself, so a Layout
+        rendered as this element's child stretches to the full height without the
+        shell declaring any height of its own - preserving the property the removed
+        declaration existed for, that the key legend sits at the bottom edge of the
+        display exactly as terminal row 24 always did.
+      */
+      html,
+      body {
+        margin: 0;
+      }
+
+      #root {
+        display: flex;
+        flex-direction: column;
+        min-height: 100dvh;
+      }
+    </style>
 
     <!--
       Trade-offs: a progressive web app

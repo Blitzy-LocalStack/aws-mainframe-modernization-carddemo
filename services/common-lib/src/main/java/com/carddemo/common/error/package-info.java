@@ -83,7 +83,7 @@
  * is exactly the outcome the pair exists to prevent -- a directory that is
  * documented on paper and undocumented in fact. The audit configuration at
  * {@code config/checkstyle/checkstyle.xml} explains the same split in its own
- * comments at lines 215 to 222 and 325 to 331, and it is restated here because
+ * comments at lines 208 to 215 and 318 to 324, and it is restated here because
  * a reader of this file may never open that one.
  *
  * <p>Assumptions: the gate is local rather than a pipeline-only step. The rule

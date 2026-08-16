@@ -30,8 +30,10 @@
  */
 
 // Assumptions: every test API is imported rather than taken from an ambient global, because
-// ui/vitest.config.ts records `globals` as a per-project contract, and admitting them here would make
-// `expect` and `vi` visible to production screens as well, where a stray call would compile.
+// ui/tsconfig.json keeps `types` EMPTY, and DECLARING them here would make `expect` and `vi`
+// visible to production screens as well, where a stray call would compile. (ui/vitest.config.ts
+// sets `globals: true`; an injected global is not a declared one, so the import still carries the
+// compiler's side of this.)
 import type { AxiosRequestConfig, AxiosResponse } from 'axios';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -58,6 +60,19 @@ const API_BASE_URL = 'https://api.carddemo.example/api/v1';
  */
 const PADDED_ACCOUNT_KEY = '00000000011';
 
+/**
+ * The two protected customer members every lawful account-view response carries.
+ *
+ * Assumptions: the value is the fixed marker `CustomerMapper.IDENTIFIER_REDACTED` publishes and the
+ * contract now pins with a pattern on all four of its declarations. It is spelled here rather than
+ * imported because the client module keeps its own pattern private -- and a fixture that imported the
+ * expectation it is measured against could not fail.
+ */
+const REDACTED_CUSTOMER = {
+  ssnMasked: '[REDACTED]',
+  governmentIssuedIdMasked: '[REDACTED]',
+} as const;
+
 let sentBody: unknown;
 
 /**
@@ -72,8 +87,19 @@ async function captureBodyAdapter(config: AxiosRequestConfig): Promise<AxiosResp
   //   anywhere between the screen and the wire, where an assertion on the composed object would still
   //   pass if a later transform coerced it.
   sentBody = config.data;
+  // Assumptions: the answer carries BOTH the paging members a cross-reference walk reads and the
+  //   redacted customer an account-view read validates, because one adapter answers both operations and
+  //   `readAccountView` now refuses a response whose protected identifiers are not the redaction marker.
+  //   A body omitting them would make these transport cases fail on the response guard rather than on
+  //   the request shape they are about.
   return Promise.resolve({
-    data: { items: [], firstKey: null, lastKey: null, hasNext: false },
+    data: {
+      items: [],
+      firstKey: null,
+      lastKey: null,
+      hasNext: false,
+      customer: REDACTED_CUSTOMER,
+    },
     status: 200,
     statusText: 'OK',
     headers: {},
@@ -179,8 +205,17 @@ const REVISION = 'W/"7"';
 /** One cross-reference row, carrying the masked rendering every row is required to carry. */
 const XREF_ROW = { cardNumberMasked: '************7065', accountId: 11, customerId: 9 } as const;
 
-/** A minimal account-view body; only the members these assertions read are populated. */
-const ACCOUNT_VIEW_BODY = { accountId: '00000000011' } as const;
+/**
+ * A minimal account-view body; only the members these assertions read are populated.
+ *
+ * Assumptions: the redacted customer is part of the MINIMUM, because the read validates it. A response
+ * whose protected identifiers are not the marker is refused before it reaches a caller, so a fixture
+ * omitting them would not be a smaller lawful body -- it would be an unlawful one.
+ */
+const ACCOUNT_VIEW_BODY = {
+  accountId: '00000000011',
+  customer: REDACTED_CUSTOMER,
+} as const;
 
 /** An account edit body carrying one ordinary member and the four sensitive ones. */
 const ACCOUNT_EDIT = {
@@ -337,6 +372,43 @@ async function refusesAnUnmaskedRow(): Promise<void> {
 }
 
 /**
+ * Asserts a national identifier returned in the clear is refused rather than returned to a screen.
+ *
+ * Assumptions: the fixture is a WHOLE formatted identifier, which is the exact value the contract's own
+ * withdrawn example carried and which its `maxLength: 12` admitted -- so this case measures the
+ * situation the schema could not exclude. The refusal is asserted to be a `RangeError` and its message
+ * asserted NOT to contain the offending value, because a message quoting it would put a national
+ * identifier into whatever records the failure.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function refusesAnUnredactedNationalIdentifier(): Promise<void> {
+  answerWith({
+    accountId: '00000000011',
+    customer: { ...REDACTED_CUSTOMER, ssnMasked: '123-45-6789' },
+  });
+
+  await expect(readAccountView('00000000011')).rejects.toThrow(RangeError);
+  await expect(readAccountView('00000000011')).rejects.not.toThrow(/123-45-6789/u);
+}
+
+/**
+ * Asserts a government-issued identifier returned in the clear is refused on the same terms.
+ *
+ * Assumptions: the second member is asserted separately rather than assumed to follow from the first.
+ * The guard is two calls, and a guard that checked only the national identifier would pass a case
+ * written against that member alone while leaving the other property open.
+ * @returns {Promise<void>} Resolves once the assertion has run.
+ */
+async function refusesAnUnredactedGovernmentIdentifier(): Promise<void> {
+  answerWith({
+    accountId: '00000000011',
+    customer: { ...REDACTED_CUSTOMER, governmentIssuedIdMasked: 'X1234567890' },
+  });
+
+  await expect(readAccountView('00000000011')).rejects.toThrow(RangeError);
+}
+
+/**
  * Registers every account client case.
  * @returns {void} Nothing; the cases are registered as a side effect.
  */
@@ -356,6 +428,8 @@ function accountClientBehaviour(): void {
   it('treats a blank cursor as none', treatsABlankCursorAsNone);
   it('refuses a direction with no usable cursor', refusesADirectionWithNoUsableCursor);
   it('refuses an unmasked row', refusesAnUnmaskedRow);
+  it('refuses an unredacted national identifier', refusesAnUnredactedNationalIdentifier);
+  it('refuses an unredacted government-issued identifier', refusesAnUnredactedGovernmentIdentifier);
 }
 
 describe('account client behaviour', accountClientBehaviour);

@@ -4,14 +4,15 @@
  *
  * Purpose
  * -------
- * Covers the eight operations that contract publishes: the three token exchanges replacing the
- * sign-on program `app/cbl/COSGN00C.cbl`, and the five user-administration operations replacing
+ * Covers the nine operations that contract publishes: the four session exchanges -- three that replace
+ * the sign-on program `app/cbl/COSGN00C.cbl` and one, the revocation, that has no reference counterpart
+ * because the baseline had nothing to revoke -- and the five user-administration operations replacing
  * `app/cbl/COUSR00C.cbl` through `COUSR03C.cbl`. Every target is derived from the operation manifest
  * below rather than written as a literal, for the reason recorded in `ui/src/api/types.ts`.
  *
  * Which requests carry a credential, and which carry an authority
  * --------------------------------------------------------------
- * Assumptions: the three token exchanges are the ONLY operations in this contract declared
+ * Assumptions: the four session exchanges are the ONLY operations in this contract declared
  * `security: []`, and each of the five user-administration operations declares both `bearerAuth` and
  * `x-required-authority: carddemo-admin` -- so a held token is necessary but not sufficient for them.
  * This mirrors the baseline, whose sign-on program was the one program that ran before any identity
@@ -21,18 +22,18 @@
  * token is held, `applyRequestHeaders` in `ui/src/api/client.ts` attaches NO `Authorization` header
  * rather than one reading `Bearer undefined`: a service handed a malformed credential answers 401,
  * which would report a refused token to an operator who has not yet presented one. And when a token IS
- * held, each of the three exchanges below is dispatched with `WITHOUT_STORED_SESSION`, so the header is
+ * held, each of the four exchanges below is dispatched with `WITHOUT_STORED_SESSION`, so the header is
  * removed for exactly the operations their contract declares `security: []`.
  *
  * Refactoring Rationale: that second half was missing, and its absence was not visible at a call site.
- * All three exchanges share the one axios instance, whose interceptor attaches the stored bearer to
- * every request, so a token that had expired or been revoked travelled on the sign-on, the refresh and
- * the challenge answer alike. The resource-server filter validates a presented credential BEFORE the
+ * All four exchanges share the one axios instance, whose interceptor attaches the stored bearer to
+ * every request, so a token that had expired or been revoked travelled on the sign-on, the refresh, the
+ * challenge answer and the revocation alike. The resource-server filter validates a presented credential BEFORE the
  * permit-all rule for these paths is reached, so a stale token could refuse the exchange whose whole
  * purpose is to replace it — and the failure is worst exactly when it matters most, at the moment an
  * operator returns to a tab whose session has lapsed. Suppressing per request rather than per instance
  * keeps the correlation identifier, the clamped timeout and the failure normalisation identical for
- * these three operations; the reasoning against a second instance is recorded on the flag itself.
+ * these four operations; the reasoning against a second instance is recorded on the flag itself.
  *
  * Nothing here may add a header, and nothing here may send a credential on the five administration
  * calls beyond the bearer token the shared interceptor attaches.
@@ -41,7 +42,7 @@
  * a challenge session -- travels in a request BODY, and never in a path or a query string. That is not
  * a preference: a target is written in full into the edge access log before any application code runs
  * and is retained by the browser's history, and neither store is reachable by anything this module
- * could add. The contract declares all three token exchanges as POST with a body for exactly this
+ * could add. The contract declares all four session exchanges as POST with a body for exactly this
  * reason, and a convenience overload accepting a credential as a query parameter must never be added
  * here.
  *
@@ -64,9 +65,17 @@
  * session-storage key and the request interceptor that reads it -- and a second writer of that key
  * would make the sign-out path ambiguous about which module had to be told. `signOn` returns the token
  * set and the caller passes it to `setAccessToken`, so there is one writer.
+ *
+ * Assumptions: the same division holds in the other direction on {@link signOut}, which revokes the
+ * token at the provider and CLEARS NOTHING locally. Clearing held tokens is `ui/src/hooks/useAuth.ts`'s
+ * concern, and that hook discards them whether this call resolves or rejects -- a session the operator
+ * has ended must not survive in the tab because the network did not cooperate. Doing the clearing here
+ * as well would put two writers on the same key and would make the local half conditional on the remote
+ * half succeeding, which is the failure mode that division exists to prevent.
  */
 
 import { WITHOUT_STORED_SESSION, getApiClient, keysetPagingMembers, requestPath } from './client';
+import type { AxiosRequestConfig } from 'axios';
 import type {
   ContractOperation,
   CreateUserRequest,
@@ -76,6 +85,7 @@ import type {
   SignOnRequest,
   SignOnResult,
   SignOnTokens,
+  SignOutRequest,
   TokenRefreshRequest,
   UpdateUserRequest,
   UserListQuery,
@@ -97,6 +107,7 @@ export type {
   SignOnResult,
   TokenRefreshRequest,
   SignOnChallengeRequest,
+  SignOutRequest,
   UserSummary,
   UserResponse,
   CreatedUserResponse,
@@ -104,6 +115,29 @@ export type {
   UpdateUserRequest,
   UserListQuery,
 } from './types';
+
+/**
+ * Composes the request configuration a session exchange is dispatched with.
+ *
+ * Purpose: every one of the four session exchanges must be dispatched WITHOUT the held bearer, for the
+ * reason argued at the head of this module, and each may additionally be given a signal that abandons
+ * it. Composing both in one place means a new exchange cannot acquire the second and forget the first.
+ *
+ * Assumptions: the shared frozen configuration is SPREAD rather than mutated, because it is frozen and
+ * because a mutation would change the configuration every other exchange is dispatched with. The signal
+ * member is omitted entirely when none was supplied rather than set to `undefined`, so a caller that
+ * passes nothing produces exactly the configuration these exchanges used before signals existed.
+ *
+ * Assumptions: the signal is the caller's to own. This module neither creates nor aborts one — the
+ * session generation that decides when an exchange has been superseded lives in
+ * `ui/src/hooks/useAuth.ts`, and a controller created here could not be tied to it.
+ * @param {AbortSignal} [signal] - Signal that abandons the request when the session it belongs to is
+ *   superseded. Omit it for a call no later event can invalidate.
+ * @returns {Readonly<AxiosRequestConfig>} The configuration to dispatch with; never `null`.
+ */
+function sessionExchangeConfig(signal?: AbortSignal): Readonly<AxiosRequestConfig> {
+  return signal === undefined ? WITHOUT_STORED_SESSION : { ...WITHOUT_STORED_SESSION, signal };
+}
 
 const SIGN_ON: ContractOperation = {
   method: 'POST',
@@ -121,6 +155,12 @@ const ANSWER_SIGN_ON_CHALLENGE: ContractOperation = {
   method: 'POST',
   path: '/api/v1/auth/challenge',
   operationId: 'answerSignOnChallenge',
+};
+
+const SIGN_OUT: ContractOperation = {
+  method: 'POST',
+  path: '/api/v1/auth/signout',
+  operationId: 'signOut',
 };
 
 const LIST_USERS: ContractOperation = {
@@ -157,15 +197,16 @@ const DELETE_USER: ContractOperation = {
  * Every operation `auth-api.yaml` declares, in the order the contract declares them.
  *
  * Assumptions: exhaustive rather than a selection, and compared with the contract for equality in
- * both directions by `ui/src/api/contracts.test.ts`. Eight entries, because the contract publishes
- * eight: the refresh and challenge exchanges are declared operations rather than optional extras, so
- * omitting either would leave a published operation with no client and would fail that comparison in
- * the contract-to-client direction.
+ * both directions by `ui/src/api/contracts.test.ts`. Nine entries, because the contract publishes
+ * nine: the refresh, challenge and revocation exchanges are declared operations rather than optional
+ * extras, so omitting any would leave a published operation with no client and would fail that
+ * comparison in the contract-to-client direction.
  */
 export const AUTH_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
   SIGN_ON,
   REFRESH_TOKENS,
   ANSWER_SIGN_ON_CHALLENGE,
+  SIGN_OUT,
   LIST_USERS,
   CREATE_USER,
   GET_USER,
@@ -231,13 +272,29 @@ export const PASSWORD_MAX_LENGTH = 256;
 /**
  * Exchanges a user identifier and password for a token set.
  *
- * Assumptions: the three verbatim sign-on messages the baseline raises -- for a wrong password, an
- * unknown user and an unverifiable user -- arrive as the `message` of a problem document on a 401,
- * not as a member of a success body. A caller renders that message unchanged under transformation
- * rule T8 and must not substitute its own wording.
+ * Assumptions: TWO verbatim sentences reach a caller on a refusal, not three, and the difference is a
+ * documented divergence rather than a gap. The baseline raises three -- "Wrong Password. Try again ..."
+ * at `app/cbl/COSGN00C.cbl` L242 and L243, "User not found. Try again ..." at L249, and "Unable to verify
+ * the User ..." at L254 -- and the service deliberately does NOT emit the second. An identifier this
+ * context holds no row for, and a credential the provider refused, are answered with the SAME wrong-password
+ * sentence, so the two cannot be told apart; the unverifiable sentence is the third and is unaffected.
+ * Both sentences that ARE emitted arrive as the `message` of a problem document on a 401 rather than as a
+ * member of a success body, and a caller renders each unchanged under transformation rule T8 without
+ * substituting its own wording.
+ *
+ * Refactoring Rationale: this block claimed all three sentences were delivered, which contradicted the
+ * merge the service performs and which the traceability register records as divergence. The merge is
+ * deliberate: two distinguishable sentences let an unauthenticated caller harvest valid identifiers one
+ * request at a time, which anyone able to reach the sign-on screen could do in the baseline. What is given
+ * up is the diagnostic telling a caller WHICH of the identifier and the credential was at fault, and a
+ * screen must therefore not offer "check your user identifier" guidance a 401 cannot support. The register
+ * is `docs/architecture/cobol-to-service-traceability.md`.
  * @param {string} userId - Operator identifier, at most `USER_ID_MAX_LENGTH` characters.
  * @param {string} password - The password as typed. It is placed in the request body and is neither
  *   logged, stored, nor transformed on the way.
+ * @param {AbortSignal} [signal] - Signal that abandons the exchange when the session it belongs to has
+ *   been superseded — a second sign-on, or a sign-out, while this one is in flight. Omitting it leaves
+ *   the request to run to completion, which a caller holding no session generation should do.
  * @returns {Promise<SignOnResult>} The token set when the provider authenticated the caller, or the
  *   challenge it requires to be answered first. Discriminate on `outcome`.
  * @throws {Error} The normalised `ApiRequestError`, whose `problem` carries the service's own
@@ -245,7 +302,11 @@ export const PASSWORD_MAX_LENGTH = 256;
  *   401 for a credential the provider refused. This is the one operation here that cannot answer 403,
  *   because it requires no authority to call.
  */
-export async function signOn(userId: string, password: string): Promise<SignOnResult> {
+export async function signOn(
+  userId: string,
+  password: string,
+  signal?: AbortSignal,
+): Promise<SignOnResult> {
   const request: SignOnRequest = { userId, password };
   // Assumptions: dispatched WITHOUT the stored session, because this operation is declared
   //   `security: []` and a bearer left over from a lapsed session would be validated by the
@@ -254,22 +315,46 @@ export async function signOn(userId: string, password: string): Promise<SignOnRe
   const response = await getApiClient().post<SignOnResult>(
     requestPath(SIGN_ON),
     request,
-    WITHOUT_STORED_SESSION,
+    sessionExchangeConfig(signal),
   );
 
   return response.data;
 }
 
 /**
- * Renews a token set from a held refresh token.
- * @param {string} userId - The identifier the tokens belong to.
+ * Renews a token set from a held refresh token, which the provider ROTATES in the process.
+ *
+ * Assumptions: rotation is enabled on the pool client, so this exchange ordinarily answers with a
+ * REPLACEMENT refresh token and invalidates the one submitted. A caller that kept the submitted token
+ * would be refused on its next renewal, so a non-null `refreshToken` on the answer MUST be stored over
+ * the held one. The null case is a pool-side retry grace period leaving the submitted token current, and
+ * a caller must then keep what it holds; the full reasoning is on `SignOnTokens` in
+ * `ui/src/api/types.ts`.
+ *
+ * Refactoring Rationale: this block previously described the answer's `refreshToken` as one that "may be
+ * null, in which case the held one remains current", stating only the tolerated case and never the
+ * ordinary one. A caller written from that sentence would discard every rotated token and be signed out
+ * on its second renewal.
+ * @param {string} userId - The identifier the tokens belong to. The service compares it against the
+ *   subject of the identity token the provider issues and refuses a renewal that names another, so it
+ *   must be the identifier the held tokens were issued for and not a value a caller chose.
  * @param {string} refreshToken - The refresh token last issued, sent in the body as a credential.
- * @returns {Promise<SignOnTokens>} A fresh token set. Its `refreshToken` may be null, in which case
- *   the held one remains current and must not be overwritten with the null.
+ * @param {AbortSignal} [signal] - Abandons the renewal when the session generation that armed it has
+ *   been superseded, so an answer to a renewal for a session that has since ended -- or been replaced by
+ *   a second sign-on -- is never stored over the current one. Optional for the same reason as on sign-on:
+ *   a caller holding no generation has no signal to give.
+ * @returns {Promise<SignOnTokens>} A fresh token set. Under the deployed pool's refresh-token
+ *   rotation its `refreshToken` carries the successor that replaces the token just presented, so a
+ *   caller must store it; the member stays nullable for a pool configured without rotation, and a null
+ *   means the held one remains current and must not be overwritten with the null.
  * @throws {Error} The normalised `ApiRequestError`: 401 when the refresh token has been revoked or
  *   has expired, which a caller treats as a completed sign-out rather than as a retryable failure.
  */
-export async function refreshTokens(userId: string, refreshToken: string): Promise<SignOnTokens> {
+export async function refreshTokens(
+  userId: string,
+  refreshToken: string,
+  signal?: AbortSignal,
+): Promise<SignOnTokens> {
   const request: TokenRefreshRequest = { userId, refreshToken };
   // Assumptions: the stored session is suppressed here for a sharper reason than on sign-on. This
   //   exchange runs precisely when the access token is about to stop being accepted, so the token most
@@ -279,7 +364,7 @@ export async function refreshTokens(userId: string, refreshToken: string): Promi
   const response = await getApiClient().post<SignOnTokens>(
     requestPath(REFRESH_TOKENS),
     request,
-    WITHOUT_STORED_SESSION,
+    sessionExchangeConfig(signal),
   );
   return response.data;
 }
@@ -290,6 +375,8 @@ export async function refreshTokens(userId: string, refreshToken: string): Promi
  * @param {string} session - The opaque continuation handle from the challenge, passed back unread.
  * @param {string} newPassword - The replacement credential, at most `PASSWORD_MAX_LENGTH` characters
  *   and sent only in the request body.
+ * @param {AbortSignal} [signal] - Signal that abandons the exchange when the session it completes has
+ *   been superseded.
  * @returns {Promise<SignOnTokens>} The token set issued once the replacement credential was accepted.
  * @throws {Error} The normalised `ApiRequestError`: 400 for a credential the provider's policy
  *   rejects, and 401 for a session that has expired, which obliges a fresh sign-on.
@@ -298,6 +385,7 @@ export async function answerSignOnChallenge(
   userId: string,
   session: string,
   newPassword: string,
+  signal?: AbortSignal,
 ): Promise<SignOnTokens> {
   const request: SignOnChallengeRequest = { userId, session, newPassword };
   // Assumptions: suppressed for the same reason as the two exchanges above. A caller answering a
@@ -307,9 +395,53 @@ export async function answerSignOnChallenge(
   const response = await getApiClient().post<SignOnTokens>(
     requestPath(ANSWER_SIGN_ON_CHALLENGE),
     request,
-    WITHOUT_STORED_SESSION,
+    sessionExchangeConfig(signal),
   );
   return response.data;
+}
+
+/**
+ * Revokes a held refresh token at the identity provider, ending the session there and not only here.
+ *
+ * Assumptions: discarding tokens in the browser ends nothing at the provider. The refresh token is
+ * provisioned with a thirty-day life -- `refresh_token_validity_days` defaults to 30 in
+ * `infra/modules/cognito/variables.tf` -- so a copy taken from a browser store, a synchronised profile or
+ * a shared workstation keeps minting access tokens for a month after the operator believed the session
+ * was over. This call is what makes a sign-out an event at the provider rather than a gesture in a tab.
+ *
+ * Assumptions: it has NO reference counterpart. The baseline's sign-off transferred control back to the
+ * sign-on screen and ended nothing, because the terminal session WAS the session and it lasted until the
+ * terminal disconnected. No reference program, screen field or literal corresponds to this operation.
+ *
+ * Assumptions: this function clears no local state, and a caller must not depend on it to.
+ * `ui/src/hooks/useAuth.ts` discards the held tokens whether this resolves or rejects, because a session
+ * the operator has ended must not survive in the tab merely because the network did not cooperate; the
+ * division is argued at the head of this module.
+ * @param {string} refreshToken - The refresh token to revoke, sent in the body as a credential. It is
+ *   the whole of the request: the provider's revocation accepts no user name, because the token
+ *   identifies its own subject.
+ * @returns {Promise<void>} Resolves with no value once the provider has been asked. The operation
+ *   answers `204` both for a token it revoked and for one it declines to accept -- already revoked,
+ *   expired, or not a revocable type -- because each of those states describes a token that can no longer
+ *   mint anything, and distinguishing them would tell an unauthenticated caller whether a token was live.
+ * @throws {Error} The normalised `ApiRequestError`: 400 with a `refreshToken` field error for an absent
+ *   or over-long token, and 500 when the provider could not be reached, in which case nothing was
+ *   revoked. It cannot answer 401 or 403, because it requires no authority to call.
+ */
+export async function signOut(refreshToken: string): Promise<void> {
+  const request: SignOutRequest = { refreshToken };
+  // Assumptions: suppressed for the sharpest version of the reason the three exchanges above suppress
+  //   it. A caller signing out is the caller MOST likely to hold a token the resource server will
+  //   refuse -- the access token lives one hour and the refresh token thirty days -- and the filter
+  //   validates a presented credential before the permit-all rule for this path is reached, so
+  //   attaching it would refuse the revocation in exactly the case that most needs it. The credential
+  //   this operation presents is the refresh token, in the body.
+  // Assumptions: this is the ONE session exchange that takes no abort signal, and the omission is
+  //   deliberate. The other three establish or renew a session, so one superseded by a later event has
+  //   nothing left to accomplish and abandoning it is free. This one ENDS a session: the event that
+  //   would supersede it is the sign-out itself, and abandoning it would leave the very token the call
+  //   exists to revoke alive at the provider. It must be allowed to finish.
+  await getApiClient().post<void>(requestPath(SIGN_OUT), request, WITHOUT_STORED_SESSION);
 }
 
 // WHY : Alternatives Considered: positioning the browse by a page number, a row offset or a page

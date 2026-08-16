@@ -96,7 +96,7 @@
  * on every local build before {@code javac} runs, and not only in CI.
  *
  * <p>Assumptions: those two checks reach this tree because {@code services/pom.xml} sets
- * {@code includeTestSourceDirectory} to true, at line 1005, and this module's own POM does not
+ * {@code includeTestSourceDirectory} to true, at line 994, and this module's own POM does not
  * override it. That value is what makes this file MANDATORY rather than merely conventional, and the
  * rationale recorded beside it in the parent is that the Explainability rule makes no exemption for
  * tests. Refactoring Rationale: the value was read from the declaring POM and then confirmed by
@@ -170,16 +170,39 @@
  *
  * <h2>Which assertions live here, and which do not</h2>
  *
- * <p>Three of the four claims this bounded context has to make about its output are made here.
+ * <p>Two of the four claims this bounded context has to make about its output are made here, and the
+ * third is made one package over.
  *
  * <ul>
- *   <li>The report line is exactly 133 columns with byte-exact edit masks. Asserted by
- *       {@code TransactionReportServiceTest} at the service level.</li>
- *   <li>A statement renders correct output for one card carrying far more than 512 transactions.
- *       Asserted by {@code StatementServiceTest}.</li>
- *   <li>A statement renders correct output for far more than 51 distinct cards. Asserted by
- *       {@code StatementServiceTest}.</li>
+ *   <li>A statement renders correct output for one card carrying more transactions than the baseline's
+ *       inner same-card table admits. Asserted HERE, by
+ *       {@code StatementServiceTest.aCardPastTheBaselineInnerTableThresholdStatementsEveryTransaction},
+ *       which drives 513 -- the first value past the threshold {@code tests/README.md} measures -- and
+ *       asserts every line reaches the document, the heading reports the true count, and the last line
+ *       is the expected one by identity so a truncation that preserved the count could not pass.</li>
+ *   <li>A statement renders correct output for more distinct cards than the baseline's outer card table
+ *       admits. Asserted HERE, by
+ *       {@code StatementServiceTest.aRunPastTheBaselineOuterTableThresholdStatementsEveryCard}, which
+ *       drives 52 across a chunk boundary and asserts a statement and a contiguous index entry for every
+ *       one of them.</li>
+ *   <li>The report line being exactly 133 columns with byte-exact edit masks is NOT asserted here. It
+ *       belongs to the sibling {@code com.carddemo.reporting.mapper} test package --
+ *       {@code TransactionReportMapperTest} for the emitted widths and the masks,
+ *       {@code ReportBandLayoutsTest} for the declared width and the per-band arithmetic -- because the
+ *       mapper assembles the line and the services in this package only decide which rows reach it.</li>
  * </ul>
+ *
+ * <p>Refactoring Rationale: this list previously read "Three of the four claims ... are made here" and
+ * attributed the 133-column control to {@code TransactionReportServiceTest} and both arity controls to
+ * {@code StatementServiceTest}. All three attributions were wrong in the same direction, and the
+ * direction matters: each named a real class that did not contain the control, so the charter read as
+ * evidence of coverage that did not exist and nothing in the build contradicted it. The two arity
+ * controls now exist and are named case by case rather than class by class -- naming the class is what
+ * allowed the claim to survive their absence -- and the 133-column control is attributed to the package
+ * that has always owned it. Both arity cases assert that the migrated service imposes NO arity, which is
+ * divergence {@code D-2} in {@code docs/architecture/cobol-to-service-traceability.md}; the baseline's
+ * two unchecked tables in {@code app/cbl/CBSTM03A.CBL} are reference-only and are left exactly as they
+ * are.</p>
  *
  * <p>The fourth claim -- that this module's database role is provably unable to write, and that no
  * {@code db/migration} directory or Flyway artifact exists anywhere in it -- is NOT made here, and no

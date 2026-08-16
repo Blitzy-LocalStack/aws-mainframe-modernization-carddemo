@@ -117,8 +117,12 @@ import org.hibernate.annotations.Immutable;
  * connects as holds no privilege on the schema the base table lives in. Widening this type to the
  * record's full width is therefore not an improvement available to it: the columns it would have
  * to name do not exist in the relation, so each one would fail the first read rather than return a
- * value. A reporting band that genuinely needs one of the seven is a change to the relation, in the
+ * value. A reporting band that genuinely needs one of the six is a change to the relation, in the
  * migration that declares it, and is reported against that artifact rather than worked around here.
+ * ⚠️ Refactoring Rationale: that figure read "the seven", which was the withheld count BEFORE the
+ * credit score moved into the projected set two paragraphs above. Both statements were in this same
+ * comment, so the file enumerated six and then counted seven -- and the enumeration is the half a
+ * reader acts on, which is why the count follows it rather than the other way round.
  *
  * <p>Trade-offs: the two identifier fields, the national identifier declared {@code PIC 9(09)} at L17
  * and the government-issued identifier declared {@code PIC X(20)} at L18, are not projected, on three

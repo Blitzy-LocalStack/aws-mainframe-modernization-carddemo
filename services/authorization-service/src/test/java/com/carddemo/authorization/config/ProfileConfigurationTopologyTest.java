@@ -330,6 +330,13 @@ class ProfileConfigurationTopologyTest {
                         "spring.security.oauth2.resourceserver.jwt.issuer-uri",
                         "carddemo.messaging.pauth-request-queue",
                         "carddemo.messaging.pauth-reply-queue",
+                        // Assumptions: two of the keys named here no longer exist in the base document at
+                        // all -- the reply-queue name was never a property, and the tokeniser key is
+                        // withdrawn with the bean that read it. Both entries are RETAINED rather than
+                        // pruned, because an overlay is the one place a withdrawn key could be
+                        // reintroduced without the base document showing it, and a key an overlay pins is
+                        // a deployment value committed to the source tree whether or not any bean reads
+                        // it.
                         "carddemo.messaging.hmac-key",
                         "carddemo.internal-identity.authorization-signing-key",
                         "carddemo.account-context.base-url");

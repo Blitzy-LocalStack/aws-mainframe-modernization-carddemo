@@ -273,44 +273,58 @@ variable "temporary_password_validity_days" {
 #       so these two settings are coupled, and changing this input to ON or
 #       OPTIONAL without that block present fails at apply rather than at plan.
 variable "mfa_configuration" {
-  description = "Multi-factor posture for the user pool: OFF, ON (compulsory) or OPTIONAL (available but not required). Paired by main.tf with a software-token MFA mechanism, without which ON and OPTIONAL are rejected at apply. Production is structurally required to be ON; the default suits dev only."
+  description = "Multi-factor posture for the user pool: OFF, ON (compulsory) or OPTIONAL (available but not required). Paired by main.tf with a software-token MFA mechanism, without which ON and OPTIONAL are rejected at apply. Currently required to be OFF in every environment, because services/auth-service answers exactly one Cognito challenge (NEW_PASSWORD_REQUIRED) and no MFA challenge at all; the validation below states the precondition for raising it."
   type        = string
-  default     = "OPTIONAL"
+  default     = "OFF"
 
   validation {
     condition     = contains(["OFF", "ON", "OPTIONAL"], var.mfa_configuration)
     error_message = "mfa_configuration must be one of OFF, ON or OPTIONAL -- the exact set the pinned provider accepts, observed by submitting an out-of-domain value and reading the rejection."
   }
 
-  # WHY : Refactoring Rationale: the trade-off above argues OPTIONAL correctly for
-  #       a freshly provisioned DEV pool and then let that argument stand for
-  #       production too, which is where it stops holding. OPTIONAL does not
-  #       merely defer the obligation, it never imposes it: a user who never
-  #       enrols a factor authenticates on a password alone forever, so a leaked
-  #       seed credential in production is a complete authentication. The
-  #       first-sign-in problem the default solves is a DEV problem -- it is dev
-  #       that is created and destroyed repeatedly by whoever is working on it --
-  #       and it does not justify a production pool that cannot require a second
-  #       factor. This validation makes the production posture a property of the
-  #       module rather than a value a root has to remember to set, so omitting
-  #       the input in prod fails to plan instead of silently producing
-  #       single-factor authentication.
-  #       Assumptions: the check reads var.environment, which this module already
-  #       declares and closes at dev and prod, so the two inputs are evaluated
-  #       together and the message can name the environment that triggered it.
-  #       Trade-offs: ON compels every user to enrol a factor before completing a
-  #       sign-in, INCLUDING any seed identity a production root chose to create.
-  #       That is the accepted cost and it is small, because seed_users now
-  #       defaults to an empty list: a production pool is expected to onboard its
-  #       identities through the approved mechanism, where factor enrolment is
-  #       part of onboarding rather than an obstacle to it.
-  #       Alternatives Considered: leaving prod free to choose and relying on a
-  #       policy scan to report OPTIONAL. Rejected because a scan reports after
-  #       the fact and can be waived, whereas a variable validation cannot be
-  #       satisfied by anything except the correct value.
+  # WHY : ⚠️ Refactoring Rationale: this validation REQUIRED prod to be ON and the
+  #       default was OPTIONAL. Both were wrong against the software that has to
+  #       answer the pool, and the two failures were opposite and equally total.
+  #       services/auth-service translates exactly ONE Cognito challenge --
+  #       NEW_PASSWORD_REQUIRED, in CognitoIdentityService.outcomeFrom -- and reports
+  #       every other challenge as an exchange it could not evaluate, which the
+  #       contract renders as HTTP 500. So under OPTIONAL, any user who did enrol a
+  #       software token received a 500 on every subsequent sign-in, the pool
+  #       answering SOFTWARE_TOKEN_MFA to a service with no path for it; and under ON
+  #       the pool answers MFA_SETUP to EVERY user's first sign-in, so a production
+  #       pool provisioned with this validation satisfied could not be signed into at
+  #       all. Advertising a factor the service cannot answer is worse than not
+  #       offering one, because it converts a working single-factor sign-on into a
+  #       server fault at the moment a security-conscious user opts in.
+  #       Assumptions: the fix chosen is to stop ADVERTISING the unsupported
+  #       capability rather than to implement it. Multi-factor authentication is not
+  #       a requirement of this migration -- the reference identity record at
+  #       app/cpy/CSUSR01Y.cpy L17-L23 has a password field and nothing else, and the
+  #       Agent Action Plan's identity mapping (section 0.4.1.9) asks for the pool,
+  #       the two groups and the claim conversion and asks for no second factor -- so
+  #       building the MFA_SETUP and SOFTWARE_TOKEN_MFA challenge union, its
+  #       associate/verify endpoints, its DTOs, its contract entries and its screens
+  #       would be a new capability rather than a fix. It is left as the documented
+  #       precondition below instead.
+  #       Assumptions: the check is not conditioned on var.environment, unlike the
+  #       posture it replaces. The defect is a property of the SERVICE that
+  #       authenticates against the pool, and both environments run the same service
+  #       image, so a per-environment exception would be an exception to nothing.
+  #       Trade-offs: the input keeps its full three-value domain and its
+  #       software-token pairing in main.tf even though only one value currently
+  #       passes. What that buys is a single, named place to lift the restriction:
+  #       whoever implements the challenge union deletes this one validation block
+  #       and the mechanism is already wired. Removing the input instead would delete
+  #       the mechanism as well and turn a one-line change into a re-derivation.
+  #       Alternatives Considered: leaving prod on ON and relying on the seed-user
+  #       list being empty there, so that no identity exists to be locked out.
+  #       Rejected because it makes the pool unusable by the identities a production
+  #       operator then onboards through the approved mechanism -- the first sign-in
+  #       of each of them meets MFA_SETUP and a 500 -- so it defers the outage to
+  #       whoever uses the environment rather than removing it.
   validation {
-    condition     = var.environment != "prod" || var.mfa_configuration == "ON"
-    error_message = "mfa_configuration must be \"ON\" when environment is \"prod\". OPTIONAL never requires a second factor, so a leaked password would be a complete authentication; the OPTIONAL default exists for dev, whose pool is created and destroyed repeatedly."
+    condition     = var.mfa_configuration == "OFF"
+    error_message = "mfa_configuration must be \"OFF\" until services/auth-service answers the MFA challenges. CognitoIdentityService translates only NEW_PASSWORD_REQUIRED; OPTIONAL makes every enrolled user's sign-in answer HTTP 500 with SOFTWARE_TOKEN_MFA, and ON makes every user's FIRST sign-in answer HTTP 500 with MFA_SETUP. Implement the challenge union and its endpoints before raising this value, and delete this validation in the same change."
   }
 }
 
@@ -405,10 +419,13 @@ variable "advanced_security_mode" {
 #       service to call GetTokensFromRefreshToken instead of initiating the
 #       incompatible REFRESH_TOKEN_AUTH flow. That is now a checkable statement
 #       rather than an assumption about code elsewhere: the call is made by
-#       CognitoIdentityService.exchangeRefreshToken, reached from its renewTokens
+#       CognitoIdentityService.exchangeRefreshToken, reached from its `refresh`
 #       method and served at POST /api/v1/auth/refresh, and it supplies the client
 #       secret as a request member because that is how this API proves a
-#       confidential client -- the initiated flows use a keyed digest instead.
+#       confidential client -- the initiated flows use a keyed digest instead. That
+#       service also refuses a replayed token as a RefreshTokenReuseException with the
+#       same sentence it uses for an expired one, which is the state the zero retry
+#       grace period configured in main.tf produces.
 # WHY : Refactoring Rationale: this exclusion previously rested on a premise that
 #       was not yet true. The service implemented no renewal at all, so forbidding
 #       the flow on the grounds that another API was used in its place described an

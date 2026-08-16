@@ -94,9 +94,10 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
  * beside the job it concerns is the smaller and more honest change than editing a sibling's file to
  * make an inventory tidy.
  *
- * <p>Assumptions: <b>it is nonetheless unscheduled.</b> The twelve states of
- * {@code carddemo-daily-batch} are quiesce, stage, verify, preflight, post, interest, backup,
- * combine, statements, reports, analyze and resume. Neither export nor import is among them. Both are
+ * <p>Assumptions: <b>it is nonetheless unscheduled.</b> The eleven states of
+ * {@code carddemo-daily-batch} are quiesce, stage, preflight, post, interest, backup,
+ * combine, statements, reports, analyze and resume -- the whole-migration verification gate runs
+ * inside the stage state rather than beside it. Neither export nor import is among them. Both are
  * operator-invoked branch-migration utilities reached only through the container's {@code --job=}
  * argument, which is exactly what the job-control header quoted above implies: a branch migration is an
  * operator event, not a nightly one.

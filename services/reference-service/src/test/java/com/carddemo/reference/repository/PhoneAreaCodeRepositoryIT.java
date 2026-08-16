@@ -92,7 +92,7 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>Assumptions: the classification values are taken from
  * {@link UsPhoneAreaCode#CODE_CLASS_GENERAL_PURPOSE} and
  * {@link UsPhoneAreaCode#CODE_CLASS_EASILY_RECOGNISABLE} and never spelled inline. The letters are a
- * schema fact -- {@code V1__reference.sql} constrains the column to two of them at its L407 -- so a
+ * schema fact -- {@code V1__reference.sql} constrains the column to two of them at its L396 -- so a
  * test that hard-coded them would keep passing if the entity's published constants and the stored
  * values ever diverged, which is the one failure a caller of this predicate would actually see.</p>
  *
@@ -124,7 +124,7 @@ import org.springframework.transaction.annotation.Transactional;
  * base starts. Rejected because three of the properties asserted here are the engine's own and not
  * the mapping's: that {@code CHAR(3)} returns a value of exactly three characters, that the primary
  * key refuses a duplicate at the statement rather than at commit, and that the check constraint at
- * {@code V1__reference.sql} L407 refuses a third classification. An engine that accepted a wider
+ * {@code V1__reference.sql} L396 refuses a third classification. An engine that accepted a wider
  * domain, or deferred either refusal, would leave every case here green while the deployed schema
  * behaved differently.</p>
  *
@@ -186,7 +186,7 @@ class PhoneAreaCodeRepositoryIT extends ReferencePersistenceBase {
     /** A well-formed three-character value on neither copybook list and in neither seeded class. */
     private static final String ABSENT_CODE = "000";
 
-    /** A classification letter the check constraint at {@code V1__reference.sql} L407 excludes. */
+    /** A classification letter the check constraint at {@code V1__reference.sql} L396 excludes. */
     private static final String REJECTED_CLASS = "Z";
 
     /** The state PostgreSQL reports for a unique or primary-key violation. */
@@ -201,7 +201,7 @@ class PhoneAreaCodeRepositoryIT extends ReferencePersistenceBase {
 
     /** Read only for the lookup subtotal, which spans the three tables another context consumes. */
     @Autowired
-    private UsStateRepository states;
+    private StateRepository states;
 
     /** Read only for the lookup subtotal, for the same reason as the state repository above. */
     @Autowired
@@ -298,8 +298,8 @@ class PhoneAreaCodeRepositoryIT extends ReferencePersistenceBase {
      * L440 is the trap that yields 410 in place of 490 and is described in this file's header.</p>
      *
      * <p>Assumptions: the classification's totality is a schema property rather than a seeding
-     * accident. {@code V1__reference.sql} declares {@code code_class CHAR(1) NOT NULL} at its L393
-     * and constrains it to two values at its L407, so the absent case cannot arise once the migration
+     * accident. {@code V1__reference.sql} declares {@code code_class CHAR(1) NOT NULL} at its L382
+     * and constrains it to two values at its L396, so the absent case cannot arise once the migration
      * has run and the third-value case cannot be stored. Both are still asserted here, because what
      * this case establishes is that the SEED honoured the constraint's intent across every row and
      * not merely that the constraint exists.</p>
@@ -336,7 +336,7 @@ class PhoneAreaCodeRepositoryIT extends ReferencePersistenceBase {
 
         // WHY : Assumptions: the key set is compared to the ROW count as well as to the expected
         //       figure, so a duplicated key cannot be absorbed silently. The primary key at
-        //       V1__reference.sql L395 makes that impossible, and asserting it here means a schema
+        //       V1__reference.sql L384 makes that impossible, and asserting it here means a schema
         //       that lost the constraint would fail on this line rather than on an arithmetic
         //       identity three lines further down whose cause would be far less obvious.
         assertThat(everyKey)
@@ -345,10 +345,10 @@ class PhoneAreaCodeRepositoryIT extends ReferencePersistenceBase {
                 .hasSize(everyRow.size());
 
         assertThat(absentClass)
-                .as("code_class is NOT NULL at V1__reference.sql L393, so no code may lack a class")
+                .as("code_class is NOT NULL at V1__reference.sql L382, so no code may lack a class")
                 .isEmpty();
         assertThat(unrecognisedClass)
-                .as("the check at V1__reference.sql L407 admits two values and no third")
+                .as("the check at V1__reference.sql L396 admits two values and no third")
                 .isEmpty();
 
         assertThat(generalPurpose)
@@ -543,7 +543,7 @@ class PhoneAreaCodeRepositoryIT extends ReferencePersistenceBase {
      * property a widened or trimmed mapping would break and it costs one assertion to pin.</p>
      *
      * <p>Assumptions: the classification is checked the same way for the same reason. It is
-     * {@code CHAR(1)} at {@code V1__reference.sql} L393, and a value read back as anything other than
+     * {@code CHAR(1)} at {@code V1__reference.sql} L382, and a value read back as anything other than
      * one character would make the entity's two published constants unmatchable by equality even
      * though a database comparison against them would still succeed.</p>
      *
@@ -560,7 +560,7 @@ class PhoneAreaCodeRepositoryIT extends ReferencePersistenceBase {
                 .hasSize(AREA_CODE_WIDTH)
                 .isEqualTo(GENERAL_PURPOSE_CODE);
         assertThat(row.getCodeClass())
-                .as("code_class is CHAR(1) at V1__reference.sql L393")
+                .as("code_class is CHAR(1) at V1__reference.sql L382")
                 .hasSize(1)
                 .isEqualTo(UsPhoneAreaCode.CODE_CLASS_GENERAL_PURPOSE);
     }
@@ -592,7 +592,7 @@ class PhoneAreaCodeRepositoryIT extends ReferencePersistenceBase {
      * Confirms the primary key refuses a duplicate area code at the flush.
      *
      * <p><b>Purpose.</b> {@code V1__reference.sql} declares {@code pk_us_phone_area_codes} on
-     * {@code area_cd} at its L395, and that constraint is what makes the key set counted by the
+     * {@code area_cd} at its L384, and that constraint is what makes the key set counted by the
      * partition case a set at all. Without it a seeded code could appear twice under two
      * classifications, both subset sizes would still be reachable, and the union would still cover the
      * table -- so the partition case depends on this refusal and does not establish it.</p>
@@ -644,7 +644,7 @@ class PhoneAreaCodeRepositoryIT extends ReferencePersistenceBase {
      * Confirms the check constraint refuses a third classification on a new row.
      *
      * <p><b>Purpose.</b> {@code V1__reference.sql} constrains {@code code_class} to two values at its
-     * L407, and that constraint is the mechanism that makes the partition TWO-valued. The partition
+     * L396, and that constraint is the mechanism that makes the partition TWO-valued. The partition
      * case asserts that no seeded row carries a third value; this case asserts that no row could,
      * which is the stronger property and the one that keeps the seed honest as it changes.</p>
      *
@@ -672,7 +672,7 @@ class PhoneAreaCodeRepositoryIT extends ReferencePersistenceBase {
 
         Throwable refusal = refusalOf(new UsPhoneAreaCode(ABSENT_CODE, REJECTED_CLASS));
 
-        assertThat(refusal).as("the check at V1__reference.sql L407 must refuse a third value")
+        assertThat(refusal).as("the check at V1__reference.sql L396 must refuse a third value")
                 .isNotNull();
         assertThat(sqlStateOf(refusal))
                 .as("a check violation, which is a different state from a unique violation")
@@ -683,7 +683,7 @@ class PhoneAreaCodeRepositoryIT extends ReferencePersistenceBase {
      * Confirms an absent classification is refused, which is what makes the partition total.
      *
      * <p><b>Purpose.</b> {@code V1__reference.sql} declares {@code code_class CHAR(1) NOT NULL} at its
-     * L393. The partition case asserts that no seeded row has an absent classification; this case
+     * L382. The partition case asserts that no seeded row has an absent classification; this case
      * asserts that none can acquire one, so the totality of the partition survives a later change to
      * the seed rather than holding only for the rows loaded today.</p>
      *
@@ -703,7 +703,7 @@ class PhoneAreaCodeRepositoryIT extends ReferencePersistenceBase {
         Throwable refusal = refusalOf(new UsPhoneAreaCode(ABSENT_CODE, null));
 
         assertThat(refusal)
-                .as("code_class is NOT NULL at V1__reference.sql L393, so an absent class is refused")
+                .as("code_class is NOT NULL at V1__reference.sql L382, so an absent class is refused")
                 .isNotNull();
     }
 

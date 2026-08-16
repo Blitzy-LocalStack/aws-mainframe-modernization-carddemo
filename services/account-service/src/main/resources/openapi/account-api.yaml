@@ -980,11 +980,114 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
+  # WHY : Assumptions: this operation is declared IMMEDIATELY after the write it judges, and
+  #       beneath its path, because the two share a request body and a reader has to read them
+  #       together. Separating them would invite one being changed without the other.
+  /api/v1/accounts/update/validate:
+    post:
+      tags: [end-user, account]
+      operationId: validateAccountUpdate
+      summary: Judge an edited account and customer without writing anything.
+      description: >-
+        Reproduces the FIRST of the reference screen's two turns. COACTUPC decides
+        whether to advance to its confirmation state on the strength of the edits
+        having already run: 2000-DECIDE-ACTION's show-details arm reads IF
+        INPUT-ERROR OR NO-CHANGES-DETECTED and performs CONTINUE, leaving the action
+        where it is, and only otherwise sets ACUP-CHANGES-OK-NOT-CONFIRMED, at
+        app/cbl/COACTUPC.cbl L2584 to L2591. Only the later turn performs
+        9600-WRITE-PROCESSING.
+
+
+        Refactoring Rationale: this operation did not exist, and its absence was a
+        correctness problem in the browser rather than a missing convenience. A client
+        wanting the reference's two turns could only advance without having validated
+        -- displaying "Changes validated.Press F5 to save" on the strength of nothing
+        -- or submit the write in order to learn the verdict, which is the one thing
+        the first turn must not do.
+
+
+        A refused value is reported as 200 carrying the verdict, NOT as 400. Here a
+        refusal is the successful answer to the question asked; on the write it means
+        the request could not be carried out. Callers therefore read inputError rather
+        than the status code. Alternatives Considered: a 400 whose body a client parses
+        for field entries -- rejected because it makes an ordinary expected outcome
+        indistinguishable from a malformed request, and because an intermediary may
+        treat a 4xx differently.
+
+
+        No If-Match precondition is required, unlike the write: a verdict changes
+        nothing, so there is no state for a precondition to protect.
+      security:
+        - bearerAuth: []
+      x-required-authorities: [carddemo-admin, carddemo-user]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      requestBody:
+        description: >-
+          The same submitted state the write carries, judged rather than applied.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountUpdateRequest'
+      responses:
+        '200':
+          description: >-
+            The verdict those edits reached. An empty fieldErrors array with both
+            flags false is the only state that admits advancing to the confirmation
+            turn.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountUpdateValidationResponse'
+        '400':
+          description: >-
+            The submitted identifier is not one the reference's own key edit would
+            accept, including absent. A refused FIELD does not produce this status;
+            it is reported in the 200 body.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: >-
+            The account master or the customer the account resolves to holds no
+            such row.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/XCorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
   /api/v1/accounts/view:
     post:
       tags: [end-user, account]
       operationId: readAccountView
-      summary: Read one account and its customer for the account-view screen.
+      summary: Read one account, with its customer where the pairing resolves, for the account-view screen.
       description: >-
         Replaces app/cbl/COACTVWC.cbl, which reads the account master by key,
         follows the pairing to the customer master and fills one screen from
@@ -1004,10 +1107,23 @@ paths:
         The customer is located through the CROSS-REFERENCE rather than through a
         column on the account, because the account record declares no customer
         identifier -- the baseline resolves the pairing through CXACAIX. A
-        missing cross-reference row and a missing customer row are reported as
-        the same 404 as a missing account: the distinction is real but is not
-        actionable by the caller, and naming which would disclose the shape of
-        the data.
+        missing cross-reference row is reported as the same 404 as a missing
+        account: that distinction is real but is not actionable by the caller,
+        and naming which would disclose the shape of the data.
+
+
+        Refactoring Rationale: a missing CUSTOMER row used to be folded into that
+        same 404, and it no longer is -- it answers 200 with customer null and the
+        reference's own sentence in returnMessage. The two are not alike, and
+        app/cbl/COACTVWC.cbl is what separates them: it guards its account region
+        on the disjunction FOUND-ACCT-IN-MASTER OR FOUND-CUST-IN-MASTER at L471
+        with L472 and its customer region on FOUND-CUST-IN-MASTER alone at L493,
+        so it PAINTS an account whose customer master holds no row and paints
+        nothing at all when no account row is located. Answering 404 for the
+        first of those reported an account that exists as one that does not and
+        withheld the ten account fields the terminal shows. Naming the miss here
+        is the reference's behaviour rather than a disclosure: the caller already
+        holds the account row in the same response.
 
 
         Refactoring Rationale: this operation was GET /api/v1/accounts/{accountId}/view
@@ -1065,12 +1181,24 @@ paths:
       responses:
         '200':
           description: >-
-            The account and its customer. The ETag header carries the revision
-            the update operation requires back as If-Match; a caller that intends
+            The account, and its customer when the pairing resolved to a customer
+            row. On the COMPLETE arm the ETag header carries the revision the
+            update operation requires back as If-Match, and a caller that intends
             to edit must keep it.
+
+
+            Refactoring Rationale: this promised the tag unconditionally, and the
+            partial arm cannot honour that. A revision is derived from BOTH rows,
+            so there is none to publish when only one was located -- and the
+            update operation this tag exists for refuses that arm anyway, because
+            its form has eighteen customer controls with no values to seed. The
+            tag is therefore ABSENT rather than rendered from a missing revision:
+            a placeholder tag would be syntactically valid, and a caller would
+            echo it in If-Match and receive a conflict for a record nobody had
+            changed.
           headers:
             ETag:
-              $ref: '#/components/headers/RevisionETag'
+              $ref: '#/components/headers/RevisionETagWhenComplete'
             X-Correlation-Id:
               $ref: '#/components/headers/XCorrelationId'
           content:
@@ -1146,8 +1274,15 @@ paths:
         '404':
           description: >-
             The account master holds no such row, or the account has no
-            cross-reference row, or the row names a customer the customer master
-            does not hold.
+            cross-reference row.
+
+
+            Refactoring Rationale: a third arm was listed here -- a
+            cross-reference row naming a customer the customer master does not
+            hold -- and it has moved to the 200 above, where the reference puts
+            it. Both arms that remain are ones app/cbl/COACTVWC.cbl paints no
+            screen region for, because its account region's guard at L471 with
+            L472 is false as well, so a 404 here still means "nothing to show".
           headers:
             X-Correlation-Id:
               $ref: '#/components/headers/XCorrelationId'
@@ -1901,6 +2036,36 @@ components:
         pattern: '^W/"[^"]+"$'
       example: 'W/"7:3"'
 
+    # WHY : ⚠️ Refactoring Rationale: this is a SECOND declaration of the same tag differing only in
+    #       whether it is guaranteed, and the pair exists because the two operations that publish the
+    #       tag make different promises. The update above always has both rows in hand, so its tag is
+    #       required; the view answers 200 for an account whose customer master holds no row, where no
+    #       revision exists to publish. Relaxing the single declaration instead would have withdrawn
+    #       the update's guarantee, which a caller relies on to compose its next If-Match, and
+    #       declaring the header inline on the view response would have put the pattern in a second
+    #       place where the two could drift.
+    # WHY : Alternatives Considered: naming this one `RevisionETagOptional`. Rejected because
+    #       "optional" states the mechanism and not the CONDITION -- a reader still has to look up when
+    #       it is absent -- whereas the condition is exactly what a caller needs in order to know that
+    #       a missing tag is an answer about the data rather than a fault.
+    RevisionETagWhenComplete:
+      description: >-
+        The revision of the account and customer pair, as an opaque entity tag, on
+        the arm where both rows were located. It is ABSENT when the account was
+        located and the customer master holds no matching row, because a revision
+        derived from one row would not describe the pair the tag stands for; that
+        arm carries customer null and names the miss in returnMessage.
+
+
+        Where present it is identical in form and meaning to the tag the update
+        operation publishes and requires back in If-Match, and it is WEAK for the
+        reason recorded there.
+      required: false
+      schema:
+        type: string
+        pattern: '^W/"[^"]+"$'
+      example: 'W/"7:3"'
+
   parameters:
     CorrelationIdHeader:
       name: X-Correlation-Id
@@ -1921,9 +2086,8 @@ components:
         A value longer than the published bound, or carrying a character outside the
         published set, is refused with 400 rather than being silently replaced -- so a
         caller cannot believe it is correlating requests that this service is in fact
-        correlating under a different identity. A value whose shape is that of a
-        primary account number, meaning only digits and the three admitted separators
-        with thirteen or more digits, is refused on the same terms, because this
+        correlating under a different identity. A value whose shape is that of a protected identifier, meaning only digits and
+        the three admitted separators with nine or more digits, is refused on the same terms, because this
         identity is echoed on the response and written to every log line for the
         request. The refusal carries the shared problem body and the response
         correlation header like any other 400, and it names the rule it applied
@@ -2225,7 +2389,7 @@ components:
     CorrelationId:
       type: string
       maxLength: 24
-      pattern: '^$|^(?!(?:[._-]*[0-9]){13,}[._-]*$)[A-Za-z0-9_.-]{1,24}$'
+      pattern: '^$|^(?!(?:[._-]*[0-9]){9,}[._-]*$)[A-Za-z0-9_.-]{1,24}$'
       description: >-
         Identity of one unit of work. At most twenty-four characters drawn from the
         ASCII letters, the digits, the hyphen, the underscore and the full stop. A
@@ -2239,13 +2403,15 @@ components:
 
         Assumptions: the pattern additionally refuses one narrow class the character
         set alone admits -- a value made up only of digits and the three separators
-        carrying thirteen or more digits. That is the shape of a primary account
-        number in contiguous form and in every separated form, and the shared filter
-        refuses it because this identity is echoed on the response and written to
-        every log line for the request, so accepting one would copy a card number
-        into both. Ordinary values are unaffected: a timestamp-like 2022-07-18-0930
-        carries nine digits and is accepted, and any value containing a letter is
-        accepted whatever its digits. A minted value begins CD, a non-numeric prefix
+        carrying nine or more digits. That is the shape of every protected identifier
+        this system holds, in contiguous form and in every separated form: a customer
+        identifier and a national identifier are nine digits, an account identifier
+        eleven, a card number sixteen. The shared filter refuses it because this
+        identity is echoed on the response and written to every log line for the
+        request, so accepting one would copy a protected identifier into both.
+        Ordinary values are unaffected: a date-like 2022-07-18 carries eight digits
+        and is accepted, and any value containing a letter is accepted whatever its
+        digits. A minted value begins CD, a non-numeric prefix
         chosen so a minted identity can never fall into the refused class.
 
 
@@ -2446,7 +2612,8 @@ components:
       additionalProperties: false
       required: [accountId, account, customer, informationMessage, returnMessage]
       description: >-
-        One account and its customer, at the widths the account-view MAP declares
+        One account, and the customer it belongs to where the pairing resolved to a
+        customer row, at the widths the account-view MAP declares
         rather than at the widths the records declare. The two disagree for four
         values -- the postal code, the national identifier and both telephone
         numbers -- and the reference itself shows the narrower form on this screen
@@ -2456,7 +2623,7 @@ components:
         accountId:
           type: string
           maxLength: 11
-          pattern: '^[0-9]{1,11}$'
+          pattern: '^[0-9]{11}$'
           description: >-
             The account read, echoed as digits. It is a string here and an integer
             in the path parameter, and the difference is deliberate: the reference
@@ -2466,8 +2633,34 @@ components:
           example: '12345678901'
         account:
           $ref: '#/components/schemas/AccountDetail'
+        # WHY : ⚠️ Refactoring Rationale: the customer half is NULLABLE and was declared required.
+        #       app/cbl/COACTVWC.cbl guards its two screen regions differently -- the account region on
+        #       the disjunction FOUND-ACCT-IN-MASTER OR FOUND-CUST-IN-MASTER at L471 and L472, the
+        #       customer region on FOUND-CUST-IN-MASTER alone at L493 -- so an account located without a
+        #       customer row is a state the reference PAINTS, with its account fields shown and the
+        #       verbatim sentence "Did not find associated customer in master file" on the message line.
+        #       Declaring the member required made that state unpublishable, and the service answered
+        #       HTTP 404 for it instead, which loses ten fields the terminal displays and reports an
+        #       account that exists as one that does not.
+        # WHY : Assumptions: nullable is expressed as a oneOf against the null type, matching the two
+        #       message members below, rather than by dropping the member from `required`. The
+        #       difference is observable: the serialiser emits declared members as null rather than
+        #       omitting them, so a client sees the key either way and a shape that made it optional
+        #       would describe a response this service does not send.
+        # WHY : Assumptions: the ACCOUNT half stays required, and the asymmetry is the reference's. When
+        #       no account row is located the reference paints NEITHER region -- both guards above are
+        #       false -- so there is no published state carrying a customer without an account, and this
+        #       operation continues to answer 404 for it.
         customer:
-          $ref: '#/components/schemas/CustomerDetail'
+          oneOf:
+            - $ref: '#/components/schemas/CustomerDetail'
+            - type: 'null'
+          description: >-
+            The customer the account belongs to, or null when the account was
+            located and the customer master holds no matching row. On that arm the
+            returnMessage carries the reference's own sentence naming the miss and
+            no entity tag is issued, because a precondition cannot be formed from
+            rows that were not both located.
         # WHY : Assumptions: the two message members carry DIFFERENT widths because the
         #       reference declares two separate channels, and the narrower of the two is
         #       not a rounding of the other. app/cbl/COACTVWC.cbl declares
@@ -2485,23 +2678,33 @@ components:
               maxLength: 40
             - type: 'null'
           description: >-
-            The screen's information line, or null. It is always null on this
-            operation and is declared because the shape is shared with the update
-            response, where it is not. The width is the 40 characters
-            WS-INFO-MSG declares at L110 of app/cbl/COACTVWC.cbl, not the 45 its
-            screen container holds. Assumptions: it is not omitted from the
-            response when null -- the serialiser emits declared members as null
-            rather than dropping them -- so a client sees the key either way.
+            The screen's information line, or null. Refactoring Rationale: this
+            read "always null on this operation", which was never true of the
+            delivered service -- every arm of the composition sets the reference's
+            own prompt, "Enter or update id of account to display", because
+            app/cbl/COACTVWC.cbl L528 to L530 forces WS-PROMPT-FOR-INPUT back
+            whenever the information field is empty, making the prompt the floor of
+            that channel rather than merely its first value. A client written to
+            the retired sentence would have treated a populated line as a contract
+            breach. The width is the 40 characters WS-INFO-MSG declares at L110 of
+            app/cbl/COACTVWC.cbl, not the 45 its screen container holds.
+            Assumptions: the null arm is kept because the shape is shared with the
+            update response, and because a member is emitted as null rather than
+            dropped, so a client sees the key either way.
         returnMessage:
           oneOf:
             - type: string
               maxLength: 75
             - type: 'null'
           description: >-
-            The screen's message line, or null; always null on this operation. The
-            width is the 75 characters CCARD-ERROR-MSG and CCARD-RETURN-MSG
-            declare, matching WS-RETURN-MSG at L117 of app/cbl/COACTVWC.cbl, which
-            is a rendering constraint carried across rather than a suggestion.
+            The screen's message line, or null. Refactoring Rationale: this read
+            "always null on this operation", which was equally untrue: the
+            partial-customer arm above carries the verbatim sentence "Did not find
+            associated customer in master file" here, latched by the read that
+            missed. It is null on the arm where both halves were located. The width
+            is the 75 characters CCARD-ERROR-MSG and CCARD-RETURN-MSG declare,
+            matching WS-RETURN-MSG at L117 of app/cbl/COACTVWC.cbl, which is a
+            rendering constraint carried across rather than a suggestion.
 
     AccountDetail:
       type: object
@@ -2610,13 +2813,33 @@ components:
         ssnMasked:
           type: string
           maxLength: 12
+          # WHY : Refactoring Rationale: this property published a maxLength and no
+          #   pattern, and a bare maximum of 12 admits a WHOLE formatted national
+          #   identifier -- 123-45-6789 is eleven characters -- so a service, stub or
+          #   proxy returning the clear value satisfied this schema exactly as the
+          #   marker does, and the screen that reads it would have painted it. The
+          #   pattern is the marker itself, which is the only value CustomerMapper
+          #   publishes for this property.
+          # WHY : Refactoring Rationale: the description said the target "masks all but
+          #   the last four" and the example showed '***-**-6789'. Neither was true of
+          #   the delivered service: CustomerMapper.IDENTIFIER_REDACTED is the constant
+          #   [REDACTED], and that class records why a trailing-digits mask is not even
+          #   constructible there -- the stored value is enciphered and it publishes no
+          #   accessor for the clear form. The example additionally made this document
+          #   the one place a shape resembling a national identifier appeared, which the
+          #   sibling declaration of this same property refuses to do on purpose.
+          pattern: '^\[REDACTED\]$'
           description: >-
             ACSTSSNI PIC X(12), from CUST-SSN PIC 9(09). The baseline composes the
-            whole nine digits onto this screen; the target masks all but the last
-            four, which is a documented, deliberate divergence rather than an
-            omission -- the stored value is enciphered and this context has no
-            decipher route by design.
-          example: '***-**-6789'
+            whole nine digits onto this screen; the target publishes a FIXED
+            redaction marker instead and never any part of the value, which is a
+            documented, deliberate divergence rather than an omission -- the stored
+            value is enciphered and this context has no decipher route by design.
+            Nothing derived from the stored value reaches a caller through this
+            property: not a fragment of it, and not its length. No example is given,
+            deliberately -- the pattern above states the only admissible value, and
+            an example resembling a national identifier is exactly what this document
+            declines to carry.
         dateOfBirth:
           type: string
           maxLength: 10
@@ -2702,9 +2925,18 @@ components:
         governmentIssuedIdMasked:
           type: string
           maxLength: 20
+          # WHY : Assumptions: the same pattern as the national identifier above, because
+          #   CustomerMapper publishes the same constant for both. Withholding it as a
+          #   constant rather than as a length-preserving mask is what keeps the OPTIONAL
+          #   nature of this column undisclosed: a mask preserving length or presence
+          #   would tell a caller whether the row carries a government-issued identifier
+          #   at all.
+          pattern: '^\[REDACTED\]$'
           description: >-
-            ACSGOVTI PIC X(20), from CUST-GOVT-ISSUED-ID PIC X(20), masked for the
-            same reason and on the same terms as the national identifier above.
+            ACSGOVTI PIC X(20), from CUST-GOVT-ISSUED-ID PIC X(20), redacted for the
+            same reason and on the same terms as the national identifier above: a
+            fixed marker is published rather than any part of the value. No example
+            is given, for the same reason.
         phoneNumber2:
           oneOf:
             - type: string
@@ -2955,6 +3187,53 @@ components:
           maxLength: 1
           description: ACSPFLGI PIC X(1).
 
+    AccountUpdateValidationResponse:
+      type: object
+      additionalProperties: false
+      required: [fieldErrors, message, inputError, noChangesFound]
+      description: >-
+        The verdict the account-update edits reached, carrying no committed state
+        because nothing was written. An empty fieldErrors array with both flags false
+        is the only state that admits advancing to the confirmation turn, which is the
+        polarity of app/cbl/COACTUPC.cbl L2584 to L2591.
+      properties:
+        fieldErrors:
+          type: array
+          description: >-
+            One entry per refused property, in the order the edits reached them, empty
+            when every value was accepted. Keyed by REQUEST PROPERTY so a form can
+            attach each refusal to the control that submitted it.
+          items:
+            $ref: '#/components/schemas/FieldError'
+        message:
+          # WHY : Assumptions: nullability is expressed as a `oneOf` union with `type: 'null'`, which is
+          #       how this OpenAPI 3.1 document states it everywhere -- see `informationMessage` on the
+          #       view response. The 3.0 `nullable: true` keyword is not part of 3.1 and is read as an
+          #       unknown annotation, so a member declared that way is published as NON-nullable while
+          #       reading as nullable to a human.
+          oneOf:
+            - type: string
+              maxLength: 80
+            - type: 'null'
+          description: >-
+            The sentence the screen shows for this verdict, in the reference's own
+            wording, or null when there is none. The no-change verdict carries the
+            reference's own no-change sentence here rather than in a field entry,
+            because the reference latches it into WS-RETURN-MSG and not against a
+            control.
+        inputError:
+          type: boolean
+          description: >-
+            Whether any submitted value was refused, which is the reference's
+            INPUT-ERROR condition.
+        noChangesFound:
+          type: boolean
+          description: >-
+            Whether the submission matched the stored rows in every compared field,
+            which is the reference's NO-CHANGES-DETECTED condition. It is reported
+            separately from inputError because the reference treats them as two
+            distinct reasons not to advance and shows a different sentence for each.
+
     AccountUpdateResponse:
       type: object
       additionalProperties: false
@@ -2978,7 +3257,7 @@ components:
         accountId:
           type: string
           maxLength: 11
-          pattern: '^[0-9]{1,11}$'
+          pattern: '^[0-9]{11}$'
           description: The account that was updated, echoed as digits.
           example: '12345678901'
         # WHY : Assumptions: the acceptance sentence belongs to the INFORMATION channel and
@@ -3089,7 +3368,7 @@ components:
         accountId:
           type: string
           maxLength: 11
-          pattern: '^[0-9]{1,11}$'
+          pattern: '^[0-9]{11}$'
           description: XREF-ACCT-ID PIC 9(11), as digits.
           example: '12345678901'
 
@@ -3325,6 +3604,13 @@ components:
         ssnMasked:
           type: string
           maxLength: 12
+          # WHY : Assumptions: the pattern is published here as well as on the account-view
+          #   grouping, although this operation is tagged internal and no browser token
+          #   reaches it. A property whose only admissible value is a fixed marker should
+          #   say so wherever it is declared: a reader comparing the two declarations
+          #   would otherwise find one constrained and one not and have to guess which
+          #   describes the service.
+          pattern: '^\[REDACTED\]$'
           description: >-
             Derived from CUST-SSN PIC 9(09) at L17, which is declared NUMERIC. The
             stored value is enciphered and this context has no decipher route by
@@ -3335,6 +3621,7 @@ components:
         governmentIssuedIdMasked:
           type: string
           maxLength: 20
+          pattern: '^\[REDACTED\]$'
           description: >-
             Derived from CUST-GOVT-ISSUED-ID PIC X(20) at L18, which is declared
             ALPHANUMERIC and is therefore not the same kind of field as the
@@ -3505,11 +3792,9 @@ components:
     #       digits-only, because the reference holds each of them as characters and
     #       reinterprets them as numbers only for arithmetic, CC-ACCT-ID PIC X(11) at L34 of
     #       app/cpy/CVCRD01Y.cpy redefined as PIC 9(11) at L36 being the pattern.
-    # WHY : Assumptions: the change is one of REPRESENTATION and not of domain. One to
-    #       eleven digits spell exactly the zero-through-eleven-nines range the integer form
-    #       declared, so no value that was acceptable becomes unacceptable and no value that
-    #       was refused becomes admissible; a caller that sent 12345678901 now sends
-    #       '12345678901'. What it buys is that the eleven-character width is expressible at
+    # WHY : Assumptions: that change from an integer was one of REPRESENTATION and not of
+    #       domain -- a caller that sent 12345678901 now sends '12345678901'. What it bought
+    #       is that the eleven-character width is expressible at
     #       all: a browser holds what an operator typed into an eleven-character screen
     #       field, and a number cannot carry the leading zeroes that width produces.
     # WHY : Trade-offs: a caller that has been sending a bare number now sends a quoted one.
@@ -3532,18 +3817,27 @@ components:
       properties:
         accountId:
           type: string
-          minLength: 1
+          minLength: 11
           maxLength: 11
-          pattern: '^[0-9]{1,11}$'
+          pattern: '^[0-9]{11}$'
           description: >-
-            The account identifier as characters, at most the eleven-digit width
+            The account identifier as characters, at EXACTLY the eleven-digit width
             XREF-ACCT-ID PIC 9(11) declares at L7 of app/cpy/CVACT03Y.cpy. Digits
             only and never signed: the reference field is unsigned display, so a
             sign, a space, a decimal point or a thousands separator names no
-            account and is refused before any lookup is attempted. A value shorter
-            than the declared width is accepted and resolves to the same account
-            as its zero-padded form, which is what an eleven-character screen
-            field and a keyed row respectively hold.
+            account and is refused before any lookup is attempted.
+
+
+            Refactoring Rationale: a value shorter than eleven used to be accepted
+            here, on the reasoning that it resolves to the same account as its
+            zero-padded form. That is not the reference's reasoning. COACTUPC
+            1210-EDIT-ACCOUNT at app/cbl/COACTUPC.cbl L1783-L1817 and COACTVWC
+            2210-EDIT-ACCOUNT both edit an eleven-character field whose IS NOT
+            NUMERIC test fails on the trailing spaces a short value leaves, so the
+            baseline REFUSES a short form rather than padding it -- and every other
+            contract in this migration already spelt the field '^[0-9]{11}$'. This
+            was the only request body admitting a short one, so one field carried
+            two widths across one system.
           example: '12345678901'
 
     CustomerLookupRequest:

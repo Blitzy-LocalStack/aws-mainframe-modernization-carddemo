@@ -7,11 +7,13 @@
 #   This file carries two distinct responsibilities for the `dev` Terraform
 #   root, and it is the only file in the root that carries either:
 #
-#     1. Toolchain contract. It declares the admitted Terraform CLI SERIES --
-#        a pessimistic constraint with both a floor and a ceiling, not an open
-#        minimum -- together with the provider version constraints under which
-#        every `plan` and `apply` of this environment is expected to have been
-#        produced and reviewed.
+#     1. Toolchain contract. It declares the MINIMUM admitted Terraform CLI --
+#        an open floor, which is the constraint AAP section 0.6.1.4 states --
+#        together with the provider version constraints under which every `plan`
+#        and `apply` of this environment is expected to have been produced and
+#        reviewed. Which CLI actually runs is decided by the pinned installer in
+#        the pipeline, not by this constraint; see the rationale at the
+#        constraint itself.
 #
 #     2. Sole ownership of `provider "aws"`. This is the ONE place in this
 #        root's entire module graph where the AWS provider is configured. Each
@@ -40,16 +42,16 @@
 #
 # Provides:
 #   One configured, unaliased default AWS provider plus a resolved provider set
-#   for `hashicorp/aws`, `hashicorp/random` and `hashicorp/archive`. Nothing in
+#   for `hashicorp/aws` and `hashicorp/random` -- the exact pair AAP section 0.6.1.4
+#   names. Nothing in
 #   this file is referenced by name -- `main.tf` and the modules it calls pick the provider
 #   up implicitly as the default for their resource types, which is why adding
 #   a provider argument here silently changes behaviour everywhere at once.
 #
 # Errors:
-#   - A Terraform CLI outside the `required_version` series -- older than
-#     1.15.0 OR 1.16.0 and newer -- aborts at `terraform init`, before any
-#     provider is fetched or any state is touched. Both directions are
-#     deliberate; see the rationale at the constraint itself.
+#   - A Terraform CLI older than 1.15.0 aborts at `terraform init`, before any
+#     provider is fetched or any state is touched. There is deliberately no upper
+#     bound; see the rationale at the constraint itself.
 #   - A provider release outside either constraint below aborts at
 #     `terraform init` during provider selection.
 #   - A SECOND `provider "aws"` block anywhere in this root -- most plausibly
@@ -59,59 +61,30 @@
 # =============================================================================
 
 terraform {
-  # Refactoring Rationale: `~> 1.15.0` replaces an open `>= 1.15.0` floor.
-  #       The pessimistic operator on the patch component accepts
-  #       1.15.0 through 1.15.x and refuses 1.16.0 as well as 2.x. That is the
-  #       toolchain this package is actually reviewed under: it is validated on
-  #       1.15.8, and the environment contract states the constraint in those
-  #       terms and forbids installing 1.16 or 1.17. A Terraform MINOR release
-  #       is where language behaviour, validation semantics and state-format
-  #       handling change, so an open floor let a reviewed plan be discharged --
-  #       and this environment's state be rewritten -- by a CLI no plan was ever
-  #       produced under. `infra/bootstrap/versions.tf` already carries `~>
-  #       1.15.0` for exactly this reason; the two environment roots now agree
-  #       with it instead of contradicting it.
-  # WHY : Refactoring Rationale: this line previously carried the open floor,
-  #       argued on the grounds that a root ceiling "made the tree
-  #       self-inconsistent" because the sixteen modules under infra/modules/
-  #       declare `>= 1.15.0`. That argument is WITHDRAWN, because it describes
-  #       constraint intersection as a conflict when intersection is precisely
-  #       how Terraform combines version constraints: a root at `~> 1.15.0`
-  #       calling modules at `>= 1.15.0` yields one effective constraint,
-  #       `~> 1.15.0`, with no disagreement to resolve. The asymmetry is
-  #       deliberate and load-bearing rather than accidental. A root directory is
-  #       the only thing an operator or CI ever runs `init`, `plan` and `apply`
-  #       against, so it is the only place a toolchain ceiling can be enforced at
-  #       the moment state is written; a shared module is reached only through a
-  #       root, so a floor there keeps one module tree reusable by any caller
-  #       that satisfies its own ceiling. Reviewer guidance on this finding
-  #       states the same division explicitly: environment roots take the
-  #       pessimistic constraint, shared modules may retain a minimum floor.
-  # WHY : Assumptions: `~> 1.15.0` is a strict SUBSET of the `>= 1.15.0` the
-  #       dependency inventory records, so narrowing it here honours that floor
-  #       rather than departing from it -- every CLI this root now admits also
-  #       satisfies the inventory constraint.
-  # WHY : Assumptions: the committed .terraform.lock.hcl beside this file does
-  #       NOT guard the toolchain, and an earlier note here claiming it did is
-  #       WITHDRAWN as false. Terraform's dependency lock file locks PROVIDERS
-  #       and nothing else: this root's lock contains three `provider` blocks
-  #       (aws, random, archive) with their versions and checksums, and no CLI
-  #       version entry of any kind, so no CLI release can be admitted or refused
-  #       by it. The count is three rather than four because the `tls` provider was
-  #       removed with its last consumer -- see the note at required_providers. The two mechanisms are complementary and neither
-  #       suffices alone -- the constraint below decides which CLI may run, the
-  #       lock plus CI's `-lockfile=readonly` decides which provider builds that
-  #       CLI may resolve. `infra/bootstrap/versions.tf` states the same pairing.
-  # WHY : Trade-offs: a ceiling rejects a runner whose toolchain image has moved
-  #       forward to 1.16, and the package cannot fix that from inside itself --
-  #       the CLI is supplied by the operator or the CI runner rather than
-  #       resolved from a registry. That refusal is the intended behaviour here,
-  #       not a defect: a runner that silently moved a minor is exactly the case
-  #       the constraint exists to catch, and the remedy is to pin the runner's
-  #       Terraform to the reviewed series. Adopting a new minor stays a
-  #       deliberate, reviewable edit to this one line in three files -- both
-  #       environment roots and the bootstrap root.
-  required_version = "~> 1.15.0"
+  # WHY : ⚠️ Refactoring Rationale: this read `~> 1.15.0`, which accepts 1.15.x and
+  #       REFUSES 1.16.0 and above, and several paragraphs here argued for that ceiling
+  #       on the grounds that a Terraform minor is where language and state-format
+  #       behaviour changes. The argument is sound engineering and it is still not this
+  #       package's to make: AAP section 0.6.1.4 states the CLI constraint as
+  #       `>= 1.15.0`, and a root that narrows a frozen plan has departed from it just
+  #       as surely as one that widens it. The floor is restored, and every paragraph
+  #       that reasoned from the ceiling is withdrawn with it rather than left to read
+  #       as a description of the constraint below.
+  # WHY : Assumptions: what the ceiling actually protected is not lost, it moves to
+  #       where it belongs. The reviewed toolchain is pinned by the RUNNER -- the
+  #       environment contract validates on 1.15.8 and CI installs a checksum-pinned
+  #       Terraform rather than whatever is newest -- so the CLI a plan is discharged
+  #       under is still exactly one reviewed release. A constraint in this file could
+  #       only ever refuse a CLI after the operator had already installed it; the
+  #       pinned installer decides which one exists.
+  # WHY : Trade-offs: an open floor admits a future major, and 2.x could in principle
+  #       run this root. Accepted, because the plan says so and because the practical
+  #       guard is the pinned installer plus the lock file's `-lockfile=readonly`
+  #       initialization, neither of which a CLI version constraint contributes to.
+  #       Alternatives Considered: keeping `~> 1.15.0` and recording the divergence in
+  #       a comment. Rejected for the same reason the archive provider below was
+  #       removed rather than annotated -- a comment does not amend a frozen plan.
+  required_version = ">= 1.15.0"
 
   required_providers {
     # WHY : `dev` is the environment allowed to run Aurora Serverless at a
@@ -167,33 +140,31 @@ terraform {
       version = "~> 3.9"
     }
 
-    # WHY : Refactoring Rationale: Lambda deployment packages are assembled
-    #       deterministically from repository sources during plan. An external
-    #       zip command would add an untracked build step whose bytes Terraform
-    #       could not hash into each function's source_code_hash.
-    # WHY : Assumptions: this entry and the `tls` entry below take this root past
-    #       the two providers -- `hashicorp/aws` and `hashicorp/random` -- that the
-    #       package's dependency inventory names, and the divergence is recorded
-    #       here rather than removed. Both are CONSUMED by main.tf, so the
-    #       declarations are not orphans: `data "archive_file"` packages the four
-    #       Lambda functions the batch state machine's quiesce, analyze and resume
-    #       states invoke, and `aws_lambda_function` accepts only a `filename`, an
-    #       S3 object or a container image -- there is no inline source form. The
-    #       only ways to drop this provider would be to commit a binary zip, which
-    #       hides reviewed source behind an opaque artifact, or to delete the
-    #       functions, which would delete three of the eleven batch states.
-    #       Trade-offs: because the provider IS used here, deleting the declaration
-    #       while keeping the resources is not the smaller change it looks like --
-    #       tflint's `terraform_required_providers` rule requires a version
-    #       constraint for every provider a directory actually uses, so an
-    #       undeclared-but-used provider fails the gating lint run AND lets `init`
-    #       resolve an arbitrary major.
-    archive = {
-      source  = "hashicorp/archive"
-      version = "~> 2.7"
-    }
-
-    # WHY : Refactoring Rationale: a `tls` provider requirement stood here, declared
+    # WHY : ⚠️ Refactoring Rationale: an archive-provider requirement stood here,
+    #       declared for three data sources that packaged the operational Lambda
+    #       functions during plan, together with a paragraph recording that it took this
+    #       root past the provider inventory AAP section 0.6.1.4 fixes -- the Terraform
+    #       CLI, `hashicorp/aws` and `hashicorp/random`. Recording a divergence is not
+    #       the same as being permitted one: the plan is frozen, so the divergence is
+    #       removed rather than annotated. Packaging moved to
+    #       infra/lambda/build_packages.py, which uses the standard library's zipfile
+    #       module and no provider at all, and each `aws_lambda_function` now reads the
+    #       built archive through `filename` with `filebase64sha256`. The provider is
+    #       removed with its last consumer.
+    # WHY : Assumptions: the old paragraph argued that an external build step would
+    #       produce bytes "Terraform could not hash into each function's
+    #       source_code_hash". That is not so, and it was the reason the divergence
+    #       looked necessary: `filebase64sha256` hashes exactly the bytes on disk, which
+    #       are the bytes Lambda receives. What the argument was really protecting
+    #       against is a NON-DETERMINISTIC archive, whose hash would move on every build
+    #       and show all four functions updating on a commit that changed no handler --
+    #       and the builder pins timestamps and modes precisely to prevent that.
+    # WHY : Trade-offs: `terraform validate` and `terraform plan` now require the
+    #       packages to exist, because both evaluate the hash. Every plan step in
+    #       .github/workflows/infra-ci.yml and .github/workflows/deploy.yml runs the
+    #       builder first, and docs/runbooks/deploy.md states the command; a run that
+    #       skips it fails while resolving the hash and names the absent path.
+    # WHY : Refactoring Rationale: a `tls` provider requirement also stood here, declared
     #       for a key generator and a self-signed-certificate resource in main.tf
     #       that fed an imported ACM certificate and two Secrets Manager entries. All
     #       of those are deleted -- the listener key they produced was persisted in
@@ -201,9 +172,9 @@ terraform {
     #       removed with its last consumer. Leaving a declared-but-unused provider
     #       would be reported by the recursive lint's unused-required-providers rule
     #       and would let `init` keep fetching a provider nothing resolves against.
-    # WHY : Assumptions: the deletion is safe to make here because no resource in
-    #       this root's own graph uses the provider any more, and no CHILD module
-    #       declares it either -- unlike `random`, whose declaration above is
+    # WHY : Assumptions: both deletions are safe to make here because no resource in
+    #       this root's own graph uses either provider any more, and no CHILD module
+    #       declares them either -- unlike `random`, whose declaration above is
     #       load-bearing precisely because two child modules consume it. Listener
     #       material is now minted inside each task by
     #       config/docker/generate-listener-material.sh, which needs no Terraform

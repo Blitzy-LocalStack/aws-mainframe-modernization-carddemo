@@ -26,9 +26,13 @@ import com.carddemo.reference.dto.TransactionTypeUpdateRequest;
  * <p>Assumptions: this class is {@code final} with a private constructor and static members rather
  * than a Spring {@code @Component}, which is the shape the charter fixes for the four entity
  * conversions at its own L170 to L192. Each of the four is a total function of its argument, with no
- * collaborator, no configuration and no state between calls. {@code DateInquiryReplyMapper} alone in
- * this package is a component and alone is not {@code final}, so that it stays proxyable; that
- * exception is recorded there and does not reach this class.</p>
+ * collaborator, no configuration and no state between calls. The three seeded-lookup conversions in
+ * this package are Spring {@code @Component}s and are not {@code final}, so that they stay proxyable;
+ * that shape is recorded on each of them and does not reach this class. Refactoring Rationale: this
+ * sentence named {@code DateInquiryReplyMapper} as the package's single component exception. That class
+ * has moved to {@code com.carddemo.common.codec.DateInquiryReplyCodec} in the shared kernel, so the
+ * exception is no longer one class but the lookup trio, and naming a class this package no longer holds
+ * would send a reader to a file that is not there.</p>
  *
  * <p>Assumptions: the eight-byte padding item at {@code app/cpy/CVTRA03Y.cpy} L7,
  * {@code 05 FILLER PIC X(08)}, reaches no column, and the drop is registered here once rather than
@@ -41,8 +45,8 @@ import com.carddemo.reference.dto.TransactionTypeUpdateRequest;
  * consumer could act on.</p>
  *
  * <p>Assumptions: the two columns this class writes are
- * {@code services/reference-service/src/main/resources/db/migration/V1__reference.sql} L106
- * {@code type_cd CHAR(2) NOT NULL} and L117 {@code description VARCHAR(50) NOT NULL}, with L151
+ * {@code services/reference-service/src/main/resources/db/migration/V1__reference.sql} L99
+ * {@code type_cd CHAR(2) NOT NULL} and L110 {@code description VARCHAR(50) NOT NULL}, with L140
  * {@code version BIGINT NOT NULL DEFAULT 0} carrying the revision. That migration is the authority for
  * the physical shape of this schema; where it and this file could ever disagree, the migration is
  * right.</p>
@@ -70,7 +74,7 @@ public final class TransactionTypeMapper {
      * Renders one stored type as the shape the contract publishes.
      *
      * <p>Assumptions: the argument is a loaded, non-null row whose description is non-null, because
-     * {@code V1__reference.sql} L117 declares that column {@code NOT NULL} and the entity repeats the
+     * {@code V1__reference.sql} L110 declares that column {@code NOT NULL} and the entity repeats the
      * constraint as {@code nullable = false}. Nothing is substituted here for a value the schema will
      * not permit to be absent; a null would mean the row was never loaded, and reporting that as an
      * empty description would hide it.</p>
@@ -152,7 +156,7 @@ public final class TransactionTypeMapper {
      * <p>Assumptions: the revision is neither taken from the request nor set here, and it cannot be.
      * The create shape carries no revision component -- there is no prior revision to state for a row
      * that does not yet exist -- the entity exposes no setter for it, and {@code V1__reference.sql}
-     * L151 defaults the column to zero, after which the persistence provider owns it.</p>
+     * L140 defaults the column to zero, after which the persistence provider owns it.</p>
      *
      * @param request the validated create body; must not be {@code null}
      * @return a new unsaved entity carrying the code verbatim and the normalised description, never

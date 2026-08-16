@@ -248,16 +248,30 @@
       <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
     </dependency>
 
-    <!-- Assumptions: app/app-vsam-mq/cbl/CODATE01.cbl is an IBM MQ request and
-         reply front door. It carries MQ-QUEUE, MQ-QUEUE-REPLY and MQ-CORRELID and
-         copies CMQGMOV, CMQPMOV, CMQMDV and CMQODV, so date conversion is reached
-         asynchronously as well as synchronously today. That flow becomes an SQS
-         standard-queue consumer, which is why an SQS client is required even
-         though the primary front door for this service is REST. -->
-    <dependency>
-      <groupId>io.awspring.cloud</groupId>
-      <artifactId>spring-cloud-aws-starter-sqs</artifactId>
-    </dependency>
+    <!-- Refactoring Rationale: io.awspring.cloud:spring-cloud-aws-starter-sqs is
+         WITHDRAWN from this module and its absence is deliberate rather than an
+         omission. It was declared because app/app-vsam-mq/cbl/CODATE01.cbl is an
+         IBM MQ request-and-reply front door as well as a synchronous one, and that
+         queue flow was consumed here. It is not consumed here any more. The
+         baseline drives BOTH of its inquiry programs from ONE request destination,
+         DEFINE QLOCAL('CARDDEMO.REQUEST.QUEUE') at app/app-vsam-mq/README.md L53
+         aliased to CICS as MQQUEUE(CARDREQ) at L71, and a queue admits exactly one
+         OWNING consumer, because a receive hides the message from every other
+         consumer rather than delivering a copy to each. The queue is therefore
+         owned by com.carddemo.account.service.InquiryMessageListener, which
+         dispatches on the request's four-character function code. What stays here
+         is the date EVALUATION of app/cbl/CSUTLDTC.cbl on the synchronous route.
+         Trade-offs: the starter is removed rather than left declared and unused.
+         An unused messaging starter is not inert. Its auto-configuration builds a
+         queue client as the context is constructed, which makes AWS_REGION a
+         startup requirement for a module that addresses no queue, and it reads to a
+         contributor as evidence of a message flow to go looking for. The accepted
+         cost is that re-introducing a consumer here would have to restore this
+         declaration, the spring.cloud.aws keys and a queue receive grant together;
+         each of those is a decision, and the previous arrangement let all three be
+         inherited silently. ReferenceServiceStructureTest asserts the annotation
+         does not resolve from this module, so the withdrawal is measured rather
+         than described. -->
 
     <!-- Assumptions: common-lib configures the Micrometer common tags but depends
          only on micrometer-core, which carries no exporter. The registry that
@@ -281,6 +295,41 @@
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- Refactoring Rationale: this declaration is REQUIRED and its absence was a
+         real gap rather than a tidiness point. Spring Boot 4 moved the MVC test
+         slice out of spring-boot-test-autoconfigure into its own starter, so
+         spring-boot-starter-test above no longer puts WebMvcTest.class on the
+         classpath at all. That was verified by listing the resolved
+         spring-boot-test-autoconfigure jar, whose autoconfigure packages are json
+         and jdbc only. Every controller suite in this module therefore had to
+         hand-assemble a dispatcher, and a hand-assembled dispatcher cannot fail
+         when the real component scan, the real message converter, the real
+         advice bean or the real Jackson customisation is wrong, because none of
+         them is present to be wrong.
+         Assumptions: the version is managed by the Spring Boot parent, so no
+         version element appears here; that is the same discipline every other
+         Boot artifact in this file follows, and it is what keeps one upgrade of
+         the parent moving the whole graph together.
+         Alternatives Considered: keeping the hand-assembled dispatchers and
+         adding a full @SpringBootTest instead. Rejected on both cost and
+         precision, because a full context for this module starts a datasource, a
+         Flyway migration and a resource-server decoder that reaches a discovery
+         document, so a controller assertion would depend on four subsystems it
+         is not about, and a failure in any of them would be reported as a
+         boundary defect.
+         Trade-offs: the slice deliberately excludes @Configuration classes, so
+         the deployed security chain is still NOT installed by these suites. That
+         is preserved on purpose and is not an oversight: with no chain, a 404
+         means an unmounted address rather than a refused caller, which is a
+         distinction several cases here depend on. The chain is asserted against
+         its own installed authorization managers by the sibling
+         com.carddemo.reference.config test package. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-webmvc-test</artifactId>
       <scope>test</scope>
     </dependency>
 

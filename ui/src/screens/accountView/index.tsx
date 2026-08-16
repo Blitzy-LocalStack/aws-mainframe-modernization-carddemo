@@ -12,22 +12,36 @@
  *
  * What this module owns, and what it does not
  * -------------------------------------------
- * Assumptions: the 29 field labels, the two section headings and the row-24 legend are declared HERE
- * rather than in `ui/src/messages/messages.ts`, because that catalog draws the boundary itself: its
- * file overview states that the static text painted by the BMS maps is "deliberately not here" and
- * that "`app/bms/*.bms` is the source for `ui/src/screens/**`, `ScreenHeader` and `PfKeyBar`". The
- * twelve message SENTENCES this program emits are program literals and `88`-level condition values,
- * so those come from the catalog and none of them is written inline below.
+ * ⚠️ Refactoring Rationale: the 29 field labels, the two section headings and the row-24 legend were
+ * declared HERE, and they now come from `ui/src/messages/messages.ts` like every other user-visible
+ * string. The justification for declaring them locally rested on a boundary sentence in that
+ * catalog's own overview -- that BMS-painted static text was "deliberately not here" -- and that
+ * sentence was the thing at fault, not this screen: AAP section 0.2.1.5 assigns the strings a screen
+ * renders to the catalog without exception, so the boundary was reworded and the strings moved rather
+ * than the rule being read down to fit them. What is bought is that one reviewable module holds every
+ * value whose byte-exactness has to be checked against a mapset, with the mapset LINE recorded beside
+ * each entry; what is paid is one import and one indirection per label.
+ *
+ * Assumptions: the twelve message SENTENCES this program emits are program literals and `88`-level
+ * condition values, so those come from the catalog too, and none of them is written inline below.
+ * Nothing user-visible is declared in this file.
  *
  * Assumptions: the six header fields the mapset paints in rows 1 and 2 -- `TRNNAME`, `TITLE01`,
- * `CURDATE`, `PGMNAME`, `TITLE02` and `CURTIME` -- are NOT rendered here. `ui/src/layout/AppShell.tsx`
- * mounts `ui/src/layout/ScreenHeader.tsx` in the shell's header region, and neither that component nor
- * the server-clock hook it needs is among this module's declared dependencies, which is the contract
- * saying the band is not this screen's to compose.
+ * `CURDATE`, `PGMNAME`, `TITLE02` and `CURTIME` -- are not composed here, and neither is the row-23
+ * error line nor the row-24 legend. All three zones are DELEGATED to the one `AppShell` that
+ * `ui/src/App.tsx` mounts, by publishing this screen's transaction identifier, program name, paint
+ * instant, error sentence and resolved key bindings through `useShellSlot`. What stays in the body is
+ * the row-22 informational line, because the mapset puts that one inside the screen's own field area.
+ *
+ * Refactoring Rationale: an earlier revision of this paragraph claimed the same division of labour
+ * while the module published nothing and no shell was mounted, so the delivered screen had no title
+ * band at all. The two facts that make the claim true now are the publication below and the mount in
+ * `ui/src/App.tsx`; the shell paints a zone if and only if a screen has delegated it, so the claim is
+ * only ever as true as the call.
  *
  * Stateless re-expression of a pseudo-conversational program
  * ---------------------------------------------------------
- * Refactoring Rationale: the reference carries every scrap of continuity between screen turns in one
+ * Assumptions: the reference carries every scrap of continuity between screen turns in one
  * passed structure -- `app/cpy/COCOM01Y.cpy` L19-L44 -- and this screen carries none of it. Navigation
  * moves to the router, identity to the signed token the API client attaches, and the selected account
  * to an explicit request member. The re-entry discriminator `CDEMO-PGM-CONTEXT` disappears outright:
@@ -38,22 +52,36 @@
 import { Descriptions, Flex, Form, Input, Result, Spin, Typography, theme } from 'antd';
 import { useCallback, useRef, useState } from 'react';
 import type { ChangeEvent, ComponentProps, CSSProperties, ReactElement } from 'react';
-import { useNavigate, useSearchParams } from 'react-router';
+import { useLocation, useNavigate } from 'react-router';
 
+import { applyMoneyEditMask } from '../../format/money';
 import { readAccountView } from '../../api/accounts';
 import type { AccountDetail, AccountViewResponse, CustomerDetail } from '../../api/accounts';
 import type { AbendDetail, ApiError, FieldError, FieldValidationState } from '../../api/types';
+import { useServerInstant } from '../../hooks/useServerInstant';
+import { useShellSlot } from '../../layout/AppShell';
+import { fieldAriaProps, fieldErrorHelp } from '../../layout/fieldHelp';
+import { RECORD_VIEW_COLUMNS } from '../../layout/recordLayout';
 import { MessageBand } from '../../layout/MessageBand';
-import { PfKeyBar } from '../../layout/PfKeyBar';
 import { usePfKeys } from '../../layout/usePfKeys';
 import type { PfKeyRejection } from '../../layout/usePfKeys';
 import {
+  ABEND_DATA_FIELDS,
+  ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS,
+  ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS,
+  ACCOUNT_VIEW_HEADINGS,
+  ACCOUNT_VIEW_KEY_LABELS,
   PROGRAM_MESSAGES,
   STATUS_MESSAGES,
   UNEXPECTED_ABEND_OCCURRED,
   UNEXPECTED_DATA_SCENARIO,
 } from '../../messages/messages';
-import { MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
+import {
+  inApplicationRoute,
+  MAIN_MENU_ROUTE,
+  navigateSafely,
+  screenTransitionState,
+} from '../../routes/navigation';
 import { FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../../theme/tokens';
 
 /**
@@ -102,24 +130,42 @@ const ACCOUNT_ID_DECLARED_WIDTH = 11;
  */
 const ACCOUNT_ID_PATTERN = /^[0-9]{11}$/u;
 
-/**
- * Query-string member this screen accepts as a pre-populated filter value.
- *
- * Assumptions: this is a DESIGN DECISION and not something the reference hands over, so it is named
- * here rather than inferred. The reference reaches this screen with a selected account already in the
- * shared communication area -- `CDEMO-ACCT-ID` at `app/cpy/COCOM01Y.cpy` L38 -- and
- * `app/cbl/COACTVWC.cbl` L465-L469 moves it into the map field when the filter flag is not blank. The
- * route carries no path parameter, and an account identifier is one of the values this migration
- * keeps out of a request LINE, so a query member is the remaining carrier that a sibling screen can
- * populate.
- *
- * Trade-offs: the value pre-fills the field and does NOT trigger a read. Reading on arrival was the
- * alternative and is rejected because `app/cbl/COACTVWC.cbl` L353-L360 sends the map and nothing else
- * on first entry -- the read happens only on the re-entry arm at L361-L373 -- so fetching here would
- * add a request the reference does not make and would report a not-found account before the operator
- * had done anything.
+/*
+ * WHY : Refactoring Rationale: ⚠️ a `const ACCOUNT_ID_PREFILL_PARAM = 'accountId'` stood here, read
+ *       through `useSearchParams` to seed the filter, and it has been WITHDRAWN. It reasoned that the
+ *       reference reaches this screen with a selected account already in the shared communication area
+ *       -- `CDEMO-ACCT-ID` at `app/cpy/COCOM01Y.cpy` L38, moved into the map field at
+ *       `app/cbl/COACTVWC.cbl` L465-L469 -- and that a query member was the remaining carrier for it,
+ *       the route declaring no path parameter. The premise was right and the conclusion contradicted
+ *       the reason the route declares no parameter in the first place.
+ *       An account identifier is one of the values this migration keeps out of a request LINE, which is
+ *       why the composed read posts it in a body rather than in a path: a value in a request line is
+ *       written to whatever access log the edge keeps, and that log outlives the request. A browser
+ *       query member is the same disclosure with a longer tail -- it enters session history, it is sent
+ *       as the `Referer` on any onward navigation, it is written to the edge log again on every reload,
+ *       and a copied or bookmarked URL carries a real customer's account number to whoever receives it.
+ *       Keeping the identifier out of the API request line while accepting it in the browser URL
+ *       protects the shorter-lived of the two records and leaves the longer-lived one open.
+ * WHY : Assumptions: nothing in this repository produced such a URL -- no screen, no route table entry
+ *       and no test -- so the withdrawal removes a reachable disclosure and no working behaviour. The
+ *       screen now starts with an empty filter, which is exactly the state `IF EIBCALEN = 0` at
+ *       `app/cbl/COACTVWC.cbl` L462-L463 gives the reference on first entry.
+ * WHY : Alternatives Considered: keeping the hand-over and moving it into router transition state,
+ *       which is the report's other option and the closer analogue of the communication area. Rejected
+ *       for now rather than on principle: the single validated navigation seam this tree transitions
+ *       through takes a destination and no state, so a state-carrying hand-over would mean bypassing
+ *       that seam, and no caller exists to hand anything over -- this screen is not yet reachable from
+ *       another. When one is authored, the seam and the hand-over belong to that change, where a reader
+ *       can see both halves at once.
+/*
+ * WHY : Refactoring Rationale: withdrawing the seed does NOT withdraw the transition state itself. A
+ *       competing remedy for the same disclosure moved the identifier out of the query string and into
+ *       router state, and its diagnosis was right -- a query string is part of the request line, so it
+ *       reaches the edge access log and the browser's history. Withdrawing the seed outright resolves
+ *       that disclosure more completely than relocating it, so the seed is gone; what remains carried in
+ *       router state is the ORIGIN the exit key returns to, which is the migrated form of
+ *       `CDEMO-FROM-TRANID` and `CDEMO-FROM-PROGRAM` and is no account identifier at all.
  */
-const ACCOUNT_ID_PREFILL_PARAM = 'accountId';
 
 /**
  * Abend code the reference moves for the dispatch state it treats as impossible.
@@ -142,116 +188,25 @@ const UNEXPECTED_DATA_SCENARIO_ABEND_CODE = '0001';
  */
 const ACCOUNT_ID_RESPONSE_FIELD = 'accountId';
 
-/**
- * The two `COLOR=NEUTRAL` headings the mapset paints, verbatim.
- *
- * Assumptions: both are `INITIAL=` literals on unnamed `DFHMDF` definitions, so neither has a
- * symbolic-map field and neither can arrive in a response -- they are painted text belonging to this
- * screen. `View Account` is at `app/bms/COACTVW.bms` L75-L78, `LENGTH=12` at `POS=(4,33)`;
- * `Customer Details` is at L199-L202, `LENGTH=16` at `POS=(11,32)`.
+/*
+ * WHY : ⚠️ Refactoring Rationale: four groups of painted text stood here -- the two `COLOR=NEUTRAL`
+ *       section headings, the eleven account-block labels, the eighteen customer-block labels and the
+ *       single row-24 legend label -- each transcribed from `app/bms/COACTVW.bms` with its own mapset
+ *       line and declared width. All four now live in `ui/src/messages/messages.ts` as
+ *       `ACCOUNT_VIEW_HEADINGS`, `ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS`,
+ *       `ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS` and `ACCOUNT_VIEW_KEY_LABELS`, with the per-entry mapset
+ *       lines in `ACCOUNT_VIEW_PAINTED_TEXT_SOURCES`, and are imported above. AAP section 0.2.1.5
+ *       assigns the strings a screen renders to that catalog, and moving them is also what makes their
+ *       byte-exactness reviewable in one place: `Credit Limit        :` and `Current Cycle Debit :` are
+ *       both `LENGTH=21` and differ only in interior spacing, which is exactly the kind of value a
+ *       reviewer cannot check while it is spread across twenty-nine sites in a component.
+ * WHY : Assumptions: nothing about the values changed in the move. The interior and trailing runs of
+ *       spaces are still part of each value, the empty `ADDRESS_LINE_2` entry is still recorded
+ *       deliberately -- the mapset paints no label for `ACSADL2`, which sat under `ACSADL1` and was
+ *       identified positionally, the one identification gap G1 gives up -- and the legend is still the
+ *       ten characters `'  F3=Exit '` with ENTER unadvertised, because binding a label to ENTER would
+ *       paint a key this mapset does not.
  */
-export const ACCOUNT_VIEW_SECTION_TITLES = {
-  account: 'View Account',
-  customer: 'Customer Details',
-} as const;
-
-/**
- * The eleven account-block field labels, verbatim from `app/bms/COACTVW.bms`, in declaration order.
- *
- * Assumptions: the interior runs of spaces and the trailing spaces are part of the value and not
- * formatting. The mapset pads each label to a fixed cell width so the colons line up down the column
- * -- `Credit Limit        :` and `Current Cycle Debit :` are both `LENGTH=21` -- and the transcription
- * rule for this tree is byte-exact. A renderer may collapse the runs visually; nothing here may
- * discard them.
- */
-export const ACCOUNT_BLOCK_FIELD_LABELS = {
-  /** `app/bms/COACTVW.bms` L79-L83, `LENGTH=16` at `POS=(5,19)`. */
-  accountNumber: 'Account Number :',
-  /** `app/bms/COACTVW.bms` L93-L96, `LENGTH=12` at `POS=(5,57)`. */
-  activeStatus: 'Active Y/N: ',
-  /** `app/bms/COACTVW.bms` L103-L106, `LENGTH=7` at `POS=(6,8)`. */
-  openDate: 'Opened:',
-  /** `app/bms/COACTVW.bms` L112-L116, `LENGTH=21` at `POS=(6,39)`. */
-  creditLimit: 'Credit Limit        :',
-  /** `app/bms/COACTVW.bms` L124-L127, `LENGTH=7` at `POS=(7,8)`. */
-  expirationDate: 'Expiry:',
-  /** `app/bms/COACTVW.bms` L133-L137, `LENGTH=21` at `POS=(7,39)`. */
-  cashCreditLimit: 'Cash credit Limit   :',
-  /** `app/bms/COACTVW.bms` L145-L148, `LENGTH=8` at `POS=(8,8)`. */
-  reissueDate: 'Reissue:',
-  /** `app/bms/COACTVW.bms` L154-L158, `LENGTH=21` at `POS=(8,39)`. */
-  currentBalance: 'Current Balance     :',
-  /** `app/bms/COACTVW.bms` L166-L170, `LENGTH=21` at `POS=(9,39)`. */
-  currentCycleCredit: 'Current Cycle Credit:',
-  /** `app/bms/COACTVW.bms` L178-L181, `LENGTH=14` at `POS=(10,8)`. */
-  groupId: 'Account Group:',
-  /** `app/bms/COACTVW.bms` L187-L191, `LENGTH=21` at `POS=(10,39)`. */
-  currentCycleDebit: 'Current Cycle Debit :',
-} as const;
-
-/**
- * The eighteen customer-block field labels, verbatim from `app/bms/COACTVW.bms`, in declaration
- * order.
- *
- * Assumptions: `addressLine2` is the empty string because the mapset paints NO label for `ACSADL2`.
- * The field sits at `POS=(17,10)`, directly beneath `ACSADL1` at `POS=(16,10)`, and the only label on
- * either row is the single `Address:` at `POS=(16,1)`; the second line was identified to a terminal
- * operator by sitting under the first. That positional identification is exactly what gap G1 gives
- * up, and inventing a label -- or repeating `Address:` -- would claim the mapset paints text it does
- * not. The empty value is therefore recorded deliberately so a reader does not read it as an omission.
- */
-export const CUSTOMER_BLOCK_FIELD_LABELS = {
-  /** `app/bms/COACTVW.bms` L203-L206, `LENGTH=14` at `POS=(12,8)`. */
-  customerId: 'Customer id  :',
-  /** `app/bms/COACTVW.bms` L212-L215, `LENGTH=4` at `POS=(12,49)`. */
-  ssn: 'SSN:',
-  /** `app/bms/COACTVW.bms` L221-L224, `LENGTH=14` at `POS=(13,8)`. */
-  dateOfBirth: 'Date of birth:',
-  /** `app/bms/COACTVW.bms` L230-L233, `LENGTH=11` at `POS=(13,49)`. */
-  ficoCreditScore: 'FICO Score:',
-  /** `app/bms/COACTVW.bms` L239-L242, `LENGTH=10` at `POS=(14,1)`. */
-  firstName: 'First Name',
-  /** `app/bms/COACTVW.bms` L243-L246, `LENGTH=13` at `POS=(14,28)`. */
-  middleName: 'Middle Name: ',
-  /** `app/bms/COACTVW.bms` L247-L250, `LENGTH=12` at `POS=(14,55)`. */
-  lastName: 'Last Name : ',
-  /** `app/bms/COACTVW.bms` L264-L267, `LENGTH=8` at `POS=(16,1)`. */
-  addressLine1: 'Address:',
-  /** `app/bms/COACTVW.bms` L273-L276, `LENGTH=6` at `POS=(16,63)`. */
-  stateCode: 'State ',
-  /** No label is painted; see the note on this group. */
-  addressLine2: '',
-  /** `app/bms/COACTVW.bms` L287-L290, `LENGTH=3` at `POS=(17,63)`. */
-  zipCode: 'Zip',
-  /** `app/bms/COACTVW.bms` L297-L300, `LENGTH=5` at `POS=(18,1)`. */
-  city: 'City ',
-  /** `app/bms/COACTVW.bms` L306-L309, `LENGTH=7` at `POS=(18,63)`. */
-  countryCode: 'Country',
-  /** `app/bms/COACTVW.bms` L315-L318, `LENGTH=8` at `POS=(19,1)`. */
-  phoneNumber1: 'Phone 1:',
-  /** `app/bms/COACTVW.bms` L322-L325, `LENGTH=30` at `POS=(19,24)`. */
-  governmentIssuedId: 'Government Issued Id Ref    : ',
-  /** `app/bms/COACTVW.bms` L331-L334, `LENGTH=8` at `POS=(20,1)`. */
-  phoneNumber2: 'Phone 2:',
-  /** `app/bms/COACTVW.bms` L338-L341, `LENGTH=16` at `POS=(20,24)`. */
-  eftAccountId: 'EFT Account Id: ',
-  /** `app/bms/COACTVW.bms` L347-L350, `LENGTH=24` at `POS=(20,53)`. */
-  primaryCardHolderIndicator: 'Primary Card Holder Y/N:',
-} as const;
-
-/**
- * The single legend label this mapset paints, verbatim.
- *
- * Assumptions: `app/bms/COACTVW.bms` L369-L373 paints exactly `'  F3=Exit '` -- two leading spaces
- * and one trailing space, ten characters inside a `LENGTH=60` `COLOR=TURQUOISE` field -- and it is the
- * whole legend. ENTER is deliberately NOT advertised even though `app/cbl/COACTVWC.cbl` L307-L308
- * admits it, so binding a label to ENTER here would paint a key the terminal did not. That is why the
- * uniform legend labels `PfKeyBar` exports are not used: none of PF4, PF7 or PF8 is bound on this
- * screen, and ENTER's wording is not uniform across the mapsets in any case.
- */
-export const ACCOUNT_VIEW_KEY_LABELS = {
-  PFK03: '  F3=Exit ',
-} as const;
 
 /**
  * The twelve message literals this program declares, keyed by their `88`-level condition names.
@@ -261,6 +216,22 @@ export const ACCOUNT_VIEW_KEY_LABELS = {
  * width alongside the text, which is how the information and error channels below stay distinguishable.
  */
 const ACCOUNT_VIEW_MESSAGES = STATUS_MESSAGES.COACTVWC;
+
+/*
+ * WHY : Assumptions: the two labels beside the abend detail are the baseline's OWN data names, read out
+ *       of the catalog's `ABEND-DATA` table rather than written as prose here, so the diagnostic surface
+ *       names the fields an operator quoting it would find in `app/cpy/CSMSG02Y.cpy`. The table is a
+ *       four-entry tuple in declaration order -- code, culprit, reason, message -- and the first two are
+ *       the members that need a label, the other two being rendered as the surface's own title and
+ *       subtitle. The account-UPDATE screen derives its labels from the same two entries, which is what
+ *       keeps the two abend surfaces naming one set of fields.
+ */
+
+/** Field names the catalog records for the two abend members this screen labels. */
+const ABEND_LABELS = {
+  abendCode: ABEND_DATA_FIELDS[0].field,
+  abendCulprit: ABEND_DATA_FIELDS[1].field,
+} as const;
 
 /**
  * The refusal sentence for a filter that is present but malformed.
@@ -280,19 +251,28 @@ const ACCOUNT_FILTER_REFUSAL =
 /**
  * One rendered row of a record block: a painted label and the value beneath it.
  *
- * Assumptions: the rows are DATA rather than markup, so the eleven account fields and the eighteen
- * customer fields are declared once as ordered arrays and rendered by one code path. The alternative
- * -- twenty-nine hand-written `Descriptions.Item` elements -- would put the declaration order that
- * this screen must preserve into the shape of the JSX, where nothing can assert it; as an array the
- * order is a value a test can compare against the mapset.
+ * Assumptions: the rows are DATA rather than markup, so the account and customer fields are declared
+ * once as ordered arrays and rendered by one code path. The alternative -- a hand-written
+ * `Descriptions.Item` element per field -- would put the declaration order that this screen must
+ * preserve into the shape of the JSX, where nothing can assert it; as an array the order is a value a
+ * test can compare against the mapset.
  */
 interface RecordRow {
-  /** Stable key, being the response member the row renders. */
   readonly key: string;
-  /** Painted label, verbatim from the mapset, or the empty string where none is painted. */
   readonly label: string;
-  /** Value as the service sent it, already reduced to displayable text. */
   readonly value: string;
+  /**
+   * A second line rendered under {@link RecordRow.value} within the same labelled item.
+   *
+   * Assumptions: exactly one row uses this, and it exists because exactly one pair of mapset fields
+   * shares a single painted label -- `ACSADL1` at `POS=(16,10)` and `ACSADL2` at `POS=(17,10)` under
+   * the one `Address:` at `POS=(16,1)`. Modelling that as a continuation of one row rather than as two
+   * rows is what lets the painted label name both lines without a label being invented for the second
+   * or the first being repeated; the same reasoning is recorded on `customerBlockRows` below, which is
+   * where the painted labels are now held -- a `CUSTOMER_BLOCK_FIELD_LABELS` map that carried them
+   * separately is withdrawn, the labels being data on the rows themselves.
+   */
+  readonly continuation?: string;
   /**
    * Whether the value is one of the five monetary amounts and takes the fixed-pitch treatment.
    *
@@ -313,10 +293,17 @@ interface RecordRow {
  * expressed as an absent property instead of an undefined one.
  */
 interface FieldRefusalProps {
-  /** Present only when the field is refused; `Form.Item` renders its error treatment. */
   readonly validateStatus?: 'error';
-  /** Refusal text rendered beneath the control. */
-  readonly help?: string;
+  /**
+   * Refusal text rendered beneath the control, wrapped in the element the control describes itself by.
+   *
+   * Assumptions: an element rather than a bare string, and the difference is the whole point. The
+   * design system renders either, but only an element can carry the stable identifier that
+   * `aria-describedby` on the control points at -- an unnamed form item contributes no identifier of
+   * its own, so the sentence was rendered and associated with nothing. `fieldErrorHelp` in
+   * `ui/src/layout/fieldHelp.tsx` builds the wrapper and derives the identifier from the control's own.
+   */
+  readonly help?: ReactElement;
 }
 
 /**
@@ -329,23 +316,18 @@ interface FieldRefusalProps {
  * additionally writes a literal `'*'` into a BLANK one.
  */
 interface AccountIdRefusal {
-  /** Which of the baseline's two rejection flags this refusal corresponds to. */
   readonly state: FieldValidationState;
-  /** Sentence describing the refusal. */
   readonly message: string;
   /*
-   * WHY : Refactoring Rationale: the ORIGIN of a refusal is carried, because it decides whether the
-   *       sentence is repeated beneath the control. Without this member both refusal kinds rendered
-   *       their sentence twice -- once in the band and once as field help -- which was measured in the
-   *       rendered DOM and is not what either source does. The reference has ONE message channel for a
-   *       locally rejected field: `app/cbl/COACTVWC.cbl` L532 moves `WS-RETURN-MSG` into `ERRMSGO`,
-   *       and `app/cpy/CSSETATY.cpy` L17-L27 gives the field itself only a COLOUR and, when blank, the
-   *       `'*'` marker -- never per-field text. A response is the other case: it supplies a per-field
-   *       sentence that is genuinely distinct from its screen-level one, which is the mapping the
-   *       migration's design-system section specifies for a field-error array, so there the help text
-   *       adds information rather than repeating it.
+   * Assumptions: the ORIGIN of a refusal decides whether its sentence is repeated beneath the
+   *       control, which is why it is carried rather than discarded once the refusal is held. The
+   *       reference gives a locally rejected field ONE message channel: `app/cbl/COACTVWC.cbl` L532
+   *       moves `WS-RETURN-MSG` into `ERRMSGO`, and `app/cpy/CSSETATY.cpy` L17-L27 gives the field
+   *       itself only a COLOUR and, when blank, the `'*'` marker -- never per-field text. A response
+   *       is the other case: it supplies a per-field sentence genuinely distinct from its
+   *       screen-level one, which is the mapping the migration's design-system section specifies for
+   *       a field-error array, so there the help text adds information rather than repeating it.
    */
-  /** Whether this screen's own edits produced the refusal, or a response did. */
   readonly source: 'local' | 'response';
 }
 
@@ -416,12 +398,12 @@ function validateAccountIdEntry(entry: string): AccountIdRefusal | null {
     };
   }
 
-  // WHY : Assumptions: the all-zeroes case is tested by comparing against a run of zeroes at the
-  //       declared width rather than by converting the entry to a number. `app/cpy/CVCRD01Y.cpy` L34
-  //       declares `CC-ACCT-ID PIC X(11)` with L36 redefining it as `PIC 9(11)`, so the identifier is
-  //       characters on the wire and a number only inside arithmetic; converting it here would discard
-  //       the leading zeros that belong to the declared width and would put an eleven-digit value
-  //       through an IEEE-754 double on the way.
+  // Assumptions: the all-zeroes case is tested by comparing against a run of zeroes at the
+  // declared width rather than by converting the entry to a number. `app/cpy/CVCRD01Y.cpy` L34
+  // declares `CC-ACCT-ID PIC X(11)` with L36 redefining it as `PIC 9(11)`, so the identifier is
+  // characters on the wire and a number only inside arithmetic; converting it here would discard
+  // the leading zeros that belong to the declared width and would put an eleven-digit value
+  // through an IEEE-754 double on the way.
   if (!ACCOUNT_ID_PATTERN.test(entry) || entry === '0'.repeat(ACCOUNT_ID_DECLARED_WIDTH)) {
     return { state: 'NOT_OK', message: ACCOUNT_FILTER_REFUSAL, source: 'local' };
   }
@@ -440,9 +422,10 @@ function validateAccountIdEntry(entry: string): AccountIdRefusal | null {
  * narrowing structurally against the shape that module publishes keeps the dependency surface as
  * declared while accepting strictly more of the values that legitimately carry a problem.
  *
- * Assumptions: `fieldErrors` is the discriminating member. The contract declares it as a required
- * array on every problem document, so its presence with the right element shape identifies one
- * without this function having to test all eleven members.
+ * Assumptions: `fieldErrors` is the discriminating member and the test is that it is an ARRAY,
+ * nothing finer. The contract declares it required on every problem document, so an object carrying
+ * an array under that key is a problem document; element shapes are not inspected here, and
+ * `accountIdRefusalFrom` reads only the entries whose `field` it recognises.
  * @param {unknown} reason - The value a rejected read settled with.
  * @returns {ApiError | null} The problem document, or `null` when the rejection carried none -- a
  *   `RangeError` from the client's own argument check, or a thrown value of any other shape.
@@ -466,7 +449,7 @@ function problemFrom(reason: unknown): ApiError | null {
 /**
  * Extracts the refusal a problem document raised against the account filter.
  *
- * Refactoring Rationale: the refusal is taken from the RESPONSE and is not recomputed here, and there
+ * Assumptions: the refusal is taken from the RESPONSE and is not recomputed here, and there
  * is no re-entry flag gating it. `app/cpy/CSSETATY.cpy` L18-L27 and `app/cbl/COACTVWC.cbl` L561-L565
  * both gate the red highlight and the `'*'` marker on `CDEMO-PGM-REENTER`, because the reference had
  * to remember that a turn was a second turn in order to know an error was worth showing. A stateless
@@ -494,8 +477,8 @@ function accountIdRefusalFrom(problem: ApiError): AccountIdRefusal | null {
 /**
  * Chooses the sentence the message band renders for a failed read.
  *
- * Refactoring Rationale: the service-supplied sentence is rendered and NO CICS diagnostic is
- * reconstructed. What the reference actually shows on these paths is a composed diagnostic --
+ * Assumptions: the service-supplied sentence is rendered and NO CICS diagnostic is
+ * reconstructed. What the reference shows on these paths is a composed diagnostic --
  * `'Account:… not found in Cross ref file.  Resp:… Reas:…'` at `app/cbl/COACTVWC.cbl` L747-L757, the
  * account-master and customer-master equivalents at L797-L802 and L847-L852, and
  * `WS-FILE-ERROR-MESSAGE` at L86-L105 appending `RESP` and `RESP2` -- and a CICS response code has no
@@ -504,7 +487,10 @@ function accountIdRefusalFrom(problem: ApiError): AccountIdRefusal | null {
  * and `XREF-READ-ERROR`) are declared at L129-L136 and never `SET`, because the statements that would
  * have set them are commented out at L792 and L842, so the `IF DID-NOT-FIND-*` tests at L704 and L713
  * can never fire. Rendering the service's sentence is therefore a documented DIVERGENCE and an
- * improvement, not parity, and it also declines to disclose which of the three reads failed.
+ * improvement, not parity, and it also declines to disclose which of the three reads failed. It is
+ * registered as **D-11** in `docs/architecture/cobol-to-service-traceability.md` section 7.2, which
+ * carries the full comparison; the identifier is stated here so that a reader who wants the register
+ * entry can search for it rather than having to recognise this paragraph in it.
  *
  * Trade-offs: the fallback is `Did not find this account in account master file` rather than an
  * invented sentence. `ui/src/api/accounts.ts` records that a missing account, a missing
@@ -585,7 +571,7 @@ function accountBlockRows(detail: AccountDetail): readonly RecordRow[] {
   return [
     {
       key: 'activeStatus',
-      label: ACCOUNT_BLOCK_FIELD_LABELS.activeStatus,
+      label: ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.ACTIVE_STATUS,
       // WHY : Assumptions: the flag renders as the stored character, `Y` or `N`, because that is what
       //       the terminal displayed -- `ACSTTUS` is `PIC X(1)` at `app/cpy-bms/COACTVW.CPY` L66 and
       //       its label names the domain, `Active Y/N`. Expanding it to `Active`/`Inactive` would
@@ -596,7 +582,7 @@ function accountBlockRows(detail: AccountDetail): readonly RecordRow[] {
     },
     {
       key: 'openDate',
-      label: ACCOUNT_BLOCK_FIELD_LABELS.openDate,
+      label: ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.OPEN_DATE,
       // WHY : Assumptions: the date renders as one combined value and is NOT split into year, month
       //       and day parts. `app/cbl/COACTVWC.cbl` L487 moves `ACCT-OPEN-DATE` whole into a single
       //       `PIC X(10)` field, whereas the account-UPDATE twin splits the same value across three
@@ -607,70 +593,137 @@ function accountBlockRows(detail: AccountDetail): readonly RecordRow[] {
     },
     {
       key: 'creditLimit',
-      label: ACCOUNT_BLOCK_FIELD_LABELS.creditLimit,
+      label: ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.CREDIT_LIMIT,
       value: detail.creditLimit,
       monetary: true,
     },
     {
       key: 'expirationDate',
-      label: ACCOUNT_BLOCK_FIELD_LABELS.expirationDate,
+      label: ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.EXPIRATION_DATE,
       value: detail.expirationDate,
       monetary: false,
     },
     {
       key: 'cashCreditLimit',
-      label: ACCOUNT_BLOCK_FIELD_LABELS.cashCreditLimit,
+      label: ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.CASH_CREDIT_LIMIT,
       value: detail.cashCreditLimit,
       monetary: true,
     },
     {
       key: 'reissueDate',
-      label: ACCOUNT_BLOCK_FIELD_LABELS.reissueDate,
+      label: ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.REISSUE_DATE,
       value: detail.reissueDate,
       monetary: false,
     },
     {
       key: 'currentBalance',
-      label: ACCOUNT_BLOCK_FIELD_LABELS.currentBalance,
+      label: ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.CURRENT_BALANCE,
       value: detail.currentBalance,
       monetary: true,
     },
     {
       key: 'currentCycleCredit',
-      label: ACCOUNT_BLOCK_FIELD_LABELS.currentCycleCredit,
+      label: ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.CURRENT_CYCLE_CREDIT,
       value: detail.currentCycleCredit,
       monetary: true,
     },
     {
       key: 'groupId',
-      label: ACCOUNT_BLOCK_FIELD_LABELS.groupId,
+      label: ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.GROUP_ID,
       value: detail.groupId,
       monetary: false,
     },
     {
       key: 'currentCycleDebit',
-      label: ACCOUNT_BLOCK_FIELD_LABELS.currentCycleDebit,
+      label: ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.CURRENT_CYCLE_DEBIT,
       value: detail.currentCycleDebit,
       monetary: true,
     },
   ];
 }
 
+/*
+ * WHY : Assumptions: the eighteen customer values are BLANK rather than absent when the customer master
+ *       holds no matching row, and this constant is what the row builder is given on that arm. The map
+ *       transmits the customer region's 35 unnamed `INITIAL=` literals unconditionally -- they are part
+ *       of the map, not output of the program -- while `app/cbl/COACTVWC.cbl` L493 guards only the
+ *       eighteen NAMED value fields, so the terminal shows every label with an empty value. Passing a
+ *       blank projection through the same builder is what reproduces that with one set of labels, one
+ *       ordering and one code path.
+ * WHY : Alternatives Considered: rendering the block from a nullable parameter and writing
+ *       `detail === null ? '' : detail.x` at each of the eighteen rows. Rejected because it puts the same
+ *       ternary in eighteen places, where a nineteenth field added later would be the one that forgets
+ *       it; the substitution belongs at the single point where the absent half is turned into a
+ *       renderable one.
+ * WHY : Trade-offs: the two nullable name and address members are `null` here rather than the empty
+ *       string, so they travel the same {@link displayText} path a present-but-empty value travels. The
+ *       alternative -- empty strings -- would render identically today and would diverge the moment that
+ *       helper distinguished the two.
+ */
+
 /**
- * Builds the eighteen customer rows in the mapset's declaration order.
+ * The customer region as the map transmits it when no customer row was located: labels, no values.
  *
- * Assumptions: the order is `app/bms/COACTVW.bms`'s, which pairs cleanly under a two-column grid --
- * the address rows are declared `ACSADL1`, `ACSSTTE`, `ACSADL2`, `ACSZIPC`, `ACSCITY`, `ACSCTRY`, so
- * a left-to-right, top-to-bottom fill reproduces the terminal's own rows 16, 17 and 18 exactly.
+ * WHY : Refactoring Rationale: this is EXPORTED, and it was local. The sibling account-update screen
+ *       resolves the same asymmetry -- an account read whose customer member is null, rendered by
+ *       readers written against a non-null customer -- and it substitutes this same blank projection at
+ *       the point the answer is received. It imports the constant rather than declaring a second one so
+ *       that one definition answers "what does an unpopulated customer look like" for both screens; two
+ *       would be two places for a nineteenth field added later to be forgotten.
+ *       Trade-offs: this is the one screen-to-screen import in the tree, and the direction is deliberate.
+ *       The view screen is the one that OWNS this projection -- the substitution and its reasoning were
+ *       authored here, against `app/cbl/COACTVWC.cbl`'s own behaviour of painting the customer labels
+ *       with empty values when `9500-GETCUSTDATA-BYCUST` finds no row -- so importing it is a smaller
+ *       deviation than either duplicating a data constant or inventing a module for one frozen record
+ *       that neither screen's layer would obviously own.
+ */
+export const UNPOPULATED_CUSTOMER: CustomerDetail = {
+  customerId: '',
+  ssnMasked: '',
+  dateOfBirth: '',
+  ficoCreditScore: '',
+  firstName: '',
+  middleName: null,
+  lastName: '',
+  addressLine1: '',
+  stateCode: '',
+  addressLine2: null,
+  zipCode: '',
+  city: '',
+  countryCode: '',
+  phoneNumber1: '',
+  governmentIssuedIdMasked: '',
+  phoneNumber2: null,
+  eftAccountId: '',
+  primaryCardHolderIndicator: '',
+};
+
+/**
+ * Builds the customer rows in the mapset's declaration order.
+ *
+ * Assumptions: the order is `app/bms/COACTVW.bms`'s -- the address fields are declared `ACSADL1`,
+ * `ACSSTTE`, `ACSADL2`, `ACSZIPC`, `ACSCITY`, `ACSCTRY` -- and it is preserved as READING order rather
+ * than as a claim about the grid.
+ *
+ * Refactoring Rationale: an earlier revision claimed the left-to-right, top-to-bottom fill "reproduces
+ * the terminal's own rows 16, 17 and 18 exactly". Two changes have made that claim false and it is
+ * withdrawn rather than defended. The two address lines are now one item, so the fill no longer pairs
+ * `ACSADL2` with `ACSZIPC`; and the grid collapses to a single column below the design system's medium
+ * breakpoint, so at a narrow width there are no pairs at all. Both are deliberate: the pairing was
+ * positional identification, which gap G1 surrenders, and protecting it had cost an unlabelled cell for
+ * every assistive technology and a table wider than a phone viewport. Reading order and grouping are
+ * what G1 commits to preserving, and both are intact.
  * @param {CustomerDetail} detail - The customer exactly as the service sent it, with both protected
- *   identifiers already masked.
- * @returns {readonly RecordRow[]} The eighteen rows to render, in reading order.
+ *   identifiers already masked, or {@link UNPOPULATED_CUSTOMER} when no customer row was located.
+ * @returns {readonly RecordRow[]} The seventeen rows to render, in reading order -- one fewer than the
+ *   eighteen fields the mapset declares, because the two address lines share the one item their single
+ *   painted label names.
  */
 function customerBlockRows(detail: CustomerDetail): readonly RecordRow[] {
   return [
     {
       key: 'customerId',
-      label: CUSTOMER_BLOCK_FIELD_LABELS.customerId,
+      label: ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.CUSTOMER_ID,
       // WHY : Assumptions: the identifier stays TEXT. `app/cpy/CVCUS01Y.cpy` declares
       //       `CUST-ID PIC 9(09)` and `app/cpy/CVCRD01Y.cpy` L40-L42 declares the carried form as
       //       `CC-CUST-ID PIC X(09)` redefined `PIC 9(9)`, so it is characters on the wire and a
@@ -681,9 +734,9 @@ function customerBlockRows(detail: CustomerDetail): readonly RecordRow[] {
     },
     {
       key: 'ssnMasked',
-      label: CUSTOMER_BLOCK_FIELD_LABELS.ssn,
+      label: ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.SSN,
       /*
-       * WHY : Refactoring Rationale: the value is rendered EXACTLY as the service sent it and this
+       * Assumptions: the value is rendered EXACTLY as the service sent it and this
        *       screen applies no formatting of its own. The reference composes the full identifier
        *       into dashed form itself -- `app/cbl/COACTVWC.cbl` L496-L504 does
        *       `STRING CUST-SSN(1:3) '-' CUST-SSN(4:2) '-' CUST-SSN(6:4) INTO ACSTSSNO` over
@@ -700,61 +753,65 @@ function customerBlockRows(detail: CustomerDetail): readonly RecordRow[] {
     },
     {
       key: 'dateOfBirth',
-      label: CUSTOMER_BLOCK_FIELD_LABELS.dateOfBirth,
+      label: ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.DATE_OF_BIRTH,
       value: detail.dateOfBirth,
       monetary: false,
     },
     {
       key: 'ficoCreditScore',
-      label: CUSTOMER_BLOCK_FIELD_LABELS.ficoCreditScore,
+      label: ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.FICO_CREDIT_SCORE,
       value: detail.ficoCreditScore,
       monetary: false,
     },
     {
       key: 'firstName',
-      label: CUSTOMER_BLOCK_FIELD_LABELS.firstName,
+      label: ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.FIRST_NAME,
       value: detail.firstName,
       monetary: false,
     },
     {
       key: 'middleName',
-      label: CUSTOMER_BLOCK_FIELD_LABELS.middleName,
+      label: ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.MIDDLE_NAME,
       value: displayText(detail.middleName),
       monetary: false,
     },
     {
       key: 'lastName',
-      label: CUSTOMER_BLOCK_FIELD_LABELS.lastName,
+      label: ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.LAST_NAME,
       value: detail.lastName,
       monetary: false,
     },
     {
+      // WHY : Refactoring Rationale: the two address lines are ONE row under the one label the mapset
+      //       paints, where they were two rows and the second carried an empty label -- an unlabelled
+      //       cell, which is what the review found. The reading order of the underlying fields is
+      //       unchanged: line 1 then line 2, in `DFHMDF` declaration order, both inside the item the
+      //       first one's label names.
       key: 'addressLine1',
-      label: CUSTOMER_BLOCK_FIELD_LABELS.addressLine1,
+      label: ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.ADDRESS_LINE_1,
       value: detail.addressLine1,
+      // WHY : Assumptions: an absent second line contributes NOTHING rather than an empty line, so the
+      //       item is one line high for a customer who has no second address line. The member is
+      //       nullable because the column is, and `displayText` would turn a null into an empty string
+      //       that still occupied a rendered line.
+      ...(detail.addressLine2 === null ? {} : { continuation: detail.addressLine2 }),
       monetary: false,
     },
     {
       key: 'stateCode',
-      label: CUSTOMER_BLOCK_FIELD_LABELS.stateCode,
+      label: ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.STATE_CODE,
       value: detail.stateCode,
       monetary: false,
     },
     {
-      key: 'addressLine2',
-      label: CUSTOMER_BLOCK_FIELD_LABELS.addressLine2,
-      value: displayText(detail.addressLine2),
-      monetary: false,
-    },
-    {
       key: 'zipCode',
-      label: CUSTOMER_BLOCK_FIELD_LABELS.zipCode,
+      label: ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.ZIP_CODE,
       value: detail.zipCode,
       monetary: false,
     },
     {
       key: 'city',
-      label: CUSTOMER_BLOCK_FIELD_LABELS.city,
+      label: ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.CITY,
       // WHY : Assumptions: the city comes from the customer's THIRD address line, because the record
       //       has no city field at all -- `app/cbl/COACTVWC.cbl` L513 moves `CUST-ADDR-LINE-3` into
       //       `ACSCITYO`, and `app/cpy/CVCUS01Y.cpy` declares three numbered address lines with no
@@ -766,13 +823,13 @@ function customerBlockRows(detail: CustomerDetail): readonly RecordRow[] {
     },
     {
       key: 'countryCode',
-      label: CUSTOMER_BLOCK_FIELD_LABELS.countryCode,
+      label: ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.COUNTRY_CODE,
       value: detail.countryCode,
       monetary: false,
     },
     {
       key: 'phoneNumber1',
-      label: CUSTOMER_BLOCK_FIELD_LABELS.phoneNumber1,
+      label: ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.PHONE_NUMBER_1,
       // WHY : Assumptions: the number renders as one combined value, not as area code and subscriber
       //       parts. `app/cbl/COACTVWC.cbl` L517 moves `CUST-PHONE-NUM-1` whole into a single
       //       `PIC X(13)` field; the account-update twin is the screen that splits it, because it has
@@ -782,25 +839,25 @@ function customerBlockRows(detail: CustomerDetail): readonly RecordRow[] {
     },
     {
       key: 'governmentIssuedIdMasked',
-      label: CUSTOMER_BLOCK_FIELD_LABELS.governmentIssuedId,
+      label: ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.GOVERNMENT_ISSUED_ID,
       value: detail.governmentIssuedIdMasked,
       monetary: false,
     },
     {
       key: 'phoneNumber2',
-      label: CUSTOMER_BLOCK_FIELD_LABELS.phoneNumber2,
+      label: ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.PHONE_NUMBER_2,
       value: displayText(detail.phoneNumber2),
       monetary: false,
     },
     {
       key: 'eftAccountId',
-      label: CUSTOMER_BLOCK_FIELD_LABELS.eftAccountId,
+      label: ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.EFT_ACCOUNT_ID,
       value: detail.eftAccountId,
       monetary: false,
     },
     {
       key: 'primaryCardHolderIndicator',
-      label: CUSTOMER_BLOCK_FIELD_LABELS.primaryCardHolderIndicator,
+      label: ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.PRIMARY_CARD_HOLDER_INDICATOR,
       value: detail.primaryCardHolderIndicator,
       monetary: false,
     },
@@ -842,12 +899,37 @@ function toDescriptionItems(
     (row: RecordRow): RecordDescriptionItems[number] => ({
       key: row.key,
       label: row.label,
+      /*
+       * WHY : Assumptions: a continuation is stacked with `Flex vertical` rather than with a line
+       *       break or a `white-space` rule, because the design system's own layout primitive is what
+       *       this tree uses for every stack -- no bespoke CSS on a raw element -- and because two
+       *       separate text nodes keep the two mapset fields separately addressable in the DOM, which a
+       *       single joined string would not.
+       */
       children: row.monetary ? (
         <Flex justify="flex-end">
-          <Typography.Text style={monetaryStyle}>{row.value}</Typography.Text>
+          {/*
+           * WHY : ⚠️ Refactoring Rationale: the baseline's `+ZZZ,ZZZ,ZZZ.99` presentation is applied
+           *       HERE, and this render passed `row.value` through untouched while the module still
+           *       imported the mask -- so the operator saw the raw wire text, `-1234.56`, where the
+           *       terminal showed `-      1,234.56`. Money crosses the boundary through `MoneyModule`,
+           *       which writes `Money.toPlainString()`, so the service cannot have applied it and
+           *       nothing else did. The mask is a string transformation on the digits, so applying it
+           *       parses nothing and keeps the exactness the string representation exists to protect.
+           * WHY : Assumptions: it is applied at the single point every monetary row is rendered rather
+           *       than at each of the five sites that build those rows. One call site cannot then
+           *       disagree with another, and the `monetary` flag that selects the fixed-pitch font
+           *       already marks exactly the fields the mapset gives a `PICOUT` to.
+           */}
+          <Typography.Text style={monetaryStyle}>{applyMoneyEditMask(row.value)}</Typography.Text>
         </Flex>
-      ) : (
+      ) : row.continuation === undefined ? (
         <Typography.Text>{row.value}</Typography.Text>
+      ) : (
+        <Flex vertical>
+          <Typography.Text>{row.value}</Typography.Text>
+          <Typography.Text>{row.continuation}</Typography.Text>
+        </Flex>
       ),
     }),
   );
@@ -880,16 +962,36 @@ function acceptAccountIdKeystrokes(raw: string): string {
   return raw.replace(/[^0-9]/gu, '').slice(0, ACCOUNT_ID_DECLARED_WIDTH);
 }
 
+/*
+ * WHY : Refactoring Rationale: a frozen `SHELL_IDENTITY_SLOT` constant stood here, published by an
+ *       identity-only `useShellSlot` call, and both are withdrawn in favour of the single complete
+ *       publication in the component body. Its stated reason for delegating the identity ALONE was
+ *       that this mapset declares two message lines while the shell paints one, so delegating either
+ *       would drop the other -- and that reasoning is preserved and acted on, just not by withholding
+ *       the whole slot: the row-23 `ERRMSG` line IS delegated, because the shell's single band is that
+ *       row, and the row-22 `INFOMSG` line stays in the body where the mapset puts it, inside the
+ *       screen's own field area. Nothing is dropped, and the legend goes with the band rather than
+ *       being composed twice.
+ * WHY : Trade-offs: the surviving publication is an inline object rather than a frozen constant, which
+ *       gives up the explicit allocation-stability the constant made visible. It has to be inline,
+ *       because it names this screen's own `bindings`, `invoke`, `paintedAt` and `errorMessage` -- all
+ *       of which change with state -- and the publisher compares structurally on every commit, so a
+ *       constant could not carry them.
+ */
+
 /**
  * Renders the account view screen: one account filter, and the account and customer it resolves to.
  *
  * The screen takes no props. It is mounted directly as the element of the `/account/view` route, which
- * declares no path parameter, so every input it has comes from the control the operator types into or
- * from the optional {@link ACCOUNT_ID_PREFILL_PARAM} query member.
+ * declares no path parameter, so the only input it TYPES is the control the operator uses. It reads no
+ * query member -- a deliberate withdrawal recorded above the filter's own constants -- and the one thing
+ * it does read from a handover is the origin its exit key returns to, declared on
+ * `ScreenTransitionState` in `ui/src/routes/navigation.ts`.
  *
  * Error paths it surfaces, all four of them distinctly:
- * - a filter that is blank or is the screen's own blank marker is refused locally with
- *   `No input received`, and the marker is written back into the control;
+ * - a filter that is blank, or that holds the reference's blank marker, is refused locally with
+ *   `No input received`, and the marker is rendered beside the control as a decoration rather than
+ *   written into its value;
  * - a filter that is not eleven digits, or is all zeroes, is refused locally with the reference's
  *   `Account Filter must  be a non-zero 11 digit number`;
  * - a rejected read renders the service's sentence in the error channel of the message band, and any
@@ -899,23 +1001,67 @@ function acceptAccountIdKeystrokes(raw: string): string {
  *   the information and error message lines, and the function-key legend.
  */
 export function AccountViewScreen(): ReactElement {
+  /*
+   * WHY : ⚠️ Refactoring Rationale: this screen publishes ONE shell slot, and three publications stood
+   *       here at once -- a frozen identity-only constant, an identity-plus-instant literal, and the
+   *       complete slot further down. Each was a later generation of the same remedy for the same
+   *       finding (the band was unpainted because nothing delegated it, so `ACCOUNT_VIEW_TRANSACTION_ID`
+   *       and `ACCOUNT_VIEW_PROGRAM_NAME` were exported and read by nothing), and keeping all three
+   *       published three slots per render from one screen: the last one wins for every member it names,
+   *       so the earlier two contributed nothing except two extra hook calls and, worse, an appearance
+   *       of disagreement about which zones this screen delegates.
+   * WHY : Assumptions: the surviving publication is the LAST one, and it has to be, because it names
+   *       `bindings` and `invoke` from this screen's own `usePfKeys` call and those do not exist until
+   *       after it. Its four members are the whole delegation -- identity, paint instant, the row-23
+   *       error line and the key legend with this mapset's measured `COLOR=TURQUOISE` -- and what stays
+   *       in the body is the row-22 informational line, which is the one message field the mapset puts
+   *       inside the screen's own field area.
+   * WHY : Assumptions: the paint instant is read HERE and handed up rather than read inside the shell.
+   *       `ShellSlot.now` documents that as required: `ui/src/hooks/useServerInstant.ts` reads
+   *       `ui/src/api/serverClock.ts`, and the shell is required to carry no dependency on the API
+   *       layer. It is server-derived rather than `new Date()` because the baseline read one region
+   *       clock for every terminal, so two operators reading one account across midnight must not be
+   *       shown two dates -- the divergence registered as D-7.
+   * WHY : Assumptions: the two identities are this screen's own constants rather than values derived
+   *       from the route. `CAVW` and `COACTVWC` are what the reference painted -- `COACTVWC.cbl`
+   *       L145-L146 for the transaction and L144 for the program -- and deriving them from a path
+   *       would make a renamed route silently change what the band reports about the reference.
+   */
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const location = useLocation();
   const { cssVar } = theme.useToken();
+  const paintedAt = useServerInstant();
 
   /*
-   * WHY : Assumptions: the query member seeds the control's INITIAL value only, through a lazy
-   *       initialiser, so a later change to the query string does not overwrite what the operator has
-   *       since typed. The reference behaves the same way: `app/cbl/COACTVWC.cbl` L465-L469 populates
-   *       the map field from the carried selection while composing the map, and from then on the
-   *       field's content is whatever the terminal last sent.
+   * WHY : Assumptions: the filter starts EMPTY and is seeded from nothing -- not a query member, not a
+   *       path parameter, not storage. That is the reference's own first-entry state: `IF EIBCALEN = 0`
+   *       at `app/cbl/COACTVWC.cbl` L462-L463 sets the prompt and sends the map with the field
+   *       untouched, and `CC-ACCT-ID` -- the value L468 paints back into it -- is written from the
+   *       RECEIVED map field at L632 and from nowhere else, so no carried selection ever reaches it.
+   *       The withdrawn query seed is recorded above, with the disclosure that removed it.
    */
-  const [entry, setEntry] = useState<string>(
+  const [entry, setEntry] = useState('');
+
+  /*
+   * WHY : Refactoring Rationale: the exit destination is resolved ONCE on entry and held, rather than
+   *       recomputed on the exit key. It is the migrated form of `CDEMO-FROM-TRANID` and
+   *       `CDEMO-FROM-PROGRAM`, which the reference reads at `app/cbl/COACTVWC.cbl` L328-L339 from
+   *       storage a CALLING program wrote before transferring - so the value is fixed at the moment of
+   *       entry by construction, and resolving it later would let a `replace` transition performed by
+   *       this screen change where its own exit key goes.
+   * WHY : Assumptions: the claim is resolved through `inApplicationRoute`, so only one of this
+   *       application's own parameterless routes can be honoured and anything else falls back to the
+   *       menu - which is the reference's own default arm, `LIT-MENUTRANID` and `LIT-MENUPGM` at L336
+   *       and L337. Router state is writable by a hand-edited history entry, and an unchecked value
+   *       there could send the exit key off this application entirely.
+   */
+  const [exitDestination] = useState<string>(
     /**
-     * Reads the pre-populated filter value once, on first render.
-     * @returns {string} The query member reduced to acceptable characters, or the empty string.
+     * Resolves the origin the exit key returns to, once, on first render.
+     * @returns {string} The handed-over origin when this application serves it, otherwise the main
+     *   menu, which is the reference's own fallback.
      */
-    (): string => acceptAccountIdKeystrokes(searchParams.get(ACCOUNT_ID_PREFILL_PARAM) ?? ''),
+    (): string => inApplicationRoute(screenTransitionState(location.state).from) ?? MAIN_MENU_ROUTE,
   );
 
   const [refusal, setRefusal] = useState<AccountIdRefusal | null>(null);
@@ -925,11 +1071,11 @@ export function AccountViewScreen(): ReactElement {
   const [loading, setLoading] = useState(false);
 
   /*
-   * WHY : Assumptions: the information line starts on the reference's prompt because that is the
-   *       state the reference guarantees. `app/cbl/COACTVWC.cbl` L462-L463 sets
-   *       `WS-PROMPT-FOR-INPUT` when no data was passed, and L528-L530 sets it again whenever the
-   *       information field is empty -- so the prompt is the information line's floor, not merely its
-   *       first value.
+   * Assumptions: the information line starts on the reference's prompt because that is the
+   * state the reference guarantees. `app/cbl/COACTVWC.cbl` L462-L463 sets
+   * `WS-PROMPT-FOR-INPUT` when no data was passed, and L528-L530 sets it again whenever the
+   * information field is empty -- so the prompt is the information line's floor, not merely its
+   * first value.
    */
   const [infoMessage, setInfoMessage] = useState<string>(
     ACCOUNT_VIEW_MESSAGES.WS_PROMPT_FOR_INPUT.text,
@@ -937,14 +1083,53 @@ export function AccountViewScreen(): ReactElement {
 
   /*
    * WHY : Trade-offs: reads are sequenced by a token held in a ref so a slow earlier response cannot
-   *       overwrite a faster later one. The reference cannot have this problem -- a pseudo-conversational
-   *       task holds the terminal until it returns, so a second Enter is not deliverable until the
-   *       first turn has finished -- and a browser has no such lock. Disabling the control while a
+   *       overwrite a faster later one, and so that a response cannot overwrite a refusal the operator
+   *       has since earned. The reference cannot have either problem -- a pseudo-conversational task
+   *       holds the terminal until it returns, so a second Enter is not deliverable until the first
+   *       turn has finished -- and a browser has no such lock. Disabling the control while a
    *       read is in flight was the alternative and is rejected because it would make an unmapped key
    *       arrive as a `disabled` rejection rather than being coerced into Enter, changing the key
    *       behaviour below to work around a race. The cost is one ref and one comparison per response.
+   *       Assumptions: EVERY submission advances the token, including one the field edits refuse, and
+   *       the advance is the first thing `submit` does. That placement is the whole of the
+   *       cancellation contract -- the reasoning is recorded at the advance itself, because it is the
+   *       statement order that carries it and not this declaration.
    */
   const requestSequence = useRef(0);
+
+  const invalidateInFlightRead = useCallback(
+    /**
+     * Retires whatever read is outstanding and clears the record it would have published.
+     *
+     * ⚠️ Refactoring Rationale: this exists because the token was advanced ONLY when a new read
+     * started, which left two paths that changed what the screen claims to be showing without
+     * retiring the read still in flight. Editing the filter was the first: an operator who submitted
+     * account A, then typed B while A was still outstanding, was shown A's record beneath the filter
+     * reading B -- a record correctly labelled by nothing on the screen. A local refusal was the
+     * second: the band said `No input received` while A's account and customer stayed on display
+     * beneath it. Both are states the reference cannot reach, because its task holds the terminal for
+     * the whole turn, so neither is a divergence to document; they are defects of the mechanism that
+     * replaced that lock.
+     *
+     * Assumptions: the record blocks are cleared as well as the token being advanced, and clearing is
+     * the half that matters to an operator. Advancing the token alone stops the outstanding response
+     * being APPLIED but leaves the previous one rendered, so the stale pairing persists until
+     * something else replaces it.
+     *
+     * Assumptions: the abend surface is cleared too, because it replaces the record blocks and would
+     * otherwise outlive the read that raised it. The message channels are NOT touched here: each
+     * caller sets the sentence its own outcome carries, and the reference clears its channels once per
+     * turn rather than once per keystroke.
+     * @returns {void} Completion leaves no read outstanding and no record on display.
+     */
+    (): void => {
+      requestSequence.current += 1;
+      setView(null);
+      setAbend(null);
+      setLoading(false);
+    },
+    [],
+  );
 
   const submit = useCallback(
     /**
@@ -964,41 +1149,81 @@ export function AccountViewScreen(): ReactElement {
      * @returns {void} Completion is represented by this screen's own state.
      */
     (): void => {
+      /*
+       * WHY : Assumptions: the token advances HERE, before the field edits run, because advancing it
+       *       is what invalidates whatever read is already in flight -- both callbacks below compare
+       *       against the token their own request captured and return when it is no longer current.
+       *       Every submission supersedes the previous one, and a locally refused submission
+       *       supersedes it just as a valid one does: the operator has pressed Enter on a filter this
+       *       screen rejects, and the answer to the filter they typed before it is no longer the
+       *       answer to the question on screen.
+       *       Refactoring Rationale: this pair of statements stood AFTER the edits, on the valid path
+       *       only, so a refused submission left the earlier request current. The sequence
+       *       valid-submit, then invalid-submit, then the first response arriving produced a screen
+       *       showing the account records and `Displaying details of given Account` while the operator
+       *       was looking at a filter the screen had just refused -- the refusal silently overwritten
+       *       by an answer to a superseded question. Moving the advance ahead of the edits fixes it
+       *       without a second mechanism: the refusal arm needs no cancellation logic of its own,
+       *       because the token it advanced is already the reason the late callback returns.
+       *       Alternatives Considered: aborting the in-flight request through an `AbortController` on
+       *       the client. Rejected as a larger change for the same observable outcome -- the response
+       *       is discarded either way, and the read is a published client function whose signature
+       *       accepts no signal, so this would push a cancellation parameter through the API layer to
+       *       save one already-issued request. What it WOULD add is the release of the connection
+       *       slot, which matters at a request rate this screen cannot reach: one operator pressing
+       *       one key.
+       */
       const normalised = normaliseAccountIdEntry(entry);
       const localRefusal = validateAccountIdEntry(normalised);
 
       if (localRefusal !== null) {
+        /*
+         * WHY : Assumptions: a local refusal RETIRES any outstanding read as well as reporting itself.
+         *       Without that, the record from a read still in flight arrived after the refusal and
+         *       replaced it, so a screen whose band said `No input received` finished by displaying an
+         *       account -- and the operator had no way to tell which of the two outcomes was current.
+         */
+        invalidateInFlightRead();
         setRefusal(localRefusal);
         setErrorMessage(localRefusal.message);
-        setView(null);
-        setAbend(null);
-        setLoading(false);
         setInfoMessage(ACCOUNT_VIEW_MESSAGES.WS_PROMPT_FOR_INPUT.text);
 
         /*
-         * WHY : Assumptions: the blank marker is written back INTO the control, which is the visible
-         *       half of the reference's blank treatment -- `app/cbl/COACTVWC.cbl` L561-L565 moves
-         *       `'*'` into the field's output subfield and `DFHRED` into its colour subfield. Only the
-         *       colour half is expressible through the form control's own error state, so the marker
-         *       has to be placed in the value; omitting it would drop an observable behaviour that a
-         *       returning operator recognises. The re-entry gate the reference puts on both halves is
-         *       not reproduced, for the reason recorded on {@link accountIdRefusalFrom}.
+         * WHY : Refactoring Rationale: the marker is NO LONGER written into the control's value. It
+         *       was, on the argument that `app/cbl/COACTVWC.cbl` L561-L565 moves `'*'` into the
+         *       field's output subfield and that only the colour half of that treatment is expressible
+         *       through the form control's error state. The argument was right about the reference and
+         *       wrong about where to put the marker: the value of an input is the field's DATA, so
+         *       writing a decoration there made the marker the account number as far as everything
+         *       reading the control was concerned -- it is what an assistive technology announces as
+         *       the field's content, what a credential manager or an autofill would store, and what a
+         *       copy of the field yields. The reference has no such conflation available to it,
+         *       because a 3270 field has separate output-data and attribute subfields and the marker
+         *       goes in the one the program writes for display.
+         * WHY : Assumptions: the marker is rendered instead as an `aria-hidden` adornment beside the
+         *       control -- see the `suffix` on the input below -- driven by this same refusal state. A
+         *       sighted operator sees the same `'*'` in the same place; an assistive technology reads
+         *       the field as empty, which it is, and hears the refusal sentence from the message band's
+         *       live region. The re-entry gate the reference puts on both halves is still not
+         *       reproduced, for the reason recorded on {@link accountIdRefusalFrom}.
          */
-        if (localRefusal.state === 'BLANK') {
-          setEntry(FIELD_ERROR_TOKENS.blankMarker);
-        }
-
         return;
       }
 
+      /*
+       * WHY : Assumptions: a NEW read retires the outstanding one first, through the same helper the
+       *       other two paths use, so the record on display is cleared while the replacement is
+       *       fetched rather than lingering under a filter that no longer describes it. The reference's
+       *       own turn behaves this way by construction: it re-sends the whole map, so nothing from the
+       *       previous turn survives into the next one.
+       */
+      invalidateInFlightRead();
       setEntry(normalised);
       setRefusal(null);
       setErrorMessage(null);
-      setAbend(null);
       setLoading(true);
 
-      const token = requestSequence.current + 1;
-      requestSequence.current = token;
+      const token = requestSequence.current;
 
       readAccountView(normalised).then(
         /**
@@ -1024,19 +1249,24 @@ export function AccountViewScreen(): ReactElement {
           setLoading(false);
 
           /*
-           * WHY : Refactoring Rationale: the successful state shows `Displaying details of given
-           *       Account` when the response supplies no information line of its own, and this IS a
-           *       documented divergence rather than parity. The sentence is declared at
-           *       `app/cbl/COACTVWC.cbl` L115-L116 as the `88`-level value `WS-INFORM-OUTPUT` and is
-           *       never `SET` anywhere in the program, and L528-L530 then forces the prompt back
-           *       whenever the information field is empty -- so the reference's information line is
-           *       effectively always the prompt, even while a record is on display. Using the
-           *       sentence for the state its own condition name describes tells the operator the read
-           *       succeeded, which the reference leaves to the record appearing; the divergence is
-           *       recorded here because it is a behavioural change and not a transcription.
+           * WHY : ⚠️ Refactoring Rationale: the successful state showed `Displaying details of given
+           *       Account` when the response supplied no information line, and that sentence is
+           *       withdrawn. It is the `88`-level value `WS-INFORM-OUTPUT` at `app/cbl/COACTVWC.cbl`
+           *       L115-L116, and the program never `SET`s it anywhere; L528-L530 then forces the
+           *       prompt back whenever the information field is empty, so the reference's information
+           *       line is the prompt on every turn, record on display or not. Substituting an unset
+           *       condition's text was therefore an invented behaviour presented as a divergence, and
+           *       it was registered nowhere -- no entry in
+           *       `docs/architecture/cobol-to-service-traceability.md` authorises it. The prompt is the
+           *       floor the reference guarantees, so the prompt is the fallback.
+           * WHY : Assumptions: the fallback is reached rarely if ever, because the service supplies the
+           *       prompt on every arm of the composition -- which is the same sentence -- so this
+           *       expression normally resolves to the response's own value. It is written out rather
+           *       than dropped because the contract declares the member nullable, and a null must not
+           *       reach the band as an empty line where the reference paints text.
            */
           setInfoMessage(
-            result.account.informationMessage ?? ACCOUNT_VIEW_MESSAGES.WS_INFORM_OUTPUT.text,
+            result.account.informationMessage ?? ACCOUNT_VIEW_MESSAGES.WS_PROMPT_FOR_INPUT.text,
           );
         },
         /**
@@ -1045,9 +1275,21 @@ export function AccountViewScreen(): ReactElement {
          * Assumptions: the record blocks are cleared. The reference's screen composition is gated on
          * its read flags -- the account block on `FOUND-ACCT-IN-MASTER OR FOUND-CUST-IN-MASTER` at
          * `app/cbl/COACTVWC.cbl` L471-L472 and the customer block on `FOUND-CUST-IN-MASTER` at L493 --
-         * so a failed read paints neither. That the two gates DIFFER is why a partially resolved read
-         * is a legitimate state, which the render below honours by testing each block's data
-         * separately rather than requiring both.
+         * so a failed read paints neither, and clearing the view reproduces that.
+         *
+         * Assumptions: the two blocks are ALL-OR-NOTHING here, which is a narrowing of those two
+         * differing gates and is enforced three layers deep rather than only rendered that way.
+         * `AccountViewService.readAccountView` answers `404` when either half is absent, `account` and
+         * `customer` are both required members of `AccountViewResponse` in `account-api.yaml` and in
+         * `ui/src/api/types.ts`, and the render below consequently gates both blocks on one non-null
+         * `view` and reads both halves of it. Refactoring Rationale: this note claimed the opposite --
+         * that a partially resolved read is a legitimate state the render honours by testing each
+         * block separately -- which no layer implemented; the render has always required both. The
+         * narrowing is deliberate and is recorded at the service: a machine caller handed a
+         * half-populated view has no way to tell it from a complete one, and the reference's
+         * disjunctive gate exists to paint a located account beside an unlocated customer on a
+         * TERMINAL, where an operator can see the empty region. That reasoning does not carry to a
+         * JSON body, so the contract refuses the half instead of publishing it.
          * @param {unknown} reason - The value the read rejected with: the normalised problem document
          *   for a refused or failed request, or a `RangeError` from the client's own argument check.
          * @returns {void} Completion is represented by this screen's own state.
@@ -1064,12 +1306,12 @@ export function AccountViewScreen(): ReactElement {
 
           if (problem === null) {
             /*
-             * WHY : Assumptions: a rejection carrying no problem document is reported with the
-             *       reference's own read-failure sentence and never with the thrown value's message.
-             *       The client throws a `RangeError` for an argument its own check refuses, and its
-             *       text is developer-facing; the account identifier is also a value this migration
-             *       keeps out of any durable diagnostic, so relaying a thrown message is the one way
-             *       an identifier could reach a log through this screen.
+             * Assumptions: a rejection carrying no problem document is reported with the
+             * reference's own read-failure sentence and never with the thrown value's message.
+             * The client throws a `RangeError` for an argument its own check refuses, and its
+             * text is developer-facing; the account identifier is also a value this migration
+             * keeps out of any durable diagnostic, so relaying a thrown message is the one way
+             * an identifier could reach a log through this screen.
              */
             setRefusal(null);
             setAbend(null);
@@ -1083,43 +1325,61 @@ export function AccountViewScreen(): ReactElement {
         },
       );
     },
-    [entry],
+    [entry, invalidateInFlightRead],
   );
 
   const exit = useCallback(
     /**
-     * Leaves the screen for the menu the reference's PF3 arm transfers to.
+     * Leaves the screen for the origin it was entered from, or for the menu when it has none.
      *
-     * Assumptions: the destination is the main menu unconditionally. `app/cbl/COACTVWC.cbl` L328-L339
-     * prefers `CDEMO-FROM-TRANID`/`CDEMO-FROM-PROGRAM` and falls back to `LIT-MENUTRANID`/`LIT-MENUPGM`
-     * -- `CM00` and `COMEN01C` -- but the preferred arm reads a value a CALLING program deliberately
-     * placed there, and the router publishes no equivalent named caller: a history entry is not a
-     * named program and may not even be inside this application. The fallback is therefore the only
-     * arm with a target analogue, and it is the reference's own default.
+     * ⚠️ Refactoring Rationale: BOTH arms of `app/cbl/COACTVWC.cbl` L328-L339 are now expressed, and
+     * only the fallback was before. The reference prefers `CDEMO-FROM-TRANID` and
+     * `CDEMO-FROM-PROGRAM` and falls back to `LIT-MENUTRANID` and `LIT-MENUPGM` -- `CM00` and
+     * `COMEN01C` -- and taking the fallback unconditionally returned an operator to the menu even when
+     * a different screen had sent them here, which is a behaviour the reference does not have. The
+     * earlier note argued that the router publishes no named caller, and that is true of the browser's
+     * HISTORY but not of the transition: a departing screen hands its own route over on
+     * `ScreenTransitionState`, exactly as a calling program wrote the two fields before its `XCTL`,
+     * and `inApplicationRoute` refuses anything that is not one of this application's own routes.
      *
-     * Trade-offs: the exit sentence is set on this screen's error channel immediately before the
-     * transition, so it is genuinely transient. Handing it to the destination as router state was the
-     * alternative -- the direct analogue of `MOVE WS-RETURN-MSG TO CCARD-ERROR-MSG` before
-     * `EXEC CICS XCTL ... COMMAREA(...)` -- and is rejected twice: the single validated navigation
-     * seam this tree transitions through takes a destination and no state, so using it would mean
-     * bypassing that seam, and the menu screen is not authored yet so nothing would read the state.
-     * Setting it keeps the transition truthful and observable rather than silently dropping a message
-     * the reference emits.
+     * Refactoring Rationale: this wrote `ACCOUNT_VIEW_MESSAGES.WS_EXIT_MESSAGE.text` --
+     * `PF03 pressed.Exiting` -- to the error channel immediately before navigating, and the write has
+     * been REMOVED. The old note defended it as "truthful and observable" while conceding that the
+     * destination could not read it; the review found it was not observable at all, because React
+     * batches the write with the transition and the route unmounts before any paint. The deeper fault is
+     * that the sentence should never have been shown: `WS-EXIT-MESSAGE` is declared at
+     * `app/cbl/COACTVWC.cbl` L119 with L120 as an `88`-level value of `WS-RETURN-MSG` and is `SET`
+     * NOWHERE in the program. Its PF3 arm at L323-L345 moves navigation fields and transfers control and
+     * emits no message at all, so the reference shows nothing on exit and removing the write is parity
+     * rather than a loss.
+     *
+     * Assumptions: this is the SAME defect as the information line above, and the shared root cause is
+     * worth naming once: two of this program's `88`-level condition names -- `WS-INFORM-OUTPUT` and
+     * `WS-EXIT-MESSAGE` -- are declared and never set, and this screen had treated a declared condition
+     * name as a sentence the program emits. A condition name is a value the program COULD write, and the
+     * catalog necessarily holds every one of them; only the program says which are written. Both are now
+     * driven by what the program does rather than by what it declares, and both catalog entries stay
+     * where they are, because transformation rule T8 keeps the transcription complete whether or not a
+     * given sentence is reachable.
      * @returns {void} Completion is the requested route transition.
+     *
+     * Assumptions: the DESTINATION is still the handed-over origin rather than the menu
+     * unconditionally, which is the other half of this arm and is unaffected by withdrawing the
+     * sentence. `app/cbl/COACTVWC.cbl` L323-L345 transfers to the program the caller named and falls
+     * back to the menu only when it named none, so the fallback is the default arm and not the rule.
      */
     (): void => {
-      setErrorMessage(ACCOUNT_VIEW_MESSAGES.WS_EXIT_MESSAGE.text);
-      navigateSafely(navigate, MAIN_MENU_ROUTE);
+      navigateSafely(navigate, exitDestination);
     },
-    [navigate],
+    [exitDestination, navigate],
   );
 
   /*
-   * WHY : Assumptions: exactly the two attention identifiers `app/cbl/COACTVWC.cbl` L307-L308 admits
-   *       are bound, and only PF3 carries a label. The hook applies the PF13-to-PF24 folding that
-   *       `app/cpy/CSSTRPFY.cpy` L54-L77 performs, so that aliasing is not restated per screen, and an
-   *       unlabelled binding is keyboard-only -- which is what keeps ENTER working while leaving the
-   *       legend showing the one key the mapset paints.
+   * Assumptions: exactly the two attention identifiers `app/cbl/COACTVWC.cbl` L307-L308 admits
+   * are bound, and only PF3 carries a label. The hook applies the PF13-to-PF24 folding that
+   * `app/cpy/CSSTRPFY.cpy` L54-L77 performs, so that aliasing is not restated per screen, and an
+   * unlabelled binding is keyboard-only -- which is what keeps ENTER working while leaving the
+   * legend showing the one key the mapset paints.
    */
   const { bindings, invoke } = usePfKeys(
     {
@@ -1169,6 +1429,38 @@ export function AccountViewScreen(): ReactElement {
   );
 
   /*
+   * WHY : Refactoring Rationale: three of this screen's four persistent zones are DELEGATED to the one
+   *       mounted `AppShell` rather than composed here, and until this call existed the delegation was
+   *       an assertion in a comment with nothing behind it. The file overview said the title band was
+   *       the shell's to paint, and because nothing published a slot and no shell was mounted, the band
+   *       was simply missing from the rendered screen. Publishing is what makes that statement true:
+   *       the shell paints a zone if and ONLY if a screen has delegated it, so a screen gets the frame
+   *       by asking for it.
+   * WHY : Assumptions: the row-23 error line and the row-24 legend go UP to the shell while the row-22
+   *       informational line stays in the body below. That split is the mapset's own, not a convenience:
+   *       `INFOMSG` is at `POS=(22,23)` inside the screen's own field area and `ERRMSG` at `POS=(23,1)`
+   *       is the last line before the legend, which is the line the shell owns for every screen. Keeping
+   *       the informational band here therefore preserves the measured reading order - record blocks,
+   *       row 22, row 23, row 24 - with each line rendered by whichever layer owns it.
+   * WHY : Assumptions: the resolved `bindings` and `invoke` from this screen's own `usePfKeys` call are
+   *       handed over unchanged. The shell never re-derives a binding, so this screen remains the single
+   *       owner of the document key listener; and because a published `pfKeys` slot makes the shell stand
+   *       its own function key down, exactly one listener is installed while this screen is mounted.
+   */
+  useShellSlot({
+    screen: { transactionId: ACCOUNT_VIEW_TRANSACTION_ID, programName: ACCOUNT_VIEW_PROGRAM_NAME },
+    now: paintedAt,
+    message: { text: errorMessage, mapset: ACCOUNT_VIEW_MAPSET },
+    /*
+     * WHY : Assumptions: the legend colour is delegated explicitly and is not left to the slot's
+     *       default. This mapset is one of only TWO whose row-24 legend is `COLOR=TURQUOISE` rather
+     *       than the 15-of-17 majority `COLOR=YELLOW` -- `app/bms/COACTVW.bms` L369-L372 -- so omitting
+     *       it would render this screen's legend in the wrong measured colour.
+     */
+    pfKeys: { keys: bindings, onInvoke: invoke, legendColor: 'TURQUOISE' },
+  });
+
+  /*
    * WHY : Assumptions: the fixed-pitch font is applied by NAME through the token bridge and resolved
    *       to its CSS-variable reference rather than to a resolved value. `ui/src/theme/tokens.ts`
    *       records that all five of the baseline's `PICOUT='+ZZZ,ZZZ,ZZZ.99'` money fields are in this
@@ -1177,6 +1469,15 @@ export function AccountViewScreen(): ReactElement {
    *       inline style, which under CSS-variable theming opts the element out of the theme silently.
    */
   const monetaryStyle: CSSProperties = { fontFamily: cssVar[TYPOGRAPHY_TOKENS.fixedPitchData] };
+
+  /*
+   * WHY : Assumptions: the marker takes the same colour token the refusal text does, which is the one
+   *       decision `FIELD_ERROR_TOKENS` exists to hold: `app/cpy/CSSETATY.cpy` L17-L27 moves `DFHRED`
+   *       into the colour subfield and `'*'` into the output subfield of the SAME field, so the two
+   *       halves of that treatment share one colour by construction. Reading it through the token
+   *       rather than naming a red here is what keeps that one decision in one place.
+   */
+  const blankMarkerStyle: CSSProperties = { color: cssVar[FIELD_ERROR_TOKENS.errorColor] };
 
   /*
    * WHY : Assumptions: the refusal is spread as an object rather than passed as two attributes,
@@ -1195,7 +1496,33 @@ export function AccountViewScreen(): ReactElement {
       ? {}
       : refusal.source === 'local'
         ? { validateStatus: 'error' }
-        : { validateStatus: 'error', help: refusal.message };
+        : {
+            validateStatus: 'error',
+            help: fieldErrorHelp(ACCOUNT_ID_FIELD_ID, refusal.message),
+          };
+
+  /*
+   * WHY : Refactoring Rationale: the reference's blank marker is rendered as an adornment on the
+   *       control rather than written into its value, which is the change recorded at the refusal site
+   *       above. `aria-hidden` is what makes the substitution safe rather than merely different: the
+   *       marker is a visual echo of a refusal an assistive technology is already told about through
+   *       the band's live region, so announcing it a second time as part of the field would report a
+   *       punctuation character where the operator expects to hear their account number.
+   * WHY : Assumptions: the adornment is present ONLY for the blank refusal, not for every refusal.
+   *       `app/cbl/COACTVWC.cbl` L561-L565 writes the marker on the blank path alone -- the templated
+   *       treatment at `app/cpy/CSSETATY.cpy` L23-L25 makes the same distinction -- so a malformed
+   *       eleven-digit entry is coloured and unmarked, exactly as it is on the terminal.
+   */
+  const blankMarkerProps =
+    refusal?.state === 'BLANK'
+      ? {
+          suffix: (
+            <Typography.Text aria-hidden="true" style={blankMarkerStyle}>
+              {FIELD_ERROR_TOKENS.blankMarker}
+            </Typography.Text>
+          ),
+        }
+      : {};
 
   return (
     <Flex vertical gap="large">
@@ -1203,76 +1530,92 @@ export function AccountViewScreen(): ReactElement {
        * WHY : Assumptions: level 3 matches the level the sibling screens give their own row-4 title,
        *       leaving level 4 to the application heading the shell's header band renders, so the two
        *       do not compete for one slot. The secondary tone is not a colour choice made here: the
-       *       mapset paints this heading `COLOR=NEUTRAL`, and `BMS_COLOR_TOKENS.NEUTRAL` in
+       *       mapset paints this heading `COLOR=NEUTRAL`, and `BMS_TEXT_COLOR_TOKENS.NEUTRAL` in
        *       `ui/src/theme/tokens.ts` resolves NEUTRAL to `colorTextSecondary` -- which is exactly
        *       the token this prop selects, so the prop IS the bridge's decision rather than a bypass
        *       of it.
        */}
       <Typography.Title level={3} type="secondary">
-        {ACCOUNT_VIEW_SECTION_TITLES.account}
+        {ACCOUNT_VIEW_HEADINGS.ACCOUNT}
       </Typography.Title>
       {/*
-       * WHY : Alternatives Considered: rendering the whole screen as a form. Of the 37 named
-       *       `DFHMDF` definitions in this mapset exactly ONE is an input -- `ACCTSID`, the only field
-       *       carrying `UNPROT` -- and the other 36 are protected, so a form would offer an
-       *       editability this transaction does not have, and the account-UPDATE screen is where that
-       *       affordance belongs. The form element here wraps the single filter alone, purely so the
-       *       field's refusal can be carried by the design system's own field-error treatment.
+       * Alternatives Considered: rendering the whole screen as a form. Of the 37 named
+       * `DFHMDF` definitions in this mapset exactly ONE is an input -- `ACCTSID`, the only field
+       * carrying `UNPROT` -- and the other 36 are protected, so a form would offer an
+       * editability this transaction does not have, and the account-UPDATE screen is where that
+       * affordance belongs. The form element here wraps the single filter alone, purely so the
+       * field's refusal can be carried by the design system's own field-error treatment.
        */}
       <Form layout="vertical">
         <Form.Item
-          label={ACCOUNT_BLOCK_FIELD_LABELS.accountNumber}
+          label={ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.ACCOUNT_NUMBER}
           htmlFor={ACCOUNT_ID_FIELD_ID}
           {...refusalProps}
         >
           {/*
-           * WHY : Assumptions: `maxLength` is eleven because three independent declarations in the
-           *       reference say so -- the receiving field `ACCTSIDI PIC 99999999999` at
-           *       `app/cpy-bms/COACTVW.CPY` L60, the map field's `LENGTH=11` with
-           *       `PICIN='99999999999'` and `VALIDN=(MUSTFILL)` at `app/bms/COACTVW.bms` L84-L90, and
-           *       the carried selection `CDEMO-ACCT-ID PIC 9(11)` at `app/cpy/COCOM01Y.cpy` L38.
-           * WHY : Assumptions: `autoFocus` is on this control and on no other, because `ACCTSID`
-           *       carries the mapset's single `IC` attribute and because
-           *       `app/cbl/COACTVWC.cbl` L546-L552 moves `-1` into `ACCTSIDL` in EVERY branch of its
-           *       cursor `EVALUATE` -- the cursor is on this field whatever happened on the previous
-           *       turn, so focusing it is transcription rather than a choice.
-           * WHY : Alternatives Considered: the design system's numeric input with `controls={false}`
-           *       and `stringMode`. Rejected because the numeric control cannot hold this field's
-           *       blank marker: `app/cbl/COACTVWC.cbl` L563 writes a literal `'*'` into this very
-           *       field and L628 reads it back, and a numeric control would discard it. A text control
-           *       with digit filtering keeps both halves of that round trip and needs no `stringMode`
-           *       to stay clear of an IEEE-754 double, because it never holds a number at all.
+           * Assumptions: `maxLength` is eleven because three independent declarations in the
+           * reference say so -- the receiving field `ACCTSIDI PIC 99999999999` at
+           * `app/cpy-bms/COACTVW.CPY` L60, the map field's `LENGTH=11` with
+           * `PICIN='99999999999'` and `VALIDN=(MUSTFILL)` at `app/bms/COACTVW.bms` L84-L90, and
+           * the carried selection `CDEMO-ACCT-ID PIC 9(11)` at `app/cpy/COCOM01Y.cpy` L38.
+           * Assumptions: `autoFocus` is on this control and on no other, because `ACCTSID`
+           * carries the mapset's single `IC` attribute and because
+           * `app/cbl/COACTVWC.cbl` L546-L552 moves `-1` into `ACCTSIDL` in EVERY branch of its
+           * cursor `EVALUATE` -- the cursor is on this field whatever happened on the previous
+           * turn, so focusing it is transcription rather than a choice.
+           * Alternatives Considered: the design system's numeric input with `controls={false}`
+           * and `stringMode`. Rejected because the numeric control cannot hold this field's
+           * blank marker: `app/cbl/COACTVWC.cbl` L563 writes a literal `'*'` into this very
+           * field and L628 reads it back, and a numeric control would discard it. A text control
+           * with digit filtering keeps both halves of that round trip and needs no `stringMode`
+           * to stay clear of an IEEE-754 double, because it never holds a number at all.
            */}
           {/*
-           * WHY : Refactoring Rationale: `aria-invalid` is set explicitly, because the design system's
-           *       field-error treatment does NOT set it for a control associated by `htmlFor`. Its form
-           *       item only contributes the described-by wiring when it owns a NAMED field, which this
-           *       one is not -- the screen holds the value itself -- so the refused state was conveyed
-           *       to a sighted operator by colour and to an assistive technology not at all. Rendering
-           *       the DOM with the field refused confirmed the attribute was absent. It is invisible,
-           *       so it cannot conflict with the mapset, and the 3270 original was operated entirely
-           *       from the keyboard, which makes programmatic determinability a fidelity concern here
-           *       rather than an embellishment.
-           *       Assumptions: the attribute alone is sufficient because the SENTENCE is already
-           *       announced -- the error band renders the design system's alert with `role="alert"`,
-           *       an assertive live region, so the refusal text reaches a screen reader without this
-           *       control having to describe it a second time.
+           * WHY : Refactoring Rationale: the ARIA members come from `ui/src/layout/fieldHelp.tsx`,
+           *       where this control previously set a bare `aria-invalid` of its own. The design
+           *       system contributes neither member for a control associated by `htmlFor` alone -- its
+           *       form item wires them only for a NAMED field, and this screen holds the value itself
+           *       -- so the state was conveyed to a sighted operator by colour and to an assistive
+           *       technology not at all. The bare attribute closed half of that: it announced THAT the
+           *       value was refused and never WHICH refusal, so a service-supplied sentence printed
+           *       under the control reached the screen and not the operator who most needed it.
+           * WHY : Assumptions: the three members are stated separately because this control is the one
+           *       place in the tree where they genuinely differ. A LOCAL refusal is coloured and
+           *       carries no help text -- the band already holds the sentence and printing it twice
+           *       would have one refusal read in two places -- so `invalid` is true while `hasError`
+           *       is false and no dangling `aria-describedby` is emitted. A refusal the SERVICE
+           *       addressed to this field does print, so both are true and the description resolves.
+           * WHY : Assumptions: `hasHint` is false because this control has no hint element; the mapset
+           *       paints no width hint on this screen, unlike the sign-on mapset which paints one.
            */}
           <Input
             id={ACCOUNT_ID_FIELD_ID}
             autoFocus
-            aria-invalid={refusal !== null}
+            {...fieldAriaProps(ACCOUNT_ID_FIELD_ID, {
+              invalid: refusal !== null,
+              hasError: refusal?.source === 'response',
+              hasHint: false,
+            })}
+            {...blankMarkerProps}
             inputMode="numeric"
             maxLength={ACCOUNT_ID_DECLARED_WIDTH}
             value={entry}
             onChange={
               /**
-               * Records the proposed filter value, reduced to the characters the field accepts.
+               * Records the proposed filter value and retires whatever read is outstanding.
+               *
+               * Assumptions: the record on display is cleared on every keystroke, because the moment
+               * the filter stops naming the account beneath it the pairing is no longer true of
+               * anything. The reference cannot show that pairing at all -- its task holds the terminal
+               * for the whole turn, so the field and the record it sent are always one turn's worth of
+               * the same state -- so clearing is what preserves that property rather than adding a
+               * behaviour.
                * @param {ChangeEvent<HTMLInputElement>} event - Change event from the control, whose
                *   target value is the text the operator typed or pasted.
                * @returns {void} Completion is represented by this screen's own state.
                */
               (event: ChangeEvent<HTMLInputElement>): void => {
+                invalidateInFlightRead();
                 setEntry(acceptAccountIdKeystrokes(event.target.value));
               }
             }
@@ -1285,88 +1628,165 @@ export function AccountViewScreen(): ReactElement {
        *       `app/cbl/COACTVWC.cbl` L375-L382 performs `SEND-PLAIN-TEXT` instead of sending the map.
        *       The legend below stays rendered so the operator can still leave, which the reference's
        *       plain-text path achieves by ending the task.
-       * WHY : Trade-offs: only the abend's heading and its reason are rendered, not its code or the
-       *       program it names. Both of those are internal identifiers, and this migration's
-       *       redaction register keeps that class of value out of the browser; the code is still used,
-       *       to choose between the reference's two abend sentences, without being displayed.
+       * WHY : ⚠️ Refactoring Rationale: all FOUR members of the abend group are rendered, and two of them
+       *       were withheld before on the grounds that a code and a program name are internal
+       *       identifiers the redaction register keeps out of the browser. That reading of the register
+       *       was wrong on its own terms: `REDACTED_DIAGNOSTICS` in `ui/src/messages/messages.ts`
+       *       withholds CICS response and reason codes and machine-level status values, replacing each
+       *       with `UNEXPECTED ABEND OCCURRED.`, and it holds no entry for `ABEND-CODE` or
+       *       `ABEND-CULPRIT`. The account-UPDATE screen renders both, from the same catalog table, so
+       *       withholding them here also made two screens answer differently for one shared contract --
+       *       and an operator quoting an abend to support had three of the four values the reference
+       *       shows.
+       * WHY : Assumptions: the four members are laid out exactly as the sibling screen lays them out --
+       *       the message as the title, the reason beneath it and the code and culprit as a bordered
+       *       two-row record view -- and the two row labels are the baseline's OWN data names, read out
+       *       of `ABEND_DATA_FIELDS` rather than written as prose, so the surface names the fields an
+       *       operator would find at `app/cpy/CSMSG02Y.cpy` L45-L53.
+       * WHY : Assumptions: the abend surface still REPLACES the record blocks rather than sitting beside
+       *       them, because the reference replaces the whole screen: its `WHEN OTHER` arm at
+       *       `app/cbl/COACTVWC.cbl` L375-L382 performs `SEND-PLAIN-TEXT` instead of sending the map.
        */}
       {abend === null ? null : (
-        <Result status="error" title={abendHeading(abend)} subTitle={abend.abendReason} />
+        <Result
+          status="error"
+          title={abendHeading(abend)}
+          subTitle={abend.abendReason}
+          extra={
+            <Descriptions column={1} size="small" bordered>
+              <Descriptions.Item label={ABEND_LABELS.abendCode}>
+                {abend.abendCode}
+              </Descriptions.Item>
+              <Descriptions.Item label={ABEND_LABELS.abendCulprit}>
+                {abend.abendCulprit}
+              </Descriptions.Item>
+            </Descriptions>
+          }
+        />
       )}
       {/*
-       * WHY : Assumptions: the spinner is ADDITIVE and is not a fidelity claim. A pseudo-conversational
-       *       task holds the terminal for the whole turn, so the 3270 screen had nothing to show
-       *       during a read and needs nothing carried across; a browser leaves the previous paint on
-       *       screen, so without this an operator cannot tell a slow read from a screen that ignored
-       *       the key.
+       * Assumptions: the spinner is ADDITIVE and is not a fidelity claim. A pseudo-conversational
+       * task holds the terminal for the whole turn, so the 3270 screen had nothing to show
+       * during a read and needs nothing carried across; a browser leaves the previous paint on
+       * screen, so without this an operator cannot tell a slow read from a screen that ignored
+       * the key.
        */}
       {loading ? <Spin size="large" /> : null}
       {abend !== null || loading || view === null ? null : (
         <>
           {/*
-           * WHY : Trade-offs: the two-column record view stands in for the mapset's absolute row and
-           *       column positions, which is documented gap G1. Reading order, grouping and tab order
-           *       are preserved because the rows are emitted in `DFHMDF` declaration order and filled
-           *       left to right, and on the customer block that reproduces the terminal's own rows
-           *       exactly -- `ACSADL1`/`ACSSTTE`, `ACSADL2`/`ACSZIPC`, `ACSCITY`/`ACSCTRY` are rows
-           *       16, 17 and 18. What is NOT preserved is row-for-row alignment on the account block,
-           *       where `ACRCYCR` occupies the right half of row 9 with nothing in the left half, so a
-           *       two-up grid necessarily closes that hole; and pixel-for-character positioning
-           *       nowhere, which a browser cannot offer responsively or accessibly.
+           * Trade-offs: the two-column record view stands in for the mapset's absolute row and
+           * column positions, which is documented gap G1. Reading order, grouping and tab order
+           * are preserved because the rows are emitted in `DFHMDF` declaration order and filled
+           * left to right, and on the customer block that reproduces the terminal's own rows
+           * exactly -- `ACSADL1`/`ACSSTTE`, `ACSADL2`/`ACSZIPC`, `ACSCITY`/`ACSCTRY` are rows
+           * 16, 17 and 18. What is NOT preserved is row-for-row alignment on the account block,
+           * where `ACRCYCR` occupies the right half of row 9 with nothing in the left half, so a
+           * two-up grid necessarily closes that hole; and pixel-for-character positioning
+           * nowhere, which a browser cannot offer responsively or accessibly.
            */}
           <Descriptions
             bordered
-            column={2}
+            column={RECORD_VIEW_COLUMNS}
             items={toDescriptionItems(accountBlockRows(view.account), monetaryStyle)}
           />
           {/*
+           * WHY : ⚠️ Refactoring Rationale: the customer block takes its VALUES from the response's own
+           *       nested member, and both blocks used to be filled together whenever a view existed. The
+           *       prose here already claimed each block was tested separately while the code read both
+           *       halves unconditionally -- and the claim could not be exercised in any case, because the
+           *       service answered HTTP 404 whenever either half was absent, so the partial state the
+           *       reference paints was unreachable end to end. The contract now publishes the customer
+           *       half as nullable, the projection below is what renders it, and the sentence naming the
+           *       miss arrives on the error band through `returnMessage`.
+           * WHY : ⚠️ Refactoring Rationale: the heading and the eighteen labels are painted on the partial
+           *       arm too, and this block was SUPPRESSED entirely on it for one turn -- on a note claiming
+           *       the map's customer region is "suppressed as a whole" by the guard at L493. That claim
+           *       does not survive reading the mapset. `app/bms/COACTVW.bms` holds 100 `DFHMDF`
+           *       definitions of which 63 carry no name and only an `INITIAL=` literal, 35 of those 63
+           *       sitting at row 11 or below -- the `Customer Details` heading at `POS=(11,32)` among
+           *       them -- and a literal definition is part of the map, so it is transmitted on every
+           *       send. What L493 guards is the eighteen NAMED value fields in rows 11 to 20 and nothing
+           *       else. The terminal therefore shows the heading and every label with its value blank,
+           *       and suppressing them here made the screen reflow on an arm where the reference's screen
+           *       does not. Reproducing the blank region is parity; suppressing it was a divergence, and
+           *       one no entry in `docs/architecture/cobol-to-service-traceability.md` registered.
+           * WHY : Assumptions: the ACCOUNT block above needs no such treatment, and that is the contract
+           *       rather than an oversight. `account-api.yaml` publishes the account half as required on
+           *       this operation because the reference paints NEITHER region's values when no account row
+           *       is located -- the disjunction at L471 and L472 is false as well -- so a 200 response
+           *       always carries it and the operation answers 404 otherwise.
+           */}
+          {/*
            * WHY : Assumptions: level 4 sits one below the screen heading above, so the customer block
-           *       reads as subordinate to it and the heading order skips nothing. The mapset states
-           *       the same subordination positionally -- `Customer Details` is painted at row 11,
-           *       inside the body, where `View Account` is painted at row 4 above the first field.
+           *       reads as subordinate to it and the heading order skips nothing. The mapset states the
+           *       same subordination positionally -- `Customer Details` is painted at row 11, inside the
+           *       body, where `View Account` is painted at row 4 above the first field.
            */}
           <Typography.Title level={4} type="secondary">
-            {ACCOUNT_VIEW_SECTION_TITLES.customer}
+            {ACCOUNT_VIEW_HEADINGS.CUSTOMER}
           </Typography.Title>
           <Descriptions
             bordered
-            column={2}
-            items={toDescriptionItems(customerBlockRows(view.customer), monetaryStyle)}
+            column={RECORD_VIEW_COLUMNS}
+            items={toDescriptionItems(
+              customerBlockRows(view.customer ?? UNPOPULATED_CUSTOMER),
+              monetaryStyle,
+            )}
           />
         </>
       )}
       {/*
-       * WHY : Assumptions: TWO bands are rendered, in this order, because the mapset declares two
-       *       independent message lines and this is where it puts them -- `INFOMSG` at `POS=(22,23)`,
-       *       `ATTRB=(PROT) COLOR=NEUTRAL`, `PIC X(45)`, and `ERRMSG` at `POS=(23,1)`,
-       *       `ATTRB=(ASKIP,BRT,FSET) COLOR=RED`, `PIC X(78)`. They sit after the record blocks and
-       *       before the legend so the reading order matches rows 22, 23 and 24, which is the part of
-       *       the fixed grid gap G1 does preserve. The informational band takes the `info` severity
-       *       and the error band takes the component's own default, which is the appearance its source
-       *       field always had.
+       * WHY : Assumptions: ONE band is rendered here and it is the row-22 informational line, because
+       *       the mapset declares two independent message lines at two different rows and only one of
+       *       them belongs to the screen's own field area -- `INFOMSG` at `POS=(22,23)`,
+       *       `ATTRB=(PROT) COLOR=NEUTRAL`, `PIC X(45)`.
+       * WHY : Refactoring Rationale: the row-23 error line that used to sit beside it, and the row-24
+       *       legend that used to follow it, are now delegated to the shell in the `useShellSlot` call
+       *       above. Composing them here as well would render a second message line and a second named
+       *       legend region on this screen once the shell was mounted -- two live regions announcing one
+       *       message, and two documented `message-band` handles where a caller expects one. The
+       *       measured reading order is unchanged: this line is the last thing in the body, and the
+       *       shell paints rows 23 and 24 immediately below the body region.
+       * WHY : ⚠️ Refactoring Rationale: this band takes the `neutral` severity, and it took `info`
+       *       before. `ui/src/theme/tokens.ts` resolves `COLOR=TURQUOISE` to `colorInfo` and
+       *       `COLOR=NEUTRAL` to `colorTextSecondary`, and this field is declared `COLOR=NEUTRAL` -- so
+       *       the informational severity painted the guidance line in the turquoise hue, which is
+       *       exactly the substitution the bridge's G3 note exists to prevent. The severity was added to
+       *       `ui/src/layout/MessageBand.tsx` for this field rather than the colour being written here,
+       *       because a literal colour on this element would opt it out of the theme silently.
+       * WHY : Assumptions: the band names its CHANNEL, which selects a distinct `data-testid`. Both
+       *       bands carried `message-band` before, so the two rendered elements were indistinguishable:
+       *       a query for the band resolved to whichever came first and no case could address the other.
+       *       The row-23 handle now belongs to the shell alone.
        */}
-      <MessageBand mapset={ACCOUNT_VIEW_MAPSET} severity="info" message={infoMessage} />
-      <MessageBand mapset={ACCOUNT_VIEW_MAPSET} message={errorMessage} />
+      <MessageBand
+        channel="information"
+        mapset={ACCOUNT_VIEW_MAPSET}
+        message={infoMessage}
+        severity="neutral"
+      />
       {/*
-       * WHY : Assumptions: the legend colour is passed explicitly and is not left at the default. This
-       *       mapset is one of only TWO whose row-24 legend is `COLOR=TURQUOISE` rather than the
-       *       15-of-17 majority `COLOR=YELLOW` -- `app/bms/COACTVW.bms` L369-L372 -- so omitting it
-       *       would render this screen's legend in the wrong measured colour.
+       * WHY : ⚠️ Refactoring Rationale: ONE row-22 band closes this body, and a second one stood here
+       *       rendering the SAME `infoMessage` under the same mapset. Two independent revisions each
+       *       added the informational line -- one naming its channel and taking the `neutral` severity
+       *       this field's measured `COLOR=NEUTRAL` requires, the other taking `info` -- so the sentence
+       *       was painted twice, in two different hues, and any query for it resolved to two matches.
+       *       The mapset declares exactly one such field, `INFOMSG` at `POS=(22,23)`, so the second is
+       *       withdrawn and the one that carries the measured colour survives. The legend note that stood
+       *       beside it is preserved on the delegation above, where the legend now lives.
        */}
-      <PfKeyBar keys={bindings} onInvoke={invoke} legendColor="TURQUOISE" />
     </Flex>
   );
 }
 
 /*
- * WHY : Trade-offs: the component is published BOTH ways, and the duplication is deliberate. The
- *       named export is what `ui/src/router.tsx` reads -- its lazy adapters republish
- *       `module.<ScreenName>` under the `default` key, which is the only shape `React.lazy` accepts --
- *       and it is the form every sibling screen already uses, so a named export is what keeps this
- *       screen mountable by the existing route table. The default export is this module's declared
- *       contract, and it additionally lets `lazy(() => import('./screens/accountView'))` resolve with
- *       no adapter at all. Both name one function, so the two cannot drift; and the discipline this
- *       tree bans is a default-export BARREL -- a re-export file standing between a screen and its
- *       importers -- which this is not, there being no second file in this folder.
+ * WHY : Refactoring Rationale: this module publishes the component under its NAME ONLY, and the
+ *       default export that used to sit here has been removed rather than kept alongside it. The
+ *       argument for publishing both was that a route could then be declared as
+ *       `lazy(() => import('./screens/<name>'))` with no adapter -- but no route is declared that way
+ *       anywhere, so the second key had no caller, and AAP section 0.6.2.1 fixes the import discipline
+ *       for this tree as named imports with the named-to-default adapter held in `ui/src/router.tsx`.
+ *       Two keys for one component also make a screen reachable by two spellings, so a reader cannot
+ *       tell from an import which convention this tree follows.
  */
-export default AccountViewScreen;

@@ -33,16 +33,23 @@
  *
  * What this screen deliberately does not do
  * -----------------------------------------
- * Trade-offs: it runs no business validation of its own. The reference edits twenty-four fields in a
- * fixed order on the Enter turn and writes only on the later F5 turn, and the migrated contract
- * publishes ONE operation that validates and writes together -- there is no validate-only address to
- * call on Enter. Two readings were available. Re-implementing the twenty-four edit paragraphs in the
- * browser would put one rule in two places, and `ui/src/api/types.ts` states why that is the wrong
- * one: a browser-side refusal produces a different first message than the reference does, and the
- * service is the authority. So Enter performs the reference's change detection and moves to the
- * confirmation state, and the service's own field errors surface on the F5 turn instead -- one turn
- * later than the terminal showed them, with no write performed and no entry lost, and every sentence
- * still the reference's own because the response body supplies it.
+ * Trade-offs: it runs no business validation of its own, and it does not need to. The reference edits
+ * its fields in a fixed order on the Enter turn and writes only on the later F5 turn, and the contract
+ * now publishes an operation for EACH turn: `POST /api/v1/accounts/update/validate` runs every edit and
+ * writes nothing, and `POST /api/v1/accounts/update` writes under a revision precondition. Enter calls
+ * the first and moves to the confirmation state only on its answer; F5 calls the second. Both turns run
+ * the same `editMapInputs`, so the service remains the single authority on what is acceptable and every
+ * sentence is the reference's own because the response body supplies it.
+ *
+ * ⚠️ Refactoring Rationale: this paragraph recorded a DIFFERENT arrangement, and it was accurate when
+ * written: no validate-only address existed, so Enter performed the reference's change detection alone,
+ * announced `Changes validated.Press F5 to save`, protected the form, and left the field refusals to
+ * arrive on the write turn. A review found what that cost -- an operator was told a thirty-six-field
+ * submission had been validated when nothing had validated it, and was then instructed to press the save
+ * key. The two readings the paragraph weighed were re-implementing the edits in the browser or deferring
+ * them to the write; the third, which is the one taken, was to publish the turn the reference already
+ * has. Re-implementing them here remains rejected for the reason recorded then, and
+ * `ui/src/api/types.ts` still states it.
  */
 
 import {
@@ -62,17 +69,25 @@ import {
   Typography,
   theme,
 } from 'antd';
-import { useCallback, useEffect, useState } from 'react';
-import type { CSSProperties, ReactElement } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { CSSProperties, ReactElement, ReactNode } from 'react';
 import { useNavigate } from 'react-router';
 
-import { isConflictFailure, readAccountView, updateAccount } from '../../api/accounts';
+import {
+  isConflictFailure,
+  readAccountView,
+  updateAccount,
+  validateAccountUpdate,
+} from '../../api/accounts';
 import type {
   AccountUpdateResponse,
+  AccountUpdateValidationResponse,
   AccountViewResponse,
+  CustomerDetail,
   SensitiveAccountUpdateRequest,
 } from '../../api/accounts';
 import { isApiRequestError } from '../../api/client';
+import { applyMoneyEditMask, stripMoneyEditMask } from '../../format/money';
 /*
  * WHY : Assumptions: this ONE type is imported from the shapes module while every other shape on this
  *       screen comes through `../../api/accounts`. That module re-exports the twelve account shapes so
@@ -83,12 +98,12 @@ import { isApiRequestError } from '../../api/client';
  *       to prevent.
  */
 import type { FieldError } from '../../api/types';
+import { useShellSlot } from '../../layout/AppShell';
+
 import { MessageBand } from '../../layout/MessageBand';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
-import { PfKeyBar } from '../../layout/PfKeyBar';
-import { ScreenHeader } from '../../layout/ScreenHeader';
 import { usePfKeys } from '../../layout/usePfKeys';
-import type { PfKeyHandlerMap } from '../../layout/usePfKeys';
+import type { PfKeyHandlerMap, PfKeyRejection } from '../../layout/usePfKeys';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import {
   ABEND_DATA_FIELDS,
@@ -101,12 +116,35 @@ import {
 } from '../../messages/messages';
 import type { MapsetName } from '../../messages/messages';
 import {
-  BMS_COLOR_TOKENS,
+  BMS_TEXT_COLOR_TOKENS,
   FIELD_ERROR_TOKENS,
   SPACING_TOKENS,
   TYPOGRAPHY_TOKENS,
 } from '../../theme/tokens';
 import { MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
+/*
+ * WHY : Refactoring Rationale: this screen no longer resolves the two reference lookups itself, and the
+ *       imports that did -- `getUsState`, `getUsStateZipPrefix`, `editAccountUpdateInputs`,
+ *       `stateZipLookupKey` and the two chain types -- are withdrawn from it. Two designs for this step
+ *       were authored: a LOCAL edit chain that consulted the reference service for the state code and
+ *       the state-and-postal-prefix pairing, and a call to the account context's own
+ *       `/accounts/update/validate` operation. The service call is retained because it is the one with
+ *       an endpoint behind it -- account-service publishes the operation and asserts it, and this
+ *       screen's own cases stub it -- and because the service is the authority that will refuse the
+ *       write in any case, so a second opinion computed here could disagree with the one that decides.
+ * WHY : Assumptions: nothing is lost from the local chain's work. It lives in `./edits` as one pure
+ *       function over the form values and is exercised directly by `./edits.test.ts`, which is a
+ *       stronger test of twenty-four ordered edits than driving them through a rendered screen; the
+ *       module is retained for that reason rather than deleted with its wiring.
+ */
+/*
+ * WHY : Assumptions: the edit chain lives in a sibling module rather than in this file. It is one pure
+ *       function over the form values with no React in it, and this module is already the screen's
+ *       largest -- keeping the twenty-four edits beside the rendering would bury them, and separating
+ *       them is what lets the chain be exercised directly rather than only through a rendered screen.
+ */
+import { fieldAriaProps, fieldErrorHelp } from '../../layout/fieldHelp';
+import { UNPOPULATED_CUSTOMER } from '../accountView/index';
 
 /*
  * WHY : Assumptions: every user-visible SENTENCE on this screen resolves through
@@ -277,6 +315,87 @@ export const SSN_PART_PLACEHOLDERS = {
 export const DATE_PART_SEPARATOR = '-';
 
 /*
+ * WHY : ⚠️ Purpose: the two protected identifiers are the one place this screen CANNOT reproduce what the
+ *       terminal showed. The reference paints the government-issued identifier in the clear --
+ *       `MOVE ACUP-NEW-CUST-GOVT-ISSUED-ID TO ACSGOVTO` at `app/cbl/COACTUPC.cbl` L2946 -- and this
+ *       system's read operations return neither identifier in the clear at all: `CustomerDetail` in
+ *       `services/account-service/src/main/resources/openapi/account-api.yaml` carries `ssnMasked` and
+ *       `governmentIssuedIdMasked` and no clear counterpart, because both columns are enciphered and
+ *       `CustomerMapper` publishes the FIXED marker `[REDACTED]` for each. So there is no stored value
+ *       to paint, and this caption is what stands in its place.
+ * WHY : Refactoring Rationale: the two masked members were DISCARDED by the seeding path while the
+ *       comment above it said they were "offered beside the control", so the screen showed nothing at
+ *       all beside four blank boxes. An operator could not tell what leaving them blank
+ *       does -- which is the one operative fact here, and it is NOT the same fact for both members: the
+ *       two captions below state each one separately, for the measured reason recorded there.
+ * WHY : Assumptions: this text is ADDITIVE and has no counterpart in the mapset, so it is authored
+ *       rather than transcribed, and transformation rule T8 does not reach it -- there is no reference
+ *       literal to carry. It is worded to claim NOTHING about the stored value, deliberately: the
+ *       marker is a constant that discloses neither a fragment of the value, nor its length, nor -- for
+ *       the optional government-issued identifier -- whether the row holds one at all, so a caption
+ *       reading "stored value" or "on file" would assert existence the marker cannot support.
+ * WHY : Alternatives Considered: correcting the comment to say the masked members are not offered, and
+ *       rendering nothing. Rejected because it would leave the capability gap unmarked on screen: the
+ *       operator would still have no way to know what blank does on either member, and the difference
+ *       between a member blank preserves and a member blank is refused on is not one to leave to
+ *       inference.
+ */
+
+/*
+ * WHY : ⚠️ Refactoring Rationale: the two identifiers get DIFFERENT captions, where one shared sentence
+ *       reading "leave blank to keep it" was written for both. It is true of the government-issued
+ *       identifier and false of the national identifier, which was established by submitting a changing
+ *       edit with the three parts blank to the running service: it answered 400 naming `ssnPart1`,
+ *       `ssnPart2` and `ssnPart3` each in the `BLANK` state. The cause is that the two obligations sit in
+ *       different layers. `CustomerMapper.nationalIdentifierUpdate` does select preserve for a
+ *       never-supplied value, but `AccountUpdateService.editMapInputs` runs `editNationalIdentifier`
+ *       first and its three `editNumericRequired` edits refuse a blank part outright -- so on any
+ *       submission that changed something, blank is refused before the mapper is ever consulted. The
+ *       government-issued identifier has no such edit, so blank reaches
+ *       `CustomerMapper.governmentIdentifierUpdate` and preserves.
+ * WHY : Assumptions: the national-identifier caption therefore states the OBLIGATION rather than a
+ *       preservation promise. Telling an operator that blank keeps the stored value, on the one field
+ *       where blank is refused, sends them into a refusal the caption told them to expect not to get --
+ *       and on a form of forty editable fields that refusal reads as arbitrary.
+ * WHY : Assumptions: both captions still claim NOTHING about the stored value itself. The marker is a
+ *       constant that discloses neither a fragment of the value, nor its length, nor -- for the optional
+ *       government-issued identifier -- whether the row holds one at all, so neither sentence asserts
+ *       existence the marker cannot support.
+ */
+
+/**
+ * Builds the caption rendered beside the three national-identifier parts.
+ * @param {string} marker - The redaction marker the read returned, rendered exactly as received.
+ * @returns {string} The caption text: the marker followed by the obligation the edits impose.
+ */
+export function nationalIdentifierCaption(marker: string): string {
+  return `${marker} — existing value is not displayed; retype all three parts to save a change`;
+}
+
+/**
+ * Builds the caption rendered beside the government-issued identifier.
+ * @param {string} marker - The redaction marker the read returned, rendered exactly as received.
+ * @returns {string} The caption text: the marker followed by what leaving the control blank does.
+ */
+export function governmentIdentifierCaption(marker: string): string {
+  return `${marker} — existing value is not displayed; leave blank to keep it`;
+}
+
+/** Identifier of the caption standing beside the three national-identifier parts. */
+export const SSN_STANDING_ID = 'carddemo-account-update-ssn-standing';
+
+/** Identifier of the caption standing beside the government-issued identifier. */
+export const GOVERNMENT_ID_STANDING_ID = 'carddemo-account-update-government-id-standing';
+
+/** The two masked identifiers a read returned, held for display and never for submission. */
+export interface ProtectedIdentifierDisplay {
+  /** The marker published in place of the national identifier, exactly as received. */
+  readonly ssnMasked: string;
+  /** The marker published in place of the government-issued identifier, exactly as received. */
+  readonly governmentIssuedIdMasked: string;
+}
+
+/*
  * WHY : Assumptions: these six names are ADDITIVE and have no painted counterpart in the mapset, which
  *       paints ONE label for each split group and relies on the operator seeing three adjacent boxes.
  *       A screen reader announces one control at a time, so without a name per part the three boxes
@@ -295,6 +414,41 @@ export const DATE_PART_SEPARATOR = '-';
  *       not been refused.
  */
 
+/*
+ * WHY : ⚠️ Refactoring Rationale: the two protected identifiers now render their STORED state beside
+ *       their replacement control, where previously both members of the response were read and
+ *       discarded and neither appeared anywhere on the screen. The module's own explanation said the
+ *       masked value "is offered beside the control instead of inside it" -- a description of a surface
+ *       that did not exist. The cost was concrete rather than cosmetic: the reference paints the whole
+ *       identifier into these controls, `MOVE ACUP-NEW-CUST-GOVT-ISSUED-ID TO ACSGOVTO` at
+ *       `app/cbl/COACTUPC.cbl` L2946 and the SSN parts at L2921 to L2931, so an operator arriving at
+ *       the reference screen can SEE what is stored and decide whether to change it. Rendering nothing
+ *       left a blank box that could equally mean stored-and-hidden or never-supplied, and an operator
+ *       cannot decide not to change a value they cannot see any trace of.
+ * WHY : Assumptions: the stored state is rendered from `ssnMasked` and `governmentIssuedIdMasked`
+ *       EXACTLY as the service sent them, in a read-only position, and never inside the control. AAP
+ *       section 0.4.1.9 stores both encrypted and returns both masked, so the whole value the reference
+ *       painted does not exist in the browser to paint; and seeding the mask into the control would
+ *       submit the mask, which the service would then store as the identifier.
+ * WHY : Alternatives Considered: rendering the masked value as the control's `placeholder`, which needs
+ *       no new string and sits inside the field the way the reference's value did. Rejected because a
+ *       placeholder disappears the instant anything is typed -- so it would vanish at exactly the
+ *       moment an operator is deciding whether their replacement is right -- and because a placeholder
+ *       reads to assistive technology as a hint about what to enter rather than as the value on file.
+ *       Trade-offs: the caption below is ADDITIVE and has no painted counterpart, so it is the one
+ *       VISIBLE string on this screen that is not transcribed from the mapset. It is accepted because
+ *       the alternative to naming the value is showing an unlabelled run of asterisks, which states
+ *       even less than the blank control it sits under.
+ * WHY : Assumptions: it is declared HERE rather than in `ui/src/messages/messages.ts`, which is that
+ *       module's own boundary rather than a gap in it -- the catalog owns every string carried ACROSS
+ *       from the baseline, and invented chrome belongs with its renderer. `SKIP_TO_CONTENT_LABEL` in
+ *       `ui/src/layout/AppShell.tsx` sets that precedent for exactly this class and records the same
+ *       reasoning, so this follows an existing convention rather than opening a second one.
+ */
+
+/** Names the stored, masked state shown beside a protected control. Additive: no painted counterpart. */
+export const ACCOUNT_UPDATE_STORED_STATE_LABEL = 'On file:' as const;
+
 /** Accessible names for the parts of each split group, additive and never rendered visibly. */
 export const ACCOUNT_UPDATE_PART_NAMES = {
   year: 'Year',
@@ -304,6 +458,27 @@ export const ACCOUNT_UPDATE_PART_NAMES = {
   prefix: 'Prefix code',
   lineNumber: 'Line number code',
 } as const;
+
+/*
+ * WHY : ⚠️ Purpose: address line 2 is the one editable control on this screen with NO painted label at
+ *       all, and it had no accessible name either -- the mapset paints `Address:` at row 16 for the
+ *       block and puts `ACSADL2` bare at row 17, so a sighted operator reads the label above while a
+ *       screen reader announced an unnamed text box. Positional association is exactly what design-system
+ *       gap G1 gives up, so the name has to be stated rather than inferred from where the box sits.
+ * WHY : Assumptions: the words are the REFERENCE'S OWN and are not invented here. `app/cbl/COACTUPC.cbl`
+ *       L1614 holds `MOVE 'Address Line 2' TO WS-EDIT-VARIABLE-NAME` commented out on the line above
+ *       L1615, with the comment at L1613 recording why -- "Address Line 2 is optional" -- so the token
+ *       exists in the source and is simply never moved. Taking it is what keeps this name in the same
+ *       vocabulary as the twenty-seven the catalog carries.
+ * WHY : Alternatives Considered: adding a twenty-eighth member to `ACCOUNT_UPDATE_FIELD_LABELS` in
+ *       `ui/src/messages/messages.ts`. Rejected because that group transcribes the tokens the program
+ *       MOVES, and a member for one it deliberately does not move would misdescribe the catalog. Also
+ *       considered: painting a visible `Address Line 2` label. Rejected as a visual divergence -- the
+ *       mapset paints none, and adding one would put a label on this screen that the terminal did not.
+ */
+
+/** Accessible name for the unlabelled second address line, from the reference's own token. */
+export const ADDRESS_LINE_2_NAME = 'Address Line 2';
 
 /**
  * The seven declared conditions of the reference's change-action character.
@@ -492,6 +667,27 @@ export const ACCOUNT_UPDATE_FIELD_WIDTHS = {
   primaryCardHolderIndicator: 1,
 } as const satisfies Record<AccountUpdateFieldName, number>;
 
+/** Matches a run of decimal digits, or nothing, used to reject a non-digit in a numeric-only part. */
+const NON_DIGITS = /[^0-9]/gu;
+
+/** The all-zeroes filter the reference refuses, as the eleven characters it is. */
+const ZEROED_ACCOUNT_ID = '0'.repeat(ACCOUNT_UPDATE_FIELD_WIDTHS.accountId);
+
+/**
+ * Strips every character that is not a decimal digit.
+ *
+ * Assumptions: applied to the numeric-only parts -- the twelve date parts, the three identifier
+ * groups, the six telephone groups, the credit score, both identifiers and the postal code -- because
+ * the mapset declares those fields right-justified numeric entry and the reference edits each with a
+ * numeric test. It is NOT applied to the five amounts, which must be able to receive a malformed
+ * entry so the service can report it in the reference's own words.
+ * @param {string} entry - The raw value as the control reports it.
+ * @returns {string} The same value with every non-digit removed.
+ */
+export function digitsOnly(entry: string): string {
+  return entry.replace(NON_DIGITS, '');
+}
+
 /*
  * WHY : Assumptions: the reference protects THREE data fields in every state and this set names them.
  *       `3310-PROTECT-ALL-ATTRS` protects all forty-three, and `3320-UNPROTECT-FEW-ATTRS` then
@@ -517,7 +713,81 @@ const NEVER_EDITABLE_FIELDS: readonly AccountUpdateFieldName[] = [
  *       last name and the postal code but is painted to the right of address line 1, and the cursor
  *       table follows the paint. The reference's own comment at L3121 says so -- "State (appears next
  *       to Line 2 on screen before city)".
+ * WHY : ⚠️ Refactoring Rationale: `customerId` is in this list and it is the ONE entry the reference's
+ *       cursor table does not have. That table runs from the current cycle debit at L3074 to L3076
+ *       straight to the first identifier part at L3077 to L3079 with no arm between them, because the
+ *       reference has no customer-key refusal to position on -- nothing there edits the value. THIS
+ *       system does: `editMapInputs` records `editCustomerKeyNamesRow` under `customerId` at
+ *       `services/account-service/src/main/java/com/carddemo/account/service/AccountUpdateService.java`
+ *       L1039 and returns the key verdict before any other edit runs, so a submission naming the wrong
+ *       customer is refused with that one entry and nothing else. Omitted from this list, such a
+ *       refusal marked its control and moved the cursor NOWHERE, leaving the operator a highlighted
+ *       field the keyboard never reached. The position is not invented either: the symbolic map
+ *       declares `ACSTNUMI` between `ACRCYDBI` and `ACTSSN1I` at `app/cpy-bms/COACTUP.CPY` L157 to
+ *       L162, so the paint order the rest of this list follows puts it exactly here.
+ * WHY : Assumptions: reaching it also requires the control to be focusable, which is why a protected
+ *       field renders `readOnly` rather than `disabled` -- recorded at the control itself. Two of the
+ *       three never-editable fields were already in this list, so the gap was this one entry rather
+ *       than a policy of leaving protected fields out.
  */
+
+/**
+ * The five amounts the reference renders through its `+ZZZ,ZZZ,ZZZ.99` edit mask.
+ *
+ * Assumptions: named as a set so the mask is applied and reversed at ONE place each, driven by
+ * membership rather than by five call sites that could disagree. Every member is an editable control --
+ * all five carry `ATTRB=(FSET,UNPROT)` at `app/bms/COACTUP.bms` L132, L170, L208, L219 and L240 -- which
+ * is why the reversal exists at all.
+ */
+const MASKED_AMOUNT_FIELDS: ReadonlySet<AccountUpdateFieldName> = new Set([
+  'creditLimit',
+  'cashCreditLimit',
+  'currentBalance',
+  'currentCycleCredit',
+  'currentCycleDebit',
+]);
+
+/**
+ * Re-applies the edit mask to the amounts a verdict accepted, leaving the refused ones as typed.
+ *
+ * Assumptions: this is `3203-SHOW-UPDATED-VALUES`, whose arms are per amount and per validation flag.
+ * For each it moves the numeric value through `WS-EDIT-CURRENCY-9-2-F` when the field's flag says valid
+ * -- `IF FLG-CRED-LIMIT-ISVALID ... MOVE WS-EDIT-CURRENCY-9-2-F TO ACRDLIMO` at `app/cbl/COACTUPC.cbl`
+ * L2874 onward -- and otherwise moves the character form the operator submitted straight back, so a
+ * rejected entry is echoed verbatim rather than reformatted.
+ *
+ * Assumptions: an accepted value is stripped BEFORE being masked, so the function is idempotent. It runs
+ * on values that may already carry the mask from a previous turn as well as on freshly typed ones, and
+ * masking an already-masked value without stripping first would read its blanks as part of the number.
+ *
+ * ⚠️ Refactoring Rationale: a refused amount is now STRIPPED rather than left as the form holds it, and
+ * the two differ whenever the refusal follows an accepted turn. The reference's else-arm moves
+ * `ACUP-NEW-CREDIT-LIMIT-X` -- the CHARACTER form received from the map -- straight back into the output
+ * field, so what an operator sees after a refusal is what they submitted. This screen's stored value may
+ * already carry the mask a previous accepted turn applied, so leaving it alone echoed
+ * `+      6,000.00` at an operator whose submission was `6000.00`, decorating the very value it was
+ * reporting as wrong. Stripping is idempotent on a freshly typed entry, so a value the operator has just
+ * written is untouched.
+ *
+ * Trade-offs: a refused amount keeps the operator's own characters even where those characters are
+ * merely differently decorated -- `1234.5` stays `1234.5` rather than becoming `1,234.50`. That is the
+ * reference's behaviour and it is the useful one: reformatting a value while reporting it as wrong would
+ * change what the operator is being asked to look at.
+ * @param {AccountUpdateFormValues} values - The form as the operator left it.
+ * @param {ReadonlyMap<string, FieldError>} refusals - The verdict's entries, keyed by field.
+ * @returns {AccountUpdateFormValues} The form with every accepted amount re-masked.
+ */
+export function remaskAcceptedAmounts(
+  values: AccountUpdateFormValues,
+  refusals: ReadonlyMap<string, FieldError>,
+): AccountUpdateFormValues {
+  const redisplayed: Record<string, string> = { ...values };
+  for (const field of MASKED_AMOUNT_FIELDS) {
+    const submitted = stripMoneyEditMask(values[field]);
+    redisplayed[field] = refusals.has(field) ? submitted : applyMoneyEditMask(submitted);
+  }
+  return redisplayed as unknown as AccountUpdateFormValues;
+}
 
 /** Screen order the reference places its cursor in, used to focus the first field in error. */
 const CURSOR_ORDER: readonly AccountUpdateFieldName[] = [
@@ -537,6 +807,7 @@ const CURSOR_ORDER: readonly AccountUpdateFieldName[] = [
   'currentBalance',
   'currentCycleCredit',
   'currentCycleDebit',
+  'customerId',
   'ssnPart1',
   'ssnPart2',
   'ssnPart3',
@@ -562,7 +833,37 @@ const CURSOR_ORDER: readonly AccountUpdateFieldName[] = [
   'primaryCardHolderIndicator',
 ];
 
-/** Screen-level sentences this screen renders, taken verbatim from the catalog keyed by its program. */
+/*
+ * WHY : Refactoring Rationale: two helpers for the withdrawn local edit chain stood here -- a
+ *       constant standing in for 'both lookups unresolved' and a wrapper that turned a lookup
+ *       promise into a three-valued answer -- and they are withdrawn with the wiring that used them.
+ *       The reasoning for preferring the service operation is recorded at the withdrawn imports above;
+ *       these two had no other caller, and leaving them would leave a reader looking for the chain
+ *       they belong to.
+ */
+
+/*
+ * WHY : Refactoring Rationale: the status code the withdrawn lookup helpers read is withdrawn with
+ *       them, for the reason recorded above. It described a reference lookup answering "no such row",
+ *       a distinction the service operation now draws on this screen's behalf.
+ */
+
+/*
+ * WHY : Refactoring Rationale: a third helper of the withdrawn local edit chain stood here, deciding
+ *       whether a lookup's refusal meant 'no such row' rather than 'the lookup failed'. It is withdrawn
+ *       with the chain wiring for the reason recorded above; the distinction it drew still matters and
+ *       still exists, in the service operation that now makes it.
+ */
+
+/*
+ * WHY : Refactoring Rationale: two helpers for the withdrawn local edit chain stood here -- a
+ *       constant standing in for 'both lookups unresolved' and a wrapper that turned a lookup
+ *       promise into a three-valued answer -- and they are withdrawn with the wiring that used them.
+ *       The reasoning for preferring the service operation is recorded at the withdrawn imports above;
+ *       these two had no other caller, and leaving them would leave a reader looking for the chain
+ *       they belong to.
+ */
+
 const MESSAGES = STATUS_MESSAGES.COACTUPC;
 
 /*
@@ -580,11 +881,31 @@ const MESSAGES = STATUS_MESSAGES.COACTUPC;
 /** The 27 name tokens the reference moves into `WS-EDIT-VARIABLE-NAME` to compose a refusal. */
 const NAME_TOKENS = ACCOUNT_UPDATE_FIELD_LABELS;
 
-/** Matches a run of decimal digits, or nothing, used to reject a non-digit in a numeric-only part. */
-const NON_DIGITS = /[^0-9]/gu;
+/*
+ * WHY : ⚠️ Refactoring Rationale: this admitted ONE to eleven digits and now admits exactly eleven,
+ *       which is what the comment beside it already claimed and the code did not. The reference's own
+ *       test is `IF CC-ACCT-ID IS NOT NUMERIC OR CC-ACCT-ID-N EQUAL ZEROS` at `app/cbl/COACTUPC.cbl`
+ *       L1802 and L1803, applied to `CC-ACCT-ID PIC X(11)`: a shorter value reaches that field padded
+ *       with spaces, so `NOT NUMERIC` refuses it, and a terminal cannot send a short value anyway
+ *       because `app/bms/COACTUP.bms` declares the map field `LENGTH=11`. A browser control CAN hold
+ *       fewer, so the width has to be asserted here instead of inherited from the transport.
+ * WHY : Assumptions: the sibling screen states the same rule the same way -- `ACCOUNT_ID_PATTERN` in
+ *       `ui/src/screens/accountView/index.tsx` is `/^[0-9]{11}$/u` -- and the two agreeing is the point:
+ *       one screen accepting a filter the other refuses would send the same operator to two different
+ *       answers for one value.
+ */
 
-/** Matches an account identifier the reference's own key edit accepts: eleven non-zero digits. */
-const ACCEPTABLE_ACCOUNT_ID = /^[0-9]{1,11}$/u;
+/**
+ * Matches an account identifier the reference's own key edit accepts: exactly eleven digits.
+ *
+ * Refactoring Rationale: the quantifier was `{1,11}` while this very comment said "eleven", so the
+ * screen accepted a partial key its own description ruled out and the service then refused. The
+ * authority is `1300-EDIT-ACCOUNT`, whose refusal is composed from the two literals that read
+ * `Account number must be an 11 digit non-zero number` -- an eleven-digit test, not an up-to-eleven
+ * one. Accepting fewer digits locally did not make them acceptable; it moved the refusal one round
+ * trip later and reported it as a server rejection rather than as the field problem it is.
+ */
+const ACCEPTABLE_ACCOUNT_ID = /^[0-9]{11}$/u;
 
 /** First character position of the month inside a ten-character ISO date. */
 const ISO_MONTH_START = 5;
@@ -705,20 +1026,29 @@ export function informationLineFor(action: ChangeAction): string {
   }
 }
 
-/**
- * Strips every character that is not a decimal digit.
- *
- * Assumptions: applied to the numeric-only parts -- the twelve date parts, the three identifier
- * groups, the six telephone groups, the credit score, both identifiers and the postal code -- because
- * the mapset declares those fields right-justified numeric entry and the reference edits each with a
- * numeric test. It is NOT applied to the five amounts, which must be able to receive a malformed
- * entry so the service can report it in the reference's own words.
- * @param {string} entry - The raw value as the control reports it.
- * @returns {string} The same value with every non-digit removed.
+/*
+ * WHY : ⚠️ Refactoring Rationale: a `digitsOnly` coercion USED to sit here, applied on entry to every
+ *       field this module marks numeric -- the twelve date parts, the three identifier groups, the six
+ *       telephone groups, the credit score, both identifiers and the postal code -- and it has been
+ *       WITHDRAWN outright rather than narrowed. Its premise was that the mapset declares those fields
+ *       numeric entry, and the mapset does not: `app/bms/COACTUP.bms` declares `ATTRB=...NUM` on ZERO
+ *       of its 128 fields, so the terminal accepts any character into any of them and the program's own
+ *       edit is what reports it.
+ * WHY : Assumptions: the consequence of stripping was not cosmetic. It made whole branches of the
+ *       reference unreachable and changed the sentence an operator reads: typing `A` into the credit
+ *       score left the control EMPTY, so the refusal that arrived was the absence sentence rather than
+ *       `Credit Score must be a non zero 3 digit number`, and the operator was told a field they had
+ *       filled in was blank. Every numeric edit in
+ *       `services/account-service/.../AccountUpdateService.java` keeps absence, non-numeric and zero on
+ *       separate sentences precisely so those three cases stay distinguishable, and a client that
+ *       silently erased the middle one collapsed two of them.
+ * WHY : Alternatives Considered: keeping the coercion and reporting the discarded characters, and
+ *       rejecting the keystroke instead of erasing it. Both were rejected for the same reason: they
+ *       leave the browser deciding what a field may hold, which is the decision the reference gives to
+ *       the edit that owns the wording. What remains is `inputMode="numeric"`, which is a keyboard
+ *       HINT -- it asks a touch device for a numeric keypad and constrains nothing -- and `maxLength`,
+ *       which is a genuine field-width constraint the mapset does declare.
  */
-export function digitsOnly(entry: string): string {
-  return entry.replace(NON_DIGITS, '');
-}
 
 /**
  * Splits a ten-character ISO date into the three parts the mapset paints.
@@ -835,13 +1165,13 @@ export function blankFormValues(): AccountUpdateFormValues {
 }
 
 /*
- * WHY : Assumptions: the four protected identifier members are seeded EMPTY and the masked value the
- *       read returned is offered beside the control instead of inside it. The reference could seed
- *       them because a terminal was shown the whole value -- `MOVE ACUP-NEW-CUST-GOVT-ISSUED-ID TO
- *       ACSGOVTO` at `app/cbl/COACTUPC.cbl` L2946 -- whereas `ui/src/api/types.ts` declares only
- *       `ssnMasked` and `governmentIssuedIdMasked` on the read shape, because no read operation
- *       returns either in the clear. Seeding a mask into the control would submit the mask, and the
- *       service would then store it.
+ * WHY : Assumptions: the four protected identifier members are seeded EMPTY, and the masked value the
+ *       read returned is rendered read-only BESIDE the control by {@link renderStoredState} rather than
+ *       inside it. The reference could seed them because a terminal was shown the whole value -- `MOVE
+ *       ACUP-NEW-CUST-GOVT-ISSUED-ID TO ACSGOVTO` at `app/cbl/COACTUPC.cbl` L2946 -- whereas
+ *       `ui/src/api/types.ts` declares only `ssnMasked` and `governmentIssuedIdMasked` on the read
+ *       shape, because no read operation returns either in the clear. Seeding a mask into the control
+ *       would submit the mask, and the service would then store it.
  *       Trade-offs: an operator who intends no change to these four leaves them blank, and the
  *       service reads an absent member as PRESERVE rather than as clear -- `nationalIdentifierUpdate`
  *       and `governmentIdentifierUpdate` in
@@ -858,10 +1188,21 @@ export function blankFormValues(): AccountUpdateFormValues {
  * the two directions the response splits: the ten account members and the eighteen customer members.
  * The three dates and the two telephone numbers are decomposed because the map paints a control per
  * part, and the four protected identifier members are left empty for the reason recorded above.
- * @param {AccountViewResponse} view - The account and its customer, as the read returned them.
+ * Assumptions: the parameter requires the customer half to be PRESENT, which the account-view shape
+ * itself no longer guarantees -- `ui/src/api/types.ts` publishes it as nullable, because the reference
+ * paints an account whose customer master holds no row. This screen cannot seed from that arm: the
+ * eighteen customer controls have no values to carry, and the reference behaves the same way rather
+ * than seeding blanks. `9000-READ-ACCT` at `app/cbl/COACTUPC.cbl` L3636 to L3638 leaves the paragraph
+ * before `9500-STORE-FETCHED-DATA` when `DID-NOT-FIND-CUST-IN-CUSTDAT`, and L2577 shows the details
+ * only `IF FOUND-CUST-IN-MASTER`. Narrowing the parameter is what makes that refusal a COMPILE-time
+ * obligation on every caller instead of a runtime read of a null.
+ * @param {AccountViewResponse & { readonly customer: CustomerDetail }} view - The account and its
+ *   customer, as the read returned them, with the customer half established to be present.
  * @returns {AccountUpdateFormValues} Every control's value, ready to render.
  */
-export function formValuesFrom(view: AccountViewResponse): AccountUpdateFormValues {
+export function formValuesFrom(
+  view: AccountViewResponse & { readonly customer: CustomerDetail },
+): AccountUpdateFormValues {
   const openDate = splitIsoDate(view.account.openDate);
   const expirationDate = splitIsoDate(view.account.expirationDate);
   const reissueDate = splitIsoDate(view.account.reissueDate);
@@ -875,18 +1216,18 @@ export function formValuesFrom(view: AccountViewResponse): AccountUpdateFormValu
     openDateYear: openDate.year,
     openDateMonth: openDate.month,
     openDateDay: openDate.day,
-    creditLimit: view.account.creditLimit,
+    creditLimit: applyMoneyEditMask(view.account.creditLimit),
     expirationDateYear: expirationDate.year,
     expirationDateMonth: expirationDate.month,
     expirationDateDay: expirationDate.day,
-    cashCreditLimit: view.account.cashCreditLimit,
+    cashCreditLimit: applyMoneyEditMask(view.account.cashCreditLimit),
     reissueDateYear: reissueDate.year,
     reissueDateMonth: reissueDate.month,
     reissueDateDay: reissueDate.day,
-    currentBalance: view.account.currentBalance,
-    currentCycleCredit: view.account.currentCycleCredit,
+    currentBalance: applyMoneyEditMask(view.account.currentBalance),
+    currentCycleCredit: applyMoneyEditMask(view.account.currentCycleCredit),
     groupId: view.account.groupId,
-    currentCycleDebit: view.account.currentCycleDebit,
+    currentCycleDebit: applyMoneyEditMask(view.account.currentCycleDebit),
     customerId: view.customer.customerId,
     ssnPart1: '',
     ssnPart2: '',
@@ -937,6 +1278,37 @@ export function formValuesFromApplied(applied: AccountUpdateResponse): AccountUp
 }
 
 /**
+ * The stored state of the two protected identifiers, as the service published it.
+ *
+ * Assumptions: both members hold a MASKED rendering and nothing else. `ui/src/api/types.ts` names them
+ * `ssnMasked` and `governmentIssuedIdMasked` for exactly that reason, and this shape repeats the naming
+ * so no consumer of it can come to believe it holds a whole value.
+ */
+export interface StoredProtectedIdentifiers {
+  /** The national identifier as stored, masked. `ACSTSSN1/2/3` at `app/bms/COACTUP.bms` L262 to L288. */
+  readonly ssnMasked: string;
+  /** The government-issued identifier as stored, masked. `ACSTGOVT` at `app/bms/COACTUP.bms` L440. */
+  readonly governmentIssuedIdMasked: string;
+}
+
+/**
+ * Lifts the two masked identifiers out of one customer block.
+ *
+ * Assumptions: this reads from the same block `formValuesFrom` seeds the rest of the customer region
+ * from, so both the read response and the update response supply it -- {@link AccountUpdateResponse}
+ * repeats the whole customer record rather than acknowledging the write, so the state shown beside the
+ * controls stays the state on file after a write as well as after a read.
+ * @param {CustomerDetail} customer - The customer block, exactly as the service published it.
+ * @returns {StoredProtectedIdentifiers} The two masked renderings, unchanged.
+ */
+export function storedIdentifiersFrom(customer: CustomerDetail): StoredProtectedIdentifiers {
+  return {
+    ssnMasked: customer.ssnMasked,
+    governmentIssuedIdMasked: customer.governmentIssuedIdMasked,
+  };
+}
+
+/**
  * Composes the account identifier's own key refusal, which is the one edit that runs before a read.
  *
  * Assumptions: `1210-EDIT-ACCOUNT` is the whole of the reference's validation on the opening turn,
@@ -957,7 +1329,7 @@ export function accountFilterError(entry: string): FieldError | null {
       message: MESSAGES.NO_SEARCH_CRITERIA_RECEIVED.text,
     };
   }
-  if (!ACCEPTABLE_ACCOUNT_ID.test(typed) || Number(typed) === 0) {
+  if (!ACCEPTABLE_ACCOUNT_ID.test(typed) || typed === ZEROED_ACCOUNT_ID) {
     return {
       field: 'accountId',
       state: 'NOT_OK',
@@ -989,11 +1361,19 @@ export function updateRequestFrom(values: AccountUpdateFormValues): SensitiveAcc
   return {
     accountId: values.accountId,
     activeStatus: values.activeStatus,
-    creditLimit: values.creditLimit,
-    cashCreditLimit: values.cashCreditLimit,
-    currentBalance: values.currentBalance,
-    currentCycleCredit: values.currentCycleCredit,
-    currentCycleDebit: values.currentCycleDebit,
+    /*
+     * WHY : Assumptions: each amount has the edit mask's decoration REMOVED here, because the control it
+     *       came from is editable and the masked text is therefore also the submitted text. The service
+     *       parser trims and strips a sign and group separators but not the interior blanks zero
+     *       suppression produces, so a masked value sent verbatim would be refused as not-a-number. The
+     *       reversal is total on anything it cannot read, so a value the operator typed badly still
+     *       reaches the service and is refused there in the reference's own words rather than here.
+     */
+    creditLimit: stripMoneyEditMask(values.creditLimit),
+    cashCreditLimit: stripMoneyEditMask(values.cashCreditLimit),
+    currentBalance: stripMoneyEditMask(values.currentBalance),
+    currentCycleCredit: stripMoneyEditMask(values.currentCycleCredit),
+    currentCycleDebit: stripMoneyEditMask(values.currentCycleDebit),
     openDateYear: values.openDateYear,
     openDateMonth: values.openDateMonth,
     openDateDay: values.openDateDay,
@@ -1290,14 +1670,76 @@ export function fieldDomId(field: AccountUpdateFieldName): string {
   return `carddemo-account-update-${field}`;
 }
 
+/**
+ * The form members for which the character `'*'` is a real update instruction rather than a marker.
+ *
+ * ⚠️ Purpose: this exists because the blank marker and a submittable value collide on exactly one field.
+ * `com.carddemo.account.mapper.CustomerMapper.governmentIdentifierUpdate` tests
+ * `IDENTIFIER_REMOVAL_MARKER.equals(submitted)` FIRST and answers `ProtectedValueUpdate.clear()`, so a
+ * submitted `'*'` on that field DELETES the stored ciphertext. That mapper's own documentation records the
+ * choice and its reason: the column is nullable, so all three intents are available, and the marker is
+ * used for removal specifically because it is the character the reference already gives a user for the
+ * purpose.
+ *
+ * ⚠️ Refactoring Rationale: {@link renderField} writes the blank marker into the control's VALUE, and the
+ * note in that position defended it on the ground that the marker "round-trips faithfully" because "the
+ * service's shared never-supplied test folds the same character into the same answer". That reading is
+ * right for every field except this one and wrong for this one, because the never-supplied test is not the
+ * first test the government-identifier mapping applies -- the removal test is. Written into the value, a
+ * blank refusal on that field would leave a `'*'` in the control for the operator's next submit to carry,
+ * and {@link updateRequestFrom} sends the member whenever it is not empty, so the mapping would
+ * read an instruction to clear a stored identifier the operator never saw and did not ask to remove.
+ *
+ * Assumptions: today no validation marks that member BLANK -- `AccountUpdateService` reads it only through
+ * the shared never-supplied test, when deciding whether the customer region changed -- so the collision is
+ * latent rather than live. It is closed here anyway, because which character a field's value may safely
+ * carry is a property of what the service does with that field, not of which of its validations happen to
+ * be wired at the moment, and a later refusal added on the service side would otherwise turn a rendering
+ * detail into silent data loss.
+ *
+ * Alternatives Considered: rendering the marker beside the control for EVERY field, so no exception list
+ * were needed. Rejected because the marker's position inside the field is part of what a returning
+ * operator recognises -- `app/cpy/CSSETATY.cpy` L23 to L26 moves the asterisk into the field's own OUTPUT
+ * subfield -- and giving that up on twenty-odd fields to defend one would trade a real fidelity for a
+ * uniformity nothing needs.
+ *
+ * Alternatives Considered: choosing a different removal character in the mapper, so the collision were
+ * removed at the source. Rejected because the mapper's reasoning is sound and is not this screen's to
+ * overturn: the marker is the character the reference itself uses for removal, and inventing a second
+ * convention would put a value on the wire that no baseline screen produces.
+ */
+const MARKER_BEARING_FIELDS: ReadonlySet<AccountUpdateFieldName> = new Set<AccountUpdateFieldName>([
+  'governmentIssuedId',
+]);
+
 /** Every input the field renderer needs, passed as one object so no member is positional. */
 export interface FieldRenderSpec {
   /** Which member of the form this control edits. */
   readonly field: AccountUpdateFieldName;
   /** Label rendered against the control, or the empty string when a group label names it instead. */
   readonly label: string;
-  /** Whether entry is coerced to decimal digits, which every numeric-only part requires. */
+  /**
+   * Whether the control asks a touch keyboard for digits, which every numeric-only part does.
+   *
+   * Refactoring Rationale: this member USED to mean "entry is coerced to decimal digits" and now
+   * means only the keyboard hint. The coercion was withdrawn for the reason recorded where it used to
+   * live: `app/bms/COACTUP.bms` declares `ATTRB=...NUM` on none of its 128 fields, so filtering
+   * characters here made the service's non-numeric refusals unreachable and reported a filled field as
+   * blank.
+   */
   readonly numeric?: boolean | undefined;
+
+  /*
+   * WHY : Assumptions: this member is OPTIONAL and holds the ID of a standing hint element rather than
+   *       the hint text. Three of the twenty-seven fields share one standing description -- the two
+   *       protected identifier parts and the government-issued identifier point at the same sentence --
+   *       so an id is what lets one element be referenced by several controls instead of the sentence
+   *       being repeated in each control's own description.
+   * WHY : Refactoring Rationale: the member was ABSENT while three call sites already passed it, so the
+   *       renderer composed `aria-describedby` from a property the type did not admit. Declaring it is
+   *       what makes those three standing hints reach assistive technology.
+   */
+  readonly describedBy?: string | undefined;
   /** Whether the control renders in the fixed-pitch face, which the amounts and identifiers use. */
   readonly fixedPitch?: boolean | undefined;
   /** Placeholder text, used only for the three parts whose mapset field declares an initial. */
@@ -1306,6 +1748,11 @@ export interface FieldRenderSpec {
   readonly ariaLabel?: string | undefined;
   /** Whether this control takes initial focus, true for the mapset's single `IC` field only. */
   readonly autoFocus?: boolean | undefined;
+  /**
+   * Supplementary read-only content rendered under the control, used only by the two protected
+   * identifiers to show their stored masked state. It is never an input and never submitted.
+   */
+  readonly extra?: ReactNode | undefined;
 }
 
 /**
@@ -1331,17 +1778,163 @@ export function AccountUpdateScreen(): ReactElement {
   const [values, setValues] = useState<AccountUpdateFormValues>(blankFormValues);
   const [baseline, setBaseline] = useState<AccountUpdateFormValues | null>(null);
   const [revision, setRevision] = useState<string | null>(null);
+
+  /*
+   * WHY : Assumptions: the two markers live in their OWN state and never in `values`, so nothing that
+   *       composes the request body can reach them. `updateRequestFrom` takes `values` alone, which is
+   *       what makes "a marker cannot be submitted" a property of the shape rather than of a habit.
+   */
+  const [protectedValues, setProtectedValues] = useState<ProtectedIdentifierDisplay | null>(null);
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the save confirmation is CONTROLLED from here, where it used to be
+   *       opened by the design system from its own trigger alone. That left one advertised key with two
+   *       behaviours: the physical F5 and the legend's F5 button invoked the write directly while the
+   *       pointer control beside them opened a confirmation first, so the keyboard bypassed a gate the
+   *       pointer could not. Holding the open state here lets both paths reach the same gate and the same
+   *       single write action.
+   */
+  const [confirmingSave, setConfirmingSave] = useState(false);
+  /*
+   * WHY : Assumptions: the stored masked identifiers are held SEPARATELY from the form values rather
+   *       than as two more members of it, because they are not editable and are never submitted. Every
+   *       member of `AccountUpdateFormValues` is read by `updateRequestFrom`, so a masked value living
+   *       there would be one omission away from being sent as the identifier; keeping it outside makes
+   *       that impossible rather than merely unintended. `null` is the never-read state, which is what
+   *       an unfetched screen and a refused read both are.
+   */
+  const [storedIdentifiers, setStoredIdentifiers] = useState<StoredProtectedIdentifiers | null>(
+    null,
+  );
   const [fieldErrors, setFieldErrors] = useState<ReadonlyMap<string, FieldError>>(new Map());
   const [statement, setStatement] = useState<BandStatement>({ message: null, severity: 'error' });
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the screen carries TWO message channels where it carried one. The
+   *       mapset declares two independent fields at two different rows -- `INFOMSG` at `POS=(22,23)`,
+   *       `ATTRB=(PROT) COLOR=NEUTRAL`, `PIC X(45)` per `app/cpy-bms/COACTUP.CPY` L318, and `ERRMSG` at
+   *       `POS=(23,1)`, `ATTRB=(ASKIP,BRT) COLOR=RED`, `PIC X(78)` per L324 -- and the program fills them
+   *       from two different working fields: `3250-SETUP-INFOMSG` derives `WS-INFO-MSG` from the change
+   *       action on every send, while `WS-RETURN-MSG` latches a refusal. The terminal shows both AT ONCE.
+   *       With one band they competed, so every arm below had to choose a winner and three of them chose
+   *       the refusal -- which meant a concurrency refusal erased the prompt telling the operator what to
+   *       do next, and a validated submission erased nothing only because it happened to write last.
+   * WHY : Assumptions: the ACTION drives this channel and nothing else does, which is what
+   *       `3250-SETUP-INFOMSG` does -- it recomputes the line from the action on every screen send, so
+   *       the two can never disagree. `enterAction` is therefore the only writer.
+   */
+  const [information, setInformation] = useState<string>(informationLineFor('DETAILS_NOT_FETCHED'));
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [validating, setValidating] = useState(false);
   const [abended, setAbended] = useState(false);
 
+  /*
+   * WHY : ⚠️ Refactoring Rationale: every asynchronous turn on this screen is now sequenced by a token,
+   *       where none of them was. The screen issues three kinds of request -- a read, a no-write
+   *       validation and a write -- and each applied its outcome unconditionally, so any pair of them
+   *       could land out of order and the LAST to arrive won regardless of which the operator asked
+   *       for most recently. Three concrete losses followed. A read for account B issued while account
+   *       A's read was outstanding could be overwritten by A, leaving A's values in the form under
+   *       B's key -- and because the form's values are what the write submits, the next save would
+   *       write A's values as though they were the operator's edits to B. A validation verdict for a
+   *       superseded submission could advance the screen to `Changes validated.Press F5 to save` for
+   *       values the operator had since changed. And leaving the screen with any of the three
+   *       outstanding applied state to a component that had gone.
+   * WHY : Assumptions: ONE counter sequences all three kinds rather than one per kind, because the
+   *       question every outcome has to answer is the same -- is this still the turn the operator is
+   *       waiting on -- and any new turn supersedes any older one whatever its kind. Per-kind counters
+   *       would let a fresh read leave a stale validation live, which is precisely the pairing that
+   *       advances the screen for values nobody submitted.
+   * WHY : Trade-offs: requests are not ABORTED, only ignored. Neither the account client nor the
+   *       validation client accepts an abort signal, so adding one would change the transport contract
+   *       for every caller; the cost of ignoring instead is a response body already on the wire being
+   *       discarded, which is invisible to the operator and cannot produce a wrong screen. The
+   *       competing controls are additionally DISABLED while a turn is in flight -- see
+   *       {@link turnInFlight} -- so the ordinary way of reaching these races is closed as well as
+   *       guarded against.
+   */
+  const turnSequence = useRef(0);
+
   /**
-   * Publishes one screen-level statement, replacing whatever the band held.
-   * @param {string | null} message - The sentence to render, or `null` to clear the band.
-   * @param {MessageBandSeverity} severity - Appearance matching the source field the sentence came
-   *   from: `info` for the reference's information line and `error` for its message line.
+   * Opens a new turn, superseding any outcome still in flight.
+   * @returns {number} The token this turn's outcome must present to be applied.
+   */
+  function beginTurn(): number {
+    const token = turnSequence.current + 1;
+    turnSequence.current = token;
+    return token;
+  }
+
+  /**
+   * Reports whether an outcome belongs to the turn the operator is still waiting on.
+   * @param {number} token - The token the outcome captured when its turn opened.
+   * @returns {boolean} `true` when no later turn has opened since.
+   */
+  function isCurrentTurn(token: number): boolean {
+    return turnSequence.current === token;
+  }
+
+  /**
+   * Invalidates any outcome still in flight without opening a turn of its own.
+   *
+   * Assumptions: this is what an EDIT does. Changing a value means the outstanding question is about a
+   * submission the operator has left behind, so its answer must not be applied -- but no request is
+   * being issued, so nothing should be waiting on a new token either.
+   * @returns {void} Completion is the advanced sequence.
+   */
+  function invalidateTurnsInFlight(): void {
+    turnSequence.current += 1;
+  }
+
+  /*
+   * WHY : Assumptions: the cleanup invalidates rather than cancels, for the reason recorded on the
+   *       trade-off above. Trade-offs: this half is DEFENSIVE and is not observable in the React
+   *       version this bundle pins -- a state update on an unmounted component is a silent no-op in
+   *       React 19, verified rather than assumed -- so no test distinguishes it. It is kept because it
+   *       completes the invariant at no runtime cost and because the guarantee it leans on belongs to
+   *       React rather than to this screen.
+   */
+  useEffect(
+    /**
+     * Registers the unmount invalidation.
+     * @returns {() => void} The cleanup that makes an outstanding turn inert.
+     */
+    (): (() => void) => invalidateTurnsInFlight,
+    [],
+  );
+
+  /**
+   * Whether a request this screen issued is still outstanding.
+   *
+   * Assumptions: the three flags are combined here ONCE so that every control which must stand down
+   * during a turn reads one value. Testing them separately at each control is how one of them comes to
+   * be forgotten at a single site, which is the state that leaves a competing action reachable.
+   */
+  const turnInFlight = loading || validating || saving;
+
+  /*
+   * WHY : Assumptions: the marker's colour is resolved by NAME through the token bridge to its
+   *       CSS-variable reference, matching how `ui/src/screens/userUpdate/index.tsx` renders the same
+   *       marker. Reading the resolved value instead would copy today's palette into an inline style and
+   *       opt the element out of the theme silently.
+   */
+  /*
+   * WHY : Refactoring Rationale: a `blankMarkerStyle` declared at this scope is withdrawn; the renderer
+   *       declares its own beside the control it styles. One style object for the blank marker is the
+   *       point -- two of them, at different scopes, is how the marker's colour comes to differ between
+   *       the in-field and the beside-the-field placement.
+   */
+
+  /**
+   * Publishes one sentence on the MESSAGE channel, the mapset's row-23 line.
+   *
+   * Assumptions: this channel is the reference's `WS-RETURN-MSG` and carries refusals only. It is
+   * delegated to the shell, which paints row 23; the information channel is painted by this screen's
+   * own body because the mapset puts `INFOMSG` inside the screen's field area at row 22.
+   * @param {string | null} message - The sentence to render, or `null` to clear the channel.
+   * @param {MessageBandSeverity} severity - Appearance for the sentence: `error` for a refusal and
+   *   `success` for the one acknowledgement this channel carries.
    * @returns {void} Completion is represented by the screen's own state.
    */
   function report(message: string | null, severity: MessageBandSeverity): void {
@@ -1349,17 +1942,22 @@ export function AccountUpdateScreen(): ReactElement {
   }
 
   /**
-   * Moves to one change action and states the information line the reference paints for it.
+   * Moves to one change action and states the INFORMATION line the reference paints for it.
    *
    * Assumptions: the two always move together, because `3250-SETUP-INFOMSG` derives the information
    * line FROM the change action on every screen send -- so an action set without its line would leave
    * the previous action's prompt on screen.
+   *
+   * Refactoring Rationale: this writes the information channel and NO LONGER touches the message
+   * channel, which is what lets both lines stand at once as the terminal showed them. Previously it
+   * wrote the single band, so moving to an action erased whatever refusal was on screen -- and a refusal
+   * written afterwards erased the prompt that told the operator what to do about it.
    * @param {ChangeAction} next - The action to move to.
    * @returns {void} Completion is represented by the screen's own state.
    */
   function enterAction(next: ChangeAction): void {
     setAction(next);
-    report(informationLineFor(next), 'info');
+    setInformation(informationLineFor(next));
   }
 
   const readAccount = useCallback(
@@ -1374,17 +1972,60 @@ export function AccountUpdateScreen(): ReactElement {
      *   `false` when the read was refused, in which case the band already carries the refusal.
      */
     async (accountId: string): Promise<boolean> => {
+      /*
+       * WHY : Assumptions: the turn opens BEFORE the request and every state change below is gated on
+       *       it still being current. Seeding the form is the most damaging outcome to apply late,
+       *       because the form's values are what a later save SUBMITS -- so a superseded read landing
+       *       last would not merely show the wrong record, it would arm the next write with it.
+       */
+      const token = beginTurn();
       setLoading(true);
       setFieldErrors(new Map());
       try {
         const read = await readAccountView(accountId);
-        const seeded = formValuesFrom(read.account);
+        if (!isCurrentTurn(token)) {
+          return false;
+        }
+
+        /*
+         * WHY : Refactoring Rationale: this screen reads `read.account.customer` in three places and the member
+         *       is NULLABLE -- the account master can hold a row whose customer identifier matches nothing,
+         *       and `app/cbl/COACTVWC.cbl` L493 guards only the eighteen NAMED value fields, so the terminal
+         *       shows every customer label with an empty value rather than refusing the screen. The three
+         *       readers were written against a non-null customer, which is a compile error here and would have
+         *       been a crashed render there.
+         * WHY : Assumptions: the substitution happens ONCE, at the point the answer is received, rather than as
+         *       a ternary at each reader. ui/src/screens/accountView/index.tsx resolves the same asymmetry the
+         *       same way and records the reasoning: a per-reader ternary is the form a nineteenth field added
+         *       later forgets.
+         * WHY : Assumptions: the blank projection is composed from the shared constant the sibling screen
+         *       publishes rather than declared again here, so one definition answers "what does an unpopulated
+         *       customer look like" for both screens.
+         */
+        const populated = {
+          ...read.account,
+          customer: read.account.customer ?? UNPOPULATED_CUSTOMER,
+        };
+        const seeded = formValuesFrom(populated);
         setValues(seeded);
         setBaseline(seeded);
         setRevision(read.revision);
+        setStoredIdentifiers(storedIdentifiersFrom(populated.customer));
+
+        // WHY : Assumptions: the two markers are stored EXACTLY as received and are never re-derived
+        //       here. `ui/src/api/accounts.ts` has already refused any answer whose members are not the
+        //       published marker, so what reaches this line is the marker; composing one locally would
+        //       put a second definition of it in the tree and let the two disagree.
+        setProtectedValues({
+          ssnMasked: populated.customer.ssnMasked,
+          governmentIssuedIdMasked: populated.customer.governmentIssuedIdMasked,
+        });
 
         return true;
       } catch (failure: unknown) {
+        if (!isCurrentTurn(token)) {
+          return false;
+        }
         /*
          * WHY : Assumptions: the account identifier the operator typed is retained on the form while
          *       everything else is cleared, which is what `1100-RECEIVE-MAP` does -- it moves the
@@ -1395,10 +2036,23 @@ export function AccountUpdateScreen(): ReactElement {
         setValues({ ...blankFormValues(), accountId });
         setBaseline(null);
         setRevision(null);
+        /*
+         * WHY : Assumptions: the stored state is cleared with the rest of the record rather than left
+         *       standing. It describes the customer the refused read failed to reach, so keeping it
+         *       would caption a blank form with the masked identifiers of whichever account was read
+         *       LAST -- attributing one customer's identifiers to another operator's key.
+         */
+        setStoredIdentifiers(null);
         report(readFailureMessage(failure), 'error');
 
         return false;
       } finally {
+        /*
+         * WHY : Assumptions: the in-flight flag is cleared UNCONDITIONALLY, unlike the state changes
+         *       above. It describes this screen's own outstanding request rather than the answer, so
+         *       leaving it set on a superseded turn would disable the keys permanently -- the operator
+         *       would be locked out by a request they had already replaced.
+         */
         setLoading(false);
       }
     },
@@ -1415,7 +2069,7 @@ export function AccountUpdateScreen(): ReactElement {
      * @returns {void} Completion is represented by the screen's own state.
      */
     function statePromptOnMount(): void {
-      report(informationLineFor('DETAILS_NOT_FETCHED'), 'info');
+      setInformation(informationLineFor('DETAILS_NOT_FETCHED'));
     },
     [],
   );
@@ -1444,14 +2098,94 @@ export function AccountUpdateScreen(): ReactElement {
   );
 
   /**
-   * Records one control's entry, coercing it to digits where the mapset declares numeric entry.
+   * Records one control's entry exactly as it was typed.
+   *
+   * Assumptions: the value is stored VERBATIM. No character class is filtered and no case is folded,
+   * because the mapset constrains no field to digits and the service's edits own every refusal --
+   * the reasoning is recorded where the coercion this replaced used to live.
+   * ⚠️ Refactoring Rationale: the third parameter, a `numeric` flag, is gone with the coercion it
+   * selected. Keeping it would leave a caller passing a value nothing reads, which is how a withdrawn
+   * decision quietly comes back.
    * @param {AccountUpdateFieldName} field - The form member being edited.
-   * @param {string} entry - The raw value the control reported.
-   * @param {boolean} numeric - Whether this field accepts decimal digits only.
+   * @param {string} entry - The value the control reported, stored unchanged.
    * @returns {void} Completion is represented by the screen's own state.
    */
-  function recordEntry(field: AccountUpdateFieldName, entry: string, numeric: boolean): void {
-    const accepted = numeric ? digitsOnly(entry) : entry;
+  function recordEntry(field: AccountUpdateFieldName, entry: string): void {
+    /*
+     * WHY : Assumptions: an edit invalidates any outcome still in flight, because the answer would be
+     *       about a submission the operator has left behind. This is what makes the guard cover more
+     *       than request-versus-request: without it a validation verdict for the values as they were
+     *       could still advance the screen after they had changed.
+     */
+    invalidateTurnsInFlight();
+
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the field's own refusal is CLEARED as soon as it is edited. It was
+     *       retained until the next turn answered, and combined with the value being forced to the blank
+     *       marker that made a correction impossible to make: the control displayed the marker whatever
+     *       the operator typed, so each keystroke arrived as the marker plus the new character and was
+     *       recorded into the form invisibly -- the submitted value silently acquired an asterisk
+     *       prefix while the screen showed nothing but the asterisk. Clearing the entry is also what the
+     *       reference does, though it does it differently: its marker lives in the field's OUTPUT
+     *       subfield and the terminal sends back whatever the operator typed over it, so the marker
+     *       cannot survive an edit there either.
+     * WHY : Trade-offs: the refusal SENTENCE disappears from the control as soon as editing begins,
+     *       before the correction has been judged. The alternative -- keeping it until the next verdict
+     *       -- leaves a stale refusal attached to a value it was never about, which is worse: the
+     *       operator cannot tell whether the sentence describes what they have now typed. The band
+     *       still carries the screen-level sentence, so the outcome is not silent.
+     */
+    if (fieldErrors.has(field)) {
+      setFieldErrors(
+        /**
+         * Drops this field's entry, leaving every other refusal in place.
+         * @param {ReadonlyMap<string, FieldError>} previous - The refusals as the last turn left them.
+         * @returns {ReadonlyMap<string, FieldError>} The refusals without this field's.
+         */
+        (previous: ReadonlyMap<string, FieldError>): ReadonlyMap<string, FieldError> => {
+          const remaining = new Map(previous);
+          remaining.delete(field);
+          return remaining;
+        },
+      );
+    }
+
+    /*
+     * WHY : ⚠️ Refactoring Rationale: a leading blank MARKER is stripped from the entry, and without this
+     *       the marker became data on the operator's very first keystroke. The refused control DISPLAYS
+     *       the asterisk -- `app/cpy/CSSETATY.cpy` L23-L26 moves it into the field's own OUTPUT subfield,
+     *       so the terminal shows it inside the field -- and a browser's caret sits after the displayed
+     *       text rather than at the field's first column, so typing `9` over a displayed `*` produced
+     *       `*9` where a terminal produces `9`. Clearing the refusal above makes the field editable
+     *       again; it cannot un-capture a character the change event has already carried.
+     * WHY : Assumptions: only a LEADING run is stripped, and only while this field is the one carrying a
+     *       blank refusal. A marker cannot appear anywhere else in a displayed value -- the render
+     *       substitutes the marker for the whole value or not at all -- so a trailing or interior
+     *       asterisk is the operator's own input and is left alone.
+     * WHY : Assumptions: the fields in {@link MARKER_BEARING_FIELDS} are exempt, because their marker is
+     *       rendered beside the control and never enters the displayed value, so an asterisk typed there
+     *       is a real instruction to the service rather than a marker being typed over. That is the same
+     *       exception, for the same reason, that decides where the marker is painted.
+     */
+    const typedOverMarker =
+      fieldErrors.get(field)?.state === 'BLANK' &&
+      !MARKER_BEARING_FIELDS.has(field) &&
+      entry.startsWith(FIELD_ERROR_TOKENS.blankMarker);
+    const overwritten = typedOverMarker
+      ? entry.replace(new RegExp(`^\\${FIELD_ERROR_TOKENS.blankMarker}+`, 'u'), '')
+      : entry;
+
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the entry is recorded VERBATIM, and a `numeric ? digitsOnly(entry)`
+     *       coercion stood here defending itself on the ground that "the mapset declares the identifier,
+     *       date part, credit-score and phone-part fields right-justified numeric entry". It does not:
+     *       `app/bms/COACTUP.bms` declares `ATTRB=...NUM` on ZERO of its 128 fields -- the credit score is
+     *       `ATTRB=(UNPROT)` with an underline highlight and nothing else -- so the terminal accepts any
+     *       character into any of them and `1245-EDIT-NUM-REQD` is what reports a non-numeric one. The
+     *       withdrawal, its consequence and the two rejected alternatives are recorded in full where the
+     *       coercion's own declaration used to live; this site is where it was still being applied.
+     */
+    const accepted = overwritten;
     setValues(
       /**
        * Replaces one member of the previous form values.
@@ -1460,6 +2194,14 @@ export function AccountUpdateScreen(): ReactElement {
        */
       (previous: AccountUpdateFormValues): AccountUpdateFormValues => ({
         ...previous,
+        /*
+         * WHY : Refactoring Rationale: the NARROWED value is stored, where this wrote the raw entry and
+         *       left the narrowing computed and discarded. The mapset declares the identifier, date
+         *       part, credit-score and phone-part fields right-justified numeric entry and the reference
+         *       edits each with a numeric test, so a pasted separator or letter must not reach the field
+         *       at all. The five AMOUNTS are deliberately not narrowed -- they must be able to hold a
+         *       malformed entry so the service can refuse it in the reference's own words.
+         */
         [field]: accepted,
       }),
     );
@@ -1531,20 +2273,32 @@ export function AccountUpdateScreen(): ReactElement {
    *       legend fields with nothing to reveal, protect no field between the validation and the write,
    *       and drop three sentences an operator reads: the confirmation prompt, the no-change refusal
    *       and the committed acknowledgement.
+   * WHY : ⚠️ Refactoring Rationale: preserving the two turns is not the same as validating on the first
+   *       one, and only the first of those was true here. The Enter turn announced
+   *       `Changes validated.Press F5 to save` and protected the form having run no field edit at all, so
+   *       the state was observable and the words were wrong: the thirty-six edits ran on the WRITE turn,
+   *       which is where the refusals arrived -- after the operator had been instructed to press the save
+   *       key. The turn now calls the service's own non-writing check, so the sentence is earned.
    */
 
   /**
-   * Validates the edits and asks for confirmation, which is the Enter arm of the details action.
+   * Runs every service-side edit and asks for confirmation, which is the Enter arm of the details action.
    *
-   * Assumptions: this writes nothing at all. `2000-DECIDE-ACTION`'s show-details arm at
-   * `app/cbl/COACTUPC.cbl` L2582 to L2590 moves to the confirmation action when the edits passed and
-   * something changed, and otherwise leaves the action where it is; only the later F5 turn performs
-   * `9600-WRITE-PROCESSING`.
+   * Assumptions: this writes nothing at all, and the operation it calls writes nothing either --
+   * `POST /api/v1/accounts/update/validate` loads the two rows, runs the edits and returns.
+   * `2000-DECIDE-ACTION`'s show-details arm at `app/cbl/COACTUPC.cbl` L2582 to L2590 moves to the
+   * confirmation action when the edits passed and something changed, and otherwise leaves the action
+   * where it is; only the later F5 turn performs `9600-WRITE-PROCESSING`.
+   *
+   * Refactoring Rationale: it used to move to the confirmation action having checked only that a record
+   * had been read and that something had changed -- see the guard below for what that cost. The move now
+   * happens on the service's answer.
    *
    * Assumptions: an unchanged submission is refused with the reference's own sentence and the action
-   * does not move, which `1205-COMPARE-OLD-NEW` reaching L1769 produces. The band carries that
-   * sentence in the message channel rather than the information channel, because the reference latches
-   * it into `WS-RETURN-MSG`.
+   * does not move, which `1205-COMPARE-OLD-NEW` reaching L1769 produces. That sentence goes to the
+   * MESSAGE channel rather than the information channel, because the reference latches it into
+   * `WS-RETURN-MSG`; the validation acknowledgement goes to the information channel for the same reason
+   * in reverse, since `3250-SETUP-INFOMSG` derives that one from the action.
    * @returns {void} Completion is represented by the screen's own state.
    */
   function validateEdits(): void {
@@ -1552,13 +2306,109 @@ export function AccountUpdateScreen(): ReactElement {
       report(MESSAGES.NO_SEARCH_CRITERIA_RECEIVED.text, 'error');
       return;
     }
+
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the verdict is now obtained from the SERVICE before the screen
+     *       advances, where this turn previously advanced on the strength of two local checks -- that a
+     *       record had been fetched, and that something had changed -- and no business rule at all. All
+     *       twenty-four edits ran only during the later write, so an operator was shown
+     *       `Changes validated.Press F5 to save` for a submission that had been validated by nothing,
+     *       and the refusals then arrived one turn later than the sentence promising there were none.
+     *       The reference does not work that way: `2000-DECIDE-ACTION`'s show-details arm reads
+     *       `IF INPUT-ERROR OR NO-CHANGES-DETECTED` and performs `CONTINUE`, leaving the action where
+     *       it is, and only otherwise sets `ACUP-CHANGES-OK-NOT-CONFIRMED`
+     *       (`app/cbl/COACTUPC.cbl` L2584 to L2591) -- so the edits have already run when that
+     *       decision is taken.
+     * WHY : Alternatives Considered: reproducing the twenty-four rules in the browser, which would put
+     *       the authority in two places and let them disagree; and calling the WRITE on this turn,
+     *       which is the one thing the first turn must not do. The service publishes a no-write
+     *       validation operation for exactly this turn, so neither compromise is needed.
+     * WHY : Assumptions: the local no-change check is KEPT as well, and it runs first. It answers
+     *       without a round trip in the case an operator reaches most often -- pressing Enter having
+     *       changed nothing -- and the service reports the same condition independently in
+     *       `noChangesFound`, so the two agree rather than compete. Dropping it would add a request per
+     *       accidental Enter; trusting it alone is what this fix removes.
+     */
     if (!hasChanges(values, baseline)) {
       setFieldErrors(new Map());
       report(MESSAGES.NO_CHANGES_DETECTED.text, 'error');
       return;
     }
-    setFieldErrors(new Map());
-    enterAction('CHANGES_OK_NOT_CONFIRMED');
+
+    const token = beginTurn();
+    setValidating(true);
+
+    validateAccountUpdate(updateRequestFrom(values)).then(
+      /**
+       * Advances only when the service reports nothing refused and something changed.
+       *
+       * Assumptions: the decision is taken from `inputError` and `noChangesFound` rather than from the
+       * entry array being empty, because a no-change verdict carries no entries either -- so an
+       * emptiness test would advance on the one outcome the reference explicitly refuses to advance on.
+       * @param {AccountUpdateValidationResponse} verdict - The verdict those edits reached.
+       * @returns {void} Completion is represented by the screen's own state.
+       */
+      (verdict: AccountUpdateValidationResponse): void => {
+        if (!isCurrentTurn(token)) {
+          return;
+        }
+        setValidating(false);
+        const refusals = indexFieldErrors(verdict.fieldErrors);
+        setFieldErrors(refusals);
+
+        /*
+         * WHY : Assumptions: the accepted amounts are re-masked on this turn, which is where the
+         *       reference re-applies its own edit field. A refused amount is left exactly as the
+         *       operator typed it, so the value they are being asked to correct is the value they see.
+         */
+        setValues(
+          /**
+           * Re-masks the accepted amounts in the form as the verdict left it.
+           * @param {AccountUpdateFormValues} previous - The form at the time the verdict arrived.
+           * @returns {AccountUpdateFormValues} The form with accepted amounts re-masked.
+           */
+          (previous: AccountUpdateFormValues): AccountUpdateFormValues =>
+            remaskAcceptedAmounts(previous, refusals),
+        );
+
+        if (verdict.inputError) {
+          report(verdict.message ?? MESSAGES.INFORM_FAILURE.text, 'error');
+          enterAction('CHANGES_NOT_OK');
+          return;
+        }
+        if (verdict.noChangesFound) {
+          report(verdict.message ?? MESSAGES.NO_CHANGES_DETECTED.text, 'error');
+          return;
+        }
+        enterAction('CHANGES_OK_NOT_CONFIRMED');
+      },
+      /**
+       * Reports a validation request that could not be answered, leaving the action where it is.
+       *
+       * Assumptions: the action does NOT advance on a transport failure, which is the same disposition
+       * a refusal gets. An unanswered question is not a passed validation, and advancing would show the
+       * confirmation prompt on the strength of a request that never completed.
+       * @param {unknown} reason - The value the request rejected with.
+       * @returns {void} Completion is represented by the screen's own state.
+       */
+      (reason: unknown): void => {
+        if (!isCurrentTurn(token)) {
+          return;
+        }
+        setValidating(false);
+
+        /*
+         * WHY : Assumptions: the shared classifier is reused rather than a second one written here, so
+         *       a refused request reports the same sentence on this turn as it does on the write. It
+         *       returns an action as well, and that member is deliberately IGNORED: its actions are
+         *       the write's outcomes, and this turn has not written, so adopting one would move the
+         *       screen to a state that misdescribes what happened.
+         */
+        const rejection = classifySaveRejection(reason);
+        setFieldErrors(indexFieldErrors(rejection.fieldErrors));
+        report(rejection.statement.message, 'error');
+      },
+    );
   }
 
   /**
@@ -1578,121 +2428,240 @@ export function AccountUpdateScreen(): ReactElement {
    */
   function saveEdits(): void {
     /*
-     * WHY : Assumptions: a second confirmation arriving while a write is in flight is ignored, and the
-     *       guard is here rather than expressed as a disabled binding -- a disabled binding reports
-     *       through the hook's invalid-key channel, and this screen's channel coerces to the Enter
-     *       arm, so disabling it would route a suppressed key back into the screen. The reference
-     *       needs no such guard, because a terminal turn is serialised.
+     * WHY : Assumptions: a second confirmation arriving while a write is in flight is ignored. The guard
+     *       is kept even though the F5 binding is now also marked `disabled` while saving, because
+     *       `invoke` can be called from the legend bar and the pointer control has its own path; the
+     *       reference needs neither, because a terminal turn is serialised.
+     *       Refactoring Rationale: this used to be the ONLY guard, and its note argued a disabled binding
+     *       was unusable here because this screen's invalid-key channel coerces to the Enter arm. The
+     *       argument was right about the coercion and wrong about the conclusion: the coercion is now
+     *       suppressed for the `disabled` reason at its source, so the binding can express unavailability
+     *       and the legend can render it, instead of staying lit while the handler silently returned.
      */
     if (saving) {
       return;
     }
+    setConfirmingSave(false);
     if (revision === null) {
       report(MESSAGES.NO_SEARCH_CRITERIA_RECEIVED.text, 'error');
       return;
     }
 
+    const token = beginTurn();
     setSaving(true);
-    updateAccount(updateRequestFrom(values), revision).then(
-      /**
-       * Redisplays the state as stored and acknowledges the write.
-       *
-       * Assumptions: this path answers 200 in THREE distinguishable ways and each gets its own arm,
-       * because the service latches two of the reference's own texts here. A response carrying field
-       * refusals is a refusal; a response carrying the no-change sentence performed no write at all
-       * and must not be announced as one; anything else committed. Collapsing the last two -- by
-       * rendering `returnMessage` whenever the response supplies it -- would report `Looks Good....
-       * so far`, the reference's VALIDATION acknowledgement, in place of its commit confirmation, and
-       * would also claim a commit on the turn the service found nothing to write.
-       * @param {{ account: AccountUpdateResponse; revision: string | null }} applied - The stored
-       *   state and the new revision, as the update operation returned them.
-       * @param {AccountUpdateResponse} applied.account - Both records as stored, the two message
-       *   channels and the per-field error array.
-       * @param {string | null} applied.revision - The revision a consecutive edit must submit, or
-       *   `null` when the response carried no entity tag.
-       * @returns {void} Completion is represented by the screen's own state.
-       */
-      (applied: { readonly account: AccountUpdateResponse; readonly revision: string | null }) => {
-        setSaving(false);
-        const stored = formValuesFromApplied(applied.account);
-        setValues(stored);
-        setBaseline(stored);
-        setRevision(applied.revision);
-        setFieldErrors(indexFieldErrors(applied.account.fieldErrors));
-        if (applied.account.fieldErrors.length > 0) {
-          setAction('CHANGES_NOT_OK');
-          report(applied.account.returnMessage ?? informationLineFor('CHANGES_NOT_OK'), 'error');
-          return;
-        }
-        /*
-         * WHY : Assumptions: a 200 whose message line is the no-change sentence WROTE NOTHING, so it
-         *       returns to showing details rather than to the committed action. The service runs its
-         *       own field-by-field comparison and can reach that answer on a turn this screen's local
-         *       comparison passed -- a value differing only in padding is the case that survives one
-         *       and not the other -- and the reference keeps the show-details action for it at
-         *       `app/cbl/COACTUPC.cbl` L1769 rather than advancing. Reporting it as a commit would
-         *       tell the operator their edit was stored when no row changed.
+    updateAccount(updateRequestFrom(values), revision)
+      .then(
+        /**
+         * Redisplays the state as stored and acknowledges the write.
+         *
+         * Assumptions: this path answers 200 in THREE distinguishable ways and each gets its own arm,
+         * because the service latches two of the reference's own texts here. A response carrying field
+         * refusals is a refusal; a response carrying the no-change sentence performed no write at all
+         * and must not be announced as one; anything else committed. Collapsing the last two -- by
+         * rendering `returnMessage` whenever the response supplies it -- would report `Looks Good....
+         * so far`, the reference's VALIDATION acknowledgement, in place of its commit confirmation, and
+         * would also claim a commit on the turn the service found nothing to write.
+         * @param {{ account: AccountUpdateResponse; revision: string | null }} applied - The stored
+         *   state and the new revision, as the update operation returned them.
+         * @param {AccountUpdateResponse} applied.account - Both records as stored, the two message
+         *   channels and the per-field error array.
+         * @param {string | null} applied.revision - The revision a consecutive edit must submit, or
+         *   `null` when the response carried no entity tag.
+         * @returns {void} Completion is represented by the screen's own state.
          */
-        if (applied.account.returnMessage === MESSAGES.NO_CHANGES_DETECTED.text) {
-          setAction('SHOW_DETAILS');
-          report(MESSAGES.NO_CHANGES_DETECTED.text, 'error');
-          return;
-        }
-
-        /*
-         * WHY : Refactoring Rationale: the commit confirmation is taken from the ACTION and not from
-         *       the response, and preferring the response here was the defect this replaced. The
-         *       service answers a stored write with `Looks Good.... so far`, which is the reference's
-         *       own text but belongs to its VALIDATION step -- `WS-RETURN-MSG` set by
-         *       `1200-EDIT-MAP-INPUTS` when every edit passed -- whereas the sentence the reference
-         *       paints once a write has committed is the information line `3250-SETUP-INFOMSG` selects
-         *       for `ACUP-CHANGES-OKAYED-AND-DONE`. The terminal painted both at once in two separate
-         *       fields; with one band the confirmation is the one that has to survive, because it is
-         *       the only sentence that distinguishes a stored write from a passed validation.
-         */
-        setAction('CHANGES_OKAYED_AND_DONE');
-        report(informationLineFor('CHANGES_OKAYED_AND_DONE'), 'success');
-      },
-      /**
-       * Classifies the refusal and moves to the action the reference sets for it.
-       * @param {unknown} failure - The caught value from the update call.
-       * @returns {void} Completion is represented by the screen's own state.
-       */
-      (failure: unknown) => {
-        setSaving(false);
-        const rejection = classifySaveRejection(failure);
-        setFieldErrors(indexFieldErrors(rejection.fieldErrors));
-        setAction(rejection.action);
-        report(rejection.statement.message, rejection.statement.severity);
-        if (rejection.reread) {
+        (applied: {
+          readonly account: AccountUpdateResponse;
+          readonly revision: string | null;
+        }) => {
           /*
-           * WHY : Assumptions: the record is re-read and the concurrency refusal is then RESTATED,
-           *       because the reference shows both channels at once on this turn and this tree has one
-           *       band. `2000-DECIDE-ACTION` sets the show-details action, so `3250-SETUP-INFOMSG`
-           *       paints `Update account details presented above.` into the information line while
-           *       `WS-RETURN-MSG` still holds the changed-record sentence in the message line. With one
-           *       band the message line wins, because it is the sentence that tells the operator why
-           *       the values on screen are not the ones they submitted.
+           * WHY : Assumptions: the outstanding-request flag is cleared UNCONDITIONALLY and the outcome is
+           *       gated behind the turn check, for the reason recorded on the read's own settlement arm:
+           *       the flag describes this screen's in-flight request, so leaving it set on a superseded
+           *       turn would disable the function keys for good. Everything after the gate reseeds the
+           *       form and moves the action, which a superseded write must not do.
            */
-          readAccount(values.accountId).then(
-            /**
-             * Restates the concurrency refusal after the re-read has reseeded the form.
-             * @returns {void} Completion is represented by the screen's own state.
+          setSaving(false);
+          if (!isCurrentTurn(token)) {
+            return;
+          }
+          const stored = formValuesFromApplied(applied.account);
+          setValues(stored);
+          setBaseline(stored);
+          setRevision(applied.revision);
+          setFieldErrors(indexFieldErrors(applied.account.fieldErrors));
+          if (applied.account.fieldErrors.length > 0) {
+            /*
+             * WHY : ⚠️ Refactoring Rationale: the action move goes through `enterAction`, so the row-22
+             *       prompt for the failed action is stated alongside the refusal instead of being replaced
+             *       by it, and the message channel carries the response's own sentence with NO fallback.
+             *       The fallback used to substitute the information line when the response omitted one,
+             *       which was necessary while a single band had to say something and is wrong now: it
+             *       would paint the identical sentence into rows 22 and 23 at once. A response naming
+             *       failing fields always latches a sentence -- `refuseWhenAnyEditFailed` carries the
+             *       first refusal's wording -- so the null case clears the channel rather than inventing
+             *       text for it.
              */
-            (): void => {
-              report(rejection.statement.message, rejection.statement.severity);
-            },
+            enterAction('CHANGES_NOT_OK');
+            report(applied.account.returnMessage ?? null, 'error');
+            return;
+          }
+          /*
+           * WHY : Assumptions: a 200 whose message line is the no-change sentence WROTE NOTHING, so it
+           *       returns to showing details rather than to the committed action. The service runs its
+           *       own field-by-field comparison and can reach that answer on a turn this screen's local
+           *       comparison passed -- a value differing only in padding is the case that survives one
+           *       and not the other -- and the reference keeps the show-details action for it at
+           *       `app/cbl/COACTUPC.cbl` L1769 rather than advancing. Reporting it as a commit would
+           *       tell the operator their edit was stored when no row changed.
+           */
+          if (applied.account.returnMessage === MESSAGES.NO_CHANGES_DETECTED.text) {
+            enterAction('SHOW_DETAILS');
+            report(MESSAGES.NO_CHANGES_DETECTED.text, 'error');
+            return;
+          }
+
+          /*
+           * WHY : ⚠️ Refactoring Rationale: BOTH sentences are painted, each on the channel the reference
+           *       puts it on, where the screen used to paint only the commit confirmation. The service
+           *       answers a stored write with `Looks Good.... so far`, which is the reference's own text
+           *       and belongs to its VALIDATION step -- `WS-RETURN-MSG` set by `1200-EDIT-MAP-INPUTS`
+           *       when every edit passed -- while the sentence the reference paints once a write has
+           *       committed is the information line `3250-SETUP-INFOMSG` selects for
+           *       `ACUP-CHANGES-OKAYED-AND-DONE`. The terminal showed both at once in two separate
+           *       fields; this screen now has both fields, so choosing between them is no longer
+           *       necessary and no longer correct. `enterAction` states the confirmation on row 22 and
+           *       the response's own sentence goes to row 23.
+           * WHY : Assumptions: the row-23 sentence is taken from the RESPONSE rather than restated from a
+           *       constant, so the acknowledgement an operator reads is the one the service actually
+           *       latched. Its appearance is `success` rather than `error` even though the mapset paints
+           *       `ERRMSG` `COLOR=RED` unconditionally, because this is the one sentence that channel
+           *       carries which is not a refusal, and rendering an acknowledgement in the refusal colour
+           *       would tell an operator their committed write had failed.
+           */
+          enterAction('CHANGES_OKAYED_AND_DONE');
+          report(applied.account.returnMessage ?? null, 'success');
+        },
+        /**
+         * Classifies the refusal and moves to the action the reference sets for it.
+         * @param {unknown} failure - The caught value from the update call.
+         * @returns {void} Completion is represented by the screen's own state.
+         */
+        (failure: unknown) => {
+          /*
+           * WHY : Assumptions: the outstanding-request flag is cleared UNCONDITIONALLY and the outcome is
+           *       gated behind the turn check, for the reason recorded on the read's own settlement arm:
+           *       the flag describes this screen's in-flight request, so leaving it set on a superseded
+           *       turn would disable the function keys for good. Everything after the gate reseeds the
+           *       form and moves the action, which a superseded write must not do.
+           */
+          setSaving(false);
+          if (!isCurrentTurn(token)) {
+            return;
+          }
+          const rejection = classifySaveRejection(failure);
+          const writeRefusals = indexFieldErrors(rejection.fieldErrors);
+          setFieldErrors(writeRefusals);
+          /*
+           * WHY : ⚠️ Refactoring Rationale: the amounts are RE-DISPLAYED on this path too, and only the
+           *       validation path did it. `3203-SHOW-UPDATED-VALUES` runs before every send and is not
+           *       specific to which step produced the flags, so a write refusal left the accepted amounts
+           *       unmasked and the refused one decorated with the mask an earlier accepted turn had
+           *       applied -- the exact inverse of the reference on both counts.
+           */
+          setValues(
             /**
-             * Reports a failure that escaped the reader's own handling.
-             * @param {unknown} readFailure - The caught value from the re-read.
-             * @returns {void} Completion is represented by the screen's own state.
+             * Re-displays the amounts as the write's own verdict leaves them.
+             * @param {AccountUpdateFormValues} previous - The form at the time the refusal arrived.
+             * @returns {AccountUpdateFormValues} The form with each amount displayed for its own flag.
              */
-            (readFailure: unknown): void => {
-              report(readFailureMessage(readFailure), 'error');
-            },
+            (previous: AccountUpdateFormValues): AccountUpdateFormValues =>
+              remaskAcceptedAmounts(previous, writeRefusals),
           );
-        }
-      },
+
+          /*
+           * WHY : ⚠️ Refactoring Rationale: the action move goes through `enterAction`, so the row-22
+           *       prompt for the action the reference sets is stated as well as the refusal. On the
+           *       concurrency path that matters most: `2000-DECIDE-ACTION` sets the show-details action, so
+           *       the terminal paints `Update account details presented above.` on row 22 while
+           *       `WS-RETURN-MSG` holds the changed-record sentence on row 23 -- the second says what went
+           *       wrong and the first says what the values on screen now are. Setting the action alone left
+           *       the previous turn's prompt standing beside the new refusal.
+           */
+          enterAction(rejection.action);
+          report(rejection.statement.message, rejection.statement.severity);
+          if (rejection.reread) {
+            /*
+             * WHY : Assumptions: the record is re-read and the refusal is then RESTATED, and the
+             *       restatement is defensive rather than redundant: `readAccount` reports on its own
+             *       failure arm, so a re-read that itself fails must not leave the concurrency sentence
+             *       standing over values it did not reseed -- and a re-read that succeeds must not lose it.
+             *       Both channels stand together on this turn, which is what the reference shows.
+             */
+            readAccount(values.accountId).then(
+              /**
+               * Restates the concurrency refusal after the re-read has reseeded the form.
+               * @returns {void} Completion is represented by the screen's own state.
+               */
+              (): void => {
+                report(rejection.statement.message, rejection.statement.severity);
+              },
+              /**
+               * Reports a failure that escaped the reader's own handling.
+               * @param {unknown} readFailure - The caught value from the re-read.
+               * @returns {void} Completion is represented by the screen's own state.
+               */
+              (readFailure: unknown): void => {
+                report(readFailureMessage(readFailure), 'error');
+              },
+            );
+          }
+        },
+      )
+      /*
+       * WHY : ⚠️ Assumptions: the four members carrying a personal identifier IN THE CLEAR are blanked
+       *       however the write settles, and this is a security obligation the type they belong to states
+       *       outright: `SensitiveAccountUpdateFields` in `ui/src/api/types.ts` records that no read
+       *       operation returns any of them, so a value assigned there is the only place in the browser it
+       *       exists, and that "a screen must clear these fields after a submission resolves rather than
+       *       retaining them to prefill a retry". The REJECTION arm is what was missing: it leaves every
+       *       other typed value on screen so the operator can correct one field, and it used to leave the
+       *       three identifier parts and the government-issued identifier live in React state and in four
+       *       mounted controls for as long as the screen stayed open.
+       * WHY : Assumptions: it runs in a settlement callback rather than in each arm, so no future arm can
+       *       be added without it. The fulfilment arm already re-seeds every value from the stored answer,
+       *       which blanks these four as well -- `formValuesFrom` seeds them empty -- so this is that
+       *       arm's belt and the rejection arm's only braces.
+       * WHY : Trade-offs: an operator retrying after a refusal must re-type the identifier they had
+       *       supplied, which is deliberate. The alternative is holding a national identifier in memory
+       *       across an indefinite correction cycle to save four keystrokes, and the service reads an
+       *       absent member as PRESERVE, so a retry that does not re-supply one changes nothing rather
+       *       than clearing anything.
+       */
+      .finally(clearSubmittedIdentifiers);
+  }
+
+  /**
+   * Blanks the four members that carry a personal identifier in the clear.
+   *
+   * Assumptions: the two masked markers in `protectedValues` are NOT touched, because they disclose
+   * nothing and are what tells the operator that leaving a box empty preserves the stored value. Only
+   * the members `updateRequestFrom` would submit are cleared.
+   * @returns {void} Completion is represented by the screen's own state.
+   */
+  function clearSubmittedIdentifiers(): void {
+    setValues(
+      /**
+       * Replaces the four identifier members of the previous form values with blanks.
+       * @param {AccountUpdateFormValues} previous - The form as the last render left it.
+       * @returns {AccountUpdateFormValues} The form with the four identifier members blank.
+       */
+      (previous: AccountUpdateFormValues): AccountUpdateFormValues => ({
+        ...previous,
+        ssnPart1: '',
+        ssnPart2: '',
+        ssnPart3: '',
+        governmentIssuedId: '',
+      }),
     );
   }
 
@@ -1706,8 +2675,40 @@ export function AccountUpdateScreen(): ReactElement {
    * @returns {void} Completion is represented by the screen's own state.
    */
   function cancelEdits(): void {
-    report(null, 'error');
+    clearBandForNewTurn();
     readThenShowDetails();
+  }
+
+  /*
+   * WHY : Refactoring Rationale: this function was also named `beginTurn`, colliding with the
+   *       turn-TOKEN generator above it -- two different concerns under one name, and only one of them
+   *       could be called. They are both kept because both are real: the generator seals a turn so a
+   *       settled request from a superseded one can be discarded, while this one clears the message
+   *       band so the previous turn's sentence does not stand beside this turn's outcome. The name
+   *       states which of the two this is.
+   */
+  /**
+   * Clears the MESSAGE channel, which every turn does before it decides anything.
+   *
+   * ⚠️ Purpose: this is the reference's own first act on every task. `app/cbl/COACTUPC.cbl` L873 to
+   * L876 carries the comment `Ensure error message is cleared` and performs
+   * `SET WS-RETURN-MSG-OFF TO TRUE` in `MAIN-PARA`, before the commarea is even examined -- so the
+   * row-23 line a task paints is always the one THAT task computed, never an inheritance.
+   *
+   * ⚠️ Refactoring Rationale: the channel used to be cleared on the cancel turn alone. Every other
+   * turn wrote it only when it had something to say, so a turn that SUCCEEDED left the previous
+   * turn's refusal standing: a failed lookup followed by a good one showed the freshly-loaded record
+   * beneath `Did not find this account in account card xref file`, in a band whose ARIA role asserts
+   * it. Clearing per turn rather than on each success path is both the reference's shape and the
+   * narrower fix -- a success path added later cannot forget to do it.
+   *
+   * Assumptions: only the MESSAGE channel is cleared. The information channel is DERIVED from the
+   * change action by `enterAction`, exactly as `3250-SETUP-INFOMSG` derives it on every send, so it
+   * is never stale and clearing it would blank row 22 for the rest of the turn.
+   * @returns {void} Completion is represented by the screen's own state.
+   */
+  function clearBandForNewTurn(): void {
+    report(null, 'error');
   }
 
   /**
@@ -1721,6 +2722,8 @@ export function AccountUpdateScreen(): ReactElement {
    * @returns {void} Completion is represented by the screen's own state.
    */
   function processEnter(): void {
+    clearBandForNewTurn();
+
     switch (action) {
       case 'DETAILS_NOT_FETCHED':
         fetchAccount();
@@ -1737,7 +2740,7 @@ export function AccountUpdateScreen(): ReactElement {
          *       well, so pressing Enter re-sends the same protected screen with the same prompt --
          *       the operator must press F5 or F12.
          */
-        report(informationLineFor(action), 'info');
+        setInformation(informationLineFor(action));
         return;
       case 'CHANGES_OKAYED_AND_DONE':
       case 'CHANGES_OKAYED_LOCK_ERROR':
@@ -1745,6 +2748,7 @@ export function AccountUpdateScreen(): ReactElement {
         setValues(blankFormValues());
         setBaseline(null);
         setRevision(null);
+        setStoredIdentifiers(null);
         setFieldErrors(new Map());
         enterAction('DETAILS_NOT_FETCHED');
         return;
@@ -1774,15 +2778,72 @@ export function AccountUpdateScreen(): ReactElement {
    *       committed one. An empty label is how `usePfKeys` expresses a handler with no painted legend,
    *       and `PfKeyBar` renders no control for one.
    */
+  /**
+   * Asks for the save confirmation, which is what the F5 key and the F5 control both do.
+   *
+   * Assumptions: this is the ONLY way the confirmation opens, so the physical key, the legend button the
+   * shell paints from this screen's bindings and the pointer control beside the form all reach the same
+   * gate and then the same single write. One advertised key with two behaviours -- a direct write from the
+   * keyboard and a confirmation from the pointer -- is what this replaces.
+   *
+   * Assumptions: the two-turn confirmation the reference already has is NOT what this gate duplicates.
+   * That one is a screen turn: Enter validates and paints `Changes validated.Press F5 to save`, and F5
+   * writes. This gate is the additive re-key-to-confirm gesture the design system expresses as an inline
+   * confirmation, which AAP section 0.4.1.4 names for this screen; what it adds is a second deliberate
+   * act on a form of forty editable fields, and what matters is that it is now reached identically
+   * whichever control the operator uses.
+   * @returns {void} Completion is represented by the screen's own state.
+   */
+  function requestSaveConfirmation(): void {
+    if (saving) {
+      return;
+    }
+    clearBandForNewTurn();
+    setConfirmingSave(true);
+  }
+
+  /**
+   * Abandons the save confirmation and discards the uncommitted edits, the confirmation's cancel action.
+   *
+   * Assumptions: cancelling closes the gate AND performs the screen's own cancel turn, because the
+   * control is labelled with the reference's `F12=Cancel` legend and that key's arm re-reads the record.
+   * A gate whose cancel only closed the gate would carry a label promising something else.
+   * @returns {void} Completion is represented by the screen's own state.
+   */
+  function abandonSaveConfirmation(): void {
+    setConfirmingSave(false);
+    cancelEdits();
+  }
+
   const cancelIsValid = action !== 'DETAILS_NOT_FETCHED';
   const saveIsValid = action === 'CHANGES_OK_NOT_CONFIRMED';
   const cancelLegendIsPainted = isChangesMade(action) && action !== 'CHANGES_OKAYED_AND_DONE';
 
+  /*
+   * WHY : ⚠️ Assumptions: the three keys that ISSUE a request stand down while one is outstanding, and
+   *       PF3 deliberately does not. Enter, save and cancel each start a turn, so admitting a second
+   *       one before the first has answered is how an operator reaches the races the token above
+   *       guards against -- the token makes a superseded answer inert, and this makes the ordinary way
+   *       of producing one unavailable. PF3 only leaves, which needs no answer and must stay reachable:
+   *       a screen that trapped an operator until a slow request finished would be worse than the race.
+   * WHY : Alternatives Considered: disabling the FIELDS instead, so no edit could be made mid-turn.
+   *       Rejected because the reference's fields are not protected on this turn -- they carry
+   *       `ATTRB=(FSET,UNPROT)` throughout -- and because it would make an unmapped key arrive as a
+   *       `disabled` rejection, changing the key behaviour to work around a race.
+   */
   const keyHandlers: PfKeyHandlerMap = {
     ENTER: {
-      /** Runs the arm for the current action, the mapset's `ENTER=Process` action. */
+      /**
+       * Runs the arm for the current action, the mapset's `ENTER=Process` action.
+       *
+       * Assumptions: it is unavailable while EITHER request is in flight. The Enter arm of the details
+       * action now issues the validation request, and the arm of the committed actions resets the screen,
+       * so allowing a second press mid-flight would either issue a duplicate validation or reset a form
+       * whose answer is still arriving.
+       */
       onInvoke: processEnter,
       label: ACCOUNT_UPDATE_KEY_LABELS.ENTER,
+      disabled: turnInFlight,
     },
     PFK03: {
       /**
@@ -1801,18 +2862,31 @@ export function AccountUpdateScreen(): ReactElement {
     ...(saveIsValid
       ? {
           PFK05: {
-            /** Writes the confirmed edits, the mapset's `F5=Save` action. */
-            onInvoke: saveEdits,
+            /**
+             * Asks for the save confirmation, the mapset's `F5=Save` action.
+             *
+             * Refactoring Rationale: this invoked the write DIRECTLY while the pointer control beside the
+             * form opened a confirmation, so the keyboard bypassed a gate the pointer could not. Both now
+             * enter through one request and leave through one write.
+             */
+            onInvoke: requestSaveConfirmation,
             label: ACCOUNT_UPDATE_KEY_LABELS.PFK05,
+            disabled: turnInFlight,
           },
         }
       : {}),
     ...(cancelIsValid
       ? {
           PFK12: {
-            /** Discards uncommitted edits and re-reads, the mapset's `F12=Cancel` action. */
+            /**
+             * Discards uncommitted edits and re-reads, the mapset's `F12=Cancel` action.
+             *
+             * Assumptions: unavailable while a write is in flight, because it re-reads the record and a
+             * re-read racing a write in progress would show the operator whichever state won.
+             */
             onInvoke: cancelEdits,
             label: cancelLegendIsPainted ? ACCOUNT_UPDATE_KEY_LABELS.PFK12 : '',
+            disabled: turnInFlight,
           },
         }
       : {}),
@@ -1830,23 +2904,134 @@ export function AccountUpdateScreen(): ReactElement {
      * browser key into a submit inside shared code could perform a write on a screen whose Enter arm
      * writes. On this screen Enter never writes -- the write is behind F5 -- so the coercion is safe
      * exactly here, which is why it is expressed at the screen and not in the hook.
+     *
+     * Assumptions: it coerces an UNMAPPED key and stays silent for a DISABLED one, which are the two
+     * rejections the hook distinguishes. The reasoning for the second is recorded at the guard below.
+     * @param {PfKeyRejection} rejection - What the hook could not dispatch, and why.
      * @returns {void} Nothing; the coerced arm runs for its own effects.
      */
-    onInvalidKey: () => {
+    onInvalidKey: (rejection: PfKeyRejection): void => {
+      /*
+       * WHY : ⚠️ Refactoring Rationale: the coercion is skipped for the `disabled` reason. It is what makes
+       *       a disabled binding usable on this screen at all: coercing a suppressed F5 into the Enter arm
+       *       would run a screen turn the operator did not ask for -- on the confirmation action, the arm
+       *       that merely restates the prompt, and on a committed action, the arm that blanks the form.
+       *       The rejection is left silent rather than reported because an unavailable key is not an
+       *       invalid one, and `CCDA-MSG-INVALID-KEY` is a sentence this screen's source never reaches.
+       */
+      if (rejection.reason === 'disabled') {
+        return;
+      }
       processEnter();
     },
   });
 
+  /*
+   * WHY : ⚠️ Refactoring Rationale: this screen DELEGATES its title band and its key legend to
+   *       the shell instead of painting them itself. `ui/src/layout/AppShell.tsx` is mounted as
+   *       the authenticated layout route, so the frame is painted once above the outlet rather
+   *       than rebuilt per screen; a screen that also painted them would show two title bands
+   *       and two legends. The row-22 INFORMATIONAL band stays local, because the mapset declares
+   *       that line inside the screen's own field area at `POS=(22,23)`; the row-23 message line is
+   *       delegated below, so exactly one element paints each of the four rows.
+   * WHY : Assumptions: the legend is delegated rather than dropped, so the SCREEN keeps owning
+   *       its keys -- `bindings` and `invoke` come from this screen's own `usePfKeys` call and
+   *       are handed up unchanged. The shell adds its sign-off key beside them only when this
+   *       screen leaves that attention identifier free, which is decided by AID in the shell.
+   */
+  useShellSlot({
+    screen: {
+      transactionId: ACCOUNT_UPDATE_TRANSACTION_ID,
+      programName: ACCOUNT_UPDATE_PROGRAM_NAME,
+    },
+    now: paintedAt,
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the row-23 MESSAGE is delegated here too, where the note above
+     *       said it "stays local" and a second `<MessageBand>` painted it inside the body. Both
+     *       statements were once true of two different revisions of this screen and they cannot both
+     *       be true of one: the shell paints a zone if and only if it is delegated, so publishing
+     *       nothing here while rendering a band below produced a row-23 line INSIDE the field area and
+     *       an unpainted line where the mapset puts it -- `app/bms/COACTUP.bms` declares `ERRMSG` at
+     *       `POS=(23,1)`, below the informational line and above the legend, which is precisely the
+     *       zone this frame owns. The sibling account-view screen delegates the same way, and the
+     *       claim that this screen's message "is bound to controls in its own body" describes the
+     *       row-22 informational line, which is the one band that remains local.
+     * WHY : Assumptions: the severity travels with the text rather than being fixed at `error`,
+     *       because this channel carries the stored-write acknowledgement as well as the refusals --
+     *       `3250` writes both -- and painting a committed write in the refusal colour would tell an
+     *       operator their write had failed.
+     */
+    message: {
+      text: statement.message,
+      severity: statement.severity,
+      mapset: ACCOUNT_UPDATE_MAPSET,
+    },
+    pfKeys: {
+      keys: bindings,
+      onInvoke: invoke,
+    },
+  });
+
+  /**
+   * Renders the stored masked state of one protected identifier, read-only, beside its control.
+   *
+   * Assumptions: the value is rendered EXACTLY as the service published it, with no reformatting
+   * whatever. The reference composes the national identifier into dashed thirds itself -- three moves at
+   * `app/cbl/COACTUPC.cbl` L2921 to L2931 over `CUST-SSN PIC 9(09)` -- because it holds the digits.
+   * This screen does not: re-running that composition over a mask would slice runs of asterisks into
+   * groups of three, two and four and present the result as though it were a formatted number.
+   *
+   * Assumptions: nothing renders until a record has been read. Before that the pair is `null`, and a
+   * caption naming an empty value would assert that the identifier on file is blank -- which is a
+   * different claim from not yet having looked.
+   * @param {string | undefined} masked - The masked rendering, or `undefined` when none has been read.
+   * @returns {ReactNode | undefined} The read-only caption, or `undefined` to render no caption at all.
+   */
+  function renderStoredState(masked: string | undefined): ReactNode | undefined {
+    if (masked === undefined || masked === '') {
+      return undefined;
+    }
+
+    /*
+     * WHY : Assumptions: the label and the value are separate text nodes inside one `Space`, so the
+     *       value keeps the fixed-pitch face the rest of the identifier column uses while the label
+     *       does not. Concatenating them into a single string would put the caption words into the
+     *       monospaced face and, more importantly, would make the value unaddressable by a test that
+     *       needs to assert the masked rendering exactly. The gap is the design system's own named
+     *       size rather than a token reference, because `Space` accepts the named sizes directly and
+     *       resolves them from the theme itself -- passing a resolved CSS-variable reference where a
+     *       named size is expected would be a literal in the shape of a token.
+     */
+    return (
+      <Space size="small">
+        <Typography.Text type="secondary">{ACCOUNT_UPDATE_STORED_STATE_LABEL}</Typography.Text>
+        <Typography.Text
+          type="secondary"
+          style={{ fontFamily: cssVar[TYPOGRAPHY_TOKENS.fixedPitchData] }}
+        >
+          {masked}
+        </Typography.Text>
+      </Space>
+    );
+  }
+
   /**
    * Renders one control with its label, error state and the reference's blank marker.
    *
-   * Assumptions: the marker is written into the control's VALUE and only for the blank state, which is
-   * exactly what `app/cpy/CSSETATY.cpy` L18 to L27 does -- it moves the error colour into the field's
-   * colour subfield when the flag is not-OK OR blank, and moves a literal asterisk into the field's
-   * OUTPUT subfield only when it is blank. Writing it into the value destroys nothing, because a blank
-   * field is what the state means, and it round-trips faithfully: the reference reads the marker back
-   * as an unfilled field at `1100-RECEIVE-MAP`, and the service's shared never-supplied test folds the
-   * same character into the same answer.
+   * Assumptions: the marker is rendered only for the blank state, which is exactly what
+   * `app/cpy/CSSETATY.cpy` L18 to L27 does -- it moves the error colour into the field's colour subfield
+   * when the flag is not-OK OR blank, and moves a literal asterisk into the field's OUTPUT subfield only
+   * when it is blank.
+   *
+   * ⚠️ Assumptions: WHERE it is rendered depends on the field, and {@link MARKER_BEARING_FIELDS} carries
+   * the reason. For most fields it goes into the control's VALUE, which destroys nothing because a blank
+   * field is what the state means and the reference reads the marker back as an unfilled field at
+   * `1100-RECEIVE-MAP`. For a field on which the service reads `'*'` as an instruction it goes BESIDE the
+   * control instead, because putting it in the value would have the operator's next submit carry an
+   * instruction they never gave. An earlier revision of this note claimed the value form round-trips for
+   * every field "because the service's shared never-supplied test folds the same character into the same
+   * answer"; that test is not the first one the government-identifier mapping applies, so the claim was
+   * false for exactly the field where being wrong deletes data.
    *
    * Refactoring Rationale: the error state is driven PURELY by the response body, and the condition
    * that has been REMOVED is the reason this needed saying. The reference's highlight is gated on
@@ -1863,9 +3048,27 @@ export function AccountUpdateScreen(): ReactElement {
     const error = fieldErrors.get(spec.field);
     const editable = isFieldEditable(action, spec.field);
     const isBlankRefusal = error !== undefined && error.state === 'BLANK';
+    const markerBesideControl = MARKER_BEARING_FIELDS.has(spec.field);
     const numeric = spec.numeric === true;
     const controlStyle: CSSProperties =
       spec.fixedPitch === true ? { fontFamily: cssVar[TYPOGRAPHY_TOKENS.fixedPitchData] } : {};
+    const blankMarkerStyle: CSSProperties = { color: cssVar[FIELD_ERROR_TOKENS.errorColor] };
+
+    /*
+     * WHY : ⚠️ Refactoring Rationale: a protected control renders `readOnly` where it used to render
+     *       `disabled`, and the difference is reachability. A disabled input is removed from the focus
+     *       order and from the accessibility tree, so a refusal keyed to one of the three never-editable
+     *       fields marked a control the keyboard could not reach and a screen reader did not announce --
+     *       and the service does key one: `editMapInputs` records `editCustomerKeyNamesRow` under
+     *       `customerId` and returns that verdict before any other edit runs. A 3270 protected field is
+     *       readable and cursor-addressable and only refuses TYPING -- `MOVE -1 TO <field>L` positions the
+     *       cursor on one -- so `readOnly` is the faithful mapping and `disabled` was a stronger claim
+     *       than the mapset makes.
+     * WHY : Assumptions: it also covers the confirmation turn, where `isFieldEditable` protects EVERY
+     *       field. Greying out all forty-three controls would put the values being confirmed behind the
+     *       disabled foreground colour, which is the one moment on this screen an operator is asked to
+     *       read them.
+     */
 
     /*
      * WHY : Assumptions: each optional attribute is SPREAD in rather than assigned a value that may be
@@ -1875,32 +3078,110 @@ export function AccountUpdateScreen(): ReactElement {
      *       and the no-error state into the same call, which is exactly the distinction the setting
      *       exists to keep.
      */
+    const controlId = fieldDomId(spec.field);
+
     return (
       <Form.Item
         {...(spec.label === '' ? {} : { label: spec.label })}
         htmlFor={fieldDomId(spec.field)}
-        {...(error === undefined ? {} : { validateStatus: 'error' as const, help: error.message })}
+        /*
+          WHY : ⚠️ Refactoring Rationale: the refusal is passed as `fieldErrorHelp` rather than as the bare
+                sentence, because `fieldAriaProps` below points the control's `aria-describedby` at
+                `fieldErrorId(controlId)` and nothing rendered an element carrying that identifier. A
+                dangling reference is worse than none: a screen reader following it announces nothing, so
+                the control reported that it had a description and then had none, and the refusal was
+                readable only by sighted operators. `ui/src/layout/fieldHelp.tsx` exists to keep the two
+                halves in one place, and this renderer was using only the half that names the target.
+        */
+        {...(error === undefined
+          ? {}
+          : {
+              validateStatus: 'error' as const,
+              help: fieldErrorHelp(fieldDomId(spec.field), error.message),
+            })}
+        {...(spec.extra === undefined ? {} : { extra: spec.extra })}
       >
+        {/*
+         * WHY : ⚠️ Assumptions: the marker is rendered as an antd `suffix` for a marker-bearing field and
+         *       written into the value for every other, and the two are never both applied. A suffix sits
+         *       inside the control's own border, so the marker still reads as belonging to the field the
+         *       reference put it in, while the control's value stays exactly what the operator typed --
+         *       which for a blank refusal is nothing, so their next submit carries nothing rather than an
+         *       instruction to clear a stored identifier.
+         * WHY : ⚠️ Trade-offs: the suffix is present on a marker-bearing field in EVERY state, carrying
+         *       the marker or an empty string, rather than appearing with the refusal. The design system
+         *       warns that adding or removing an affix while the control is focused makes it lose focus,
+         *       because the affix changes the control's rendered root from a bare `input` to a wrapping
+         *       element -- so an affix that came and went would move the cursor off the very field the
+         *       operator was correcting. Holding the element and changing only its text keeps the input's
+         *       identity, and with it the identifier the screen's cursor effect looks the control up by.
+         *       The cost is one empty inline element per marker-bearing field, which is one.
+         */}
         <Input
           id={fieldDomId(spec.field)}
-          value={isBlankRefusal ? FIELD_ERROR_TOKENS.blankMarker : values[spec.field]}
+          value={
+            isBlankRefusal && !markerBesideControl
+              ? FIELD_ERROR_TOKENS.blankMarker
+              : values[spec.field]
+          }
+          {...(markerBesideControl
+            ? {
+                suffix: (
+                  <Typography.Text style={blankMarkerStyle}>
+                    {isBlankRefusal ? FIELD_ERROR_TOKENS.blankMarker : ''}
+                  </Typography.Text>
+                ),
+              }
+            : {})}
           maxLength={ACCOUNT_UPDATE_FIELD_WIDTHS[spec.field]}
-          disabled={!editable}
+          {...(editable ? {} : { readOnly: true })}
           autoFocus={spec.autoFocus === true}
+          /*
+            WHY : ⚠️ Refactoring Rationale: a SECOND, unconditional `suffix` stood here, rendering the
+                  marker beside EVERY refused control and overriding the one above it for the one field
+                  that needs it. Two spreads of the same prop into the same element means only the later
+                  one applies, so the exception list above was inert and every blank refusal painted the
+                  marker twice -- once inside the control's displayed value and once beside it. The
+                  reference settles which of the two survives: `app/cpy/CSSETATY.cpy` L23-L26 moves the
+                  asterisk into the field's own OUTPUT subfield, so it appears IN the field, and
+                  {@link MARKER_BEARING_FIELDS} records why exactly one field is exempt and what a
+                  submitted asterisk would mean there. The withdrawn design's own point is kept: the
+                  surviving marker for that one field is hidden from assistive technology by the same
+                  reasoning, since the refusal sentence is already announced through the form item's
+                  error text.
+            WHY : Assumptions: the displayed marker does not become the submitted value. The control's
+                  `value` is computed for the render while `values[field]` is untouched, and
+                  `updateRequestFrom` reads the latter -- so an operator who presses Enter again submits
+                  what they typed, and one who edits the marked field replaces the asterisk exactly as
+                  they would on the terminal.
+          */
           {...(spec.placeholder === undefined ? {} : { placeholder: spec.placeholder })}
           {...(spec.ariaLabel === undefined ? {} : { 'aria-label': spec.ariaLabel })}
           {...(numeric ? { inputMode: 'numeric' as const } : {})}
+          {...fieldAriaProps(controlId, {
+            invalid: error !== undefined,
+            hasError: error !== undefined,
+            hasHint: spec.describedBy !== undefined,
+            ...(spec.describedBy === undefined ? {} : { hintId: spec.describedBy }),
+          })}
           style={controlStyle}
           onChange={
             /**
-             * Records the entry, coercing it where the mapset declares numeric entry.
+             * Records the entry exactly as the control reports it.
              * @param {{ target: { value: string } }} event - The control's change event.
              * @param {{ value: string }} event.target - The control the event came from.
              * @param {string} event.target.value - The entry exactly as the control reports it.
              * @returns {void} Completion is represented by the screen's own state.
              */
             (event: { readonly target: { readonly value: string } }): void => {
-              recordEntry(spec.field, event.target.value, numeric);
+              /*
+               * WHY : Assumptions: the third argument is the field's OWN numeric flag from its render
+               *       spec, and it has to be passed: the narrowing that keeps a separator or a letter
+               *       out of a numeric-only field is decided per field, and the five amounts must be
+               *       able to receive a malformed entry so the service refuses it in the reference's own
+               *       words. Omitting it left every field taking the same path.
+               */
+              recordEntry(spec.field, event.target.value);
             }
           }
         />
@@ -1913,12 +3194,23 @@ export function AccountUpdateScreen(): ReactElement {
    *       conversion of any kind, and the reference is why. `1250-EDIT-SIGNED-9V2` checks for a blank
    *       value FIRST and only then applies `FUNCTION TEST-NUMVAL-C` -- character before number -- so
    *       the field must be able to hold text that is not a number in order for that first check to
-   *       have anything to reject. The mapset agrees: none of the five declares a `PICOUT` operand,
-   *       so nothing formats them on output either. A numeric control would additionally route the
-   *       value through a JavaScript number, which is an IEEE-754 double, and the cent it loses would
-   *       produce a plausible balance rather than an error.
-   *       Trade-offs: the operator gets no stepper and no thousands grouping, and gains an amount that
-   *       is the same characters end to end and a refusal in the reference's own words.
+   *       have anything to reject. A numeric control would additionally route the value through a
+   *       JavaScript number, which is an IEEE-754 double, and the cent it loses would produce a
+   *       plausible balance rather than an error.
+   * WHY : ⚠️ Refactoring Rationale: this note observed that "none of the five declares a `PICOUT`
+   *       operand" and concluded "so nothing formats them on output either". The observation is true --
+   *       `app/bms/COACTUP.bms` carries no `PICOUT` anywhere -- and the conclusion drawn from it was
+   *       false, because on THIS screen the formatting is done by the PROGRAM rather than by the map:
+   *       `app/cbl/COACTUPC.cbl` L371 declares `WS-EDIT-CURRENCY-9-2-F PIC +ZZZ,ZZZ,ZZZ.99` and moves
+   *       the edited result into the unedited `PIC X(15)` field, at L2797 to L2811 for the stored values
+   *       and L2874 onward for redisplayed ones. The sibling account-view screen reaches the SAME
+   *       presentation the other way round, through `PICOUT` on its own mapset. So the mask was missing
+   *       here while the one place a reader would look explained why it was absent.
+   *       The mask is now applied on seeding and on redisplay, and REVERSED on submission -- see
+   *       {@link remaskAcceptedAmounts} and `updateRequestFrom` -- which is what keeps the control
+   *       plain text end to end while still painting what the terminal painted.
+   *       Trade-offs: the operator gets no stepper, and gains grouping that matches the terminal, an
+   *       amount that never passes through a number, and a refusal in the reference's own words.
    */
 
   /**
@@ -2083,12 +3375,22 @@ export function AccountUpdateScreen(): ReactElement {
    */
   const gridGutter = token[SPACING_TOKENS.sectionGapMedium];
 
+  /*
+   * WHY : Refactoring Rationale: every text colour on this screen resolves through
+   *       `BMS_TEXT_COLOR_TOKENS` and not through the hue map `BMS_COLOR_TOKENS`. The measured
+   *       source roles are unchanged, and so is the bridge that assigns each `COLOR=` operand its
+   *       semantic role; what changed is that the hue map's entries are mid-ramp FILL anchors, and
+   *       read as text the turquoise role measures 2.205:1 and the blue role 4.104:1 against the
+   *       surface the shell paints, where WCAG AA asks 4.5:1 for normal text.
+   *       `ui/src/theme/tokens.ts` records, per role, the in-family shade that was measured and the
+   *       text-grade token that replaced it.
+   */
   const titleStyle: CSSProperties = {
-    color: cssVar[BMS_COLOR_TOKENS.NEUTRAL],
+    color: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL],
     fontSize: cssVar[TYPOGRAPHY_TOKENS.screenTitleSize],
     lineHeight: cssVar[TYPOGRAPHY_TOKENS.screenTitleLineHeight],
   };
-  const sectionStyle: CSSProperties = { color: cssVar[BMS_COLOR_TOKENS.NEUTRAL] };
+  const sectionStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL] };
 
   return (
     <Flex vertical gap="large">
@@ -2099,11 +3401,6 @@ export function AccountUpdateScreen(): ReactElement {
        * clock hook rather than the browser's, which is what reproduces the single region clock
        * `FUNCTION CURRENT-DATE` gave every terminal.
        */}
-      <ScreenHeader
-        transactionId={ACCOUNT_UPDATE_TRANSACTION_ID}
-        programName={ACCOUNT_UPDATE_PROGRAM_NAME}
-        now={paintedAt}
-      />
       {/*
        * Assumptions: the heading is a `Typography.Title` carrying the mapset's own 14-character
        * `COLOR=NEUTRAL` field, and its colour and size come from the bridge rather than from a literal
@@ -2114,17 +3411,12 @@ export function AccountUpdateScreen(): ReactElement {
         {ACCOUNT_UPDATE_HEADINGS.screen}
       </Typography.Title>
       {/*
-       * Refactoring Rationale: the band is rendered unconditionally and reserves its space at all
-       * times, which row 23 of a 24-row terminal did for free. On THIS screen that matters more than
-       * on most: the reference re-sends the same map with row 23 populated, so a band that appeared and
-       * disappeared would move the very control an operator is correcting, mid-correction, on a form
-       * of forty editable fields.
+       * Refactoring Rationale: the message line that used to sit here is delegated to the shell, which
+       * renders it unconditionally and reserves its space at all times -- what row 23 of a 24-row
+       * terminal did for free. On THIS screen that reservation matters more than on most: the reference
+       * re-sends the same map with row 23 populated, so a band that appeared and disappeared would move
+       * the very control an operator is correcting, mid-correction, on a form of forty editable fields.
        */}
-      <MessageBand
-        message={statement.message}
-        severity={statement.severity}
-        mapset={ACCOUNT_UPDATE_MAPSET}
-      />
       {/*
        * Assumptions: the spinner covers the read and the write without unmounting the form, so the
        * values an operator typed survive a refused write. Replacing the form with the spinner would
@@ -2277,7 +3569,17 @@ export function AccountUpdateScreen(): ReactElement {
                * per-part accessible names, so each box is identifiable by the same words a refusal
                * naming it would use. The three placeholders are the mapset's own `INITIAL=` hints.
                */}
-              <Form.Item label={ACCOUNT_UPDATE_FIELD_LABELS_PAINTED.ssn}>
+              {/*
+               * Assumptions: the stored state captions the GROUP rather than each of its three parts,
+               * because the service publishes one masked rendering of the whole identifier and the
+               * split into three is the mapset's entry shape, not the record's. Captioning each part
+               * would need the mask cut into thirds, which is exactly the reformatting
+               * {@link renderStoredState} refuses to do.
+               */}
+              <Form.Item
+                label={ACCOUNT_UPDATE_FIELD_LABELS_PAINTED.ssn}
+                extra={renderStoredState(storedIdentifiers?.ssnMasked)}
+              >
                 <Space.Compact>
                   {renderField({
                     field: 'ssnPart1',
@@ -2286,6 +3588,7 @@ export function AccountUpdateScreen(): ReactElement {
                     fixedPitch: true,
                     placeholder: SSN_PART_PLACEHOLDERS.ssnPart1,
                     ariaLabel: NAME_TOKENS.SSN_FIRST_3_CHARS,
+                    describedBy: SSN_STANDING_ID,
                   })}
                   <Typography.Text type="secondary">{DATE_PART_SEPARATOR}</Typography.Text>
                   {renderField({
@@ -2295,6 +3598,7 @@ export function AccountUpdateScreen(): ReactElement {
                     fixedPitch: true,
                     placeholder: SSN_PART_PLACEHOLDERS.ssnPart2,
                     ariaLabel: NAME_TOKENS.SSN_4TH_AND_5TH_CHARS,
+                    describedBy: SSN_STANDING_ID,
                   })}
                   <Typography.Text type="secondary">{DATE_PART_SEPARATOR}</Typography.Text>
                   {renderField({
@@ -2304,8 +3608,23 @@ export function AccountUpdateScreen(): ReactElement {
                     fixedPitch: true,
                     placeholder: SSN_PART_PLACEHOLDERS.ssnPart3,
                     ariaLabel: NAME_TOKENS.SSN_LAST_4_CHARS,
+                    describedBy: SSN_STANDING_ID,
                   })}
                 </Space.Compact>
+                {/*
+                 * WHY : Assumptions: ONE caption serves all three boxes, which is why each part
+                 *       references it by identifier rather than carrying its own. The mapset paints one
+                 *       `SSN:` label for the group, and a caption repeated three times would be read out
+                 *       three times by an assistive technology walking the parts.
+                 * WHY : Assumptions: it renders only once a record has been read. Before that there is no
+                 *       marker to show, and a caption about preserving a stored value would describe a
+                 *       record the screen does not have.
+                 */}
+                {protectedValues === null ? null : (
+                  <Typography.Text id={SSN_STANDING_ID} type="secondary">
+                    {nationalIdentifierCaption(protectedValues.ssnMasked)}
+                  </Typography.Text>
+                )}
               </Form.Item>
             </Col>
 
@@ -2375,7 +3694,7 @@ export function AccountUpdateScreen(): ReactElement {
              */}
             {/* Mapset row 17: address line 2 with the postal code to its right. */}
             <Col xs={24} md={16}>
-              {renderField({ field: 'addressLine2', label: '' })}
+              {renderField({ field: 'addressLine2', label: '', ariaLabel: ADDRESS_LINE_2_NAME })}
             </Col>
             <Col xs={24} md={8}>
               {renderField({
@@ -2408,10 +3727,30 @@ export function AccountUpdateScreen(): ReactElement {
               )}
             </Col>
             <Col xs={24} md={12}>
+              {/*
+               * WHY : ⚠️ Refactoring Rationale: `describedBy` names this control's OWN caption, and it
+               *       named nothing. The three national-identifier parts each point at their shared
+               *       standing caption and this one pointed at neither, so the sentence stating that the
+               *       stored government identifier is preserved when the field is left blank was visible
+               *       and unannounced -- and it is the one caption whose absence changes what an operator
+               *       believes a blank submission does.
+               */}
               {renderField({
                 field: 'governmentIssuedId',
                 label: ACCOUNT_UPDATE_FIELD_LABELS_PAINTED.governmentIssuedId,
+                describedBy: GOVERNMENT_ID_STANDING_ID,
+                extra: renderStoredState(storedIdentifiers?.governmentIssuedIdMasked),
               })}
+              {/*
+               * WHY : Assumptions: this control gets its OWN caption rather than sharing the one above,
+               *       because it is a different value with a different preserve decision -- the service
+               *       compares and preserves the two identifiers independently.
+               */}
+              {protectedValues === null ? null : (
+                <Typography.Text id={GOVERNMENT_ID_STANDING_ID} type="secondary">
+                  {governmentIdentifierCaption(protectedValues.governmentIssuedIdMasked)}
+                </Typography.Text>
+              )}
             </Col>
 
             {/* Mapset row 20: the second telephone number, the funds-transfer account and the flag. */}
@@ -2450,7 +3789,19 @@ export function AccountUpdateScreen(): ReactElement {
        *       A modal is rejected because it takes focus away from the values being confirmed, where
        *       the design system's inline confirmation keeps them on screen behind it. The confirmation
        *       is offered only while the save key is valid, so it cannot appear on a turn the reference
-       *       refuses the key.
+       *       refuses the key, and AAP section 0.4.1.4 names this component for this screen.
+       * WHY : ⚠️ Refactoring Rationale: the gate is CONTROLLED -- its visibility is this screen's state and
+       *       `requestSaveConfirmation` is the only thing that opens it. Uncontrolled, the design system
+       *       opened it from this trigger alone, so the physical F5 and the legend's F5 button wrote
+       *       directly while only a pointer on this control passed through the gate: one advertised key
+       *       with two behaviours, and the keyboard path was the one that skipped the extra deliberate
+       *       act. `onOpenChange` keeps the pointer path working THROUGH that state rather than around it.
+       * WHY : Assumptions: `onConfirm` is `saveEdits` and nothing else, so there remains exactly ONE write
+       *       call site on this screen. `saveEdits` closes the gate itself, which is why no separate close
+       *       runs here -- a close in two places could disagree about the order.
+       * WHY : Assumptions: it is rendered ABOVE the information line rather than below it, so the row-22
+       *       band stays the last element of the body. The confirmation control has no mapset row of its
+       *       own, and putting it after the band would place an additive control between rows 22 and 23.
        */}
       {saveIsValid ? (
         <Card size="small">
@@ -2459,10 +3810,26 @@ export function AccountUpdateScreen(): ReactElement {
             okText={ACCOUNT_UPDATE_KEY_LABELS.PFK05}
             cancelText={ACCOUNT_UPDATE_KEY_LABELS.PFK12}
             okType="primary"
+            open={confirmingSave}
+            onOpenChange={
+              /**
+               * Routes the design system's own open and close gestures through this screen's state.
+               * @param {boolean} open - Whether the component is asking to be shown.
+               * @returns {void} Completion is represented by the screen's own state.
+               */
+              (open: boolean): void => {
+                if (open) {
+                  requestSaveConfirmation();
+
+                  return;
+                }
+                setConfirmingSave(false);
+              }
+            }
             onConfirm={saveEdits}
-            onCancel={cancelEdits}
+            onCancel={abandonSaveConfirmation}
           >
-            <Button type="primary" loading={saving}>
+            <Button type="primary" loading={saving} disabled={saving}>
               {ACCOUNT_UPDATE_KEY_LABELS.PFK05}
             </Button>
           </Popconfirm>
@@ -2470,24 +3837,53 @@ export function AccountUpdateScreen(): ReactElement {
       ) : null}
 
       {/*
-       * Assumptions: the legend colour is left at the bar's default, which `app/bms/COACTUP.bms` L493
-       * to L507 confirms -- all three of this mapset's row-24 fields are `COLOR=YELLOW`, the majority
-       * the bar already defaults to.
+       * WHY : Assumptions: ONE band is rendered here and it is the row-22 INFORMATION line, because the
+       *       mapset declares two independent message lines at two different rows and only one of them
+       *       belongs to the screen's own field area -- `INFOMSG` at `POS=(22,23)`,
+       *       `ATTRB=(PROT) COLOR=NEUTRAL`, `PIC X(45)`. It takes the `info` severity, which is the
+       *       appearance its source field always had. The row-23 message line and the row-24 legend are
+       *       delegated to the shell in the `useShellSlot` call above, so exactly one element paints each
+       *       row and the sibling account-view screen is arranged the same way.
+       * WHY : Assumptions: it is rendered UNCONDITIONALLY and never as `null`, because
+       *       `3250-SETUP-INFOMSG` derives it from the change action on every send and every action has a
+       *       line -- so there is no state in which this row is empty, and reserving its height keeps the
+       *       controls above it from moving when the sentence changes.
        */}
-      <PfKeyBar keys={bindings} onInvoke={invoke} />
+      <MessageBand
+        mapset={ACCOUNT_UPDATE_MAPSET}
+        severity="info"
+        message={information}
+        line="information"
+      />
+
+      {/*
+       * WHY : ⚠️ Refactoring Rationale: a SECOND band stood here, on the `error` channel, and it is
+       *       withdrawn in favour of the delegation in `useShellSlot` above. The finding it was written
+       *       for is real and is preserved: `report` writes this screen's refusals and its one
+       *       acknowledgement into state, and before either remedy nothing rendered them, so all
+       *       twenty-four field refusals, the concurrency sentence and the stored-write acknowledgement
+       *       were computed and discarded. Rendering it here fixed that but put row 23 inside the
+       *       screen's own field area, one row above where the mapset declares `ERRMSG` and below the
+       *       row this frame reserves; delegating the same text and the same severity fixes it in the
+       *       zone that owns the row. The suites that query the two lines apart are unaffected, because
+       *       the band the shell paints carries `MESSAGE_BAND_TEST_ID` and the informational band above
+       *       carries `INFORMATION_BAND_TEST_ID` exactly as before.
+       */}
+      {/*
+       * Assumptions: the legend the shell paints from this screen's delegated bindings dispatches through
+       * the same `invoke` a real key press does, so a clicked legend control and its key cannot diverge.
+       */}
     </Flex>
   );
 }
 
 /*
- * WHY : Alternatives Considered: exporting this component under one name only. Both spellings are
- *       published deliberately. `ui/src/router.tsx` loads every screen with
- *       `lazy(async () => ({ default: module.<Named> }))`, so the NAMED export is what the route table
- *       reaches for and matches the four screens already mounted there; the DEFAULT export is what the
- *       file's own specification requires and what lets a route be declared as
- *       `lazy(() => import('./screens/accountUpdate'))` with no adapter. Publishing one would break
- *       whichever caller expected the other, and this is not the re-export barrel AAP section 0.6.2.1
- *       forbids -- that prohibition is on a module that re-exports somebody else's screen, whereas
- *       this is the screen's own module naming itself twice.
+ * WHY : Refactoring Rationale: this module publishes the component under its NAME ONLY, and the
+ *       default export that used to sit here has been removed rather than kept alongside it. The
+ *       argument for publishing both was that a route could then be declared as
+ *       `lazy(() => import('./screens/<name>'))` with no adapter -- but no route is declared that way
+ *       anywhere, so the second key had no caller, and AAP section 0.6.2.1 fixes the import discipline
+ *       for this tree as named imports with the named-to-default adapter held in `ui/src/router.tsx`.
+ *       Two keys for one component also make a screen reachable by two spellings, so a reader cannot
+ *       tell from an import which convention this tree follows.
  */
-export default AccountUpdateScreen;

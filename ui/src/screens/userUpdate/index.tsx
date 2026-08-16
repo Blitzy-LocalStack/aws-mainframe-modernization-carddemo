@@ -7,8 +7,9 @@
  * Render the reference screen's two-turn fetch-then-save workflow over one administered user: read
  * the row by identifier, let an administrator edit the three values the contract admits, and write
  * the change. It replaces CICS transaction `CU02`, which `app/cbl/COUSR02C.cbl` L37 declares as
- * `WS-TRANID PIC X(04) VALUE 'CU02'`, and it renders the five editable controls the mapset paints
- * plus the ten sentences the program emits.
+ * `WS-TRANID PIC X(04) VALUE 'CU02'`, and it renders four of the five editable controls the mapset
+ * paints -- the credential being registered divergence D-10, below -- plus nine of the ten sentences the
+ * program emits.
  *
  * The one screen where PF3 is not "go back"
  * ----------------------------------------
@@ -19,15 +20,36 @@
  * default label for PF3 precisely because this mapset contradicts the otherwise-reliable reading --
  * so every one of this screen's key labels except `F4=Clear` is stated here rather than inherited.
  *
- * What is deliberately NOT carried across
- * --------------------------------------
- * Refactoring Rationale: the reference pre-fills the password control from the stored plaintext
- * credential -- `MOVE SEC-USR-PWD TO PASSWDI OF COUSR2AI` at `app/cbl/COUSR02C.cbl` L169, reading the
- * `05 SEC-USR-PWD PIC X(08).` field at `app/cpy/CSUSR01Y.cpy` L21 -- and this screen never does.
- * `auth.users` carries no password column, identity lives in a managed user pool, and
- * `ui/src/api/auth.ts` states that no password appears on any type outside the sign-on and challenge
- * request bodies. The control therefore renders empty after every fetch, and nothing this screen holds
- * can put a credential on the glass.
+ * What is deliberately NOT carried across: the credential control
+ * --------------------------------------------------------------
+ * ⚠️ Refactoring Rationale: the mapset's password control and the program's `Password can NOT be
+ * empty...` refusal are BOTH absent from this screen, and their absence is registered divergence D-10 in
+ * `docs/architecture/cobol-to-service-traceability.md` section 7.2 rather than a silent omission. The
+ * reference paints the control at `app/bms/COUSR02.bms` L125-L134, pre-fills it from the stored
+ * plaintext credential -- `MOVE SEC-USR-PWD TO PASSWDI OF COUSR2AI` at `app/cbl/COUSR02C.cbl` L169,
+ * reading `05 SEC-USR-PWD PIC X(08).` at `app/cpy/CSUSR01Y.cpy` L21 -- compares it at L227 to L230 and
+ * writes it. None of those four steps has a target: AAP section 0.7.8 declines parity here explicitly,
+ * moving identity to a managed user pool so that `auth.users` carries no password column at all, and the
+ * published `UpdateUserRequest` seals itself with `additionalProperties: false` over three properties,
+ * none of them a credential.
+ *
+ * ⚠️ Refactoring Rationale: an earlier shape of this screen KEPT the control and its blank refusal while
+ * omitting the value from the request, on the ground that the refusal is "a user-visible behaviour of the
+ * screen rather than a property of the request". A review found that reasoning insufficient and it is
+ * withdrawn. Requiring an administrator to type a credential that is then discarded is worse than either
+ * alternative: it states, by every affordance a form has, that a credential was set, and an administrator
+ * who typed a new one would reasonably believe the account's password had changed when nothing anywhere
+ * had changed. A control whose value is thrown away is also a control a password manager will fill and a
+ * browser will retain, so the discarded value does not stay discarded.
+ *
+ * Alternatives Considered: implementing a truthful credential reset, so the control could keep its
+ * meaning. Rejected on scope rather than on difficulty -- the AAP publishes no administrative
+ * credential-reset operation, and `services/auth-service/src/main/resources/openapi/auth-api.yaml`
+ * declares eight operations, none of them one. Onboarding's own credential is published as
+ * `CreatedUserResponse.credentialSecretName`, the NAME of a managed-secret entry, precisely so that no
+ * credential travels in a response body; a reset operation faithful to that design needs a service
+ * endpoint, a user-pool administrative grant and its own contract, which is a capability to plan rather
+ * than a control to re-label.
  *
  * Refactoring Rationale: the pseudo-conversational session structure is gone, so three of its members
  * are answered from elsewhere. The selected-user carrier `CDEMO-CU02-USR-SELECTED` (L58) becomes the
@@ -52,12 +74,11 @@ import type {
   UserType,
 } from '../../api/types';
 import { useServerInstant } from '../../hooks/useServerInstant';
-import { MessageBand } from '../../layout/MessageBand';
+import { useShellSlot } from '../../layout/AppShell';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
-import { PfKeyBar, UNIFORM_PF_KEY_LABELS, decodeBmsLegendText } from '../../layout/PfKeyBar';
-import { ScreenHeader } from '../../layout/ScreenHeader';
+import { UNIFORM_PF_KEY_LABELS, decodeBmsLegendText } from '../../layout/PfKeyBar';
 import { usePfKeys } from '../../layout/usePfKeys';
-import type { PfKeyHandlerMap } from '../../layout/usePfKeys';
+import type { PfKeyHandlerMap, PfKeyRejection } from '../../layout/usePfKeys';
 import {
   INVALID_KEY_PRESSED,
   MESSAGE_TEMPLATES,
@@ -67,7 +88,12 @@ import {
 } from '../../messages/messages';
 import type { MapsetName } from '../../messages/messages';
 import { ADMIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
-import { BMS_COLOR_TOKENS, FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../../theme/tokens';
+import {
+  BMS_COLOR_TOKENS,
+  BMS_TEXT_COLOR_TOKENS,
+  FIELD_ERROR_TOKENS,
+  TYPOGRAPHY_TOKENS,
+} from '../../theme/tokens';
 
 /** The two sentences this screen's own program owns, from the catalog that owns every string it paints. */
 const UPDATE_MESSAGES = PROGRAM_MESSAGES.COUSR02C;
@@ -98,10 +124,10 @@ export const USER_UPDATE_MAPSET = 'COUSR02' as const satisfies MapsetName;
 export const USER_UPDATE_CAPTION = 'Update User';
 
 /** One editable control on this screen, named as the update contract names its property. */
-export type UserUpdateField = 'userId' | 'firstName' | 'lastName' | 'password' | 'userType';
+export type UserUpdateField = 'userId' | 'firstName' | 'lastName' | 'userType';
 
 /**
- * The five field labels, verbatim from `app/bms/COUSR02.bms`.
+ * The four field labels this screen renders, verbatim from `app/bms/COUSR02.bms`.
  *
  * Assumptions: the trailing space on `userType` is part of the value. The mapset declares
  * `INITIAL='User Type: '` at `LENGTH=11` (L140-L144) where the visible text is ten characters, so the
@@ -115,34 +141,43 @@ export const USER_UPDATE_FIELD_LABELS = {
   firstName: 'First Name:',
   /** `app/bms/COUSR02.bms` L111-L115, `COLOR=TURQUOISE`, `LENGTH=10`, `POS=(11,45)`. */
   lastName: 'Last Name:',
-  /** `app/bms/COUSR02.bms` L125-L129, `COLOR=TURQUOISE`, `LENGTH=9`, `POS=(13,6)`. */
-  password: 'Password:',
+  /*
+   * WHY : ⚠️ Assumptions: the mapset's fifth label, `Password:` at L125-L129, is absent because the
+   *       control it labels is absent -- registered divergence D-10. It is not carried as an unused
+   *       constant, because a published label with no control is a value a later screen would render
+   *       against a request that has nowhere to put it.
+   */
   /** `app/bms/COUSR02.bms` L140-L144, `COLOR=TURQUOISE`, `LENGTH=11`, `POS=(15,17)`. */
   userType: 'User Type: ',
 } as const satisfies Readonly<Record<UserUpdateField, string>>;
 
 /**
- * The two hints the mapset paints beside a control, verbatim and in `COLOR=BLUE`.
+ * The one hint this screen paints beside a control, verbatim and in `COLOR=BLUE`.
+ *
+ * ⚠️ Assumptions: the mapset paints TWO, and the credential's `(8 Char)` at L135-L139 is absent for the
+ * same reason its control is -- registered divergence D-10. That hint advertised the width of a value
+ * nothing now accepts.
  *
  * Assumptions: the user-type hint is the ONLY place the `'A'`/`'U'` domain is advertised to an
  * operator, because `app/cbl/COUSR02C.cbl` contains no domain check for that field -- L204 tests it
  * for blank and nothing else. Dropping the hint would leave the domain undiscoverable.
+ *
+ * Assumptions: the mapset paints a second hint, `INITIAL='(8 Char)'` at L135-L139, beside the
+ * credential control. It goes with that control rather than being retained without it, and the width it
+ * names is separately registered as `D-SIGNON-PASSWORD-HINT` for the one screen that still has a
+ * credential control to hint at.
  */
 export const USER_UPDATE_FIELD_HINTS = {
-  /** `app/bms/COUSR02.bms` L135-L139, `COLOR=BLUE`, `LENGTH=8`, `POS=(13,25)`. */
-  password: '(8 Char)',
   /** `app/bms/COUSR02.bms` L150-L154, `COLOR=BLUE`, `LENGTH=17`, `POS=(15,19)`. */
   userType: '(A=Admin, U=User)',
 } as const;
 
 /** How one control is presented, with every member measured from the mapset's own operands. */
 interface UserUpdateFieldPresentation {
-  /** Measured `COLOR=` role of the control's label, resolved through `BMS_COLOR_TOKENS`. */
-  readonly labelTone: keyof typeof BMS_COLOR_TOKENS;
+  /** Measured `COLOR=` role of the control's label, resolved through `BMS_TEXT_COLOR_TOKENS`. */
+  readonly labelTone: keyof typeof BMS_TEXT_COLOR_TOKENS;
   /** Whether the mapset places the initial cursor here, from its single `IC` operand. */
   readonly initialCursor?: boolean;
-  /** Whether the mapset renders the control non-display, from its `DRK` operand. */
-  readonly secret?: boolean;
   /** Whether the value is an identifier column and takes the fixed-pitch face. */
   readonly fixedPitch?: boolean;
   /** Verbatim hint the mapset paints beside the control, when it paints one. */
@@ -160,7 +195,6 @@ const FIELD_PRESENTATION: Readonly<Record<UserUpdateField, UserUpdateFieldPresen
   userId: { labelTone: 'GREEN', initialCursor: true, fixedPitch: true },
   firstName: { labelTone: 'TURQUOISE' },
   lastName: { labelTone: 'TURQUOISE' },
-  password: { labelTone: 'TURQUOISE', secret: true, hint: USER_UPDATE_FIELD_HINTS.password },
   userType: { labelTone: 'TURQUOISE', hint: USER_UPDATE_FIELD_HINTS.userType },
 };
 
@@ -169,21 +203,18 @@ const FIELD_PRESENTATION: Readonly<Record<UserUpdateField, UserUpdateFieldPresen
  *       independently by the record layout so neither source is trusted alone. `USRIDIN` is
  *       `LENGTH=8` at `app/bms/COUSR02.bms` L85-L89 and `05 SEC-USR-ID PIC X(08).` at
  *       `app/cpy/CSUSR01Y.cpy` L18; `FNAME` is `LENGTH=20` at L103-L107 and `PIC X(20)` at L19;
- *       `LNAME` is `LENGTH=20` at L116-L120 and `PIC X(20)` at L20; `PASSWD` is `LENGTH=8` at
- *       L130-L134 and `PIC X(08)` at L21; `USRTYPE` is `LENGTH=1` at L145-L149 and `PIC X(01)` at L22.
+ *       `LNAME` is `LENGTH=20` at L116-L120 and `PIC X(20)` at L20; `USRTYPE` is `LENGTH=1` at
+ *       L145-L149 and `PIC X(01)` at L22.
  *       These are the terminal's own field widths, which is how a 3270 refused a keystroke past the
  *       end of a field, so `maxLength` is the faithful browser equivalent rather than a convenience.
- * WHY : Alternatives Considered: `PASSWORD_MAX_LENGTH` from `ui/src/api/auth.ts`, which is 256. It is
- *       rejected here because that constant bounds the SIGN-ON request body, where the credential is
- *       the identity provider's and may legitimately be longer than the baseline's field. This control
- *       submits nothing at all (see the request note on `save` below), so the only bound with meaning
- *       on this screen is the 3270 field width the mapset and the copybook agree on.
+ * WHY : ⚠️ Assumptions: the mapset's fifth width, `PASSWD` at `LENGTH=8` (L130-L134) corroborated by
+ *       `PIC X(08)` at L21, is absent because its control is -- registered divergence D-10. It is not
+ *       carried as an unused constant: a width bounds keystrokes into a control, and there is none.
  */
 export const USER_UPDATE_FIELD_WIDTHS = {
   userId: USER_ID_MAX_LENGTH,
   firstName: 20,
   lastName: 20,
-  password: 8,
   userType: 1,
 } as const satisfies Readonly<Record<UserUpdateField, number>>;
 
@@ -215,46 +246,54 @@ export const USER_UPDATE_KEY_LABELS = {
 /**
  * The sentence each control's blank refusal raises, verbatim from the catalog.
  *
- * Assumptions: all five are `SHARED_MESSAGES` entries rather than program-scoped ones because
- * `app/cbl/COUSR01C.cbl` raises the same five literals, and the catalog files a sentence under the
+ * Assumptions: all four are `SHARED_MESSAGES` entries rather than program-scoped ones because
+ * `app/cbl/COUSR01C.cbl` raises the same literals, and the catalog files a sentence under the
  * group that can cite every site emitting it. The provenance index in
  * `ui/src/messages/messages.ts` records this program's own lines for each: L182 for the identifier
- * (also L148 on the fetch arm), L188, L194, L200 and L206.
+ * (also L148 on the fetch arm), L188, L194 and L206.
+ *
+ * ⚠️ Assumptions: the cascade's FIFTH sentence, `Password can NOT be empty...` at L200, has no entry
+ * here because it has no control to refuse -- registered divergence D-10. The catalog still publishes it,
+ * because a catalog is a register of what the reference emits rather than of what this screen renders, and
+ * `ui/src/screens/signon` raises the same literal for a credential it genuinely submits.
  */
 const BLANK_FIELD_MESSAGES = {
   userId: SHARED_MESSAGES.USER_ID_CAN_NOT_BE_EMPTY,
   firstName: SHARED_MESSAGES.FIRST_NAME_CAN_NOT_BE_EMPTY,
   lastName: SHARED_MESSAGES.LAST_NAME_CAN_NOT_BE_EMPTY,
-  password: SHARED_MESSAGES.PASSWORD_CAN_NOT_BE_EMPTY,
   userType: SHARED_MESSAGES.USER_TYPE_CAN_NOT_BE_EMPTY,
 } as const satisfies Readonly<Record<UserUpdateField, string>>;
 
 /*
  * WHY : Assumptions: the order is the reference's own and it is SHORT-CIRCUIT, not a set of
  *       independent rules. `app/cbl/COUSR02C.cbl` L179-L213 is one `EVALUATE TRUE` whose arms test the
- *       identifier (L180), the first name (L186), the last name (L192), the password (L198) and the
+ *       identifier (L180), the first name (L186), the last name (L192), the credential (L198) and the
  *       user type (L204); the first arm that matches raises its sentence and no later arm is evaluated.
  *       An operator who clears three controls therefore reads exactly one sentence, about the first of
  *       them, which is why this is an ordered list walked to the first hit rather than a validation
  *       pass that accumulates.
+ * WHY : ⚠️ Assumptions: FOUR of the five arms are transcribed, and the missing one is the password's at
+ *       L198 to L203 -- registered divergence D-10. Its removal does not reorder the others: the arms
+ *       are independent tests reached in sequence, so dropping the fourth leaves the first three
+ *       reachable exactly as before and moves the user type's arm from fifth position to fourth without
+ *       changing which submissions reach it. An operator who clears the last name still reads the last
+ *       name's sentence, and one who clears the user type still reads the user type's.
  */
 const SAVE_VALIDATION_ORDER: readonly UserUpdateField[] = [
   'userId',
   'firstName',
   'lastName',
-  'password',
   'userType',
 ];
 
 /** HTTP status the service answers when no user row carries the identifier. */
 const NOT_FOUND_STATUS = 404;
 
-/** Values the five controls hold, with the user type narrowed to the domain its control admits. */
+/** Values the four controls hold, with the user type narrowed to the domain its control admits. */
 interface UserUpdateValues {
   readonly userId: string;
   readonly firstName: string;
   readonly lastName: string;
-  readonly password: string;
   readonly userType: '' | UserType;
 }
 
@@ -263,7 +302,6 @@ const EMPTY_VALUES: UserUpdateValues = {
   userId: '',
   firstName: '',
   lastName: '',
-  password: '',
   userType: '',
 };
 
@@ -306,7 +344,7 @@ export function isBlankFieldValue(value: string): boolean {
 
 /**
  * Finds the first control the reference's short-circuit cascade would refuse.
- * @param {UserUpdateValues} values - Values the five controls hold.
+ * @param {UserUpdateValues} values - Values the four controls hold.
  * @param {readonly UserUpdateField[]} order - Controls to test, in the order the reference tests them.
  * @returns {UserUpdateField | null} The first blank control, or `null` when every one carries a value.
  */
@@ -326,7 +364,7 @@ export function firstBlankField(
 /**
  * Narrows an arbitrary problem-document field name to a control this screen paints.
  * @param {string} candidate - Field name as the response spelled it.
- * @returns {boolean} `true` when the name is one of this screen's five controls.
+ * @returns {boolean} `true` when the name is one of this screen's four controls.
  */
 function isUserUpdateField(candidate: string): candidate is UserUpdateField {
   return (SAVE_VALIDATION_ORDER as readonly string[]).includes(candidate);
@@ -419,12 +457,12 @@ export function describeFailure(failure: unknown, stage: UserUpdateStage): UserU
  * WHY : Assumptions: the comparison covers the first name, the last name and the user type, and the
  *       reference's fourth comparison has NO target analogue. `app/cbl/COUSR02C.cbl` compares the first
  *       name at L219, the last name at L223, the PASSWORD at L227-L230 and the user type at L231, and
- *       sets `USR-MODIFIED-YES` when any differs. The password arm cannot be reproduced because no
- *       response type carries a password to compare against: `UserResponse` declares five members and
- *       none is a credential, and the update contract declares three. Excluding it is what keeps the
- *       `Please modify to update ...` outcome (L239) observable for the case that actually reaches an
- *       operator -- pressing save having changed nothing -- rather than making it unreachable because a
- *       freshly-typed password always differs from a value that does not exist.
+ *       sets `USR-MODIFIED-YES` when any differs. The password arm cannot be reproduced because there is
+ *       nothing on either side of it: this screen renders no credential control -- registered divergence
+ *       D-10 -- and no response type carries a credential to compare one against, `UserResponse`
+ *       declaring five members of which none is one and the update contract declaring three. Excluding it
+ *       is also what keeps the `Please modify to update ...` outcome (L239) reachable at all: a
+ *       comparison against a value that does not exist would differ on every save.
  * WHY : Assumptions: both sides are trimmed before comparison, because the reference compares two
  *       equally space-padded fixed-width fields. `FNAMEI` is `PIC X(20)` and so is `SEC-USR-FNAME`, so
  *       trailing blanks are equal on both sides of L219 and the comparison is insensitive to them. The
@@ -434,7 +472,7 @@ export function describeFailure(failure: unknown, stage: UserUpdateStage): UserU
 
 /**
  * Reports whether the typed values differ from the row as the service last returned it.
- * @param {UserUpdateValues} values - Values the five controls hold.
+ * @param {UserUpdateValues} values - Values the four controls hold.
  * @param {UserResponse} stored - The row as the service returned it on the read this save performed.
  * @returns {boolean} `true` when at least one comparable value differs, which is the reference's
  *   `USR-MODIFIED-YES` condition.
@@ -481,11 +519,13 @@ export function normaliseUserType(typed: string): '' | UserType {
  * Renders the administered-user update form, whose route carries the identifier to load.
  *
  * Assumptions: the route parameter is read as `id`, which is the name `ui/src/router.tsx` declares for
- * this route -- its sibling routes spell theirs `num`, `key` and `cd`, so the name is per-route and is
- * not interchangeable. It is optional in this component's own terms: an operator may reach the screen
- * with no identifier and type one, which is exactly what the reference permits when
- * `CDEMO-CU02-USR-SELECTED` arrives as `SPACES` (L99-L104).
- * @returns {ReactElement} The header band, caption, message band, the five controls and the key legend.
+ * this route. The name is per-route rather than global -- the only other parameterised routes in the
+ * table are the two card routes, and both spell theirs `cardKey` (`ui/src/routes/cards.ts` L88, L91) --
+ * so the two spellings are not interchangeable and a mismatch resolves to `undefined` silently. It is
+ * optional in this component's own terms: an operator may reach the screen with no identifier and type
+ * one, which is exactly what the reference permits when `CDEMO-CU02-USR-SELECTED` arrives as `SPACES`
+ * (L99-L104).
+ * @returns {ReactElement} The header band, caption, message band, the four controls and the key legend.
  */
 export function UserUpdateScreen(): ReactElement {
   const navigate = useNavigate();
@@ -557,6 +597,82 @@ export function UserUpdateScreen(): ReactElement {
   );
 
   /*
+   * WHY : Assumptions: every request this screen issues is sequenced, and the counter is the ONLY thing
+   *       that makes an outcome's arrival order irrelevant. Both turns this screen has -- the read on
+   *       the Enter arm and the re-read-then-write on the save arms -- resolve asynchronously, and
+   *       nothing in a promise's resolution order relates it to the turn the operator is now waiting on,
+   *       so the LAST answer to arrive would otherwise win whichever question it answered.
+   * WHY : Assumptions: the `busy` guards on the key handlers do NOT close this on their own, and the
+   *       reason is that the competing turn is not always a key press. `loadRouteUser` below re-runs
+   *       whenever the route names a different user, so navigating from `/users/A/edit` to
+   *       `/users/B/edit` issues B's read with A's read still outstanding -- with no key pressed and no
+   *       handler to guard. If A's answer arrived second it would seed A's first name, last name and
+   *       user type into the form under B's identifier, and because the form's values are what the save
+   *       arm submits, the next save would write A's values onto B. The counter is what makes that
+   *       impossible; the key guards only close the ordinary way of reaching it.
+   * WHY : Assumptions: ONE counter sequences reads and saves together rather than one counter per kind.
+   *       The question every outcome has to answer is the same -- is this still the turn the operator is
+   *       waiting on -- and any newer turn supersedes any older one whatever its kind. Per-kind counters
+   *       would let a fresh read leave a stale save's re-read live, which is the pairing that reseeds the
+   *       form from a row the operator has already navigated away from.
+   * WHY : Trade-offs: requests are IGNORED rather than aborted. `getUser` and `updateUser` in
+   *       `ui/src/api/auth.ts` accept no abort signal, so aborting would mean changing the transport
+   *       contract for every caller of both; the cost of ignoring is a response body already on the wire
+   *       being discarded, which the operator cannot observe and which cannot produce a wrong screen.
+   *       This is the same trade-off `ui/src/screens/accountUpdate/index.tsx` records for the same
+   *       reason, and the two screens use one shape deliberately.
+   */
+  const turnSequence = useRef(0);
+
+  /**
+   * Opens a new turn, superseding any outcome still in flight.
+   * @returns {number} The token this turn's outcome must present to be applied.
+   */
+  function beginTurn(): number {
+    const token = turnSequence.current + 1;
+    turnSequence.current = token;
+    return token;
+  }
+
+  /**
+   * Reports whether an outcome belongs to the turn the operator is still waiting on.
+   * @param {number} token - The token the outcome captured when its turn opened.
+   * @returns {boolean} `true` when no later turn has opened since.
+   */
+  function isCurrentTurn(token: number): boolean {
+    return turnSequence.current === token;
+  }
+
+  /**
+   * Invalidates any outcome still in flight without opening a turn of its own.
+   *
+   * Assumptions: this is what CLEARING does, and what leaving the screen does. Neither issues a
+   * request, so neither should have a token waiting on it -- but both mean the outstanding question is
+   * about a screen state the operator has abandoned, so its answer must not be applied.
+   * @returns {void} Completion is the advanced sequence.
+   */
+  function invalidateTurnsInFlight(): void {
+    turnSequence.current += 1;
+  }
+
+  /*
+   * WHY : Assumptions: the cleanup invalidates rather than cancels, for the reason recorded on the
+   *       trade-off above. Trade-offs: this half is DEFENSIVE and is not observable in the React version
+   *       this bundle pins -- a state update on an unmounted component is a silent no-op in React 19,
+   *       measured rather than assumed -- so no test distinguishes it. It is kept because it completes
+   *       the invariant at no runtime cost and because the guarantee it leans on belongs to React rather
+   *       than to this screen, which a later upgrade could withdraw.
+   */
+  useEffect(
+    /**
+     * Registers the unmount invalidation.
+     * @returns {() => void} The cleanup that makes an outstanding turn inert.
+     */
+    (): (() => void) => invalidateTurnsInFlight,
+    [],
+  );
+
+  /*
    * WHY : Assumptions: this is declared before {@link load} and is one of its dependencies, rather than
    *       being a plain function declaration hoisted into it. `load` is memoised on an empty dependency
    *       list so the mount effect below does not re-run on every render, and a memoised callback closes
@@ -585,14 +701,17 @@ export function UserUpdateScreen(): ReactElement {
   /**
    * Reads one user and seeds the editable controls from the row, which is the reference's Enter arm.
    *
-   * Assumptions: the four editable controls are blanked BEFORE the read is issued, because
+   * Assumptions: the three editable controls are blanked BEFORE the read is issued, because
    * `app/cbl/COUSR02C.cbl` L158-L161 moves `SPACES` into the first name, last name, password and user
    * type and only then performs `READ-USER-SEC-FILE` at L163. An operator therefore never sees one
-   * row's values beside another row's identifier, not even briefly.
+   * row's values beside another row's identifier, not even briefly. The reference's fourth target on
+   * that one `MOVE` is the credential, which this screen does not paint -- see the module header -- so
+   * three of the four blanks are reproduced and the fourth has nothing to blank.
    *
-   * Assumptions: the password control is left EMPTY on success. The reference fills it from the stored
-   * plaintext credential at L169; the target holds no credential to fill it with, as the module header
-   * records, so that single `MOVE` is the one line of this paragraph deliberately not carried across.
+   * ⚠️ Assumptions: two of that paragraph's statements have no counterpart, both concerning the
+   * credential -- the blanking at L160 and the pre-fill from the stored plaintext value at L169. Neither
+   * is carried because this screen renders no credential control at all; registered divergence D-10 states
+   * why, and the module header carries the reasoning.
    */
   const load = useCallback(
     /**
@@ -602,6 +721,15 @@ export function UserUpdateScreen(): ReactElement {
      *   is reduced to a band sentence and field marks rather than propagated.
      */
     (userId: string): void => {
+      /*
+       * WHY : Assumptions: the turn opens BEFORE the blank test, so a refusal supersedes an outstanding
+       *       read as surely as a request does. A read the operator has replaced with a refusal is still
+       *       a read whose answer would seed the form, and the refusal leaves the identifier on the
+       *       screen -- so an older answer arriving afterwards would fill the three controls beneath a
+       *       sentence saying the identifier is empty.
+       */
+      const token = beginTurn();
+
       if (isBlankFieldValue(userId)) {
         /*
          * WHY : Assumptions: the blank identifier is refused WITHOUT issuing a request, and the refusal
@@ -625,7 +753,7 @@ export function UserUpdateScreen(): ReactElement {
 
       setValues(
         /**
-         * Records the identifier and blanks the four editable controls, as L158-L161 does before reading.
+         * Records the identifier and blanks the three editable controls, as L158-L161 does before reading.
          * @param {UserUpdateValues} previous - Values as they stand.
          * @returns {UserUpdateValues} The identifier alone, with every editable control emptied.
          */
@@ -634,7 +762,6 @@ export function UserUpdateScreen(): ReactElement {
           userId,
           firstName: '',
           lastName: '',
-          password: '',
           userType: '',
         }),
       );
@@ -650,9 +777,20 @@ export function UserUpdateScreen(): ReactElement {
          * @returns {void} Completion is represented by the screen's own state.
          */
         (found: UserResponse): void => {
+          /*
+           * WHY : Assumptions: a superseded answer returns having touched NOTHING, and `busy` in
+           *       particular is left alone. It describes the turn now in flight rather than this one, so
+           *       clearing it here would re-enable the keys while a newer request was still outstanding.
+           *       Every path that supersedes a turn either opens one of its own -- which sets `busy` --
+           *       or clears `busy` itself, so it can never be left set with nobody to clear it.
+           */
+          if (!isCurrentTurn(token)) {
+            return;
+          }
+
           setValues(
             /**
-             * Seeds the three readable values from the row, leaving the credential control empty.
+             * Seeds the three editable values from the row, leaving the keyed identifier as typed.
              * @param {UserUpdateValues} previous - Values as they stand.
              * @returns {UserUpdateValues} The same values carrying the row.
              */
@@ -687,6 +825,16 @@ export function UserUpdateScreen(): ReactElement {
          * @returns {void} Completion is represented by the screen's own state.
          */
         (failure: unknown): void => {
+          /*
+           * WHY : Assumptions: a superseded FAILURE is discarded on the same terms as a superseded
+           *       success. A refusal is an answer too, so applying it would put `User ID NOT found...`
+           *       and a marker on a screen the operator has since pointed at a different user -- naming a
+           *       refusal of a key that is no longer on the glass.
+           */
+          if (!isCurrentTurn(token)) {
+            return;
+          }
+
           applyFailureReport(describeFailure(failure, 'read'));
         },
       );
@@ -790,6 +938,15 @@ export function UserUpdateScreen(): ReactElement {
 
     const userId = values.userId.trim();
 
+    /*
+     * WHY : Assumptions: the turn opens here rather than at the top of this function, because the two
+     *       returns above supersede nothing -- the `busy` arm has not accepted a turn at all, and the
+     *       blank arm refuses locally without issuing a request, so an older answer it might discard is
+     *       one that belongs to a turn the operator has not replaced. Opening a turn on either would
+     *       silently cancel an outstanding read that is still the one being waited on.
+     */
+    const token = beginTurn();
+
     setBusy(true);
     setFieldErrors([]);
     setMessage(null);
@@ -803,6 +960,17 @@ export function UserUpdateScreen(): ReactElement {
        *   when nothing differed and no write was issued.
        */
       (current: UserResponse): Promise<void> => {
+        /*
+         * WHY : Assumptions: the re-read's answer is checked against the turn BEFORE the comparison, not
+         *       after it. The comparison's other operand is `values`, which a later turn may already have
+         *       replaced, so comparing first would decide `Please modify to update ...` -- or a write --
+         *       from one turn's row against another turn's form. The row is the half that goes stale here,
+         *       because the form is read at the moment of comparison and the row was fetched earlier.
+         */
+        if (!isCurrentTurn(token)) {
+          return Promise.resolve();
+        }
+
         if (!hasComparableChanges(values, current)) {
           setBusy(false);
           /*
@@ -819,19 +987,19 @@ export function UserUpdateScreen(): ReactElement {
         }
 
         /*
-         * WHY : Assumptions: the request carries THREE members and no credential, because
-         *       `UpdateUserRequest` declares exactly `firstName`, `lastName` and `userType` and its
-         *       contract seals itself with `additionalProperties: false`. That contract states outright
-         *       that the baseline's `Password can NOT be empty...` branch "has no counterpart anywhere in
-         *       this contract, since the service neither accepts nor stores a password on create or
-         *       update". So the password this screen validated is deliberately NOT transmitted: the
-         *       reference's own comparison of it (L227-L230) and its write of it have no target
-         *       analogue, while its blank refusal (L198-L203) is kept because it is a user-visible
-         *       behaviour of the screen rather than a property of the request.
-         *       Trade-offs: an administrator must therefore type something into a control whose value is
-         *       discarded. That is the reference's own requirement -- it refuses a blank password before
-         *       writing -- and the alternative was to drop the control and its refusal altogether, which
-         *       would silently delete a field the mapset paints and a sentence the program emits.
+         * WHY : ⚠️ Assumptions: the request carries THREE members, and every one of them is a value this
+         *       screen renders and the operator can see. `UpdateUserRequest` declares exactly
+         *       `firstName`, `lastName` and `userType` and seals itself with
+         *       `additionalProperties: false`; that contract states outright that the baseline's
+         *       `Password can NOT be empty...` branch "has no counterpart anywhere in this contract,
+         *       since the service neither accepts nor stores a password on create or update".
+         *       ⚠️ Refactoring Rationale: this screen used to COLLECT a credential and omit it here, and
+         *       the note in this position defended that as keeping "a user-visible behaviour of the
+         *       screen". It is withdrawn -- the control and its refusal are gone, registered as
+         *       divergence D-10 -- because the request being three members is now a property a reader can
+         *       verify against the form rather than a discrepancy the form actively contradicted: an
+         *       administrator who typed a credential into a discarded control had every reason to believe
+         *       the account's password had changed.
          */
         const request: UpdateUserRequest = {
           firstName: values.firstName.trim(),
@@ -847,16 +1015,34 @@ export function UserUpdateScreen(): ReactElement {
            */
           (saved: UserResponse): void => {
             /*
-             * WHY : Assumptions: the three comparable controls are reseeded from the RESPONSE while the
-             *       password control is left exactly as typed. The reference re-sends the same map after
-             *       the write, so the values on the glass are the ones written -- which the response
-             *       restates authoritatively -- and its password control keeps whatever was typed
-             *       because nothing in `UPDATE-USER-SEC-FILE` (L358-L390) clears it. Only the fetch arm
-             *       (L160) and `INITIALIZE-ALL-FIELDS` (L409) blank it.
+             * WHY : ⚠️ Refactoring Rationale: this guard was LOST while the note two arms below kept
+             *       claiming that "all four outcomes of a save turn ... are applied only while the turn is
+             *       still the one being waited on" and that "gating three of the four would leave one path
+             *       by which a superseded save reaches the band". Three were gated and this, the fourth,
+             *       was not -- so a write released after PF4 had emptied the screen reseeded the three
+             *       blanked controls from its response and painted `User NNNNNNNN has been updated ...`
+             *       over a form the operator had just cleared. It is restored.
+             * WHY : Assumptions: a superseded WRITE still committed, and only its screen effects are
+             *       dropped. The reference's `EXEC CICS REWRITE` is equally irreversible once issued, so
+             *       discarding the outcome here is not discarding the change -- it is declining to reseed
+             *       a form the operator has since pointed elsewhere, and to claim `... has been updated
+             *       ...` about a row that is no longer the one on the glass. The row the next read
+             *       returns is the authority either way.
+             */
+            if (!isCurrentTurn(token)) {
+              return;
+            }
+
+            /*
+             * WHY : Assumptions: the three comparable controls are reseeded from the RESPONSE rather than
+             *       left as typed. The reference re-sends the same map after the write, so the values on
+             *       the glass are the ones written, and the response is what restates them
+             *       authoritatively -- reusing the typed values would show an operator their own input
+             *       where the stored row is what they need to see.
              */
             setValues(
               /**
-               * Restates the three written values from the response, leaving the credential as typed.
+               * Restates the three written values from the response, which are all this screen holds.
                * @param {UserUpdateValues} previous - Values as they stand.
                * @returns {UserUpdateValues} The same values carrying the stored row.
                */
@@ -890,6 +1076,10 @@ export function UserUpdateScreen(): ReactElement {
            * @returns {void} Completion is represented by the screen's own state.
            */
           (failure: unknown): void => {
+            if (!isCurrentTurn(token)) {
+              return;
+            }
+
             applyFailureReport(describeFailure(failure, 'write'));
           },
         );
@@ -900,6 +1090,16 @@ export function UserUpdateScreen(): ReactElement {
        * @returns {void} Completion is represented by the screen's own state.
        */
       (failure: unknown): void => {
+        /*
+         * WHY : Assumptions: both of this arm's siblings are gated on the same token, so all four
+         *       outcomes of a save turn -- re-read refused, nothing changed, written, write refused --
+         *       are applied only while the turn is still the one being waited on. Gating three of the
+         *       four would leave one path by which a superseded save reaches the band.
+         */
+        if (!isCurrentTurn(token)) {
+          return;
+        }
+
         applyFailureReport(describeFailure(failure, 'read'));
       },
     );
@@ -987,6 +1187,30 @@ export function UserUpdateScreen(): ReactElement {
    */
   function handleSaveAndExit(): void {
     /*
+     * WHY : Assumptions: this arm is guarded on the in-flight flag SEPARATELY from the guard inside
+     *       {@link attemptSave}, and the separate guard is the point. That one returns an already-resolved
+     *       promise when a turn is in flight, which this arm's `.then` runs immediately -- so a PF3 taken
+     *       while a read or a save was outstanding EXITED THE SCREEN WITHOUT SAVING, on the one key whose
+     *       own legend promises `F3=Save&&Exit`. The unconditional transition recorded below is
+     *       unconditional on the save's OUTCOME, which is the reference's behaviour; it was never meant to
+     *       be unconditional on the save having been attempted.
+     * WHY : Trade-offs: this guard and the `disabled` on the PF3 binding are REDUNDANT, and the redundancy
+     *       is deliberate rather than accidental. It was measured: removing either one alone leaves
+     *       `userUpdate.test.tsx`'s exit case green, because each closes the path on its own, and only
+     *       removing both fails it. The pair is kept because they close it at different levels -- the
+     *       binding withholds the key so an operator sees it greyed rather than pressing a live-looking
+     *       control that does nothing, and this guard makes the handler correct on its own terms whatever
+     *       binds it, which matters for the one key whose failure mode is leaving the screen without
+     *       writing. Alternatives Considered: keeping only the binding, so every line is individually
+     *       falsifiable. Rejected here, unlike the analogous case on the transaction-capture screen, because
+     *       that one was UNREACHABLE by construction while this one runs whenever the binding is reached
+     *       without its flag -- it is redundant, not dead.
+     */
+    if (busy) {
+      return;
+    }
+
+    /*
      * WHY : Assumptions: the transition WAITS for the attempt to settle, on both outcomes, rather than
      *       being issued alongside it. The reference's `EXEC CICS REWRITE` is synchronous, so the write
      *       has completed -- or failed -- before `EXEC CICS XCTL` runs at L258-L261; sequencing on the
@@ -1001,14 +1225,32 @@ export function UserUpdateScreen(): ReactElement {
   /**
    * Blanks every control and the message, which is the reference's PF4 arm.
    *
-   * Assumptions: all FIVE controls are blanked including the identifier, and the message with them.
-   * `INITIALIZE-ALL-FIELDS` at L403-L411 moves `SPACES` into the identifier, the first name, the last
-   * name, the password, the user type and `WS-MESSAGE` in one statement, and L405 places the cursor back
-   * on the identifier. The field marks go with them, because a mark left beneath a control the operator
+   * Assumptions: all FOUR controls this screen renders are blanked including the identifier, and the
+   * message with them. `INITIALIZE-ALL-FIELDS` at L403-L411 moves `SPACES` into the identifier, the first
+   * name, the last name, the password, the user type and `WS-MESSAGE` in one statement, and L405 places
+   * the cursor back on the identifier; the credential is the one item of the six with no control here to
+   * blank, per registered divergence D-10. The field marks go with them, because a mark left beneath a control the operator
    * has just emptied would name a refusal of a value that is no longer there.
    * @returns {void} Completion is represented by the screen's own state.
    */
   function clearScreen(): void {
+    /*
+     * WHY : Assumptions: PF4 is deliberately NOT guarded on the in-flight flag, unlike ENTER, PF5 and
+     *       PF3. It is not a competing turn -- it asks no question and issues no request -- it is the
+     *       ABORT of whichever turn is outstanding, which is why it invalidates the sequence and clears
+     *       the flag instead of declining to run. That also gives the operator a way out of a turn that
+     *       is taking its time, on the one key whose whole purpose is to put the screen back to empty.
+     * WHY : Assumptions: the invalidation is what makes the clear STICK. Without it, a read still on the
+     *       wire would resolve into the three controls this function has just blanked, seeding one row's
+     *       values under an empty identifier and painting `Press PF5 key to save your updates ...` over a
+     *       screen the operator had just emptied -- and because the form's values are what the save arm
+     *       submits, the next save would be addressed to a blank key carrying that row's values.
+     * WHY : Assumptions: the flag is cleared here rather than left to the superseded response, because
+     *       that response now returns before touching it. Every other superseding path opens a turn of
+     *       its own, which sets the flag again; this one does not, so it owns the clear.
+     */
+    invalidateTurnsInFlight();
+    setBusy(false);
     setValues(EMPTY_VALUES);
     setFieldErrors([]);
     setMessage(null);
@@ -1079,12 +1321,30 @@ export function UserUpdateScreen(): ReactElement {
    *       does not mean what it means everywhere else. Its button emphasis is unaffected: emphasis is
    *       keyed by AID through `PRIMARY_ACTION_AIDS`, which lists ENTER and PF5, so PF3 stays a default
    *       button exactly as the design-system mapping requires.
+   * WHY : Assumptions: the three keys that OPEN a turn -- ENTER, PF3 and PF5 -- additionally carry
+   *       `disabled` while one is in flight, so the legend greys them out instead of leaving a control
+   *       that looks live and does nothing. The guards inside their handlers are kept as well rather than
+   *       replaced: they are what a test can exercise deterministically, and two independent refusals of
+   *       a second concurrent turn are cheaper than one.
+   * WHY : Assumptions: PF4 and PF12 are deliberately left ENABLED throughout. PF4 is the abort of the
+   *       outstanding turn, not a competitor for it, and PF12 leaves the screen -- greying either would
+   *       trap an operator on a screen whose only unresponsive keys were the ones offering a way off it.
+   * WHY : Trade-offs: `disabled` reports through the invalid-key channel, whose sentence
+   *       `Invalid key pressed...` is the reference's answer for a key OUTSIDE its list (L127-L130) and
+   *       would be wrong for one this screen offers. The rejection payload carries its reason, so the
+   *       handler below states the sentence only for an unmapped key; the alternative -- withholding
+   *       `disabled` and relying on the in-handler guards alone -- was what left the keys looking live.
    */
   const keyHandlers: PfKeyHandlerMap = {
-    ENTER: { onInvoke: handleFetch, label: USER_UPDATE_KEY_LABELS.ENTER },
-    PFK03: { onInvoke: handleSaveAndExit, label: USER_UPDATE_KEY_LABELS.PFK03, action: 'save' },
+    ENTER: { onInvoke: handleFetch, label: USER_UPDATE_KEY_LABELS.ENTER, disabled: busy },
+    PFK03: {
+      onInvoke: handleSaveAndExit,
+      label: USER_UPDATE_KEY_LABELS.PFK03,
+      action: 'save',
+      disabled: busy,
+    },
     PFK04: { onInvoke: clearScreen, label: USER_UPDATE_KEY_LABELS.PFK04 },
-    PFK05: { onInvoke: handleSave, label: USER_UPDATE_KEY_LABELS.PFK05 },
+    PFK05: { onInvoke: handleSave, label: USER_UPDATE_KEY_LABELS.PFK05, disabled: busy },
     PFK12: { onInvoke: exitToAdminMenu, label: USER_UPDATE_KEY_LABELS.PFK12 },
   };
 
@@ -1103,11 +1363,59 @@ export function UserUpdateScreen(): ReactElement {
      */
     /**
      * Reports a key the screen does not bind, using the reference's own invalid-key sentence.
+     * @param {PfKeyRejection} rejection - Why the key was refused, and by which attention identifier.
      * @returns {void} Completion is represented by the screen's own state.
      */
-    onInvalidKey: (): void => {
+    onInvalidKey: (rejection: PfKeyRejection): void => {
+      /*
+       * WHY : Assumptions: a key refused because it is momentarily DISABLED is silent, and only an
+       *       UNMAPPED one raises the sentence. The reference's `WHEN OTHER` arm answers for keys outside
+       *       its list of six; a key this screen registers and greys out for the duration of one turn is
+       *       not outside that list, so answering `Invalid key pressed...` for it would tell an operator
+       *       the screen does not offer a key whose own legend is on the glass in front of them.
+       */
+      if (rejection.reason === 'disabled') {
+        return;
+      }
+
       setMessage(INVALID_KEY_PRESSED);
       setSeverity('error');
+    },
+  });
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: this screen DELEGATES its title band and its key legend to
+   *       the shell instead of painting them itself. `ui/src/layout/AppShell.tsx` is mounted as
+   *       the authenticated layout route, so the frame is painted once above the outlet rather
+   *       than rebuilt per screen; a screen that also painted them would show two title bands
+   *       and two legends. The message band stays local, because the shell paints a zone only
+   *       when it is delegated and this screen's message is bound to controls in its own body.
+   * WHY : Assumptions: the legend is delegated rather than dropped, so the SCREEN keeps owning
+   *       its keys -- `bindings` and `invoke` come from this screen's own `usePfKeys` call and
+   *       are handed up unchanged. The shell adds its sign-off key beside them only when this
+   *       screen leaves that attention identifier free, which is decided by AID in the shell.
+   */
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the row-23 message line is delegated WITH the title band and the
+   *       legend, and this publication omitted it while the screen's own band had already been removed
+   *       -- so every sentence `report` wrote into state, including all five field refusals and the
+   *       invalid-key sentence, was computed and then painted nowhere. The mapset's `severity` travels
+   *       with the text because this channel carries the stored-write acknowledgement as well as
+   *       refusals, and painting that in the refusal colour would tell an operator a committed write
+   *       had failed.
+   * WHY : Assumptions: delegating `pfKeys` is what keeps the keyboard singly owned. This screen binds
+   *       PF12 as its exit and the shell binds PF12 as sign-off whenever no screen has published keys,
+   *       so without the publication both listeners would sit on the document and one PF12 press would
+   *       leave the screen AND end the session. No legend colour is delegated because
+   *       `app/bms/COUSR02.bms` L160 paints this screen's row-24 field `COLOR=YELLOW`, the slot default.
+   */
+  useShellSlot({
+    screen: { transactionId: USER_UPDATE_TRANSACTION_ID, programName: USER_UPDATE_PROGRAM_NAME },
+    now: paintedAt,
+    message: { text: message, severity, mapset: USER_UPDATE_MAPSET },
+    pfKeys: {
+      keys: bindings,
+      onInvoke: invoke,
     },
   });
 
@@ -1116,17 +1424,17 @@ export function UserUpdateScreen(): ReactElement {
    *       screen carries no colour, weight, spacing or font literal. The colour roles are the mapset's
    *       own measured attributes, mapped by `BMS_COLOR_TOKENS`: `COLOR=NEUTRAL` on the caption
    *       (`app/bms/COUSR02.bms` L76) resolves to `colorTextSecondary`, `COLOR=GREEN` on the identifier
-   *       label (L81) to `colorSuccess`, `COLOR=TURQUOISE` on the four remaining labels (L99, L112,
-   *       L126, L141) to `colorInfo`, `COLOR=BLUE` on the two hints (L136, L151) to `colorPrimary`, and
+   *       label (L81) to `colorSuccess`, `COLOR=TURQUOISE` on the three remaining labels (L99, L112 and
+   *       L141) to `colorInfo`, `COLOR=BLUE` on the one hint (L151) to `colorPrimary`, and
    *       `COLOR=YELLOW` on the row-8 rule (L93) to `colorWarning`. `ATTRB=BRT` on the caption (L75) is
    *       carried by `fontWeightStrong` rather than by a colour, which is what keeps brightness and
    *       colour independent in the target the way the mapset has them independent.
    */
   const captionStyle: CSSProperties = {
-    color: cssVar[BMS_COLOR_TOKENS.NEUTRAL],
+    color: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL],
     fontWeight: cssVar[TYPOGRAPHY_TOKENS.brightEmphasis],
   };
-  const hintStyle: CSSProperties = { color: cssVar[BMS_COLOR_TOKENS.BLUE] };
+  const hintStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.BLUE] };
   const blankMarkerStyle: CSSProperties = { color: cssVar[FIELD_ERROR_TOKENS.errorColor] };
   /*
    * WHY : Assumptions: the rule's colour is set through a LOGICAL property, `border-block-start-color`,
@@ -1141,8 +1449,8 @@ export function UserUpdateScreen(): ReactElement {
    *       identifier columns to `fontFamilyCode`. `SEC-USR-ID` is a fixed eight-character key
    *       (`app/cpy/CSUSR01Y.cpy` L18) that a terminal displayed in a monospaced cell grid, so a
    *       proportional face would make two identifiers of equal length render at different widths -- the
-   *       one property of the 3270 presentation that a browser can still keep. The three name and
-   *       credential controls are free text and are deliberately left in the body face.
+   *       one property of the 3270 presentation that a browser can still keep. The two name controls
+   *       and the one-character user type are free text and are deliberately left in the body face.
    */
   const fixedPitchStyle: CSSProperties = { fontFamily: cssVar[TYPOGRAPHY_TOKENS.fixedPitchData] };
 
@@ -1199,7 +1507,7 @@ export function UserUpdateScreen(): ReactElement {
     return (
       <Form.Item
         label={
-          <Typography.Text style={{ color: cssVar[BMS_COLOR_TOKENS[presentation.labelTone]] }}>
+          <Typography.Text style={{ color: cssVar[BMS_TEXT_COLOR_TOKENS[presentation.labelTone]] }}>
             {USER_UPDATE_FIELD_LABELS[field]}
           </Typography.Text>
         }
@@ -1214,39 +1522,18 @@ export function UserUpdateScreen(): ReactElement {
             })}
       >
         {/*
-         * WHY : Trade-offs: the credential is rendered by `Input.Password` with its visibility toggle
-         *       switched OFF, which is AAP gap G2 taken deliberately. The mapset declares this control
-         *       `ATTRB=(DRK,FSET,UNPROT)` at `app/bms/COUSR02.bms` L130 -- `DRK` is non-display, so a
-         *       terminal showed a truly blank field with no indication of length -- while
-         *       `Input.Password` shows one dot per character. The difference is accepted as strictly
-         *       better feedback with no behavioural change, and the toggle is suppressed because
-         *       revealing the value is a capability the original did not have.
-         *       Assumptions: this is one of only THREE genuine `(DRK,FSET,UNPROT)` password controls in
-         *       the repository -- the others being `app/bms/COSGN00.bms` L175 and `app/bms/COUSR01.bms`
-         *       L126 -- and is not to be confused with the `ASKIP` `DRK` carriers on the card and account
-         *       maps, which are protected fields a program un-darkens to reveal text rather than inputs.
+         * WHY : ⚠️ Refactoring Rationale: every control this screen renders is a plain `Input`, and the
+         *       branch that selected `Input.Password` for a non-display control is gone with the control
+         *       it served. The mapset does declare one `ATTRB=(DRK,FSET,UNPROT)` field, at
+         *       `app/bms/COUSR02.bms` L130, and rendering it as a masked input was AAP gap G2 taken
+         *       deliberately -- but the value was then discarded rather than submitted, so what the
+         *       masking protected was a credential that went nowhere. Registered divergence D-10 records
+         *       the removal; the two remaining genuine password controls in the repository,
+         *       `app/bms/COSGN00.bms` L175 and `app/bms/COUSR01.bms` L126, are unaffected, and the sign-on
+         *       screen still takes gap G2 exactly as before, because a credential it collects is a
+         *       credential it sends.
          */}
-        {/*
-         * WHY : Assumptions: the credential control declares `autocomplete="off"`, and the declaration
-         *       is load-bearing rather than tidiness. This screen guarantees that the control renders
-         *       EMPTY after every read -- that is the whole point of not reproducing
-         *       `app/cbl/COUSR02C.cbl` L169 -- and a guarantee the code keeps can still be broken by the
-         *       browser: without this attribute a password manager may fill the field on its own, which
-         *       would put a stored credential on the glass exactly as the reference did. A browser
-         *       console advisory suggests `current-password` for a control of this type; that value is
-         *       refused here, because it would invite precisely the autofill this screen exists to
-         *       avoid and because the value is never transmitted, so no stored credential could be
-         *       correct for it.
-         *       Alternatives Considered: `new-password`, which also suppresses autofill of an existing
-         *       credential. Rejected because it additionally invites a generated-password suggestion for
-         *       a value this screen discards, which would tell an operator a new credential had been set
-         *       when none had.
-         */}
-        {presentation.secret === true ? (
-          <Input.Password {...controlProps} visibilityToggle={false} autoComplete="off" />
-        ) : (
-          <Input {...controlProps} />
-        )}
+        <Input {...controlProps} />
       </Form.Item>
     );
   }
@@ -1258,8 +1545,9 @@ export function UserUpdateScreen(): ReactElement {
    *       carry an absolute `POS=(row,column)`, so a faithful rendering would need character cells at
    *       fixed coordinates. What is preserved is what survives translation: the GROUPING, the READING
    *       ORDER and the TAB ORDER. Each block below is one of the mapset's own rows -- 4 for the caption,
-   *       6 for the identifier, 8 for the rule, 11 for the two names, 13 for the credential and 15 for
-   *       the user type -- and the two controls the mapset puts on row 11 share one row here. What is
+   *       6 for the identifier, 8 for the rule, 11 for the two names and 15 for the user type -- and the
+   *       two controls the mapset puts on row 11 share one row here. Row 13 is absent because the control
+   *       it carried is: registered divergence D-10. What is
    *       given up is pixel-for-character positioning, which no browser holds across viewport widths and
    *       which would be hostile to an operator using magnification or a screen reader.
    * WHY : Alternatives Considered: `Row` and `Col` with a `gutter`, which is antd's idiomatic form grid.
@@ -1270,27 +1558,22 @@ export function UserUpdateScreen(): ReactElement {
    */
   return (
     <Flex vertical gap="large">
-      <ScreenHeader
-        transactionId={USER_UPDATE_TRANSACTION_ID}
-        programName={USER_UPDATE_PROGRAM_NAME}
-        now={paintedAt}
-      />
       {/*
        * Assumptions: heading level four rather than any other, because the token bridge maps a screen
        * caption to `fontSizeHeading4` and `lineHeightHeading4`, and `Typography.Title level={4}` is the
        * component that resolves to exactly those two tokens. This is the mapset's own row-4 field and
-       * not the title band, which `ScreenHeader` paints from rows 1 and 2.
+       * not the title band, which the shell paints from rows 1 and 2 out of the delegated identity.
        */}
       <Typography.Title level={4} style={captionStyle}>
         {USER_UPDATE_CAPTION}
       </Typography.Title>
       {/*
-       * Assumptions: the band is placed above the controls, which is where every authored screen in this
-       * tree puts it, and it is sized from the mapset rather than from the route. The reference paints
-       * its message on row 23 below the fields; the band reserves its space at all times either way, so
-       * the reading order changes and the layout stability the reserved space exists for does not.
+       * Refactoring Rationale: the message line that used to sit here is delegated to the shell, which
+       * paints it at row 23 -- below the fields, which is where the reference paints it. Composing it
+       * above the controls was this tree's earlier convention and it inverted the source's order; the
+       * band reserves its space at all times either way, so the layout stability that reservation exists
+       * for is unaffected by the move.
        */}
-      <MessageBand message={message} severity={severity} mapset={USER_UPDATE_MAPSET} />
       <Form layout="vertical">
         {renderField('userId')}
         {/*
@@ -1312,26 +1595,24 @@ export function UserUpdateScreen(): ReactElement {
             {renderField('lastName')}
           </Flex>
         </Flex>
-        {renderField('password')}
+
         {renderField('userType')}
       </Form>
       {/*
-       * Assumptions: the legend colour is left at the bar's default, which `app/bms/COUSR02.bms` L160
-       * confirms -- this screen's row-24 field is `COLOR=YELLOW`, the majority the bar already defaults
-       * to. A clicked control and the corresponding key press dispatch through the same `invoke`, so the
-       * two paths cannot diverge.
+       * Assumptions: the legend the shell paints from this screen's delegated bindings dispatches through
+       * the same `invoke` a real key press does, so a clicked control and its key cannot diverge.
        */}
-      <PfKeyBar keys={bindings} onInvoke={invoke} />
     </Flex>
   );
 }
 
 /*
- * WHY : Assumptions: BOTH a named and a default export are published, because two consumers read this
- *       module differently. `ui/src/router.tsx` lazily imports each screen and republishes
- *       `module.<Name>` under the `default` key that `React.lazy` requires, so the named export is what
- *       the route table binds; the folder contract for this file additionally specifies a default
- *       export. Every other authored screen in this tree publishes the same pair, so a reader moving
- *       between them meets one convention.
+ * WHY : Refactoring Rationale: this module publishes the component under its NAME ONLY, and the
+ *       default export that used to sit here has been removed rather than kept alongside it. The
+ *       argument for publishing both was that a route could then be declared as
+ *       `lazy(() => import('./screens/<name>'))` with no adapter -- but no route is declared that way
+ *       anywhere, so the second key had no caller, and AAP section 0.6.2.1 fixes the import discipline
+ *       for this tree as named imports with the named-to-default adapter held in `ui/src/router.tsx`.
+ *       Two keys for one component also make a screen reachable by two spellings, so a reader cannot
+ *       tell from an import which convention this tree follows.
  */
-export default UserUpdateScreen;

@@ -25,7 +25,10 @@
  */
 
 // Assumptions: every test API is imported rather than taken from an ambient global, because
-// ui/vitest.config.ts sets `globals: false` and records that as a contract.
+// ui/tsconfig.json keeps its `types` list EMPTY -- so nothing is declared ambiently and an omitted
+// import fails to compile on the symbol it omitted. The runner's own `globals` option is set to
+// `true`, for the separate reason recorded beside it, so the enforcing mechanism is the empty
+// `types` list and never that option.
 import { describe, expect, it, vi } from 'vitest';
 
 // Assumptions: the module's own type is imported as a namespace here rather than written as an inline

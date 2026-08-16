@@ -17,7 +17,7 @@
 - **Decision:** Run the **seven online deployables** as **ECS Fargate services**,
   run every batch step as a **Step-Functions-invoked Fargate task** from a task
   definition that has **no long-running service** behind it, and reserve **Lambda
-  for glue only**. Three of the twelve states in the nightly chain are Lambda
+  for glue only**. Three of the eleven states in the nightly chain are Lambda
   invocations; a small number of operational functions outside the chain are too,
   and all of them are enumerated in
   [The glue tier is bounded by role, not by count](#the-glue-tier-is-bounded-by-role-not-by-count)
@@ -228,8 +228,8 @@ count of chain states is not a count of functions:
 | Function | Declared in | Duty |
 |---|---|---|
 | `quiesce` | each environment root | Chain state 1 — sets the read-only flag |
-| `resume` | each environment root | Chain state 12 — clears the flag; **also** the target of the bracket-finalizer rule (`aws_cloudwatch_event_rule.daily_finalizer`), which releases the flag when an execution ends FAILED, TIMED\_OUT or ABORTED without reaching state 12 |
-| `database_admin` | each environment root | Chain state 11 — runs `VACUUM ANALYZE`; **also** invoked once at apply time to run the schema-and-role bootstrap transactionally |
+| `resume` | each environment root | Chain state 11 — clears the flag; **also** the target of the bracket-finalizer rule (`aws_cloudwatch_event_rule.daily_finalizer`), which releases the flag when an execution ends FAILED, TIMED\_OUT or ABORTED without reaching state 12 |
+| `database_admin` | each environment root | Chain state 10 — runs `VACUUM ANALYZE`; **also** invoked once at apply time to run the schema-and-role bootstrap transactionally |
 | `dataset_retention` | each environment root | Not a chain state — triggered by object creation in the dataset bucket to enforce generation retention |
 
 Two clarifications the inventory earns. The maintenance statement is

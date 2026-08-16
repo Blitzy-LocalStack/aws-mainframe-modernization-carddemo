@@ -201,7 +201,7 @@ graph TB
         end
         subgraph APP["private-application subnets"]
             TASK["ECS Fargate tasks<br/>8 services; 7 request-serving ones<br/>run a resource-server JWT check"]
-            VPCE["8 interface endpoints<br/>+ S3 gateway endpoint"]
+            VPCE["10 interface endpoints<br/>+ S3 gateway endpoint"]
         end
         subgraph DATA["isolated-data subnets — NO internet route"]
             DB[("Aurora PostgreSQL<br/>8 schemas")]
@@ -213,10 +213,11 @@ graph TB
     ALB -->|"8080"| TASK
     TASK -->|"5432"| DB
     TASK -->|"443, stays in VPC"| VPCE
-    TASK -->|"443, Cognito JWK set"| NAT
-%% Almost all AWS API traffic leaves through VPCE, not NAT. Cognito is the one
-%% exception: it has no interface endpoint in the specified eight-service set, so
-%% the JWK set every service fetches at start-up leaves through NAT.
+    TASK -.->|"443, identity provider (opt-in, off by default)"| NAT
+%% All AWS API traffic leaves through VPCE, not NAT. The identity provider is the one
+%% service with no interface endpoint in the specified eight-service set, so in-task
+%% issuer resolution would leave through NAT -- and that rule is opt-in and empty by
+%% default, which is why the edge shows it dashed. By default no task reaches NAT at all.
 %% The data tier has no NAT association at all — that absence is the control.
 ```
 
@@ -232,8 +233,8 @@ rather than a preference.
    CHOSEN.** The data subnets have no NAT association and no internet gateway
    route.
 2. **Two tiers, with the database in the private-application subnets — rejected.**
-   The application subnets have an egress route, because tasks pull images and
-   reach non-AWS endpoints through NAT. Placing the database there gives the
+   The application subnets have an egress route, because the tier is the one that
+   may need to reach something outside AWS at all. Placing the database there gives the
    database's subnet an egress route it never uses, and it collapses two different
    exposures into one: a compromised task in a subnet with an egress route and a
    compromised task in a subnet without are not the same incident, and the
@@ -345,61 +346,91 @@ envelope operations, use queues, start workflow executions and read configuratio
 Every one of those is an AWS API call, and by default each would leave through the
 NAT gateways and traverse the public internet to a public service endpoint.
 
-Eight **interface** endpoints are provisioned instead, one set per zone, covering
+Ten **interface** endpoints are provisioned instead, one set per zone, covering
 exactly: the ECR API and the ECR Docker registry for image pulls, CloudWatch Logs
 for delivery, Secrets Manager for credentials, KMS for envelope operations, SQS
-for messaging, Step Functions for workflow calls, and Systems Manager for
-configuration. Object storage uses a **gateway** endpoint instead, which is a
+for messaging, Step Functions for workflow calls, Systems Manager for
+configuration, **X-Ray** for trace export and **Cognito identity** for issuer,
+signing-key and administrative user-pool calls. Object storage uses a **gateway**
+endpoint instead, which is a
 route-table entry rather than an ENI — the distinction matters twice over, because
 a gateway endpoint carries no hourly charge (see
 [§Cost Implications](#cost-implications)) and because it is why S3 is deliberately
 absent from the interface set.
 
-The security consequence is specific and checkable, and it is stated with its
-exception rather than without it: with those endpoints in place, **no call to one of
-the nine endpointed services needs internet egress**, so the NAT gateways carry only
-the traffic that has nowhere else to go. Assumptions: the endpoint set is treated as
-identical in every environment and is validated as an exact set rather than a
-minimum, so an environment cannot quietly omit one and send that service's traffic
-out through NAT instead — a drift that would be invisible in behaviour and visible
-only in a flow log.
+The security consequence is specific and checkable: with those endpoints in place,
+**no AWS API call a task makes needs internet egress**, so the NAT gateways carry
+no task traffic at all under the rules the network module declares. Assumptions:
+the endpoint set is treated as identical in every environment and is validated as
+an exact set rather than a minimum, so an environment cannot quietly omit one — and
+because the application group's egress is enumerated, an omission does not send
+that service out through NAT, it drops the call at the group. That is the harsher
+failure and the deliberate one: a dropped call is visible immediately, whereas a
+silent NAT fallback is visible only in a flow log.
 
-### Six security-group rules, each with one purpose
+Refactoring Rationale: this said **eight** interface endpoints covering eight
+services, and that "no call to one of the nine endpointed services needs internet
+egress" — the nine counting the S3 gateway. The set is ten interface endpoints plus
+the gateway, and the two additions are load-bearing rather than cosmetic. It is a
+deliberate SUPERSET of the enumeration in AAP §0.4.1.6 and §0.4.1.9, adopted
+because the same §0.4.1.9 states the stronger constraint that the security groups
+permit only load-balancer-to-application, application-to-Aurora and
+application-to-endpoint — no internet destination at all. Every service validates
+tokens against the pool's issuer at start-up and the telemetry sidecar exports
+traces continuously, so with an enumerated egress and no endpoint for either, both
+calls are dropped at the group: identity validation fails every request and traces
+vanish silently. Widening the endpoint enumeration keeps the constraint that governs
+security intact, whereas keeping the enumeration literal could only be paid for with
+an internet-bound rule the same section forbids. The deviation is recorded here
+rather than absorbed, and the alternative it replaced is recorded in the section
+below.
 
-* the **security** claim is bounded, not absolute — the accurate statement is that
-  task-to-AWS traffic stays inside the VPC *for every service an endpoint covers*,
-  and that the two uncovered services carry no customer record data in either
-  direction: a token operation carries a credential and a claim set, and a trace
-  segment carries timing and identifiers the observability rules already require to
-  be non-identifying;
-* the **cost** claim in [§Cost Implications](#cost-implications) is bounded the same
-  way — NAT data-processing spend is displaced by the endpoints for the nine covered
-  services and is *not* eliminated, because these two remain.
+### How the two additions were reached
 
-Refactoring Rationale: this paragraph previously asserted that no AWS call from a
-task needed internet egress at all. That was untrue in both directions at once — the
-two services above did need it, and the application group carried no egress rule
-permitting it, so the calls would have been dropped rather than routed. Adding the
-endpoints for them was considered and rejected: the eight-service set is a frozen AAP
-decision, and widening it here would resolve a documentation inconsistency by
-editing the specification the documentation describes. Alternatives Considered:
-narrowing the sixth rule to the published address ranges of those two services was
-also rejected, because those ranges change without notice and a rule that silently
-stops matching one of them fails **closed** on sign-on — which is the whole service.
+* the **security** claim is now unbounded for task-to-AWS traffic, because every
+  service a task calls has an endpoint: identity and trace export were the two that
+  did not, and both were added rather than routed out;
+* the **cost** claim in [§Cost Implications](#cost-implications) is bounded only by
+  what the endpoints cannot displace — NAT data-processing spend for task-to-AWS
+  calls is now displaced in full, while the hourly per-endpoint-per-zone term is
+  genuinely additive and grew by two endpoints across three zones.
 
-### Six security-group flows, each with one purpose
+Refactoring Rationale: this section previously read as a rejection. It recorded that
+the two uncovered services *did* need internet egress, that "adding the endpoints for
+them was considered and rejected: the eight-service set is a frozen AAP decision",
+and that narrowing a sixth rule to their published address ranges was rejected too —
+leaving a 0.0.0.0/0 rule as the only remaining option and this document as its
+justification. The delivered network module took the opposite path, and this record
+is aligned to it because that path is the one the AAP's own security-group contract
+requires: §0.4.1.9 permits the application group no internet destination, so an
+allow-all rule contradicts an explicit constraint whereas a longer endpoint list
+extends an enumeration. Alternatives Considered: narrowing that rule to the two
+services' published address ranges — still rejected, and for the reason recorded
+before: those ranges change without notice, and a rule that silently stops matching
+fails **closed** on sign-on, which is the whole service. Alternatives Considered:
+leaving the rule with an open default and documenting it — rejected, because a
+default that neither environment root overrides is the effective configuration of
+every environment, so the documentation would have described an intent nothing
+implemented. The input survives with an EMPTY default so that an account whose
+PrivateLink coverage genuinely falls short has a narrow, reviewable way to admit one
+destination; with the set empty the rule creates no instance.
+
+### Seven security-group flows, each with one purpose
 
 The permitted flows are narrow enough to enumerate completely, and the table below
-is that complete enumeration — ten rule resources expressing six flows:
+is that complete enumeration — **eleven** rule resources expressing **seven** flows,
+of which six create an instance in a delivered environment:
 
 | Flow | Port | Destination form | Why it exists |
 |---|---|---|---|
 | Load balancer → application tasks | **8080** | group | The only ingress to a service; the tasks accept traffic from the load balancer's group and from nothing else |
+| Application tasks → load balancer | **443** | group | The internal listener, which is how one migrated context calls another without leaving the private tier |
 | Application tasks → database | **5432** | group | The only data-tier ingress, and it is sourced from the application group rather than from a CIDR range |
-| Application tasks → interface endpoints | **443** | group | Carries almost every AWS API call, which is what keeps that traffic off the public path |
+| Application tasks → interface endpoints | **443** | group | Carries every AWS API call a task makes, which is what keeps that traffic off the public path |
+| Application tasks → load balancer | **443** | group | How one migrated context calls another: the delivered synchronous service-to-service edges are addressed through the internal listener, so without this rule each one fails as a connect timeout |
 | Application tasks → S3 gateway endpoint | **443** | **prefix list** | Object-storage reads and writes. A gateway endpoint places no network interface and so has no group to reference, so this rule matches the service's managed prefix list instead |
 | Isolated data tier → S3 gateway endpoint | **443** | **prefix list** | What makes the data tier's own gateway-endpoint association usable — a snapshot export, for instance — without giving it any internet path |
-| Application tasks → Cognito | **443** | **CIDR input** | The JWK set every service fetches while starting, and the user-pool admin API `auth-service` calls. Cognito has no interface endpoint in the specified eight-service set, so this leaves through NAT |
+| Application tasks → identity provider | **443** | **CIDR input, opt-in** | In-task issuer and key-set resolution. Cognito has no interface endpoint in the specified eight-service set, so this leaves through NAT. **The input is empty by default, so this rule does not exist unless an environment supplies a reviewed exact destination set**; `0.0.0.0/0`, anything broader than a `/12`, and the VPC's own CIDR are all refused. Refactoring Rationale: it previously defaulted to `0.0.0.0/0`, which with NAT gave every task an outbound TLS path to any internet address — the reachability SSRF and exfiltration both need. With the empty default, token validation rests on the API Gateway Cognito JWT authorizer at the edge, which reaches the provider natively because it is not in the VPC |
 
 Wherever a group can be named, the rule is written source-group to
 destination-group rather than by address range. Alternatives Considered:
@@ -410,17 +441,22 @@ membership are then two facts that have to agree.
 Assumptions: the last three rules cannot take that form, and the reason differs
 between them. The two S3 rules cannot because the destination is a gateway
 endpoint with no group to reference; a managed prefix list is the narrowest
-destination available and it still resolves to one service. The Cognito rule
-cannot because the destination is a public regional endpoint outside the VPC.
-Trade-offs: that last rule's destination is therefore an **input** with an open
-default rather than a literal, so an environment that has determined its
-provider's ranges can narrow it without editing the module. Deriving it from
-AWS's published ranges was rejected on a hard limit — the regional ranges run to
-hundreds of CIDRs and a security group admits far fewer, so the apply would fail
-on quota. What bounds it meanwhile is that it is TLS-only, that it is one rule
-carrying its purpose in its description so it is identifiable in a plan diff and
-in a flow log, and that it is the only rule in the topology with an open
-destination.
+destination available and it still resolves to one service. The identity rule
+cannot because the destination it would name is outside the VPC — which is why
+it names nothing.
+
+Refactoring Rationale: this table listed **six** flows over **ten** rule resources
+and omitted the application-to-load-balancer rule entirely, while its identity row
+said Cognito "has no interface endpoint in the specified eight-service set, so this
+leaves through NAT". Both matter to a reader auditing the tier: an omitted flow makes
+a complete enumeration incomplete in the one direction that hides a permission, and
+the identity row described an open outbound rule as necessary when the endpoint that
+makes it unnecessary is provisioned three sections above. Trade-offs: the identity
+rule is retained rather than deleted, so the topology still contains a way to open
+one 443 destination. What bounds it is the empty default — opening it is an explicit
+tfvars change that appears in a plan diff — together with the single port, the
+egress-only direction, and a module precondition that refuses a value naming the
+VPC's own CIDR.
 
 ### The edge validates, and so does every request-serving service
 
@@ -858,23 +894,28 @@ rather than against a number that was stale when it was written.
 |---|---|---|---|
 | NAT gateways | Per **hour per gateway**, plus per **GB processed** | **3** (one per zone) | One gateway per zone × 3 zones multiplies the hourly term threefold |
 | Elastic IPs on the NAT gateways | Per **hour per address** | **3** (one per gateway) | Every public NAT gateway carries an address, and all public IPv4 addresses are chargeable |
-| Interface VPC endpoints | Per **hour per endpoint per availability zone**, plus per **GB processed** | **24** (8 endpoints × 3 zones) | 8 endpoints × 3 zones sets the hourly term; it dominates the data term at this workload's volume |
+| Interface VPC endpoints | Per **hour per endpoint per availability zone**, plus per **GB processed** | **30** (10 endpoints × 3 zones) | 10 endpoints × 3 zones sets the hourly term; it dominates the data term at this workload's volume |
 | S3 gateway endpoint | **No hourly charge** | **0** | It is a route-table entry, not an ENI — which is precisely why object storage uses this form |
 
 **The interface-endpoint fleet, not the NAT tier, carries the larger fixed hourly
 term — and the ratio that decides it is stated so the claim survives a price
-change.** The endpoint fleet bills **24** hourly units against the NAT tier's **3**,
+change.** The endpoint fleet bills **30** hourly units against the NAT tier's **3**,
 so the endpoints are the larger fixed cost unless a single NAT gateway-hour costs
-**more than eight times** an endpoint-zone-hour. At `us-east-1` list rates read
+**more than ten times** an endpoint-zone-hour. At `us-east-1` list rates read
 while writing this record — `$0.045` per NAT gateway-hour against `$0.01` per
 endpoint per zone-hour ([Amazon VPC pricing](https://aws.amazon.com/vpc/pricing/),
 [AWS PrivateLink pricing](https://aws.amazon.com/privatelink/pricing/)) — the
 actual ratio is **4.5 : 1**, which is below that break-even, so the endpoint fleet
-is the larger fixed charge: `24 × $0.01 = $0.24` per hour against
+is the larger fixed charge: `30 × $0.01 = $0.30` per hour against
 `3 × $0.045 = $0.135` per hour for the gateways plus `3 × $0.005 = $0.015` per hour
 for their addresses. The break-even ratio is the durable half of this statement and
 the dollar figures are the perishable half, which is why both are given rather than
-only the second.
+only the second. Refactoring Rationale: the unit count read **24** for eight
+endpoints and the break-even ratio read **eight times**; both are re-derived from the
+ten endpoints the module provisions, because a structural count that lags the
+configuration corrupts exactly the durable half of the claim this method relies on —
+a reader re-checking the ratio against a current price list would have re-checked the
+wrong ratio.
 
 Trade-offs: this passage gives **unit counts** and the **break-even ratio** they
 imply rather than ranking the two line items outright, and that is deliberate. A
@@ -888,15 +929,27 @@ Elastic IP row exist for the same reason: the address charge is a real fixed net
 cost, and unit counts are what make a ranking derivable rather than asserted.
 
 **One NAT gateway would cost a third of that tier's hourly term, and that trade was
-not taken.** The reason is availability rather than security: with one gateway,
-egress from the two zones that do not hold it becomes a cross-zone data path, and
-the loss of the zone holding it takes egress from all three. Trade-offs: three
-hourly gateway charges and three address charges are accepted in exchange for
-per-zone egress independence.
+not taken.** The reason is topological parity rather than security or availability:
+AAP §0.4.1.6 confines environment difference to sizing and retention and never to
+topology, so a single-NAT switch for non-production is not available to this module
+— and a dev network with a different shape would not validate the prod one.
+Trade-offs: three hourly gateway charges and three address charges are accepted for
+a tier that carries **no traffic at all**, because every AWS service this system
+calls is endpointed and the application group's enumerated egress names only in-VPC
+destinations. What the spend buys is a symmetric per-zone shape in which a future
+bounded public dependency arrives as one security-group rule rather than as a change
+of topology. Refactoring Rationale: this paragraph justified the three gateways on
+availability — cross-zone egress for two zones, total egress loss for the third —
+which presumed egress that does not exist. The same correction is recorded beside
+`aws_nat_gateway` in
+[`infra/modules/network/main.tf`](../../infra/modules/network/main.tf); it is stated
+in both places because "we accept this cost for resilience" is exactly the claim a
+cost review takes at face value.
 
-**The ten interface endpoints are worth paying for, and the reason is partly
+**The eight interface endpoints are worth paying for, and the reason is partly
 financial.** The security consequence is stated in [§Rationale](#rationale) —
-task-to-AWS traffic stays inside the VPC for every service an endpoint covers. The
+every service a task calls has an endpoint, so task-to-AWS traffic stays inside the
+VPC without exception. The
 cost consequence is that this traffic **stops flowing through the NAT gateways**, so
 it no longer accrues NAT per-GB processing charges. Part of the endpoint spend
 therefore **displaces** NAT data-processing spend rather than adding to it. The
@@ -904,16 +957,20 @@ hourly per-endpoint-per-zone term is genuinely additive; the data term largely m
 from one line to another. Presenting the endpoints as pure additional cost would
 overstate them, and presenting them as free would understate them.
 
-Assumptions: "largely" is doing real work in that sentence and is not a hedge.
-**Cognito and X-Ray have no endpoint in the frozen eight-service set**, so their
-traffic continues to cross the NAT gateways and continues to accrue the per-GB
-processing term. Token operations are small and infrequent relative to image pulls
-and log delivery, so the residue is a small share of what it displaces — but it is
-not zero, and a reader modelling this tier as "endpoints eliminate NAT data
-processing" would model it wrong. Refactoring Rationale: this paragraph previously
-claimed task-to-AWS traffic never takes the public path, which overstated the
-displacement by describing an exception-free rule that the endpoint set does not
-support.
+Assumptions: for **task-to-AWS** traffic the displacement is now complete rather
+than partial, because Cognito identity and X-Ray are in the endpoint set — the two
+services that used to be the residue. What the endpoints do not displace is the
+egress a task makes to something that is not an AWS API, and this stack has none
+under the rules the network module declares, so the NAT gateways are paid for as
+availability infrastructure and as the path a future non-AWS dependency would take.
+A reader modelling this tier should therefore treat the three hourly gateway charges
+as a floor that is largely unused rather than as a data-processing line.
+Refactoring Rationale: this paragraph said Cognito and X-Ray "have no endpoint in
+the frozen eight-service set, so their traffic continues to cross the NAT gateways",
+and quantified the residue on that basis. Both have endpoints, added after exactly
+that omission was found, so the residue it described is zero — and leaving the
+sentence in the cost section would have kept a reader believing a public path for
+token operations exists somewhere in this design.
 
 ### Identity, keys and secrets
 
@@ -967,7 +1024,7 @@ that their limits are visible: **log retention days**, and the
 **deletion-protection** and **final-snapshot** flags.
 
 **The security topology is not a place `dev` saves money, and that is deliberate.**
-The same three tiers across the same three zones, the same ten interface
+The same three tiers across the same three zones, the same eight interface
 endpoints and the same three NAT gateways are deployed to both, so `dev` pays the
 full network floor. The reason is validation: a `dev` environment with one zone, or
 with the database in the application subnets, or reaching AWS services through NAT
@@ -1003,7 +1060,7 @@ were also the cheapest. It is not, and that is the point.
 
 ### Trade-offs accepted
 
-* **Three NAT gateways and ten interface endpoints across three zones are the
+* **Three NAT gateways and eight interface endpoints across three zones are the
   price of zone-independent egress and a private AWS API path.** The charge shape
   is in [§Cost Implications](#cost-implications). Accepted: the hourly terms are
   paid so that no zone depends on another for egress and no task needs internet
@@ -1154,8 +1211,20 @@ establish that the resulting environment behaves as described.
   of an earlier revision carrying a `0.0.0.0/0` egress rule and became false when
   that rule was withdrawn — and the difference matters, because it turns an omission
   from a cost and privacy defect into an outage. The endpoint set is validated as an
-  exact set for that reason, and X-Ray and the Cognito identity provider were both
-  added to it after exactly this omission was found.
+  exact set for that reason. Refactoring Rationale: this bullet went on to say that
+  "X-Ray and the Cognito identity provider were both added to it after exactly this
+  omission was found". Both additions have since been **withdrawn**, and the sentence
+  is corrected rather than left standing because it recorded a precedent for widening
+  a frozen set. AAP §0.4.1.9 states the endpoint set exactly at eight, so a ninth or
+  tenth entry is a topology change rather than a repaired omission. X-Ray had one
+  consumer, a telemetry collector sidecar that is itself outside the AAP and is
+  withdrawn from `infra/modules/ecs-service`. The Cognito endpoint additionally did
+  not work: the module's shared endpoint policy is scoped to same-account principals
+  while the identity calls on that path are unauthenticated by construction, so they
+  were implicitly denied. In-task issuer resolution is served instead by an opt-in,
+  empty-by-default egress rule naming a reviewed exact destination set. So the rule
+  for a genuinely new AWS dependency is narrower than this bullet implied: it needs an
+  endpoint **within** the stated eight, or an AAP amendment.
 * **Two behavioural differences are registered rather than absorbed:** the declined
   password parity, and the sign-on sentence emitted for a refused credential. Both
   belong in

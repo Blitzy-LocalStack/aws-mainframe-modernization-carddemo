@@ -212,7 +212,7 @@
  * in application code can change it. The reason is that these keys are NATURAL rather than generated:
  * the two-character type code, the three-character area code, the two-character state code and the
  * four-character state-and-postal combination are all values read out of the baseline, and each is
- * pointed at by something else -- a category's foreign key at {@code V1__reference.sql} L267 for the
+ * pointed at by something else -- a category's foreign key at {@code V1__reference.sql} L256 for the
  * first, and seed data for the other three. Reassigning one would move a row's identity while every
  * reference to it stayed pointing at the old value, and on the single-column state-and-postal table it
  * would not modify a row at all but replace it with a different one while the provider believed it was

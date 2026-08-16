@@ -60,14 +60,19 @@
  * </pre>
  *
  * <p>Refactoring Rationale: this section counted four files and three tests, and admitted a fourth test
- * once a measurement showed one property genuinely unowned. {@code DailyTransactionRepository} declares
- * TWO reads over the unposted feed with different lifetimes -- an unbounded lazily-populated cursor and a
- * bounded chunk -- and a search for callers of the cursor across every module found none in any test. The
- * feed's entry in {@code CrossSchemaFeedRepositoryIT} exercises the BOUNDED finder only, so the cursor's
- * whole contract was unexercised: that it orders across more than one fetch, that its mandatory
- * propagation refuses a call holding no transaction, and that it closes. An unexercised cursor was worse
- * than an untested one, because the feed LOOKED covered while the member a nightly pass actually drives
- * was not reached at all.</p>
+ * once a measurement showed one property genuinely unowned. {@code DailyTransactionRepository} then
+ * declared TWO reads over the unposted feed with different lifetimes -- an unbounded lazily-populated
+ * cursor and a bounded chunk -- and the feed's entry in {@code CrossSchemaFeedRepositoryIT} exercised the
+ * BOUNDED finder only, so the cursor's whole contract was unexercised while the feed LOOKED covered.</p>
+ *
+ * <p>Refactoring Rationale: that cursor has since been WITHDRAWN, and the fourth test remains for a
+ * different reason. A search for callers found none in any module: both jobs loop on the bounded
+ * continuation from a watermark that sits below every assigned ordinal, so the continuation finder already
+ * covered the first chunk and the cursor froze a surface nothing called. What
+ * {@code DailyTransactionRepositoryIT} owns now is the CHUNKED walk's result under conditions one
+ * statement cannot show -- per-statement chunk geometry, resumption across a commit, and keyset rather
+ * than offset positioning when a read row is deleted -- which is a property of the driving loop rather
+ * than of a cursor's lifetime, and still one no sibling holds.</p>
  *
  * <p>Refactoring Rationale: this inventory then read five files and named a sixth prohibited, and it is
  * raised to six because {@code CardXrefRepositoryIT} was added deliberately rather than by drift. What
@@ -107,13 +112,15 @@
  *
  * <p>Assumptions: neither of the two classes named for a single interface is a departure from that
  * partition but an application of it. Each is named for an interface because it happens to reach only
- * one, yet what each owns is a PROPERTY none of the others holds -- the lifetime of an unbounded
- * database cursor in the one case, the determinacy of a by-account read over a NON-UNIQUE index in the
- * other -- and both are different questions from whether a mapping resolves and walks in order. Two
- * classes therefore touch the daily-transaction interface, and the split between them is by member
- * rather than by table: the bounded chunk finder belongs to {@code CrossSchemaFeedRepositoryIT} because
- * it is one of that class's six near-identical feed walks, and the cursor belongs to
- * {@code DailyTransactionRepositoryIT} because its contract has no counterpart among them. Two classes
+ * one, yet what each owns is a PROPERTY none of the others holds -- the CHUNKED walk's behaviour across
+ * more than one statement in the one case, the determinacy of a by-account read over a NON-UNIQUE index
+ * in the other -- and both are different questions from whether a mapping resolves and walks in order.
+ * Two classes therefore touch the daily-transaction interface, and the split between them is by
+ * QUESTION rather than by member, now that the interface declares a single read: one bounded walk of the
+ * feed belongs to {@code CrossSchemaFeedRepositoryIT} because it is one of that class's six
+ * near-identical feed walks and asks only whether the mapping resolves and orders, while the driving
+ * loop's own properties -- chunk geometry, resumption, and positioning under a concurrent delete --
+ * belong to {@code DailyTransactionRepositoryIT} because they have no counterpart among them. Two classes
  * likewise touch the cross-reference, and that split is by KIND of statement: the catalog fact and a
  * reachability read stay with the feed walks, while the keyed access paths and their multiplicity
  * ruling belong to {@code CardXrefRepositoryIT}. A sixth test would need to name a property this list
@@ -272,9 +279,10 @@
  *       be faithful to.</li>
  *   <li>{@code CrossSchemaFeedRepositoryIT} across 9 cases -- the harness post-state and the six
  *       read-only feeds: the card, cross-reference, customer, daily-transaction, disclosure-group and
- *       reject interfaces. Of the daily-transaction interface it owns the BOUNDED chunk finder and its
- *       walk-until-empty loop only; the unbounded cursor beside it belongs to
- *       {@code DailyTransactionRepositoryIT} below, and the division is by member rather than by table. It owns the 430-byte reject composition, which the
+ *       reject interfaces. Of the daily-transaction interface it owns ONE bounded walk asking whether the
+ *       mapping resolves and orders; the driving loop's own properties belong to
+ *       {@code DailyTransactionRepositoryIT} below, and the division is by question rather than by
+ *       member, the interface now declaring a single read. It owns the 430-byte reject composition, which the
  *       baseline builds at
  *       {@code app/cbl/CBTRN02C.cbl:447} as a whole-group move of the daily record exactly as read, so
  *       the stored row retains that record's own trailing filler span and its own processing timestamp
@@ -307,16 +315,28 @@
  *       multiplicity that no shipped row carries. The residual cost is that a reader meets the
  *       cross-reference in two files; it is recorded here so the second encounter reads as a boundary
  *       rather than as a duplicated proof.</li>
- *   <li>{@code DailyTransactionRepositoryIT} across 8 cases -- the UNBOUNDED forward-only cursor over the
- *       unposted feed, which is the one member of that interface no other class here reaches. It owns the
- *       cursor's lifetime rather than its result set: that a walk keeps its order past the point where
- *       the driver must fetch again, which a walk fitting inside one fetch cannot show; that the
- *       mandatory propagation refuses a call holding no transaction, so a cursor is never handed back
- *       already closed; that the walk closes; and that an empty feed yields an empty walk rather than a
- *       failure. It also owns two boundaries the loop beside it cannot state as properties -- that the
- *       continuation predicate is STRICTLY greater, so a resumed step never processes a row twice, and
- *       that the interface's reachable surface is exactly two reads, which is what makes the read-only
- *       guarantee structural rather than dependent on a privilege these tests do not have. The ordering
+ *   <li>{@code DailyTransactionRepositoryIT} across 9 cases -- the CHUNKED forward walk over the unposted
+ *       feed, driven exactly as the two jobs drive it: repeated bounded continuations from the watermark,
+ *       each capped at the deployed chunk size. Refactoring Rationale: this entry described an UNBOUNDED
+ *       forward-only cursor and the properties of its lifetime -- that a mandatory propagation refused a
+ *       call holding no transaction, and that the walk closed -- and both the member and those properties
+ *       are gone. {@code findAllByOrderByIngestSeqAsc} had no production caller: both jobs loop on the
+ *       bounded continuation from {@code DailyFeedWatermarkService.NOTHING_CONSUMED}, which is below every
+ *       assigned ordinal, so the continuation finder already covered the first chunk and the cursor froze a
+ *       surface nothing called. It was withdrawn rather than given a caller, because a caller would have
+ *       had to abandon per-record commits to satisfy a cursor's lifetime.</li>
+ *   <li>What the class owns now is the walk's RESULT under conditions one statement cannot show. It
+ *       inspects each statement separately -- exactly two chunks, the first at the cap and the second
+ *       carrying the remainder, with no chunk above the cap -- which eager buffering of a single query
+ *       cannot satisfy; that a chunk read needs no enclosing transaction and resumes across a commit taken
+ *       between two reads; that a row DELETED from the already-read range cannot make the next chunk skip
+ *       an unread row, which offset positioning would fail and keyset positioning cannot; that an empty
+ *       feed delivers no row; that the continuation predicate is STRICTLY greater, so a resumed step never
+ *       processes a row twice, and that it caps its result; that a continuation from the last ordinal
+ *       delivers nothing; that the interface's reachable surface is exactly ONE read, exposing no mutator
+ *       and no row-counting window, which is what makes the read-only guarantee structural rather than
+ *       dependent on a privilege these tests do not have; and that an amount round-trips through the
+ *       engine at scale two with its sign. The ordering
  *       key is the ingestion ordinal and the class asserts it is neither of the two columns a reader
  *       reaches for first: the processing stamp is absent on every row the walk returns, and the
  *       transaction identifier carries only a partial order. The reference read it mirrors is declared
@@ -354,7 +374,7 @@
  * <p>Trade-offs: each proof above has exactly ONE owner, and the cost accepted for that is some
  * cross-referencing between the five classes -- the cross-reference table, for instance, is written by
  * three of them, and only one of them owns its access paths, and the daily-transaction interface is read
- * by more than one, its bounded chunk finder and its unbounded cursor owned separately. The alternative
+ * by more than one, its resolve-and-order question and its driving-loop properties owned separately. The alternative
  * was to let two classes each
  * assert a property partially, which is how a proof drifts: one side is updated, the other still passes,
  * and the two now describe different behaviour with nothing able to report the divergence.</p>

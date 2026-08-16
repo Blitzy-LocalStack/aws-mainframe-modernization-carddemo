@@ -121,7 +121,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * {@code .transaction}, {@code .reference}, {@code .batch}, {@code .authorization} and
  * {@code .reporting}. What is given up is the convenience of one root covering everything; what it buys
  * is a deployable that cannot couple to another context by accident, and the risk is counted rather
- * than hypothetical, because {@code services/pom.xml} L242 to L250 declares nine modules, one shared
+ * than hypothetical, because {@code services/pom.xml} L233 to L241 declares nine modules, one shared
  * kernel and eight bounded contexts, so every one of those seven roots is on this build's own reactor
  * path and would be reachable from the wider root. The boundary is enforced by
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java},
@@ -165,7 +165,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * would only go stale beside it. {@code config/SqsConfig.java} owns the listener wiring for the inquiry
  * consumer. The management
  * endpoints arrive from {@code spring-boot-starter-actuator}, declared at
- * {@code services/account-service/pom.xml} L298, so {@code GET /actuator/health} is framework-provided
+ * {@code services/account-service/pom.xml} L289, so {@code GET /actuator/health} is framework-provided
  * and is no declared operation of the contract; it has to stay reachable without a credential because
  * both the load-balancer target-group registration and this module's container health check poll it and
  * neither can present a token, which is why {@code config/SecurityConfig.java} permits that pattern
@@ -176,7 +176,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  *
  * <p>Alternatives Considered: no resilience dependency, no circuit breaker and no retry annotation
  * appear here or anywhere in this tree, and the reasoning is recorded once for the whole module in the
- * non-adoption note at {@code services/account-service/pom.xml} L668 to L680 rather than repeated at
+ * non-adoption note at {@code services/account-service/pom.xml} L659 to L671 rather than repeated at
  * each site. Spring Framework 7, which arrives inside the Spring Boot parent this module inherits, moved
  * retry into the framework core, so a third-party resilience library would add a dependency for a
  * capability already present. Where retry does become genuinely necessary the
@@ -251,8 +251,8 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * user-visible message is directly checkable against its originating program and is asserted character
  * for character. The audit that governs this file is pass or fail with no tolerated warning level,
  * because the documentation gate is bound to Maven's {@code validate} phase at {@code services/pom.xml}
- * L850 with {@code failOnViolation} true at its L939 and {@code violationSeverity} at warning on its
- * L940, so a warning and a failure are one outcome here. The graded condition-code rubric of the COBOL
+ * L841 with {@code failOnViolation} true at its L930 and {@code violationSeverity} at warning on its
+ * L931, so a warning and a failure are one outcome here. The graded condition-code rubric of the COBOL
  * suite, under which code 4 counts as a passing result, describes no build in this tree, and reading a
  * build here through it would treat a real violation as acceptable.</p>
  *

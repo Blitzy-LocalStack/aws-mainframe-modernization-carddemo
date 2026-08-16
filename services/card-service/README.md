@@ -947,8 +947,8 @@ is running in without this module restating it.
 
 ## Tests
 
-<!-- test-inventory: 23 tests + 1 integration tests -->
-**24** test classes: **23** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
+<!-- test-inventory: 24 tests + 1 integration tests -->
+**25** test classes: **24** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
 Failsafe. That census is machine-checked — `ServiceReadmeInventoryTest` in `common-lib` parses the
 comment above and re-measures both figures against this module's test tree, so the count fails the
 build when it drifts rather than ageing quietly in prose.

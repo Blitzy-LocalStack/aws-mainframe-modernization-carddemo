@@ -4,9 +4,16 @@
 # Purpose:
 #   Supplies the Spring `test` profile overlay for reference-service, the sixth
 #   module in the nine-module services reactor. It keeps the production
-#   datastore, schema, identity and queue mechanisms while replacing only the
+#   datastore, schema and identity mechanisms while replacing only the
 #   environment-bound values that would make an isolated test context contact
 #   infrastructure or resolve against the wrong PostgreSQL schema.
+#   Refactoring Rationale: "queue mechanisms" is struck from that list, along with
+#   the region, queue-strategy, listener-auto-start and three queue-name values
+#   this profile used to carry. The module consumes no queue: the baseline drives
+#   BOTH of its inquiry programs from ONE request destination at
+#   app/app-vsam-mq/README.md L53, and a queue admits exactly one owning consumer,
+#   which is in the account context. A profile that kept stand-in queue names would
+#   describe a mechanism no class in this module reads.
 #
 #   Spring's Config Data loader consumes this file whenever profile `test` is
 #   active. Repository integration tests supply PostgreSQL container connection
@@ -34,9 +41,11 @@
 #
 # Exceptions or errors:
 #   A misspelled Spring property is silently ignored. A wrong value can instead
-#   open the wrong transport, select `public`, skip a migration, contact AWS, or
-#   keep a queue poller alive. The adjacent comments identify those failure
-#   modes at the values that prevent them.
+#   open the wrong transport, select `public` or skip a migration. The adjacent
+#   comments identify those failure modes at the values that prevent them.
+#   Refactoring Rationale: "contact AWS, or keep a queue poller alive" is struck
+#   with the queue values it described -- no class in this module builds a queue
+#   client or a listener container now, so neither failure is reachable.
 #
 # WHY (non-obvious design decisions):
 #   - Assumptions: user-specified Rule 1 (Explainability) requires Purpose,
@@ -50,13 +59,15 @@
 #     fileExtensions="java". This profile is therefore a review gate rather
 #     than a linter gate, which is why every non-obvious value and every
 #     deliberate absence is explained in this file.
-#   - Assumptions: all leaf paths below match the base profile verbatim except
-#     spring.cloud.aws.sqs.listener.auto-startup. AWSpring 4.1.0 publishes that
-#     exact Boolean path in its configuration metadata, and batch-service uses
-#     it under the same namespace. This explicit proof matters because Spring
-#     reports no error for an unknown key.
+#   - Assumptions: every leaf path below matches the base profile verbatim, with
+#     no exception. Refactoring Rationale: the one exception this note recorded was
+#     spring.cloud.aws.sqs.listener.auto-startup, a key that existed here to stop a
+#     listener container starting. Both the key and the container are withdrawn, so
+#     the exception is gone rather than merely re-argued; the property-shape proof
+#     it carried is no longer needed because nothing in this module binds a key
+#     outside the base's own set.
 #   - Trade-offs: the overlay repeats several inherited values so the database,
-#     migration, identity and queue contracts can be read in one place. The
+#     migration and identity contracts can be read in one place. The
 #     repeated text adds review surface, but silent inheritance would hide which
 #     schema and migrations a passing integration test actually exercised.
 # =============================================================================
@@ -76,43 +87,6 @@ server:
     enabled: false
 
 spring:
-  cloud:
-    aws:
-      # WHY : (1) Assumptions: a client cannot be built without a region, and
-      #       leaving the base value as ${AWS_REGION} makes a build host with no
-      #       such variable enter the SDK region chain and attempt instance
-      #       metadata discovery. That request times out rather than failing
-      #       immediately. A static test region stops that lookup before it can
-      #       occur. (2) Trade-offs: us-east-1 is a valid SDK region selector,
-      #       not an endpoint, account identifier or credential. No request is
-      #       sent there because listener startup is disabled below.
-      region:
-        static: us-east-1
-
-      sqs:
-        # WHY : Assumptions: the base value is repeated because FAIL preserves
-        #       the deployed queue contract if a test explicitly starts a
-        #       listener. CREATE would build an unprovisioned queue without the
-        #       dead-letter and encryption settings owned by infra/modules/sqs,
-        #       allowing the context to look healthy while it polls a queue no
-        #       producer uses.
-        queue-not-found-strategy: fail
-
-        listener:
-          # WHY : (1) Assumptions: AWSpring 4.1.0 binds this exact path to the
-          #       listener container's auto-start flag. False keeps the SQS
-          #       client, annotation processor and default container factory in
-          #       the context, so an @SqsListener bean can still be constructed,
-          #       while no container starts and no queue lookup or receive call
-          #       occurs. (2) Alternatives Considered: setting
-          #       spring.cloud.aws.sqs.enabled to false was rejected because it
-          #       removes the factory that an annotated listener requires,
-          #       changing the context shape instead of only stopping polling.
-          #       (3) Trade-offs: a messaging test must start its listener
-          #       deliberately after supplying an emulator endpoint and
-          #       credentials through that test's dynamic properties. Shared
-          #       profile startup remains network-free and credential-free.
-          auto-startup: false
 
   # WHY : (1) Alternatives Considered: H2 or another in-process database was
   #       rejected. V1__reference.sql uses PostgreSQL DDL and an ON DELETE
@@ -213,12 +187,17 @@ spring:
 
   flyway:
     # WHY : (1) Assumptions: Flyway remains enabled because this context is the
-    #       executable check of both migrations. V1__reference.sql creates the
-    #       six tables; V2__seed_reference.sql inserts 862 rows: 7 transaction
-    #       types, 18 transaction categories, 51 disclosure groups, 490 phone
-    #       area codes, 56 states and 240 state/zip prefixes. Narrowing the
-    #       location or disabling Flyway would make count, rate and foreign-key
-    #       assertions operate on absent or hand-created data. (2) Assumptions:
+    #       executable check of all THREE migrations. V1__reference.sql creates
+    #       the six reference tables; V2__seed_reference.sql inserts 862 rows: 7
+    #       transaction types, 18 transaction categories, 51 disclosure groups,
+    #       490 phone area codes, 56 states and 240 state/zip prefixes; and
+    #       V3__reference_inquiry_reply_ledger.sql creates the one operational
+    #       table the date-inquiry exchange records its answers in, whose two
+    #       CHECK constraints and pruning index InquiryReplyLedgerIT asserts
+    #       against this engine. Narrowing the location or disabling Flyway would
+    #       make count, rate and foreign-key assertions operate on absent or
+    #       hand-created data, and would leave that ledger's statements
+    #       unexercised against a real engine. (2) Assumptions:
     #       exactly 17 of the disclosure rows use the CHAR(10) key
     #       'DEFAULT   '. CBACT04C retries a missed account-group lookup with
     #       that key and calls its abend paragraph if the second read also
@@ -384,15 +363,6 @@ logging:
     org.hibernate.SQL: WARN
     org.hibernate.orm.jdbc.bind: WARN
 
-# WHY : (1) Assumptions: these are queue names, not URLs, ARNs, account
-#       identifiers or credentials. They replace fallback-free base values so a
-#       listener bean can resolve its annotation while auto-startup remains
-#       false. Their `reference-test-` prefix is visibly non-production and all
-#       three names satisfy the SQS standard-queue character set. (2)
-#       Trade-offs: the shared profile does not name a LocalStack endpoint or
-#       supply credentials, so it cannot start a messaging integration test by
-#       itself. Such a test supplies its emulator coordinates dynamically and
-#       starts the prepared listener explicitly.
 carddemo:
   security:
     jwt:
@@ -430,7 +400,7 @@ carddemo:
       #       of the same pool is rejected has a client to differ from.
       #       (4) Trade-offs: the two adjacent claim values are repeated rather than
       #       inherited so the complete accepted-token contract is readable in one
-      #       place, beside the three queue names below. The cost is that a
+      #       place. The cost is that a
       #       deliberate change to either in the base profile must be mirrored here
       #       or the suite stops exercising the deployed contract. The two
       #       carddemo.security.cognito group names are NOT repeated, because the
@@ -442,11 +412,7 @@ carddemo:
       expected-token-use: access
       required-scope: aws.cognito.signin.user.admin
 
-  reference:
-    inquiry:
-      request-queue: reference-test-request
-      reply-queue: reference-test-reply
-      error-queue: reference-test-error
+
 
 # Register of deliberate omissions -- each one is a value a reasonable
 # alternative would have set, and each would change what the test profile proves
@@ -503,11 +469,15 @@ carddemo:
 #      value exists for this profile to stub.
 #
 #   8. No cloud-service endpoint, credential, ARN, account identifier or
-#      registry hostname.
-#      Assumptions: the static region and three queue names above are routing
-#      selectors, not network locations or credentials. The issuer uses the
-#      reserved `.invalid` domain and cannot identify a reachable provider.
-#      Alternatives Considered: a LocalStack endpoint in this shared profile
-#      was rejected because it would make every context depend on an emulator
-#      even when no messaging behavior is under test. Messaging tests contribute
-#      all emulator-specific values through their own dynamic registration.
+#      registry hostname, and no queue name or region either.
+#      Assumptions: the issuer uses the reserved `.invalid` domain and cannot
+#      identify a reachable provider, and nothing else here addresses a network
+#      location. Refactoring Rationale: this entry used to describe a static region
+#      and three stand-in queue names as routing selectors rather than locations.
+#      That defence is no longer needed because those values are withdrawn with the
+#      module's queue consumer, and the reason is stronger than the defence was: a
+#      module that builds no queue client cannot contact a queue service by
+#      misconfiguration. Alternatives Considered: a LocalStack endpoint in this
+#      shared profile was rejected then and would be rejected now -- it would make
+#      every context depend on an emulator when no test in this module exercises
+#      messaging at all.

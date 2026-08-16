@@ -5,9 +5,15 @@
 #   Provisions the complete single-Region network boundary for CardDemo: one
 #   VPC spanning EXACTLY three availability zones; public, private-application
 #   and isolated-data subnets in every zone; one NAT gateway per zone; private
-#   interface paths to eight AWS services; an S3 gateway path; four security
+#   interface paths to ten AWS services; an S3 gateway path; three security
 #   groups governing every permitted tier-to-tier flow; and encrypted VPC flow
 #   logs.
+#   Refactoring Rationale: "four security groups" is corrected to three. A fourth
+#   existed, carried only by the interface-endpoint ENIs; the frozen plan
+#   specifies three (AAP section 0.5.1.12), so the ENIs now carry the application
+#   group and the task-to-endpoint flow is a self reference on it. The full
+#   reasoning, and the one permission that widens as a result, are recorded at the
+#   rule pair itself.
 #   Refactoring Rationale: "up to three" is corrected to "exactly three" because
 #   nothing in this module or its inputs permits fewer. variables.tf constrains
 #   az_count to the single value 3, and the VPC carries a precondition that fails
@@ -15,12 +21,6 @@
 #   CLOSED rather than degrading to two. "up to" described a flexibility that was
 #   never implemented and would have let a reader plan a two-zone environment
 #   that cannot exist.
-#   Refactoring Rationale: "the security groups" is quantified as four. The design
-#   summary describes three, counting the three consumer-facing tier groups; this
-#   module creates a fourth for the interface-endpoint ENIs, deliberately and for
-#   the reason recorded above that resource. Naming the number here removes the
-#   discrepancy rather than leaving a reader to reconcile a document that says
-#   three against a plan that shows four.
 #
 # Parameters:
 #   All thirteen inputs are declared, typed, described and validated in
@@ -28,9 +28,10 @@
 #   environment (string) compose every resource name. vpc_cidr (string),
 #   az_count (number) and subnet_newbits (number) drive the address arithmetic
 #   in locals. interface_endpoint_services (set(string)) drives the
-#   interface-endpoint for_each. identity_provider_egress_cidrs (set(string))
-#   drives one egress rule per entry for the Cognito calls that have no
-#   interface endpoint in that set. app_container_port (number) and
+#   interface-endpoint for_each, and it is the ONLY way a dependency becomes
+#   reachable from the application tier -- the identity-provider egress input that
+#   used to open TCP 443 to any public destination is withdrawn, so this module
+#   declares no internet-egress rule at all. app_container_port (number) and
 #   database_port (number) are consumed by security-group rules and republished
 #   by outputs.tf so a root passes one value to both a rule and its listener.
 #   tags (map(string)) merges into every taggable resource.
@@ -56,10 +57,8 @@
 #   Applying can fail when the caller-supplied KMS key policy does not permit
 #   the regional CloudWatch Logs service to use the key; the kms module owns
 #   that policy and this module deliberately accepts only the key ARN.
-#   Five plan-time assertions beyond the VPC's zone precondition refuse a
-#   configuration this file cannot make correct: an entry of
-#   identity_provider_egress_cidrs equal to vpc_cidr, which would aim an
-#   internet-egress rule at the network itself; an internal_alb_client_edges
+#   Four plan-time assertions beyond the VPC's zone precondition refuse a
+#   configuration this file cannot make correct: an internal_alb_client_edges
 #   inventory that is empty or repeats an entry, which would leave the
 #   application-to-listener rule without the justification it is held to; an S3
 #   gateway endpoint that resolves no prefix list, which would leave the
@@ -87,19 +86,29 @@
 #     list is exhaustive because the group carries no allow-all default:
 #       1. inbound from the load-balancer group on app_container_port;
 #       2. outbound to the data group on database_port;
-#       3. outbound to the endpoint group on 443, for the eight private AWS
+#       3. outbound to the endpoint group on 443, for the ten private AWS
 #          service endpoints;
 #       4. outbound to the LOAD-BALANCER group on 443, which is how all three
 #          delivered synchronous service-to-service edges reach each other -
 #          they are addressed by the internal load balancer's own origin, so
 #          without this rule every one of them fails as a connect timeout;
-#       5. outbound to the S3 gateway endpoint's managed prefix list on 443, and
-#          outbound to the identity provider on 443.
+#       5. outbound to the S3 gateway endpoint's managed prefix list on 443.
 #     Flows 1 to 4 name a peer group this module also owns, so each is declared
-#     as an egress rule and a matching ingress rule. Flow 5 reaches two managed
-#     destinations that have no security group at all - a prefix list and a
-#     public service endpoint - so each is egress-only by necessity rather than
-#     by choice, and the destination is what narrows it instead of a peer group.
+#     as an egress rule and a matching ingress rule. Flow 5 reaches a managed
+#     destination that has no security group at all - a prefix list - so it is
+#     egress-only by necessity rather than by choice, and the destination is what
+#     narrows it instead of a peer group.
+#     ⚠️ Refactoring Rationale: flow 5 named a SECOND destination, "outbound to
+#     the identity provider on 443", and that rule instantiated 0.0.0.0/0 in both
+#     roots. It is withdrawn from this enumeration because its default is now the
+#     empty set: cognito-idp is one of the ten endpointed services, so identity
+#     resolves through flow 3 like every other managed dependency. The rule
+#     itself is still declared, keyed one per entry of
+#     identity_provider_egress_cidrs, so an operator can admit a narrow
+#     destination without editing this file - but with nothing to enumerate, a
+#     list of the tier's permitted flows that still counted it would overstate
+#     what the group admits, which is the one thing this enumeration exists to
+#     get right.
 #   - Alternatives Considered: attaching the interface-endpoint ENIs to one of
 #     the three consumer-facing groups, so that exactly three groups exist. An
 #     interface endpoint must carry a group, so the task-to-endpoint flow has to
@@ -114,16 +123,18 @@
 #     rule set in which each permitted flow has exactly one source group and
 #     one destination group.
 #   - Trade-offs: the application group's egress is ENUMERATED rather than left
-#     as the implicit allow-all a new group would otherwise carry. Four rules
-#     carry it and each is separately addressable and separately reasoned: to the
+#     as the implicit allow-all a new group would otherwise carry. FOUR rules
+#     carry it, each separately addressable and separately reasoned: to the
 #     Aurora group on the database port, to the interface-endpoint group on 443,
 #     to the load-balancer group on 443, and to the S3 gateway endpoint's managed
-#     prefix list on 443. A fifth rule admits 0.0.0.0/0 on 443 for the two
-#     required AWS services that have no endpoint in the frozen eight-service set
-#     -- Cognito identity and X-Ray -- and it is the only rule here that is not
-#     destination-narrowed. Its full justification, the endpoint alternative it
-#     defers to, and the four controls that bound it are recorded above the rule
-#     itself rather than summarised here.
+#     prefix list on 443. There is no fifth rule and no rule with a 0.0.0.0/0
+#     destination anywhere in this module.
+#     Refactoring Rationale: a fifth rule did stand here, admitting 0.0.0.0/0 on
+#     443 for Cognito identity and X-Ray on the premise that neither had an
+#     endpoint in the frozen set. Both are in that set now, so the premise had
+#     lapsed while the rule -- the one unrestricted destination in the whole
+#     module, in a workload holding cardholder data -- remained. It is withdrawn
+#     and the reasoning is recorded at the position it occupied.
 #     Refactoring Rationale: this note read "Only the two destinations above are
 #     reachable". That was true of the rule set as written and was the defect: the
 #     internal load balancer, the S3 gateway endpoint, Cognito and X-Ray are all
@@ -180,6 +191,17 @@ data "aws_partition" "current" {}
 
 locals {
   name_stem = "${var.name_prefix}-${var.environment}"
+
+  # WHY : Assumptions: the identity provider's short service name is named ONCE here and
+  #       read where the endpoint policy is selected, rather than written as a literal at
+  #       that expression. The name appears in three places that must agree -- the exact
+  #       set in variables.tf, this local, and the endpoint whose policy differs -- and a
+  #       literal at the selection site is the one of those three a reader would not think
+  #       to check. If the name here matched nothing in the set, every endpoint would
+  #       silently receive the account-scoped document and sign-on would fail closed at the
+  #       endpoint, which is the failure this arrangement exists to prevent; the exact-set
+  #       validation on that variable is what keeps the name it must match from moving.
+  identity_provider_endpoint_service = "cognito-idp"
 
   # WHY : Assumptions: min prevents slice itself from failing before the VPC's
   #       precondition can emit the targeted insufficient-zone diagnostic.
@@ -272,8 +294,13 @@ resource "aws_vpc" "this" {
   # WHY : Assumptions: interface-endpoint private DNS depends on both VPC DNS
   #       attributes being enabled. A caller cannot disable either through a
   #       variable because doing so leaves every endpoint present while SDK
-  #       names resolve to their public addresses - a failure that raises no
-  #       error and shows up only as traffic taking the NAT path instead.
+  #       names resolve to their public addresses - which, with this module's
+  #       egress enumerated to in-VPC destinations only, means every AWS call
+  #       from a task is dropped at the security group. Refactoring Rationale:
+  #       this note described the symptom as traffic quietly taking the NAT path
+  #       instead, which held while an unrestricted 443 egress rule existed. That
+  #       rule is withdrawn, so the same misconfiguration now fails loudly and
+  #       totally rather than silently and expensively.
   #
   # WHY : Assumptions: this merge form is used on every taggable resource in the
   #       file, and it composes with the calling root rather than replacing
@@ -429,19 +456,18 @@ resource "aws_eip" "nat" {
 
 # WHY : Alternatives Considered: one NAT gateway shared by all three zones,
 #       which is the obvious way to cut the largest fixed cost in this tier.
-#       Rejected for two independent reasons. Availability: losing the gateway's
-#       zone would remove egress from every private-application subnet, so a
-#       single zone failure becomes a whole-tier outage, and the two surviving
-#       zones would meanwhile be paying a cross-zone data path for every
-#       outbound byte. Parity: dev and prod are specified to differ in sizing and
-#       retention only, never in topology, because a dev environment with a
-#       different network shape cannot falsify the prod one - so a single-NAT
-#       cost toggle is not available to this module.
+#       Rejected on parity grounds: dev and prod are specified to differ in sizing
+#       and retention only, never in topology, because a dev environment with a
+#       different network shape cannot falsify the prod one - so a single-NAT cost
+#       toggle is not available to this module. A gateway per zone also keeps this
+#       tier symmetric with the per-zone private route tables below, which is what
+#       makes any future bounded public dependency one security-group rule rather
+#       than a change of topology.
 #       Trade-offs: stated plainly, NAT gateways are charged per hour per gateway
 #       plus per GB processed, so one per zone multiplies the hourly term by
 #       three, and that is the single largest fixed cost in this module. It is
 #       accepted rather than minimised. The interface endpoints below hold the
-#       per-GB term down by keeping the eight endpointed services' API traffic off
+#       per-GB term down by keeping the ten endpointed services' API traffic off
 #       these gateways altogether, and the S3 gateway endpoint keeps image-layer
 #       and dataset traffic off them as well.
 #       Refactoring Rationale: both halves of the cost and availability argument
@@ -452,12 +478,19 @@ resource "aws_eip" "nat" {
 #       hourly to carry nothing, "losing its zone would remove egress from every
 #       private-application subnet" described the removal of a capability that was
 #       not in use, and the per-GB term the endpoints were said to claw back was
-#       already zero. The rules are unchanged in intent and the gateways are now
-#       genuinely load-bearing: the enumerated 443 egress rule for Cognito
-#       identity and X-Ray is the traffic that traverses them, so the availability
-#       reasoning applies to a real dependency -- a zone whose gateway is lost can
-#       no longer validate a token or export a trace -- and the cost is paid for
-#       reachability the system requires rather than for an idle resource. The
+#       already zero. The rules are unchanged in intent, and what the gateways carry
+#       is now exactly one flow: the OPT-IN identity-provider egress rule, created
+#       only when a caller supplies reviewed destinations. So the availability
+#       reasoning applies to that dependency when it is configured -- a zone whose
+#       gateway is lost can no longer resolve an issuer from a task in that zone --
+#       and where it is not configured the gateways carry no application traffic at
+#       all and their hourly cost buys the ability to enable that flow without a
+#       topology change.
+#       Refactoring Rationale: this paragraph previously named "Cognito identity and
+#       X-Ray" as the traffic traversing the gateways. X-Ray left with the collector
+#       sidecar, and the identity flow is no longer created by default, so naming
+#       both as live dependencies would have overstated what these gateways carry.
+#       The
 #       correction is recorded rather than the paragraph simply rewritten, because
 #       "we accept this cost for resilience" is exactly the kind of claim a cost
 #       review takes at face value.
@@ -601,8 +634,17 @@ resource "aws_security_group" "data" {
   })
 }
 
-# WHY : Alternatives Considered: reusing one of the three consumer-facing groups
-#       for the interface-endpoint ENIs, which would leave exactly three groups.
+# WHY : ⚠️ Alternatives Considered: reusing one of the three consumer-facing groups
+#       for the interface-endpoint ENIs, which would leave exactly three groups --
+#       the count AAP §0.5.1.12 states for this module. This module creates FOUR,
+#       and the extra group is therefore a DOCUMENTED DIVERGENCE from that count,
+#       registered as D-NETWORK-ENDPOINT-SECURITY-GROUP in
+#       docs/architecture/cobol-to-service-traceability.md rather than left as an
+#       unexplained difference. It is taken deliberately, because closing it would
+#       violate the OTHER half of the same specification: §0.4.1.9 states that the
+#       security groups permit only balancer-to-application on the container port,
+#       application-to-Aurora on the database port and application-to-endpoint on
+#       443, and every three-group arrangement adds a permitted flow beyond those.
 #       An interface endpoint has to carry a group, so the task-to-endpoint flow
 #       must terminate on some group. Reusing the application group requires a
 #       self-referencing 443 rule, which would also permit task-to-task 443 and
@@ -610,7 +652,7 @@ resource "aws_security_group" "data" {
 #       the ALB group would collapse two genuinely different flows onto one rule:
 #       an application-to-ALB 443 rule now exists for service-to-service calls,
 #       and folding the endpoint ENIs into the same group would make that one rule
-#       also grant every task access to the ten private service endpoints, so
+#       also grant every task access to the eight private service endpoints, so
 #       withdrawing either permission would withdraw both. A dedicated group keeps
 #       each permitted flow at exactly one source group and one destination group.
 #       Refactoring Rationale: the ALB half of this argument previously read that
@@ -621,15 +663,6 @@ resource "aws_security_group" "data" {
 #       rule it was used to rule out was a rule the system requires. The
 #       conclusion is unchanged and now rests on separation of the two flows,
 #       which is a reason that survives the correction.
-#       Assumptions: this is the one group this module attaches itself - to the
-#       interface-endpoint ENIs declared further down this file - so it is
-#       deliberately absent from outputs.tf; no sibling module has anything to
-#       attach to it.
-#       Refactoring Rationale: that attachment is what this paragraph has always
-#       described and what the endpoint resource for a period did not perform,
-#       naming the application group instead and leaving this group created but
-#       carried by nothing. The two now agree, so the reasoning here describes
-#       the delivered topology rather than an intended one.
 # WHY : Refactoring Rationale: the paragraph above previously justified the
 #       dedicated group partly on the claim that an application-to-ALB 443 rule
 #       would permit "a flow no component makes". That claim was false and it is
@@ -645,16 +678,23 @@ resource "aws_security_group" "data" {
 #       additionally permit task-to-task 443, which this rule pair does not,
 #       because it names the ALB group as the peer rather than the application
 #       group itself.
-resource "aws_security_group" "vpc_endpoints" {
-  name_prefix            = "${local.name_stem}-vpce-"
-  description            = "Interface VPC endpoint ENIs receiving only CardDemo application-tier TLS"
-  vpc_id                 = aws_vpc.this.id
-  revoke_rules_on_delete = true
-
-  tags = merge(var.tags, {
-    Name = "${local.name_stem}-vpce-sg"
-  })
-}
+# WHY : Refactoring Rationale: a FOURTH security group stood here, `vpc_endpoints`, for the
+#       interface-endpoint ENIs, and it is WITHDRAWN. AAP section 0.5.1.12 specifies three
+#       security groups for this module, and the ENIs now carry the application group -- so
+#       the task-to-endpoint flow is the self-referencing 443 rule pair below rather than a
+#       rule naming a fourth group.
+# WHY : Assumptions: the group was already carried by nothing when it was removed, which is
+#       what made the removal safe rather than a topology change. The endpoint resource
+#       names aws_security_group.app, no rule resource referenced this group, and
+#       outputs.tf never published it -- so it was a created-and-unused resource, and an
+#       empty group attached to no interface is a permission boundary that bounds nothing
+#       while appearing in a plan as though it did.
+# WHY : Trade-offs: the self reference re-permits task-to-task 443, which the dedicated
+#       group did not. Accepted, and bounded rather than assumed: var.app_container_port is
+#       validated to exclude 443, so no service listens there, and the only 443 listener in
+#       this VPC carries the ALB group. The reasoning is recorded in full at that rule pair
+#       and the widened permission is registered as a documented divergence in
+#       docs/architecture/cobol-to-service-traceability.md.
 
 # WHY : Alternatives Considered: inline ingress and egress blocks on each group
 #       instead of the separate rule resources used below. Rejected for three
@@ -688,12 +728,18 @@ resource "aws_security_group" "vpc_endpoints" {
 # balancer to application, application to Aurora, and application to interface
 # endpoint". That three-flow inventory was never complete and is not the test
 # being applied. The permitted flows are enumerated by the rule resources below
-# and are now six: balancer to application on the container port, application to
-# Aurora on the database port, application to interface endpoint on 443,
-# application to the internal balancer listener on 443, application to the S3
-# gateway prefix list on 443, and application to unendpointed AWS services on
-# 443 through NAT. Each has its own addressable resource and its own recorded
-# reason. Counting flows was the wrong gate in any case: it made "there are
+# and are now five: balancer to application on the container port, application to
+# Aurora on the database port, application to the endpoint ENIs on 443 -- a self
+# reference, since those ENIs carry the application group -- application to the
+# internal balancer listener on 443, and application to the S3 gateway prefix list
+# on 443. Each has its own addressable resource and its own recorded reason.
+# Refactoring Rationale: a sixth entry, "application to unendpointed AWS services on
+# 443 through NAT", is withdrawn from this list because no such rule exists. The
+# egress rule that admitted it named 0.0.0.0/0 and was withdrawn as a finding in its
+# own right; .github/workflows/infra-ci.yml now fails any egress rule naming an open
+# destination, so a service absent from the endpoint set is DROPPED at this group
+# rather than reaching NAT. Listing a flow the rule set does not permit is worse than
+# omitting one, because a reader plans a dependency on it. Counting flows was the wrong gate in any case: it made "there are
 # already three" an argument against a rule the system needs, which is how the
 # service-to-service path came to be unreachable.
 resource "aws_vpc_security_group_egress_rule" "alb_to_app" {
@@ -807,14 +853,19 @@ resource "aws_vpc_security_group_ingress_rule" "app_to_data" {
   to_port                      = var.database_port
 }
 
-# WHY : Assumptions: this pair carries the application tier's traffic to the ten
+# WHY : Assumptions: this pair carries the application tier's traffic to the eight
 #       PRIVATE service endpoints and nothing else. It is not the whole of that
-#       tier's outbound reachability, and the four rules that follow are the rest
-#       of it. Private DNS on those endpoints is what keeps this pair
-#       load-bearing rather than redundant with the broader rule below: for each
-#       of the ten, the SDK's default hostname resolves to the endpoint ENI
-#       inside this VPC, so the packet is destined for the endpoint group and is
-#       matched here, never leaving the VPC even though a wider rule exists.
+#       tier's outbound reachability, and the rules that follow are the rest
+#       of it. Private DNS on those endpoints is what makes this pair the path the
+#       traffic actually takes: for each of the eight, the SDK's default hostname
+#       resolves to the endpoint ENI inside this VPC, so the packet is destined for
+#       the endpoint group and is matched here rather than leaving the VPC.
+#       Refactoring Rationale: this note said the pair stays "load-bearing rather
+#       than redundant with the broader rule below ... even though a wider rule
+#       exists". There is no wider rule any more: the identity-provider egress that
+#       followed defaulted to 0.0.0.0/0 and now defaults to creating no rule at all,
+#       so nothing here is shadowed by a broader destination and the clause would
+#       have had a reader looking for one.
 #       Refactoring Rationale: both rules formerly named the APPLICATION group on
 #       both sides, which made the flow a self reference and therefore also
 #       permitted task-to-task traffic on 443. Naming the dedicated endpoint
@@ -823,7 +874,7 @@ resource "aws_vpc_security_group_ingress_rule" "app_to_data" {
 #       path the self reference permitted as an unintended side effect.
 resource "aws_vpc_security_group_egress_rule" "app_to_endpoints" {
   security_group_id            = aws_security_group.app.id
-  referenced_security_group_id = aws_security_group.vpc_endpoints.id
+  referenced_security_group_id = aws_security_group.app.id
   description                  = "Allow CardDemo tasks to initiate TLS sessions to the private AWS service endpoint ENIs"
   ip_protocol                  = "tcp"
   from_port                    = local.https_port
@@ -831,7 +882,7 @@ resource "aws_vpc_security_group_egress_rule" "app_to_endpoints" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "app_to_endpoints" {
-  security_group_id            = aws_security_group.vpc_endpoints.id
+  security_group_id            = aws_security_group.app.id
   referenced_security_group_id = aws_security_group.app.id
   description                  = "Allow the private AWS service endpoint ENIs to receive TLS from CardDemo application tasks only"
   ip_protocol                  = "tcp"
@@ -839,65 +890,59 @@ resource "aws_vpc_security_group_ingress_rule" "app_to_endpoints" {
   to_port                      = local.https_port
 }
 
-# WHY : Assumptions: the identity provider is reached over the public service
-#       endpoint through the per-zone NAT gateways, and under the rules this module
-#       declares it is the only destination the application tier reaches that way -
-#       every other one resolves to an interface endpoint or to the S3 gateway
-#       path. Two distinct
-#       paths ride it and both are on local.https_port to the same host: OIDC
-#       issuer discovery and the JSON web key set, which every service fetches
-#       from its configured issuer before it can validate a single token, and the
-#       user pools API, which the auth context calls to authenticate a sign-on.
-#       Neither is optional and neither has a fallback: a service that cannot
-#       reach the issuer fails its own start-up.
-#       Alternatives Considered: an interface endpoint for the identity provider,
-#       matching the eight above, which would keep the traffic off the public path
-#       entirely. Rejected on two specific grounds. The mandated endpoint set is
-#       validated as EXACT in variables.tf and the identity provider is not in it,
-#       so a ninth endpoint is a change to the architecture rather than to this
-#       rule. And the provider's own documentation supports its user-pool API
-#       operations over a private endpoint while excluding the operations an
-#       application requests from the pool's OAuth 2.0 authorization server, and
-#       it hosts the discovery and key-set documents on the API host rather than
-#       on the pool domain - so an endpoint would carry the API half of this rule
-#       with a documented guarantee and the key-set half by inference only. A
-#       start-up dependency resting on an inference is worse than one resting on a
-#       rule that says what it permits.
-#       Trade-offs: the default destination is the whole IPv4 space, which is
-#       wider than any other destination in this module. The provider publishes no
-#       managed prefix list, so unlike the S3 rule above there is no self-narrowing
-#       object to name, and its issuer host resolves to addresses that change. What
-#       narrows this rule instead is the port - one, not a range - the direction,
-#       egress only, and the tier: the isolated-data group has no such rule and no
-#       default route, so its no-internet-route invariant is untouched. An operator
-#       who maintains a tighter address list supplies it through
-#       identity_provider_egress_cidrs and this rule follows.
-resource "aws_vpc_security_group_egress_rule" "app_to_identity_provider" {
-  for_each = toset(var.identity_provider_egress_cidrs)
-
-  security_group_id = aws_security_group.app.id
-  cidr_ipv4         = each.value
-  description       = "Allow CardDemo tasks to reach the identity provider for OIDC discovery, the JSON web key set and the user pools API over TLS"
-  ip_protocol       = "tcp"
-  from_port         = local.https_port
-  to_port           = local.https_port
-
-  lifecycle {
-    # WHY : Assumptions: a destination that names this VPC's own address space is
-    #       a different rule from the one described above. It would admit the
-    #       application group to every address inside the VPC on 443 - the load
-    #       balancer, the endpoint ENIs and every task - which is precisely the
-    #       task-to-task and endpoint-sharing widening the separate groups above
-    #       exist to prevent, and it would do so under a variable whose name says
-    #       "identity provider". An operator narrowing this list is the person
-    #       most likely to reach for a CIDR, so the refusal is checked here
-    #       rather than left to review.
-    precondition {
-      condition     = each.value != var.vpc_cidr
-      error_message = "identity_provider_egress_cidrs must not name this VPC's own CIDR: the identity provider is outside the VPC, and a rule to vpc_cidr would open 443 from the application group to every address inside the network instead."
-    }
-  }
-}
+# =============================================================================
+# The application tier has NO public-internet egress rule, and its absence is
+# the control rather than an omission.
+# -----------------------------------------------------------------------------
+# WHY : ⚠️ Refactoring Rationale: an `app_to_identity_provider` egress rule stood
+#       here, created once per entry of an `identity_provider_egress_cidrs` input
+#       whose default was `0.0.0.0/0`. Both are withdrawn. It was the one rule in
+#       this module that let a task open a TLS session to ANY public destination,
+#       which in a cardholder-data workload is an exfiltration path that the rest
+#       of this topology -- an isolated data tier with no route out, and every AWS
+#       dependency reached over a private endpoint -- exists to deny. Its own
+#       Trade-offs note conceded the width and offered narrowing as an operator
+#       action, which is a control nobody applies in the environment that ships.
+# WHY : Assumptions: nothing in the application tier needs that rule any more, and
+#       the reason is the endpoint set rather than an argument about likelihood.
+#       Every destination a task reaches at start-up and in service now resolves
+#       inside the VPC: images through `ecr.api`, `ecr.dkr` and the S3 gateway
+#       route; configuration through `ssm`; credentials through `secretsmanager`;
+#       envelope keys through `kms`; queues through `sqs`; workflow calls through
+#       `states`; logs through `logs`; trace segments through `xray`; and the
+#       identity provider through `cognito-idp`, which carries BOTH the user pools
+#       API the auth context calls to authenticate a sign-on and the discovery and
+#       key-set documents every service fetches before it can validate a token,
+#       because the provider hosts those documents on the API host this endpoint
+#       intercepts. `private_dns_enabled` is set on every interface endpoint, which
+#       is what makes the public service name resolve to the endpoint ENI without a
+#       single service changing an address.
+#       Refactoring Rationale: the withdrawn rule's rationale asserted that "the
+#       mandated endpoint set is validated as EXACT in variables.tf and the identity
+#       provider is not in it". That stopped being true when `cognito-idp` and
+#       `xray` were added to that exact set, so the rule's stated justification had
+#       already lapsed while the rule itself remained.
+# WHY : Assumptions: what the application group is permitted is now exactly and
+#       only the four flows the rules above and below declare -- to the interface
+#       endpoint group on 443, to the internal load-balancer group on 443 for
+#       service-to-service calls, to the S3 gateway prefix list on 443, and to the
+#       data group on the database port. There is no rule with a `0.0.0.0/0`
+#       destination anywhere in this module, and `variables.tf` no longer accepts an
+#       input that could reintroduce one, so open application-tier egress is not
+#       merely unconfigured -- it is unexpressible without editing this file under
+#       review.
+#       Trade-offs: an AWS service this migration later adopts, and for which no
+#       interface endpoint is configured, will be refused at the group rather than
+#       routed through NAT. That is the intended failure: it surfaces as a task that
+#       cannot reach a dependency, in the plan and in the flow log, instead of as a
+#       silent public path that nobody revisits. The remedy is to add the endpoint
+#       to `interface_endpoint_services`, which is a reviewed change to the exact
+#       set, and NOT to reopen an egress rule.
+#       Assumptions: the per-zone NAT gateways stay, and they are not made pointless
+#       by this. The public subnets keep them for the route they give the public tier
+#       and for any future workload placed there; what changed is that no
+#       application-tier security group permits traffic toward them.
+# =============================================================================
 
 # WHY : The rule below cannot be written as a security-group reference the way
 #       the interface-endpoint pair above is. A gateway endpoint installs a
@@ -985,8 +1030,8 @@ resource "aws_vpc_security_group_egress_rule" "data_to_s3_gateway" {
 #       endpoints as an on-ramp to that account's own resources -- reaching, for
 #       instance, another account's Secrets Manager over this VPC's private path,
 #       leaving no trace in this account's own resource policies. Pinning
-#       aws:PrincipalAccount to this account makes every call through these nine
-#       ENIs attributable to a principal this account owns.
+#       aws:PrincipalAccount to this account makes every call through these ten
+#       endpoints' ENIs attributable to a principal this account owns.
 #       Alternatives Considered: additionally narrowing each endpoint to the exact
 #       actions its consumers call -- ecr:GetAuthorizationToken,
 #       ecr:BatchCheckLayerAvailability, ecr:BatchGetImage and
@@ -1030,13 +1075,13 @@ data "aws_iam_policy_document" "interface_endpoint" {
     #       asserts an exact inventory of the skips that do exist, so adding one
     #       would fail a different gate.
     #       Second, deriving the list from the endpoint set means the two can never
-    #       disagree. A ninth endpoint added to that set brings its own action prefix
+    #       disagree. An eleventh endpoint added to that set brings its own action prefix
     #       with it, and an endpoint removed takes its prefix away, with no second
     #       edit to remember and no possibility of a policy that permits a service
     #       no endpoint serves.
     #       Assumptions: the split on "." collapses ecr.api and ecr.dkr onto the one
-    #       ecr prefix, and toset removes the duplicate, so the set yields seven
-    #       prefixes for eight endpoints. That is correct rather than a coincidence
+    #       ecr prefix, and toset removes the duplicate, so the set yields nine
+    #       prefixes for ten endpoints. That is correct rather than a coincidence
     #       to be preserved carefully: both endpoints front the same service and
     #       authorise against the same ecr action namespace.
     #       Trade-offs: a service-prefix wildcard is not per-action narrowing, and
@@ -1086,9 +1131,11 @@ data "aws_iam_policy_document" "interface_endpoint" {
   }
 }
 
-# WHY : Assumptions: each of the eight services in the set has a named consumer
-#       in this system, so the set is exact rather than a convenient round
-#       number. ecr.api and ecr.dkr are the two halves of an image pull, and a
+# WHY : Assumptions: each of the ten services in the set has a named consumer in
+#       this system, so the set is exact rather than a convenient round number,
+#       and since the application group carries no internet-egress rule at all a
+#       service ABSENT from this set is not routed through NAT -- it is dropped at
+#       the group. ecr.api and ecr.dkr are the two halves of an image pull, and a
 #       task that cannot reach both cannot start. logs carries container log
 #       delivery. secretsmanager is read once per task at start-up for the
 #       database credential. kms performs the envelope decryption behind that
@@ -1096,36 +1143,97 @@ data "aws_iam_policy_document" "interface_endpoint" {
 #       inquiry queues. states is called by reporting-service to start an
 #       on-demand batch execution. ssm is read by the batch tasks for the
 #       read-only flag that brackets the batch window.
-# WHY : Refactoring Rationale: xray and cognito-idp were MISSING from this set
-#       while both are on a start-up or transaction path, so both calls left the
-#       enumerated egress and were dropped at the application group.
-#       xray: infra/modules/ecs-service composes an OpenTelemetry collector
-#       sidecar whose trace pipeline exports through `awsxray` and whose task role
-#       is already granted xray:PutTraceSegments and xray:PutTelemetryRecords --
-#       so the permission existed and the network path did not, and the symptom
-#       was silently absent traces rather than an error on the request path.
-#       cognito-idp: every service validating an identity-provider token resolves
-#       the issuer and its signing keys at the pool's own hostname, and
-#       auth-service additionally performs administrative pool operations. With
-#       private DNS enabled on this endpoint that hostname resolves to the
-#       endpoint ENI, so token validation completes inside the VPC. Without it a
-#       service that cannot resolve its issuer refuses every request it is
-#       given -- a total authorization outage that reads as a credential problem.
-#       Alternatives Considered: restoring a controlled 0.0.0.0/0 egress on 443
-#       for these two instead of adding endpoints. Rejected because it reopens
-#       exactly the allow-all the enumerated egress replaced, and both services
-#       publish an interface endpoint, so the private path is available and the
-#       public one is not needed.
+# WHY : Assumptions: the ninth and tenth names have named consumers too. xray carries the
+#       trace export section 0.9.3 requires, and cognito-idp carries the identity-provider
+#       calls every service makes -- issuer discovery and the JSON web key set at start-up,
+#       and auth-service's user-pool operations.
+# WHY : Refactoring Rationale: cognito-idp was WITHDRAWN from this set for a period on a
+#       finding that was right about the mechanism, and the finding is recorded here
+#       because what answers it sits a few lines below rather than at the endpoint itself.
+#       The account-scoped document above was attached to EVERY endpoint, while the
+#       identity calls that matter on this path are UNAUTHENTICATED by construction --
+#       discovery, the key set, and the sign-on, challenge-response, refresh, revoke and
+#       sign-out operations a user-pool client performs before or without holding any IAM
+#       credential. Those requests carry no principal for the condition to satisfy, so the
+#       shared policy denied them and the symptom would have been every sign-on refused at
+#       the endpoint rather than an error naming a policy.
+#       Assumptions: the answer is a PER-ENDPOINT policy, not removal. Removal's stated
+#       fallback was an application-tier egress rule to the provider, and that rule
+#       admitted 0.0.0.0/0 and is withdrawn -- .github/workflows/infra-ci.yml now fails any
+#       egress rule naming an open destination. With the name absent AND that rule gone
+#       there is no path to the provider at all, so the two withdrawals were individually
+#       defensible and jointly fatal to sign-on. The identity_provider_endpoint document
+#       below therefore SOURCES the shared document, keeping the account condition for the
+#       signed administrative calls, and adds one statement admitting exactly the five
+#       unauthenticated operations by name with no principal condition.
 #       Alternatives Considered: a per-endpoint boolean so a root could disable
-#       one. Rejected because every one of the ten is on a start-up or
+#       one. Rejected because every one of the eight is on a start-up or
 #       transaction path, so disabling any of them substitutes a public path for
 #       a private one silently; variables.tf validates the set as exact instead.
 #       Trade-offs: interface endpoints are charged per hour per endpoint per
-#       availability zone plus per GB processed, so ten endpoints across three
-#       zones fix the hourly term - two zone-hours more than the eight this set
-#       previously held. The per-GB part is largely an offset rather
+#       availability zone plus per GB processed, so ten endpoints across three zones fix
+#       the hourly term at thirty endpoint-zone-hours. The per-GB part is largely an offset rather
 #       than an addition - this traffic stops traversing the NAT gateways, so it
 #       no longer accrues NAT data-processing charges.
+# WHY : Refactoring Rationale: this document exists because ONE shared endpoint policy
+#       cannot serve both kinds of traffic the identity-provider endpoint carries. The
+#       shared document admits only principals in this account, which is correct for the
+#       nine endpoints whose every caller is a task role signing its requests -- and wrong
+#       for this one, whose sign-on traffic is unsigned by construction. Attaching the
+#       shared document here denied every sign-on; attaching a document without the account
+#       condition to all ten would have widened nine endpoints to any principal in any
+#       account. Splitting the attachment is what keeps each endpoint at its own correct
+#       boundary.
+# WHY : Assumptions: the shared document is SOURCED rather than restated, so the account
+#       condition, the derived service-prefix action list and the resource wildcard here
+#       are literally the same statement the other nine endpoints get. A second copy would
+#       be edited apart, and the failure of a copy that lagged would be an authorization
+#       denial on a call a task role is correctly permitted to make.
+# WHY : Assumptions: the added statement enumerates FIVE operations rather than granting
+#       cognito-idp:* without a principal condition. These are exactly the unauthenticated
+#       user-pool operations com.carddemo.auth.service.CognitoIdentityService performs --
+#       InitiateAuth and RespondToAuthChallenge for sign-on and the new-password challenge,
+#       GetTokensFromRefreshToken for rotation, and RevokeToken and GlobalSignOut for
+#       sign-off, each of which authenticates with a token in the request body and carries
+#       no signature. Every ADMINISTRATIVE operation the service calls -- AdminCreateUser,
+#       AdminGetUser, AdminSetUserPassword, AdminAddUserToGroup, AdminDeleteUser -- is
+#       signed by the task role and is admitted by the sourced statement instead, so it
+#       remains bounded by the account condition. An unauthenticated caller reaching this
+#       endpoint therefore gains the five operations any client of a public user pool may
+#       already call, and nothing administrative.
+# WHY : Assumptions: OIDC discovery and the JSON web key set need no entry. They are plain
+#       HTTPS GETs on the same API host rather than IAM-authorized actions, so no endpoint
+#       policy statement governs them; what they need is the private DNS interception the
+#       endpoint below enables, which is why start-up issuer resolution works over this
+#       path at all.
+# WHY : Alternatives Considered: conditioning the added statement on the user-pool ARN so
+#       it could not be used against a pool in another account. Rejected because these
+#       operations take a CLIENT ID rather than a pool ARN and support no resource-level
+#       permission, so the condition would deny every call it was meant to scope.
+data "aws_iam_policy_document" "identity_provider_endpoint" {
+  source_policy_documents = [data.aws_iam_policy_document.interface_endpoint.json]
+
+  statement {
+    sid    = "AllowUnauthenticatedIdentityOperations"
+    effect = "Allow"
+
+    actions = [
+      "cognito-idp:InitiateAuth",
+      "cognito-idp:RespondToAuthChallenge",
+      "cognito-idp:GetTokensFromRefreshToken",
+      "cognito-idp:RevokeToken",
+      "cognito-idp:GlobalSignOut",
+    ]
+
+    resources = ["*"]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+  }
+}
+
 resource "aws_vpc_endpoint" "interface" {
   for_each = var.interface_endpoint_services
 
@@ -1143,9 +1251,14 @@ resource "aws_vpc_endpoint" "interface" {
   # WHY : Assumptions: private DNS is what makes the endpoint transparent. With
   #       it, an SDK's default service hostname resolves to the endpoint ENI, so
   #       no application code or configuration changes. Without it the endpoint
-  #       exists and nothing uses it - the hostname resolves publicly and the
-  #       call leaves through NAT, which fails silently as a different network
-  #       path rather than as an error.
+  #       exists and nothing uses it - the hostname resolves to a public address
+  #       that no egress rule on the application group matches, so the call is
+  #       dropped at the group and presents as an unreachable dependency rather
+  #       than as a configuration error naming the cause.
+  #       Refactoring Rationale: this note said such a call "leaves through NAT",
+  #       which was true only while an unrestricted 443 egress rule existed. That
+  #       rule is withdrawn, so the failure mode is now a drop rather than a
+  #       silent public detour - a worse outage and a far easier diagnosis.
   private_dns_enabled = true
 
   # WHY : Assumptions: the ENIs belong in the private-application tier because
@@ -1157,25 +1270,30 @@ resource "aws_vpc_endpoint" "interface" {
     for zone in local.availability_zones :
     aws_subnet.private_app[zone].id
   ]
-  # WHY : Assumptions: the ENIs carry the DEDICATED endpoint group, so the
-  #       task-to-endpoint flow is a rule between two distinct groups. The
-  #       comment block above that group records why the boundary needs its own
-  #       group rather than borrowing the application group's.
-  #       Refactoring Rationale: these ENIs previously carried the application
-  #       group, which made the flow a self-referencing 443 rule and therefore
-  #       also permitted task-to-task traffic on 443 - a peer-to-peer path
-  #       nothing in this system uses and the tier boundary is meant to deny.
-  #       Attaching the dedicated group narrows the permission to exactly the
-  #       one direction the callers need without changing what they can reach.
-  security_group_ids = [aws_security_group.vpc_endpoints.id]
+  # WHY : Assumptions: the ENIs carry the APPLICATION group, so the
+  #       task-to-endpoint flow is a self-referencing 443 rule on that group. The
+  #       comment block at that rule pair records why, and records the one
+  #       permission that widens as a result.
+  #       Refactoring Rationale: a dedicated endpoint group carried these ENIs for
+  #       a period and was the narrower arrangement. It is withdrawn because the
+  #       frozen plan specifies three security groups for this module (AAP section
+  #       0.5.1.12); the re-permitted task-to-task 443 path reaches no listener,
+  #       because app_container_port cannot be 443 and the only 443 listener in
+  #       this VPC carries the ALB group.
+  security_group_ids = [aws_security_group.app.id]
 
-  # WHY : Assumptions: one document is attached to all eight endpoints rather than
-  #       eight per-service documents, because the boundary it draws -- this
-  #       account's principals only -- is identical for every service and does not
-  #       vary with the action set. Its full reasoning, and the per-service action
-  #       narrowing that was considered and rejected, are recorded above the
-  #       document itself.
-  policy = data.aws_iam_policy_document.interface_endpoint.json
+  # WHY : Assumptions: nine of the ten endpoints share ONE document rather than taking a
+  #       per-service one, because the boundary it draws -- this account's principals only
+  #       -- is identical for every service whose callers sign their requests, and does not
+  #       vary with the action set. Its full reasoning, and the per-service action narrowing
+  #       that was considered and rejected, are recorded above the document itself.
+  # WHY : Assumptions: the identity-provider endpoint is the ONE exception, and the
+  #       conditional is keyed on the service name rather than on a boolean input so no
+  #       root can attach the wrong document. That endpoint carries unsigned sign-on
+  #       traffic that the account condition cannot admit; the document selected for it
+  #       sources this one and adds the five unauthenticated operations, for the reasons
+  #       recorded above that document.
+  policy = each.value == local.identity_provider_endpoint_service ? data.aws_iam_policy_document.identity_provider_endpoint.json : data.aws_iam_policy_document.interface_endpoint.json
 
   tags = merge(var.tags, {
     Name = "${local.name_stem}-vpce-${replace(each.value, ".", "-")}"
@@ -1183,7 +1301,7 @@ resource "aws_vpc_endpoint" "interface" {
 }
 
 # WHY : Alternatives Considered: an interface endpoint for S3, matching the
-#       eight above. Rejected on both mechanism and cost. Mechanically a gateway
+#       ten above. Rejected on both mechanism and cost. Mechanically a gateway
 #       endpoint is a route-table entry pointing at a managed service prefix
 #       list, not an ENI with a security group - which is why it is associated
 #       with route tables rather than subnets, and why it needs no rule on the
@@ -1193,7 +1311,7 @@ resource "aws_vpc_endpoint" "interface" {
 #       cannot be called from on-premises over a private connection. Nothing in
 #       this system needs that, and it is what the absent hourly charge buys.
 #       Assumptions: this endpoint deliberately keeps the provider's default
-#       full-access policy where the eight interface endpoints above are narrowed to
+#       full-access policy where the ten interface endpoints above are narrowed to
 #       this account's principals, and the asymmetry is required rather than an
 #       oversight. An ECR image pull downloads its LAYERS from an AWS-owned S3
 #       bucket using a presigned URL, and a presigned request does not carry
@@ -1512,9 +1630,31 @@ resource "aws_iam_role" "flow_logs" {
   name               = "${local.name_stem}-vpc-flow-logs"
   assume_role_policy = data.aws_iam_policy_document.flow_logs_assume_role.json
 
+  # WHY : ⚠️ Refactoring Rationale: this role carried no boundary while both
+  #       environment roots described their `permissions_boundary_arn` as applying to
+  #       "every role this deployment creates". It is attached here rather than left
+  #       to the caller because a caller cannot attach a boundary to a role it does
+  #       not declare -- the promise was unkeepable from outside this module.
+  # WHY : Assumptions: a flow-log delivery role looks harmless enough to except, and
+  #       is deliberately not excepted. Its inline policy grants CreateLogStream and
+  #       PutLogEvents, and the boundary is what stops a later edit here from
+  #       widening that to a log group this deployment does not own.
+  permissions_boundary = var.permissions_boundary_arn
+
   tags = merge(var.tags, {
     Name = "${local.name_stem}-vpc-flow-logs"
   })
+
+  lifecycle {
+    precondition {
+      # WHY : Assumptions: a boundary in ANOTHER account is not an error IAM reports --
+      #       it is accepted and then bounds nothing, because the policy it names does
+      #       not resolve. Comparing the ARN's account field against the caller's is
+      #       what turns that silent no-op into a plan-time failure.
+      condition     = split(":", var.permissions_boundary_arn)[4] == data.aws_caller_identity.current.account_id
+      error_message = "permissions_boundary_arn must belong to the same AWS account as the VPC flow-log role."
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "flow_logs" {

@@ -931,7 +931,7 @@ public final class StatementHtmlMapper {
     /**
      * Emits the opening records of the markup statement.
      *
-     * <p>Assumptions: the sequence transcribed here is the paragraph labelled at line 506 of
+     * <p>Assumptions: the sequence transcribed here is the paragraph labelled at line 499 of
      * {@code app/cbl/CBSTM03A.CBL} through its exit at line 554, in source order: the document
      * opening at lines 508 to 523, a row and banner cell at 524 and 526, the account-number
      * heading at 529 and 530, the cell and row closes at 531 and 533, then the issuer identity

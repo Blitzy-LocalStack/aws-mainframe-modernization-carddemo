@@ -3,7 +3,7 @@
 This reusable Terraform module provisions the VPC boundary that carries the
 migrated CardDemo workload: three availability zones; public,
 private-application and isolated-data subnet tiers; per-zone NAT egress; ten
-interface VPC endpoints and one S3 gateway endpoint; four security groups; and
+interface VPC endpoints and one S3 gateway endpoint; three security groups; and
 an encrypted VPC flow log. It is the network floor every other module in this
 package is placed on.
 
@@ -62,26 +62,31 @@ graph LR
     APP -->|443| EP[Interface endpoints]
     APP -->|443 to prefix list| S3[S3 gateway endpoint]
     DB -->|prefix-list route only| S3
-    APP -->|443, identity provider only| NAT[NAT gateway per zone]
+    APP -.->|no rule instantiated| NAT[NAT gateway per zone]
     NAT --> IGW{{Internet gateway}}
 ```
 
-Every arrow above is either a named rule or a route in `main.tf`, and there is no
-arrow out of the isolated data tier except to the S3 gateway endpoint.
+Every solid arrow above is either a named rule or a route in `main.tf`, and there
+is no arrow out of the isolated data tier except to the S3 gateway endpoint.
 
 The NAT arrow is narrower than it looks, and it is the one place a reader is
 likely to assume more than the configuration grants. The private-application
-route tables do carry a default route to the zone-local NAT gateway, but the
-application security group's egress is enumerated, so the only traffic that can
-actually take that route is TLS 443 to `identity_provider_egress_cidrs` — the
-issuer metadata and signing keys every service fetches at start-up, and the
-administrative user-pool calls. Everything else a task needs reaches its service
-through an endpoint without leaving the VPC. General outbound access is not
-available to a task merely because a default route exists; see entries 4 and 5.
+route tables do carry a default route to the zone-local NAT gateway, but **no
+application-tier security-group rule permits any public destination**, so no task
+traffic can take that route at all. Every service a task needs — including the
+identity provider and the trace collector — is reached through an interface
+endpoint or the S3 gateway route without leaving the VPC. A default route grants
+nothing on its own; see entries 4 and 5.
+
+An `identity_provider_egress_cidrs` input and an `app_to_identity_provider` rule
+used to carry TLS 443 to any public destination from this tier, on the premise
+that Cognito had no interface endpoint. That premise lapsed when `cognito-idp`
+joined the endpoint set, and both are now withdrawn — the reasoning is recorded in
+`main.tf` and `variables.tf` at the positions they occupied.
 
 ## Private AWS service paths
 
-Ten interface endpoints are created, one per entry in
+Eight interface endpoints are created, one per entry in
 `interface_endpoint_services`, each placing an ENI in the private application
 subnets so that a task reaches the service without its traffic leaving the VPC.
 The column that matters is the second one: it records which part of the migrated
@@ -97,8 +102,6 @@ stack would stop working if the endpoint were removed.
 | `sqs` | Carries the authorization, inquiry and error queue traffic |
 | `states` | Starts a batch or report execution from the reporting service |
 | `ssm` | Reads runtime parameters, including the batch read-only flag |
-| `xray` | Exports trace segments from the telemetry sidecar |
-| `cognito-idp` | Resolves the identity-provider issuer and its signing keys, and carries the administrative user-pool calls |
 | S3 gateway endpoint | Carries dataset, statement and report object traffic. It is a route-table entry pointing at a service prefix list rather than an ENI, so it places no interface, carries no security group and incurs no hourly endpoint charge |
 
 Assumptions: the endpoint set is identical in both environments and is validated
@@ -143,6 +146,13 @@ module "network" {
   database_port           = 5432
   flow_log_retention_days = var.log_retention_days
   flow_log_kms_key_arn    = module.kms.s3_key_arn
+
+  # Required. Bounds the VPC flow-log delivery role this module creates. Its inline
+  # policy grants CreateLogStream and PutLogEvents; the boundary is what stops a later
+  # edit here widening that to a log group the deployment does not own. The module
+  # asserts the ARN names THIS account -- a cross-account boundary is accepted by IAM
+  # and then bounds nothing.
+  permissions_boundary_arn = var.permissions_boundary_arn
 }
 ```
 
@@ -221,17 +231,21 @@ endpoint identities a policy or metric attaches to — and each is derived from 
 resource this module already creates, so keeping them costs nothing at apply
 time.
 
-The module deliberately does not publish four things it creates:
+The module deliberately does not publish three things it creates:
 
-- **the `vpc_endpoints` security group id**, because no sibling attaches to it
-  and publishing it would invite a future caller to attach something and thereby
-  hand that thing the application tier's 443 path;
 - **the flow-log IAM role ARN**, because its only consumer is the flow log in
   this module;
 - **the route table ids**, because tier reachability is decided here and a second
   owner adding a route elsewhere is exactly the change entry 1 below exists to
   prevent; and
 - **the internet gateway id**, for the same reason.
+
+Refactoring Rationale: this list held FOUR entries and opened on the
+`vpc_endpoints` security group id, withheld because no sibling attached to it. That
+group no longer exists — the frozen plan specifies three security groups (AAP
+§0.5.1.12), so the interface-endpoint ENIs carry the `app` group — and there is
+consequently nothing to withhold. The list is three, and every security group this
+module creates is now published.
 
 Refactoring Rationale: this contract was previously published as twenty-one
 outputs, including three route-table ids and two further flow-log values, and
@@ -265,14 +279,22 @@ than merely overwrite the value.
 
 2. **One NAT gateway per availability zone, with no input to collapse them.**
    Alternatives Considered: a single shared gateway, billing one gateway-hour
-   and one address-hour instead of three of each. Rejected on two independent
-   grounds. Availability: with one gateway, egress from the two zones that do
-   not hold it becomes a cross-zone path, and losing the zone that holds it
-   removes egress from all three. Fidelity: AAP section 0.4.1.6 confines
-   environment difference to sizing and retention and never topology, and
-   ADR-008 records that a dev environment with a different network shape would
-   not validate the prod one. Trade-offs: three gateway-hours and three
-   address-hours are accepted in exchange for per-zone egress independence.
+   and one address-hour instead of three of each. Rejected on fidelity grounds:
+   AAP section 0.4.1.6 confines environment difference to sizing and retention
+   and never topology, and ADR-008 records that a dev environment with a
+   different network shape would not validate the prod one.
+   Trade-offs: three gateway-hours and three address-hours are accepted for a
+   tier that carries **no traffic at all** — every rule in the application
+   group's enumerated egress names an in-VPC destination, so nothing can take the
+   default route these gateways serve. What is bought is a symmetric per-zone
+   shape in which a future bounded public dependency arrives as one
+   security-group rule rather than as a change of topology.
+   Refactoring Rationale: this entry also rejected the shared gateway on
+   availability grounds — cross-zone egress for two zones and total egress loss
+   for the third. That reasoning is withdrawn because it presumes egress that
+   does not exist; the same correction is recorded beside `aws_nat_gateway` in
+   `main.tf`, where the full sequence of what this argument claimed and when is
+   kept.
    Note what this entry does **not** claim. An earlier reading called the NAT
    tier the largest fixed cost in the network, and ADR-008 has since retracted
    that as false. On the unit counts it records, the interface-endpoint fleet
@@ -281,27 +303,29 @@ than merely overwrite the value.
    are repeated here, because a ranking of two rates goes stale in a way a
    structural count does not.
 
-3. **Four security groups are created and three are published.** `alb`, `app`
-   and `data` are published because sibling modules attach to them.
-   `vpc_endpoints` is attached by this module alone, to the interface-endpoint
-   ENIs, and is therefore internal. An interface endpoint must carry a group, so
-   the application-to-endpoint flow has to terminate somewhere.
-   Alternatives Considered: reusing the application group, which needs a
-   self-referencing 443 ingress rule that would also permit task-to-task traffic
-   on 443 — widening the very radius the isolated tier exists to narrow; or
-   reusing the load-balancer group, which would collapse two genuinely different
-   flows onto one rule, because an application-to-load-balancer 443 rule already
-   exists for the three synchronous context-to-context calls and folding the
-   endpoint ENIs into that group would make the same rule also grant every task
-   the ten private service endpoints, so withdrawing either permission would
-   withdraw both.
-   Refactoring Rationale: the load-balancer half of this comparison used to
-   read that such a rule "would let every task reach the edge listener group", as
-   though the rule did not exist. It does exist and the system requires it, so
-   the premise was false; the conclusion is unchanged and now rests on keeping
-   the two flows separately withdrawable.
-   Trade-offs: one more group to reason about, accepted in exchange for a rule
-   set in which each permitted flow has exactly one source and one destination.
+3. **Three security groups are created and all three are published.** `alb`,
+   `app` and `data`, each attached by a sibling module.
+   Refactoring Rationale: a FOURTH group, `vpc_endpoints`, carried the
+   interface-endpoint ENIs and was internal to this module. It is withdrawn: AAP
+   §0.5.1.12 specifies three security groups, so the ENIs now carry the `app` group
+   and the application-to-endpoint flow is a self reference on it. When it was
+   removed the group was already carried by nothing — the endpoint resource named
+   `app`, no rule referenced it and `outputs.tf` never published it — so an empty
+   group appeared in every plan as though it bounded something.
+   Trade-offs: the self reference re-permits task-to-task 443, which the dedicated
+   group did not. Accepted and bounded rather than assumed: `app_container_port` is
+   validated to exclude 443, so no service listens there, and the only 443 listener
+   in this VPC carries the `alb` group. The widened permission is registered as a
+   documented divergence in `docs/architecture/cobol-to-service-traceability.md`.
+   Alternatives Considered: keeping the fourth group, which is the narrower rule
+   set and was the arrangement for a period. Rejected on the specified count, and
+   because the flow it isolated reaches no listener once the port validation above
+   is in place — so what the extra group buys is a plan that reads more strictly
+   rather than a path an attacker could otherwise take.
+   Alternatives Considered: folding the ENIs onto the load-balancer group instead.
+   Rejected because an application-to-load-balancer 443 rule already exists for the
+   three synchronous context-to-context calls, so that group would make one rule
+   grant both flows and withdrawing either permission would withdraw both.
 
 4. **Every tier-to-tier rule references a peer security group rather than a CIDR
    block.** Alternatives Considered: CIDR-based rules scoped to the VPC or to a
@@ -313,24 +337,25 @@ than merely overwrite the value.
    not a member of that group cannot open a database session at all. There is no
    `0.0.0.0/0` ingress rule on any group in this module; the public tier's
    reachability is a route-table property, not a rule.
-   The one deliberate exception is a single egress rule.
-   `identity_provider_egress_cidrs` is a CIDR set because its destination is a
-   public regional endpoint that has no interface endpoint in the set and so has
-   no group to reference. Assumptions: the rule is TLS-only, one rule is keyed
-   per entry so that narrowing the set removes rules individually, and it names
-   its purpose in its description so it is identifiable in a plan diff and in a
-   flow log. Deriving the destination from the provider's published address
-   ranges was rejected on a hard limit rather than on preference — the regional
-   range lists run to hundreds of entries and a security group admits far fewer,
-   so the apply would fail on quota.
+   There is no longer any exception: every rule in this module names either a
+   peer security group or the S3 gateway endpoint's managed prefix list, and none
+   names a CIDR block. The one that did — `app_to_identity_provider`, fed by an
+   `identity_provider_egress_cidrs` set whose default was `0.0.0.0/0` — is
+   withdrawn now that the identity provider is reached through the `cognito-idp`
+   interface endpoint. Deriving a narrowed destination from the provider's
+   published address ranges had already been rejected on a hard limit rather than
+   on preference: the regional range lists run to hundreds of entries and a
+   security group admits far fewer, so the apply would fail on quota — which left
+   removal, rather than narrowing, as the only way to close it.
 
 5. **The application group's egress is enumerated, not implicit.** Four
    destinations are reachable and nothing else: the data group on
-   `database_port`, the endpoint group on 443, the S3 gateway endpoint's managed
-   prefix list on 443, and `identity_provider_egress_cidrs` on 443.
+   `database_port`, the endpoint group on 443, the load-balancer group on 443 for
+   service-to-service calls, and the S3 gateway endpoint's managed prefix list on
+   443. No public destination is among them.
    Alternatives Considered: leaving a new group's implicit allow-all in place,
    which is less configuration. Rejected because it would make every one of
-   those four dependencies invisible and absorb the fifth silently.
+   those four dependencies invisible and would silently absorb a fifth.
    Trade-offs: a new outbound dependency now has to arrive as a named rule that
    appears in a plan diff, which is more work per dependency. This is also what
    makes the note under [Private AWS service paths](#private-aws-service-paths)
@@ -479,7 +504,7 @@ the address space is a decision taken before the first apply.
 this module are otherwise byte-identical, and the difference reaches the module
 through each environment's `log_retention_days` variable. Everything structural
 is the same in both: three zones, three tiers, three NAT gateways, the same ten
-interface endpoints, the same S3 gateway endpoint, the same four security groups
+interface endpoints, the same S3 gateway endpoint, the same three security groups
 and the same enumerated flows, the same ports.
 
 That identity is the point, and it is worth saying plainly for an operator
@@ -495,12 +520,12 @@ usual way this cost is trimmed. Rejected because the first defect it would hide
 is a routing or endpoint-reachability defect — precisely the class of problem a
 pre-production environment exists to surface.
 
-`identity_provider_egress_cidrs` is the one input an environment *may*
-legitimately differ on without differing in topology, because it narrows a
-destination set rather than adding or removing a flow. Neither root sets it
-today, so both take the open default and remain identical. An environment whose
-egress traverses a proxy that resolves the issuer's addresses should narrow it
-there rather than here.
+`flow_log_retention_days` is now the one input an environment *may* legitimately
+differ on without differing in topology. `identity_provider_egress_cidrs` used to
+be named here as a second such lever, on the reading that narrowing a destination
+set changes no flow; it is withdrawn along with the public-egress rule it fed, so
+the only per-environment difference this module admits is how long the flow log is
+kept.
 
 ## Policy-scan posture
 
@@ -678,7 +703,6 @@ hand — regenerate it with the command in [Validation](#validation) instead.
 | [aws_security_group.alb](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group) | resource |
 | [aws_security_group.app](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group) | resource |
 | [aws_security_group.data](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group) | resource |
-| [aws_security_group.vpc_endpoints](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group) | resource |
 | [aws_subnet.isolated_data](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet) | resource |
 | [aws_subnet.private_app](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet) | resource |
 | [aws_subnet.public](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet) | resource |
@@ -691,7 +715,6 @@ hand — regenerate it with the command in [Validation](#validation) instead.
 | [aws_vpc_security_group_egress_rule.app_to_alb](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
 | [aws_vpc_security_group_egress_rule.app_to_data](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
 | [aws_vpc_security_group_egress_rule.app_to_endpoints](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
-| [aws_vpc_security_group_egress_rule.app_to_identity_provider](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
 | [aws_vpc_security_group_egress_rule.app_to_s3_gateway](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
 | [aws_vpc_security_group_egress_rule.data_to_s3_gateway](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
 | [aws_vpc_security_group_ingress_rule.alb_to_app](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
@@ -703,6 +726,7 @@ hand — regenerate it with the command in [Validation](#validation) instead.
 | [aws_ec2_managed_prefix_list.s3](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/ec2_managed_prefix_list) | data source |
 | [aws_iam_policy_document.flow_logs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.flow_logs_assume_role](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_policy_document.identity_provider_endpoint](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.interface_endpoint](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_partition.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/partition) | data source |
 | [aws_region.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/region) | data source |
@@ -712,14 +736,14 @@ hand — regenerate it with the command in [Validation](#validation) instead.
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
 | <a name="input_environment"></a> [environment](#input\_environment) | Trailing component of the Name tag on the VPC, every subnet, every route table, every gateway, every endpoint and every security group, so one environment's network is distinguishable from another's in the same account. Required -- there is no default. Lowercase letters, digits and hyphens only, no leading or trailing hyphen, at most 16 characters. | `string` | n/a | yes |
+| <a name="input_permissions_boundary_arn"></a> [permissions\_boundary\_arn](#input\_permissions\_boundary\_arn) | Same-account customer-managed IAM policy ARN used as the permissions boundary on the VPC flow-log delivery role this module creates. Required so no capability this module composes can exceed the account's deployment boundary. Supplied by the caller; never created here. | `string` | n/a | yes |
 | <a name="input_allow_service_managed_flow_log_encryption"></a> [allow\_service\_managed\_flow\_log\_encryption](#input\_allow\_service\_managed\_flow\_log\_encryption) | Whether this module may create the VPC flow-log group on CloudWatch Logs service-default encryption instead of a customer-managed key. False, the default, makes flow\_log\_kms\_key\_arn required. True is reserved for planning this module in isolation without the kms module and is not a supported setting for the dev or prod roots. | `bool` | `false` | no |
 | <a name="input_app_container_port"></a> [app\_container\_port](#input\_app\_container\_port) | TCP port admitted from the load-balancer security group to the application security group and republished for the calling root to pass into every ecs-service container and target group. The default 8080 matches the Spring Boot listeners; using the output rather than repeating the number keeps the rule and the listener aligned. | `number` | `8080` | no |
 | <a name="input_az_count"></a> [az\_count](#input\_az\_count) | Number of availability zones the network spans, and therefore the number of subnets created in each of the three tiers and the number of NAT gateways. The only supported value is 3, the topology shared by dev and prod. | `number` | `3` | no |
 | <a name="input_database_port"></a> [database\_port](#input\_database\_port) | TCP port admitted from the application security group to the isolated-data security group and republished for the calling root to pass into aurora-postgresql. The default 5432 matches PostgreSQL; the accepted range is the range Aurora PostgreSQL supports. | `number` | `5432` | no |
 | <a name="input_flow_log_kms_key_arn"></a> [flow\_log\_kms\_key\_arn](#input\_flow\_log\_kms\_key\_arn) | ARN of a customer-managed KMS key with which to encrypt the CloudWatch Logs group receiving this VPC's flow logs. Required unless allow\_service\_managed\_flow\_log\_encryption is explicitly set true, which is the opt-out reserved for planning this module in isolation without the kms module. Both environment roots pass the key the kms module produces. | `string` | `null` | no |
 | <a name="input_flow_log_retention_days"></a> [flow\_log\_retention\_days](#input\_flow\_log\_retention\_days) | Days the CloudWatch Logs group receiving this VPC's flow logs retains events before they age off, or 0 to retain them indefinitely. This is the one value in this module the dev and prod roots are expected to set differently, and it is the direct analogue of how long a mainframe job log was kept before it aged off the spool. | `number` | `30` | no |
-| <a name="input_identity_provider_egress_cidrs"></a> [identity\_provider\_egress\_cidrs](#input\_identity\_provider\_egress\_cidrs) | Destination CIDR blocks the application security group may reach on TCP 443 for Cognito identity-provider calls: the JWK set every service fetches at start-up and the user-pool admin API auth-service calls. One egress rule is created per entry. The default permits any destination because the provider is a public regional endpoint whose addresses AWS may change; an environment that has determined the exact ranges may narrow this set without editing the module. | `set(string)` | <pre>[<br/>  "0.0.0.0/0"<br/>]</pre> | no |
-| <a name="input_interface_endpoint_services"></a> [interface\_endpoint\_services](#input\_interface\_endpoint\_services) | Exact set of short AWS service names given private interface endpoints in every environment: ecr.api and ecr.dkr for image pulls, logs for delivery, secretsmanager for credentials, kms for envelope operations, sqs for messaging, states for workflow calls, ssm for configuration, xray for the telemetry sidecar's trace export and cognito-idp for identity-provider issuer, signing-key and administrative calls. main.tf expands each short name into its Region-qualified service name; S3 is excluded because it uses the separate gateway endpoint. | `set(string)` | <pre>[<br/>  "ecr.api",<br/>  "ecr.dkr",<br/>  "logs",<br/>  "secretsmanager",<br/>  "kms",<br/>  "sqs",<br/>  "states",<br/>  "ssm",<br/>  "xray",<br/>  "cognito-idp"<br/>]</pre> | no |
+| <a name="input_interface_endpoint_services"></a> [interface\_endpoint\_services](#input\_interface\_endpoint\_services) | Exact set of short AWS service names given private interface endpoints in every environment: ecr.api and ecr.dkr for image pulls, logs for delivery, secretsmanager for credentials, kms for envelope operations, sqs for messaging, states for workflow calls, ssm for configuration, xray for trace export and cognito-idp for identity-provider discovery, key-set and user-pool calls. main.tf expands each short name into its Region-qualified service name; S3 is excluded because it uses the separate gateway endpoint. | `set(string)` | <pre>[<br/>  "ecr.api",<br/>  "ecr.dkr",<br/>  "logs",<br/>  "secretsmanager",<br/>  "kms",<br/>  "sqs",<br/>  "states",<br/>  "ssm",<br/>  "xray",<br/>  "cognito-idp"<br/>]</pre> | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Leading component of the Name tag on every resource this module creates, ahead of the tier and the environment, giving the whole network one greppable identity shared with the rest of the stack. Lowercase letters, digits and hyphens only, no leading or trailing hyphen, at most 32 characters. | `string` | `"carddemo"` | no |
 | <a name="input_subnet_newbits"></a> [subnet\_newbits](#input\_subnet\_newbits) | Number of bits cidrsubnet adds to the vpc\_cidr prefix when carving each subnet, which fixes every subnet's size: at the default /16 and 4 additional bits each subnet is a /20. It must admit at least `3 * az_count` distinct subnets, because the three tiers are taken from consecutive netnum ranges of the one block rather than from separate per-tier address lists. | `number` | `4` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Additional tags merged onto every taggable resource this module creates, on top of the provider-level default\_tags the calling root sets and underneath the per-resource Name tag this module composes. Network-specific tags belong here; tags common to the whole stack belong on the root's provider block, so that every module receives them without being passed them. | `map(string)` | `{}` | no |
@@ -731,16 +755,16 @@ hand — regenerate it with the command in [Validation](#validation) instead.
 |------|-------------|
 | <a name="output_alb_security_group_id"></a> [alb\_security\_group\_id](#output\_alb\_security\_group\_id) | Identifier (string) of the internal load balancer's security group, attached by alb. api-gateway-http adds its 443 ingress from the VPC Link's own group for edge traffic. This module grants it two flows: egress to the application group on app\_container\_port, so the balancer can forward requests and health checks, and 443 ingress from the application group, which is how one migrated context calls another over the internal listener. It can reach nothing else. |
 | <a name="output_app_container_port"></a> [app\_container\_port](#output\_app\_container\_port) | TCP port (number) this module admits from the load-balancer group to the application group. Both environment roots pass it to ecs-service as its container and target-group port, so the rule and the listener cannot drift apart. |
-| <a name="output_app_security_group_id"></a> [app\_security\_group\_id](#output\_app\_security\_group\_id) | Identifier (string) of the application-tier security group, attached by ecs-service to its task ENIs and by step-functions-batch to its Fargate task network configuration. Its permitted flows are exactly five, each a separately named rule: ingress from the load-balancer group on app\_container\_port; egress to the data group on database\_port; egress to the interface-endpoint group on 443 for the eight private AWS service endpoints; egress on 443 to the S3 gateway endpoint's managed prefix list, which needs a prefix-list rule because a gateway endpoint places no ENI and so has no group to reference; and egress on 443 to identity\_provider\_egress\_cidrs for the Cognito JWK set every service fetches at start-up, which has no interface endpoint in the specified eight-service set. Egress is enumerated rather than left as a new group's implicit allow-all, so a further outbound dependency has to arrive as a named rule visible in a plan diff. |
+| <a name="output_app_security_group_id"></a> [app\_security\_group\_id](#output\_app\_security\_group\_id) | Identifier (string) of the application-tier security group, attached by ecs-service to its task ENIs and by step-functions-batch to its Fargate task network configuration. Its permitted flows are exactly five, each a separately named rule: ingress from the load-balancer group on app\_container\_port; egress to the data group on database\_port; egress to the endpoint ENIs on 443 for the ten private AWS service endpoints, which include the identity provider and the trace collector -- a SELF reference, because those ENIs carry this same group rather than a fourth one; egress to the load-balancer group on 443 for service-to-service calls; and egress on 443 to the S3 gateway endpoint's managed prefix list, which needs a prefix-list rule because a gateway endpoint places no ENI and so has no group to reference. There is NO rule to a public destination: the identity-provider egress rule that admitted 0.0.0.0/0 on 443 is withdrawn, because the cognito-idp endpoint in the set above carries the same calls inside the VPC. Egress is enumerated rather than left as a new group's implicit allow-all, so a further outbound dependency has to arrive as a named rule visible in a plan diff. |
 | <a name="output_availability_zones"></a> [availability\_zones](#output\_availability\_zones) | Ordered list of the availability-zone names this module actually used, after az\_count is clamped to the zones the account can place a subnet in. No consumer reads it today - neither a sibling module nor either environment root - and it is published for zone-aware sizing and for confirming the span a deployment really got rather than the span it asked for. Every subnet-id list below is ordered to match it. |
 | <a name="output_data_security_group_id"></a> [data\_security\_group\_id](#output\_data\_security\_group\_id) | Identifier (string) of the isolated-data security group, attached by aurora-postgresql to its cluster. It grants exactly one flow: ingress from the application-tier group on database\_port. It admits no CIDR range, so a host that is not a member of the application group cannot open a database session even from inside the VPC. |
 | <a name="output_database_port"></a> [database\_port](#output\_database\_port) | TCP port (number) this module admits from the application group to the isolated-data group. Both environment roots pass it to aurora-postgresql as its cluster port, so the rule and the engine cannot drift apart. |
 | <a name="output_flow_log_group_name"></a> [flow\_log\_group\_name](#output\_flow\_log\_group\_name) | Exact name (string) of the CloudWatch log group receiving this VPC's flow records. Both environment roots pass it to observability as its required vpc\_flow\_log\_group\_name input, which points that module's Logs Insights widgets at the group this module created rather than at a name reassembled from a prefix and an environment. |
-| <a name="output_interface_vpc_endpoint_ids"></a> [interface\_vpc\_endpoint\_ids](#output\_interface\_vpc\_endpoint\_ids) | Map from short AWS service name to that service's interface VPC endpoint identifier, keyed exactly as var.interface\_endpoint\_services is written: ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs, states, ssm, xray and cognito-idp. Its consumer is the environment root, which needs a specific endpoint's identity to attach a metric or an endpoint policy to it; no sibling module reads it today. Each endpoint places an ENI in the private application subnets, which is how a task reaches these services without egressing the VPC. |
+| <a name="output_interface_vpc_endpoint_ids"></a> [interface\_vpc\_endpoint\_ids](#output\_interface\_vpc\_endpoint\_ids) | Map from short AWS service name to that service's interface VPC endpoint identifier, keyed exactly as var.interface\_endpoint\_services is written: ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs, states and ssm. Its consumer is the environment root, which needs a specific endpoint's identity to attach a metric or an endpoint policy to it; no sibling module reads it today. Each endpoint places an ENI in the private application subnets, which is how a task reaches these services without egressing the VPC. |
 | <a name="output_isolated_data_subnet_ids"></a> [isolated\_data\_subnet\_ids](#output\_isolated\_data\_subnet\_ids) | Ordered list of the isolated data subnet identifiers, one per availability zone, forming the DB subnet group read by aurora-postgresql. These subnets have no route to the internet at all - their route tables carry no default route, no NAT and no gateway - which is what makes them the correct home for the database and the wrong home for anything needing egress. |
 | <a name="output_nat_gateway_ids"></a> [nat\_gateway\_ids](#output\_nat\_gateway\_ids) | Map from availability-zone name to the NAT gateway serving that zone's private application subnet. No consumer reads it today - neither a sibling module nor either environment root; observability takes only the flow-log group name from this module. It is published because an alarm on a per-gateway metric - a failed-connection count, for instance - needs the gateway identity, and the zone key is what lets such an alarm name the zone it describes instead of an opaque identifier. |
 | <a name="output_nat_gateway_public_ips"></a> [nat\_gateway\_public\_ips](#output\_nat\_gateway\_public\_ips) | Map from availability-zone name to the Elastic IP address attached to that zone's NAT gateway. No consumer reads it today - neither a sibling module nor either environment root - and it is published so an operator or downstream system that has to allow-list CardDemo's egress can be handed the set. All az\_count entries are present, because egress can leave from any zone. |
-| <a name="output_private_app_subnet_ids"></a> [private\_app\_subnet\_ids](#output\_private\_app\_subnet\_ids) | Ordered list of the private application subnet identifiers, one per availability zone, and the most widely consumed output here. Read by ecs-service for task placement, by step-functions-batch for its Fargate task network configuration, and by api-gateway-http for its VPC Link. NOT read by alb: per AAP 0.4.1.9 the load balancer belongs to the public tier, and the roots place it there. The tier also holds the interface VPC endpoint ENIs, which is how a task reaches ECR, CloudWatch Logs, Secrets Manager, KMS, SQS, Step Functions and SSM without its traffic leaving the VPC. |
+| <a name="output_private_app_subnet_ids"></a> [private\_app\_subnet\_ids](#output\_private\_app\_subnet\_ids) | Ordered list of the private application subnet identifiers, one per availability zone, and the most widely consumed output here. Read by ecs-service for task placement, by step-functions-batch for its Fargate task network configuration, and by api-gateway-http for its VPC Link. NOT read by alb: per AAP 0.4.1.9 the load balancer belongs to the public tier, and the roots place it there. The tier also holds the interface VPC endpoint ENIs, which is how a task reaches ECR, CloudWatch Logs, Secrets Manager, KMS, SQS, Step Functions, SSM, X-Ray and the Cognito identity provider without its traffic leaving the VPC. |
 | <a name="output_public_subnet_ids"></a> [public\_subnet\_ids](#output\_public\_subnet\_ids) | Ordered list of the public subnet identifiers, one per availability zone. This tier is reserved for the two kinds of thing that need a route to the internet gateway: the zone-local NAT gateways this module creates, which are its only current occupants, and an internet-facing load balancer. No consumer reads it today - neither a sibling module nor either environment root - because the load balancer in this deployment is INTERNAL and both roots therefore place it in the private-application subnets, leaving the NAT gateways this module creates as this tier's only occupants. Nothing holding application state or record data belongs here. |
 | <a name="output_s3_gateway_endpoint_id"></a> [s3\_gateway\_endpoint\_id](#output\_s3\_gateway\_endpoint\_id) | Identifier (string) of the S3 gateway endpoint. No consumer reads it today - neither a sibling module nor either environment root - and it is published because naming the private path to S3 in a bucket policy that restricts access to this VPC's endpoint needs it. Being a gateway rather than an interface endpoint, it is associated with route tables instead of subnets, places no ENI and carries no security group - so which tiers can reach S3 is decided by route-table association, not by a security-group rule. |
 | <a name="output_vpc_cidr_block"></a> [vpc\_cidr\_block](#output\_vpc\_cidr\_block) | IPv4 CIDR block (string) AWS assigned to this VPC. No consumer reads it today - neither a sibling module nor either environment root - because every tier-to-tier flow this topology allows is expressed group-to-group instead. It is published for a rule or policy that has to be scoped to the whole network rather than to a peer security group. Publishing it means no consumer is ever handed var.vpc\_cidr a second time. |

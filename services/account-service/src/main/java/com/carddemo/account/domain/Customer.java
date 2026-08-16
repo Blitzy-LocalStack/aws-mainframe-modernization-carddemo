@@ -14,28 +14,30 @@ import org.hibernate.annotations.JdbcTypeCode;
  * The customer master row this context owns.
  *
  * <h2>Reference contract</h2>
+ *
  * <p>This is {@code CUSTOMER-RECORD} of {@code app/cpy/CVCUS01Y.cpy} lines 4 through 23, the 500-byte
  * {@code CUSTDATA} record whose header comment at line 2 declares that length. Its eighteen meaningful
- * fields sum to 332 bytes and {@code FILLER PIC X(168)} at line 23 pads the record out to 500. The filler
- * is dropped here.</p>
+ * fields sum to 332 bytes and {@code FILLER PIC X(168)} at line 23 pads the record to 500; the filler is
+ * dropped here.</p>
  *
- * <p>Assumptions: the filler is padding rather than data, so dropping it loses nothing. The region is
- * blank in every one of the fifty records of {@code app/data/ASCII/custdata.txt}, each of which is exactly
- * 500 bytes long, so there is no hidden overlay to preserve.</p>
+ * <p>Assumptions: the filler is padding rather than data, so dropping it loses nothing -- the region is
+ * blank in every one of the fifty records of {@code app/data/ASCII/custdata.txt}, each exactly 500 bytes
+ * long, so there is no hidden overlay to preserve.</p>
  *
  * <p>Assumptions: {@code CVCUS01Y} is the contract for this context and {@code app/cpy/CUSTREC.cpy} is
  * not, even though the two declare a near-identical 500-byte {@code CUSTOMER-RECORD}. The customer master
  * reader settles it: {@code app/cbl/CBCUS01C.cbl} line 45 is {@code COPY CVCUS01Y.}. The other copybook
- * names its date field without the two hyphens the extract actually carries, and it is copied by the
- * statement generator, which belongs to the reporting context. Taking offsets from it here would place the
- * date and every field after it at the wrong position while still compiling.</p>
+ * names its date field without the two hyphens the extract actually carries and is copied by the statement
+ * generator, which belongs to the reporting context, so taking offsets from it here would place the date
+ * and every field after it at the wrong position while still compiling.</p>
  *
  * <h2>Target schema</h2>
+ *
  * <p>Assumptions: the shape below is the other half of a two-sided contract with
- * {@code db/migration/V1__account.sql}, which owns the DDL and is authored separately. It is restated
- * here so that the obligation is legible at the mapping site and not only in the migration. The
- * {@code account} schema itself is created by {@code data-migration/sql/V0__schemas_and_roles.sql}, which
- * is the exclusive authority for schemas, roles and grants.</p>
+ * {@code db/migration/V1__account.sql}, which owns the DDL. It is restated here so the obligation is
+ * legible at the mapping site, while the {@code account} schema itself is created by
+ * {@code data-migration/sql/V0__schemas_and_roles.sql}, the exclusive authority for schemas, roles and
+ * grants.</p>
  *
  * <pre>
  * account.customers
@@ -63,136 +65,97 @@ import org.hibernate.annotations.JdbcTypeCode;
  *   -- no foreign key to account.accounts or account.card_xref
  * </pre>
  *
- * <p>Assumptions: that shape declares NO value constraint at all, and the absence is deliberate on both
- * columns where one might be expected. No range constraint bounds the credit score, and the field below
- * records why one must never be added. No closed domain bounds the primary-holder indicator either:
- * {@code CVCUS01Y.cpy} L21 declares {@code PIC X(01)} and attaches no 88-level value set -- there is not one
- * such level anywhere in this record -- so the storage layer admits any one character, exactly as the VSAM
- * cluster it replaces does. Constraints are declared in the migration and never here: an entity that also
- * declared them would be a second statement of the same fact, free to drift from the schema that actually
- * enforces it.</p>
+ * <p>Assumptions: that shape declares NO value constraint, and the absence is deliberate on both columns
+ * where one might be expected. No range constraint bounds the credit score, for the reason the field below
+ * records. No closed domain bounds the primary-holder indicator either: {@code CVCUS01Y.cpy} L21 declares
+ * {@code PIC X(01)} and attaches no 88-level value set -- there is not one such level anywhere in this
+ * record -- so the storage layer admits any one character, exactly as the VSAM cluster it replaces does.
+ * The Y-or-N rule the online screen applies is a WORKING-STORAGE edit flag in one program
+ * ({@code FLG-PRI-CARDHOLDER-ISVALID} at {@code app/cbl/COACTUPC.cbl:350}), so it states what that screen
+ * ACCEPTS rather than what the file HOLDS; it is preserved where the reference applies it, as
+ * {@code 1220-EDIT-YESNO} at L1856 to L1894 migrated into {@code AccountUpdateService.editYesNo} and
+ * applied on every update. Constraints are declared in the migration and never here, so there is one
+ * statement of each fact rather than two free to drift.</p>
  *
- * <p>Refactoring Rationale: a check closing the indicator at Y and N was declared and is removed. Its
- * authority was {@code FLG-PRI-CARDHOLDER-ISVALID VALUES 'Y', 'N'} at {@code app/cbl/COACTUPC.cbl:350},
- * which sits on {@code WS-EDIT-PRI-CARDHOLDER} -- a WORKING-STORAGE edit flag in one online program -- and
- * not on the record field, so it states what that screen ACCEPTS rather than what the file HOLDS. The
- * migration plan's transformation rule T1 makes the copybook normative, and its section 0.4.1.3 turns an
- * 88-level value set into a check constraint; neither licenses a domain the record layout does not state.
- * The Y-or-N rule itself is preserved where the reference applies it: {@code 1220-EDIT-YESNO} at L1856 to
- * L1894, migrated as {@code AccountUpdateService.editYesNo} and applied to this field on every update, so a
- * submission still cannot set a third character while a loaded record carrying one is no longer refused.</p>
+ * <p>Assumptions: {@code @Table} names the table without a schema qualifier, matching {@link Account} and
+ * {@link CardXref}. The service pins every pooled connection's search path to the one schema it owns, so an
+ * unqualified name resolves there or fails, and hard-coding the schema here would put the same fact in two
+ * places that could disagree.</p>
  *
- * <p>Assumptions: {@code @Table} names the table without qualifying it with a schema, matching
- * {@link Account} and {@link CardXref}. The qualifier is deliberately absent rather than forgotten: the
- * service pins every pooled connection's search path to the one schema it owns, so an unqualified name
- * resolves there or fails, and hard-coding the schema in the annotation would put the same fact in two
- * places that could then disagree.</p>
+ * <h2>Encryption and nullability</h2>
  *
  * <p>Assumptions: the two identifier columns are stored ENCRYPTED, as {@code byte[]} over {@code BYTEA},
- * and no accessor on this class returns either one at all. The reference holds both in clear --
+ * and no accessor on this class returns either. The reference holds both in clear --
  * {@code CUST-SSN PIC 9(09)} at {@code CVCUS01Y.cpy} line 17 and
- * {@code CUST-GOVT-ISSUED-ID PIC X(20)} at line 18 -- on a file the resource definition declares with
- * {@code READINTEG(UNCOMMITTED)} at {@code app/csd/CARDDEMO.CSD} line 53 and
- * {@code RECOVERY(NONE) FWDRECOVLOG(NO)} at line 59, in the {@code CUSTDAT} stanza that opens at line 50.
- * The baseline therefore stores personal identifiers in clear with no recovery journalling; the Java
- * stores them encrypted at rest and never returns them; and the divergence is documented rather than
- * silent. Trade-offs: queryability on the clear value is given up. No predicate, sort or index on this
- * column can address the identifier itself, so any lookup by identifier has to be designed around a
- * deterministic token instead. That cost is accepted because the alternative is holding the value in a
- * form that any read of the table discloses.</p>
+ * {@code CUST-GOVT-ISSUED-ID PIC X(20)} at line 18 -- on a file the resource definition declares
+ * {@code READINTEG(UNCOMMITTED)} and {@code RECOVERY(NONE) FWDRECOVLOG(NO)} in the {@code CUSTDAT} stanza
+ * at {@code app/csd/CARDDEMO.CSD} lines 50 to 59. The Java stores them encrypted at rest and never returns
+ * them, and the divergence is documented rather than silent. Trade-offs: queryability on the clear value is
+ * given up -- no predicate, sort or index can address the identifier itself, so a lookup by identifier has
+ * to be designed around a deterministic token -- and that cost is accepted because the alternative is
+ * holding the value in a form any read of the table discloses.</p>
  *
  * <p>Trade-offs: this class performs no encryption and no decryption. It holds bytes that are already
- * ciphertext and does nothing else with them, so a caller must encrypt before construction and decrypt
- * outside the domain. A JPA {@code AttributeConverter} doing the cryptography on this entity was the
- * obvious alternative and is not available: it would have to reach a key provider, and the architecture
- * test in {@code common-lib} forbids a class in a {@code domain} package from depending on an
- * infrastructure or transport root, both cloud provider SDK generations included. Keeping the boundary
- * costs an explicit conversion step at the mapper edge and buys a domain type that can be constructed and
- * asserted on with no key material anywhere in reach.</p>
+ * ciphertext, so a caller encrypts before construction and decrypts outside the domain. A JPA
+ * {@code AttributeConverter} doing the cryptography here is unavailable: it would have to reach a key
+ * provider, and the architecture test in {@code common-lib} forbids a class in a {@code domain} package
+ * from depending on an infrastructure or transport root. The boundary costs an explicit conversion at the
+ * mapper edge and buys a domain type constructible and assertable with no key material in reach.</p>
  *
- * <p>Alternatives Considered: declaring the two ciphertext columns {@code @Basic(fetch = LAZY)} so that a
- * read that never touches an identifier would not fetch one. Rejected on two grounds. Lazy loading of a
- * basic attribute has no effect at all without bytecode enhancement, so the annotation would suggest a
- * guarantee the build does not deliver; and the underlying values are a nine-character identifier and a
- * twenty-character identifier, so their ciphertext is a matter of tens of bytes and there is no column
- * width here worth deferring.</p>
+ * <p>Assumptions: five columns are nullable and the rest are not, and the split comes from the reference.
+ * {@code app/cbl/COACTUPC.cbl} states the distinction itself: it edits the middle name through
+ * {@code 1235-EDIT-ALPHA-OPT} at line 1571, the optional routine, while editing the first and last names
+ * through {@code 1225-EDIT-ALPHA-REQD} at lines 1563 and 1579, the required one. A {@code NOT NULL} column
+ * on an optional field would refuse rows the reference itself produces, which rule T9 forbids as a
+ * behavioural change wearing the costume of a tightened constraint.</p>
  *
- * <p>Assumptions: five columns are nullable and the rest are not, and the split comes from the reference
- * rather than from taste. {@code app/cbl/COACTUPC.cbl} states the distinction itself instead of leaving it
- * to be inferred: it edits the middle name through {@code 1235-EDIT-ALPHA-OPT} at line 1571, the optional
- * routine, while editing the first and last names through {@code 1225-EDIT-ALPHA-REQD} at lines 1563 and
- * 1579, the required one. A {@code NOT NULL} column on an optional field would refuse rows the reference
- * itself produces, which transformation rule T9 forbids because it is a behavioural change wearing the
- * costume of a tightened constraint.</p>
+ * <h2>Identity and optimistic concurrency</h2>
  *
- * <h2>Optimistic concurrency</h2>
- * <p>Refactoring Rationale: the {@code @Version} column replaces a manual before-image comparison the
- * reference already performs, so this expresses an existing check natively rather than adding a new one.
+ * <p>Assumptions: the identifier is assigned rather than generated, because the reference carries
+ * {@code CUST-ID} as data in the record it reads rather than allocating it.</p>
+ *
+ * <p>Assumptions: the {@code @Version} column is the native form of a before-image comparison the
+ * reference already performs, so it expresses an existing check rather than adding a new one.
  * {@code app/cbl/COACTUPC.cbl} snapshots the whole pre-edit customer row into
- * {@code 10 ACUP-OLD-CUST-DATA.} at line 709, inside the before-image block that opens at line 669.
- * Paragraph {@code 9700-CHECK-CHANGE-IN-REC.} at line 4109 then compares the re-read row against that
- * snapshot and, on a mismatch, sets {@code WS-DATACHANGED-FLAG} at line 168 so the write is abandoned. The
- * comparison exists precisely because the read-for-update lock was never held
- * across client think-time in a pseudo-conversational transaction, which is the same reason a version
- * column is the right native form: both detect a concurrent write after the fact rather than preventing
- * one.</p>
+ * {@code 10 ACUP-OLD-CUST-DATA.} at line 709, inside the before-image block opening at line 669, and
+ * {@code 9700-CHECK-CHANGE-IN-REC.} at line 4109 compares the re-read row against that snapshot, setting
+ * {@code WS-DATACHANGED-FLAG} at line 168 so the write is abandoned on a mismatch. That comparison exists
+ * because the read-for-update lock was never held across client think-time in a pseudo-conversational
+ * transaction, which is the same reason a version column is the right native form: both detect a concurrent
+ * write after the fact rather than preventing one.</p>
  *
- * <p>Assumptions: the reference's customer snapshot is COMPLETE where its account snapshot is not -- all
- * eighteen non-filler fields of this record are snapshotted and all seventeen non-key fields compared,
- * whereas the account block carries no postal-code member even though {@code ACCT-ADDR-ZIP PIC X(10)}
- * exists at {@code app/cpy/CVACT01Y.cpy} line 15. The asymmetry says the account update screen never
- * edited an account postal code, so a reader comparing the two entities does not mistake the difference
- * for an omission here.</p>
- *
- * <p>Trade-offs: a version column is strictly MORE conservative than the comparison it replaces, and the
+ * <p>Trade-offs: a version column is strictly MORE conservative than the comparison it expresses, and the
  * difference is observable. The reference compares the three name parts, the three address lines, the
  * state, the country and the government-issued identifier through {@code FUNCTION UPPER-CASE}, so a
- * concurrent edit that changed only a letter's case counted as no change at all, while a version counter
+ * concurrent edit changing only a letter's case counted as no change at all, while a version counter
  * increments on ANY committed update. Refusing a write that a concurrent case-only edit overlapped is the
- * safer direction to err; reproducing the case-folded comparison in Java to preserve the blind spot
- * exactly was rejected because it would carry a silent lost-update window forward for the sake of matching
- * it. The divergence is registered as {@code D-UPDATE-CASE-SENSITIVE-COMPARE} in
+ * safer direction to err, and reproducing the case-folded comparison would carry a silent lost-update
+ * window forward for the sake of matching it. The divergence is registered as
+ * {@code D-UPDATE-CASE-SENSITIVE-COMPARE} in
  * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
  *
- * <p>Assumptions: the conflict this column raises is translated to a response elsewhere and must not be
- * translated here. The shared kernel's exception advice already answers an optimistic-lock failure with
- * HTTP 409 carrying the reference's own verbatim message, the one declared at
- * {@code app/cbl/COACTUPC.cbl} lines 521 and 522 on the {@code PIC X(75)} field at line 479. This class
- * only causes the exception at flush; it defines, catches, wraps and re-maps nothing, which is why no
- * exception type is declared or imported below. The reference's own failure path is the same shape -- it
- * sets a locked-but-failed state and issues {@code SYNCPOINT ROLLBACK} -- which transformation rule T5
- * carries over as ordinary exception propagation.</p>
+ * <p>Assumptions: the conflict this column raises is translated to a response elsewhere. The shared
+ * kernel's exception advice answers an optimistic-lock failure with HTTP 409 carrying the reference's own
+ * verbatim message, declared at {@code app/cbl/COACTUPC.cbl} lines 521 and 522 on the {@code PIC X(75)}
+ * field at line 479. This class only causes the exception at flush and defines, catches, wraps and re-maps
+ * nothing, which is why no exception type is declared or imported below. The reference's failure path is
+ * the same shape -- it sets a locked-but-failed state and issues {@code SYNCPOINT ROLLBACK} -- which rule
+ * T5 carries over as ordinary exception propagation.</p>
  *
  * <h2>Shape decisions</h2>
+ *
  * <p>Alternatives Considered: mapping only an existence probe, since the account-context contract asks
- * this context nothing about a customer except whether the row is there. Rejected for the same reason the
- * account entity is not narrowed to three amounts: this is the context's customer master, and an entity
- * shaped to one caller's question would silently drop every unmapped column on a write. The contract
- * narrows what is published; the entity carries the row.</p>
+ * this context nothing about a customer except whether the row is there. Rejected because this is the
+ * context's customer master, and an entity shaped to one caller's question would silently drop every
+ * unmapped column on a write: the contract narrows what is published, the entity carries the row.</p>
  *
- * <p>Alternatives Considered: an association to {@link Account} or a foreign key toward it, so that a
- * customer could be navigated to its accounts. Rejected because this record holds no CardDemo account
- * identifier to navigate by. Its only field naming an account is {@code CUST-EFT-ACCOUNT-ID} at
- * {@code CVCUS01Y.cpy} line 20, and that is an EXTERNAL transfer account at another institution rather
- * than a reference into {@code account.accounts}. The join path is {@code CARD-XREF-RECORD} of
- * {@code app/cpy/CVACT03Y.cpy}, whose lines 6 and 7 carry the customer and account identifiers together,
- * and the view program reaches its three rows as three separate keyed reads rather than as a navigation. A
- * foreign key would additionally reject rows the baseline accepts: the only one declared anywhere in the
- * reference belongs to the transaction-type extension in another context, and every file stanza in this
- * one is defined {@code RECOVERY(NONE) JOURNAL(NO)}.</p>
- *
- * <p>Alternatives Considered: generating the accessors with an annotation processor, or declaring this
- * type as a {@code record}. Both were rejected on the same ground and the ground is mechanical rather than
- * stylistic. Generated accessors cannot carry the Javadoc that
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md} requires of every method, and the documentation gate is
- * configured to exempt nothing, so a generated class would either fail the gate or have to be suppressed
- * out of it. A {@code record} additionally cannot serve here at all: the persistence provider needs a
- * no-argument constructor and non-final fields, neither of which a record has.</p>
- *
- * <p>Assumptions: nothing is imported from the shared kernel, and the absence is deliberate rather than an
- * oversight. This record carries no monetary amount, no twenty-six-character timestamp, and no error or
- * pagination concern, so none of the shared money, codec, error or paging types has anything to contribute
- * to it. Keyset paging over this table belongs to the repository, not to the entity.</p>
+ * <p>Alternatives Considered: an association or foreign key toward {@link Account}. Rejected because this
+ * record holds no CardDemo account identifier to navigate by -- its only field naming an account is
+ * {@code CUST-EFT-ACCOUNT-ID} at {@code CVCUS01Y.cpy} line 20, an EXTERNAL transfer account at another
+ * institution. The join path is {@code CARD-XREF-RECORD} of {@code app/cpy/CVACT03Y.cpy}, whose lines 6
+ * and 7 carry the customer and account identifiers together, and the view program reaches its three rows
+ * as three separate keyed reads. A foreign key would additionally reject rows the baseline accepts, every
+ * file stanza in this context being defined {@code RECOVERY(NONE) JOURNAL(NO)}.</p>
  */
 @Entity
 @Table(name = "customers")
@@ -201,7 +164,7 @@ public class Customer {
     /**
      * The marker standing in for a protected identifier wherever this row is rendered.
      */
-    // WHY : Assumptions: a single shared constant rather than a literal written at each use site, so that
+    // Assumptions: a single shared constant rather than a literal written at each use site, so that
     //   the two protected fields cannot drift into rendering differently and so that a search for the
     //   marker finds every place a value is withheld. It is deliberately a fixed string that says nothing
     //   about the value it replaces: a marker that varied with length or presence would leak exactly the
@@ -211,7 +174,7 @@ public class Customer {
     /**
      * The customer identifier, {@code CUST-ID PIC 9(09)}.
      */
-    // WHY : Assumptions: the key is ASSIGNED and never generated, which is why no generation strategy is
+    // Assumptions: the key is ASSIGNED and never generated, which is why no generation strategy is
     //   declared. CVCUS01Y.cpy line 5 makes this a nine-digit business identifier, the cluster keys on it
     //   per app/cbl/CBCUS01C.cbl line 32, and the migration loads it straight from the source record. A
     //   generation strategy would overwrite real identity on load and break every cross-reference row that
@@ -224,7 +187,7 @@ public class Customer {
     /**
      * The customer's first name, {@code CUST-FIRST-NAME PIC X(25)}.
      */
-    // WHY : Assumptions: the three name parts and the three address lines are VARCHAR while the state,
+    // Assumptions: the three name parts and the three address lines are VARCHAR while the state,
     //   country, postal, phone, transfer-account and indicator columns are CHAR, and the split follows one
     //   principle rather than two. A descriptive field's declared width is a maximum -- a name shorter than
     //   twenty-five characters is a shorter name, not a defective one -- so its trailing blanks in the
@@ -262,7 +225,7 @@ public class Customer {
     /**
      * The third address line, {@code CUST-ADDR-LINE-3 PIC X(50)}, which carries the city.
      */
-    // WHY : Assumptions: this line IS the city, and it is the only place a city is held, because the
+    // Assumptions: this line IS the city, and it is the only place a city is held, because the
     //   record declares no city field. A search for CUST-CITY returns nothing in app/cpy/, nothing in
     //   app/cbl/CBCUS01C.cbl and nothing anywhere under app/. The extract settles what the name leaves
     //   ambiguous: position 185 through 234 of every record in app/data/ASCII/custdata.txt holds a city
@@ -275,9 +238,9 @@ public class Customer {
     /**
      * The state code, {@code CUST-ADDR-STATE-CD PIC X(02)}.
      */
-    // WHY : Assumptions: CHAR(2) in V1__account.sql, and this value is compared against the seeded
-    //       reference state table rather than merely displayed, so the fixed-character binding is
-    //       what keeps the comparison agreeing with the stored form.
+    // Assumptions: CHAR(2) in V1__account.sql, and this value is compared against the seeded
+    // reference state table rather than merely displayed, so the fixed-character binding is
+    // what keeps the comparison agreeing with the stored form.
     @JdbcTypeCode(Types.CHAR)
     @Column(name = "addr_state_cd", length = 2, nullable = false)
     private String addressStateCode;
@@ -285,8 +248,8 @@ public class Customer {
     /**
      * The country code, {@code CUST-ADDR-COUNTRY-CD PIC X(03)}.
      */
-    // WHY : Assumptions: CHAR(3) in V1__account.sql; the override is repeated per member because
-    //       Hibernate infers the JDBC type independently for each one.
+    // Assumptions: CHAR(3) in V1__account.sql; the override is repeated per member because
+    // Hibernate infers the JDBC type independently for each one.
     @JdbcTypeCode(Types.CHAR)
     @Column(name = "addr_country_cd", length = 3, nullable = false)
     private String addressCountryCode;
@@ -294,7 +257,7 @@ public class Customer {
     /**
      * The postal code, {@code CUST-ADDR-ZIP PIC X(10)}, which is text and NOT a date.
      */
-    // WHY : Assumptions: this field is one of THREE PIC X(10) fields in this record, and it is not the
+    // Assumptions: this field is one of THREE PIC X(10) fields in this record, and it is not the
     //   date. Only CUST-DOB-YYYY-MM-DD at CVCUS01Y.cpy line 19 is; this one at line 14 and
     //   CUST-EFT-ACCOUNT-ID at line 20 share the width and nothing else. The extract distinguishes them by
     //   punctuation position: a date carries hyphens at positions 5 and 8, whereas this field holds either
@@ -302,14 +265,14 @@ public class Customer {
     //   record in app/data/ASCII/custdata.txt has a hyphen at position 5 here, so the two field kinds are
     //   distinguishable by punctuation alone. A date mapping would reject every value in the extract, and a
     //   numeric mapping would discard both the hyphen of the longer form and any leading zero.
-    // WHY : Trade-offs: CHAR rather than VARCHAR, so a read returns the value blank-padded to ten. A
+    // Trade-offs: CHAR rather than VARCHAR, so a read returns the value blank-padded to ten. A
     //   postal code is a fixed-width code rather than free text, and the padding is part of that contract;
     //   trimming belongs at the mapper edge, where the anti-corruption layer already sits, rather than in
     //   an entity whose job is to carry the row as stored.
-    // WHY : Assumptions: the column is CHAR(10) in V1__account.sql, so a five-digit postal code is
-    //       stored blank-padded to ten. Left as VARCHAR the padded stored value and an unpadded
-    //       parameter would be different strings under PostgreSQL's text comparison rules, so a
-    //       lookup would silently miss rather than fail loudly.
+    // Assumptions: the column is CHAR(10) in V1__account.sql, so a five-digit postal code is
+    // stored blank-padded to ten. Left as VARCHAR the padded stored value and an unpadded
+    // parameter would be different strings under PostgreSQL's text comparison rules, so a
+    // lookup would silently miss rather than fail loudly.
     @JdbcTypeCode(Types.CHAR)
     @Column(name = "addr_zip", length = 10, nullable = false)
     private String addressZip;
@@ -317,7 +280,7 @@ public class Customer {
     /**
      * The primary phone number, {@code CUST-PHONE-NUM-1 PIC X(15)}, punctuation-formatted and optional.
      */
-    // WHY : Assumptions: these fifteen characters are FORMATTED TEXT, not fifteen digits, so the column is
+    // Assumptions: these fifteen characters are FORMATTED TEXT, not fifteen digits, so the column is
     //   character-typed and the value is stored exactly as the reference holds it. app/cbl/COACTUPC.cbl
     //   redefines the before-image of this field at lines 723 through 731 as a one-byte filler, three
     //   digits, a one-byte filler, three digits, a one-byte filler, four digits and a two-byte filler --
@@ -325,7 +288,7 @@ public class Customer {
     //   lines 733 through 741. Every record in app/data/ASCII/custdata.txt agrees: an opening parenthesis
     //   at position 1, a closing one at position 5, a hyphen at position 9, and two trailing blanks. Not
     //   one value is purely numeric.
-    // WHY : Trade-offs: the punctuation is deliberately NOT stripped and the value is deliberately NOT
+    // Trade-offs: the punctuation is deliberately NOT stripped and the value is deliberately NOT
     //   modelled as a number. Normalising to ten digits here would be the tidier representation and is
     //   rejected: the stored form is what the reference reads back and what a report renders, so
     //   normalisation would have to be undone on every read, and a numeric type would additionally destroy
@@ -336,7 +299,7 @@ public class Customer {
     /**
      * The secondary phone number, {@code CUST-PHONE-NUM-2 PIC X(15)}, punctuation-formatted and optional.
      */
-    // WHY : Assumptions: identical in form and treatment to the primary number above, from the same
+    // Assumptions: identical in form and treatment to the primary number above, from the same
     //   redefinition at app/cbl/COACTUPC.cbl lines 733 through 741. It is declared separately rather than
     //   folded into a collection because the reference declares two discrete fields at fixed offsets, and
     //   a collection would introduce an arity the 500-byte record cannot express.
@@ -351,7 +314,7 @@ public class Customer {
      * from being the value itself; withholding the accessor means no code path outside this context can
      * ask for it, so the question of whether a given caller masked correctly never arises.</p>
      */
-    // WHY : Trade-offs: the reference declares this field NUMERIC, PIC 9(09) at CVCUS01Y.cpy line 17, and
+    // Trade-offs: the reference declares this field NUMERIC, PIC 9(09) at CVCUS01Y.cpy line 17, and
     //   the target carries it as bytes. The representation change is deliberate and the extract shows why
     //   the plaintext must be handled as a nine-CHARACTER zero-padded string before it is ever encrypted:
     //   6 of the 50 records in app/data/ASCII/custdata.txt begin with a zero, which any integer type drops
@@ -368,7 +331,7 @@ public class Customer {
      * <p>Assumptions: nullable, because the reference leaves the field optional, and likewise without a
      * public accessor.</p>
      */
-    // WHY : Trade-offs: as with the national identifier above, the plaintext is significant to its full
+    // Trade-offs: as with the national identifier above, the plaintext is significant to its full
     //   declared width and must be encrypted as text rather than as a number. CVCUS01Y.cpy line 18 declares
     //   twenty characters, and every one of the fifty seeded values is left-padded with zeros to fill them,
     //   so a numeric round trip would return a shorter and different identifier.
@@ -378,7 +341,7 @@ public class Customer {
     /**
      * The date of birth, {@code CUST-DOB-YYYY-MM-DD PIC X(10)}, the ONE date in this record.
      */
-    // WHY : Assumptions: this is the only one of the record's three PIC X(10) fields that holds a date, and
+    // Assumptions: this is the only one of the record's three PIC X(10) fields that holds a date, and
     //   the reference proves the character layout rather than merely implying it. app/cbl/COACTUPC.cbl
     //   compares the master field against an eight-character before-image at lines 4174 through 4179,
     //   slicing the master at (1:4), (6:2) and (9:2) while slicing the before-image at (1:4), (5:2) and
@@ -386,7 +349,7 @@ public class Customer {
     //   hyphens, and the offset asymmetry between the ten-character and eight-character forms is explicit
     //   in the source. Every record in app/data/ASCII/custdata.txt carries hyphens at exactly those two
     //   positions.
-    // WHY : Assumptions: the target name drops the format suffix the reference field carries. The suffix
+    // Assumptions: the target name drops the format suffix the reference field carries. The suffix
     //   describes the CHARACTER representation of a fixed-width text field, so once the column is a true
     //   date it would actively misdescribe what is stored; recording a representation change in the target
     //   name is the same convention that turns the national identifier into an encrypted column. The
@@ -399,16 +362,16 @@ public class Customer {
      * The electronic-transfer account identifier, {@code CUST-EFT-ACCOUNT-ID PIC X(10)}, text and NOT a
      * date.
      */
-    // WHY : Assumptions: the third of the three PIC X(10) fields, at CVCUS01Y.cpy line 20, and like the
+    // Assumptions: the third of the three PIC X(10) fields, at CVCUS01Y.cpy line 20, and like the
     //   postal code above it is not the date. It is an account at ANOTHER institution used for electronic
     //   transfer, not a reference into account.accounts, which is why no association is declared for it.
-    // WHY : Trade-offs: String over any numeric type, even though every seeded value is ten digits. The
+    // Trade-offs: String over any numeric type, even though every seeded value is ten digits. The
     //   leading digit is zero in all fifty records of app/data/ASCII/custdata.txt, so a numeric type would
     //   silently drop it and change the identifier; an external account number is an opaque token to be
     //   carried byte-for-byte rather than a quantity to be computed on.
-    // WHY : Assumptions: CHAR(10) in V1__account.sql. The reference declares this field as ten
-    //       characters and its seeded values are zero-filled to that width, so the padding is part
-    //       of the value rather than an artefact of storage.
+    // Assumptions: CHAR(10) in V1__account.sql. The reference declares this field as ten
+    // characters and its seeded values are zero-filled to that width, so the padding is part
+    // of the value rather than an artefact of storage.
     @JdbcTypeCode(Types.CHAR)
     @Column(name = "eft_account_id", length = 10, nullable = false)
     private String eftAccountId;
@@ -416,25 +379,22 @@ public class Customer {
     /**
      * Whether this customer is the primary cardholder, {@code CUST-PRI-CARD-HOLDER-IND PIC X(01)}.
      */
-    // WHY : Alternatives Considered: a boolean or an enum, since every one of the fifty seeded records
+    // Alternatives Considered: a boolean or an enum, since every one of the fifty seeded records
     //   carries Y and the online screen accepts only Y or N. Both were rejected in favour of the
     //   one-character string the reference declares. CVCUS01Y.cpy line 21 states only PIC X(01) and
     //   attaches no 88-level value set -- there is not one such level anywhere in this record -- and
     //   app/cbl/COACTUPC.cbl compares the field through FUNCTION TRIM at lines 1764 and 1766 rather than
     //   against a value list. A boolean would have to invent a mapping for any third character the file
     //   can hold, and an enum would fail to construct on one rather than carrying it.
-    // WHY : Refactoring Rationale: this comment used to say the schema constrains the column to Y or N,
-    //   and used to contrast it with the account status as a domain "the reference does state outright".
-    //   Both halves were wrong in the same direction. The check has been removed from V1__account.sql
-    //   because the value set it enforced is declared on an EDIT FLAG in one online program and not on the
-    //   record field, and the account status is in the same position -- its own value set sits on
-    //   WS-EDIT-ACCT-STATUS at app/cbl/COACTUPC.cbl:193 -- so the contrast asserted a difference that does
-    //   not exist. That neighbouring constraint is left in place because this correction was scoped to
-    //   this column, and the asymmetry is recorded here rather than left for a reader to trip over.
-    // WHY : Assumptions: CHAR(1) in V1__account.sql, and UNCONSTRAINED. The reference's Y-or-N rule is
-    //       enforced on the update path by AccountUpdateService.editYesNo, which is where
-    //       1220-EDIT-YESNO enforces it. VARCHAR(1) would validate against a different declared type and
-    //       would compare under text rules.
+    // Assumptions: neither this column nor the account status has a value set declared on its RECORD
+    //   field -- the indicator's sits on an edit flag in one online program and the status's sits on
+    //   WS-EDIT-ACCT-STATUS at app/cbl/COACTUPC.cbl:193 -- so the two are in the same position. This
+    //   column is unconstrained in V1__account.sql while the neighbouring status column carries a check,
+    //   and the asymmetry is recorded here rather than left for a reader to trip over.
+    // Assumptions: CHAR(1) in V1__account.sql, and UNCONSTRAINED. The reference's Y-or-N rule is
+    // enforced on the update path by AccountUpdateService.editYesNo, which is where
+    // 1220-EDIT-YESNO enforces it. VARCHAR(1) would validate against a different declared type and
+    // would compare under text rules.
     @JdbcTypeCode(Types.CHAR)
     @Column(name = "pri_card_holder_ind", length = 1, nullable = false)
     private String primaryCardHolderIndicator;
@@ -446,7 +406,7 @@ public class Customer {
      * at three digits at {@code CVCUS01Y.cpy} line 22 and a wider type would admit values no reference
      * program could produce.</p>
      */
-    // WHY : Assumptions: the column carries NO range constraint, and the omission is deliberate. The
+    // Assumptions: the column carries NO range constraint, and the omission is deliberate. The
     //   industry floor for this kind of score is 300, so a CHECK BETWEEN 300 AND 850 is exactly the
     //   reasonable-looking constraint a reviewer would expect to find here. It must not be added: the
     //   scores in app/data/ASCII/custdata.txt run from 1 upward, and 21 of the 50 records fall below 300.
@@ -459,7 +419,7 @@ public class Customer {
     /**
      * The optimistic-concurrency counter.
      */
-    // WHY : Assumptions: the provider owns this value entirely -- it sets it on insert and increments it on
+    // Assumptions: the provider owns this value entirely -- it sets it on insert and increments it on
     //   every update -- so nothing in this class or above it assigns to it, and the constructor does not
     //   take it. That is what makes it a faithful stand-in for the reference's before-image comparison
     //   described on the class above: neither mechanism is something a caller can supply or forge.
@@ -528,7 +488,7 @@ public class Customer {
         this.addressZip = Objects.requireNonNull(addressZip, "addressZip must not be null");
         this.phoneNumber1 = phoneNumber1;
         this.phoneNumber2 = phoneNumber2;
-        // WHY : Assumptions: both protected arrays are copied on the way in and never handed back out.
+        // Assumptions: both protected arrays are copied on the way in and never handed back out.
         //   An array is mutable and a caller retaining its own reference could alter the stored
         //   ciphertext after construction, which for an encrypted identifier means corrupting it in a way
         //   no constraint would catch.
@@ -629,12 +589,12 @@ public class Customer {
         this.phoneNumber1 = editedPhoneNumber1;
         this.phoneNumber2 = editedPhoneNumber2;
 
-        // WHY : Assumptions: a PRESERVE intent leaves the field untouched rather than reassigning it to
-        //       its own current value. The two are equivalent in the stored result, but only the
-        //       untouched form is equivalent in the DIRTY-CHECKING result: reassigning a byte array
-        //       makes the provider see a changed field and issue an update for a column nothing edited,
-        //       which advances the version and would make a concurrent reader's precondition fail for a
-        //       change that never happened.
+        // Assumptions: a PRESERVE intent leaves the field untouched rather than reassigning it to
+        // its own current value. The two are equivalent in the stored result, but only the
+        // untouched form is equivalent in the DIRTY-CHECKING result: reassigning a byte array
+        // makes the provider see a changed field and issue an update for a column nothing edited,
+        // which advances the version and would make a concurrent reader's precondition fail for a
+        // change that never happened.
         if (nationalIdentifier.replaces()) {
             this.ssnEncrypted = defensiveCopy(nationalIdentifier.ciphertext());
         }
@@ -672,12 +632,11 @@ public class Customer {
      * columns keeps the caller's shape uniform; the refusal names the column, which a type-level split
      * could not do as clearly.</p>
      *
-     * <p>Refactoring Rationale: this type used to hold the caller's ciphertext array by ALIAS and hand the
-     * same array back, so an intent was not immutable in the one component that carries a protected value.
-     * A caller reusing a buffer across two identifiers -- or mutating one after stating its intent -- could
-     * therefore have a value written that it never declared, and nothing in the type or the entity would
-     * report the substitution. Both the constructor and the accessor copy now, so the intent is fixed at
-     * construction whichever side the array is touched from.</p>
+     * <p>Assumptions: both the constructor and the accessor COPY the ciphertext array rather than holding
+     * or handing back the caller's own, so an intent is immutable in the one component that carries a
+     * protected value. Holding it by alias would let a caller reusing a buffer across two identifiers, or
+     * mutating one after stating its intent, have a value written that it never declared, with nothing in
+     * the type or the entity reporting the substitution.</p>
      */
     public static final class ProtectedValueUpdate {
 
@@ -970,19 +929,18 @@ public class Customer {
     /**
      * Renders this row for a log line or a diagnostic, disclosing no cardholder detail.
      *
-     * <p>Refactoring Rationale: the rendering an entity receives by default prints every field. On this
-     * entity that would emit a name, a full postal address, two phone numbers, a date of birth, a credit
-     * score and the raw bytes of two encrypted identifiers -- the single most disclosing default rendering
-     * anywhere in this migration, and one that would reach a log on every persistence failure the provider
-     * reports. All of that was already withheld.</p>
+     * <p>Assumptions: the rendering is written out rather than inherited, because the default an entity
+     * receives prints every field. On this entity that would emit a name, a full postal address, two phone
+     * numbers, a date of birth, a credit score and the raw bytes of two encrypted identifiers -- the most
+     * disclosing default rendering anywhere in this migration, and one that reaches a log on every
+     * persistence failure the provider reports.</p>
      *
-     * <p>Refactoring Rationale: what was NOT withheld was the CUSTOMER IDENTIFIER, carried on the
-     * reasoning that it says which row and is not cardholder data. The sensitive-data logging contract in
+     * <p>Assumptions: the CUSTOMER IDENTIFIER is withheld as well, even though it names a row rather than
+     * a cardholder. The sensitive-data logging contract in
      * {@code docs/architecture/observability.md} names customer identifiers explicitly among the
-     * prohibited values, so that reasoning does not hold, and the first part of the rule it states is that
-     * a prohibited value is OMITTED rather than abbreviated. The identifier is therefore gone, and the
-     * version counter -- which that same rule admits by name -- is what remains to say which revision was
-     * in hand.</p>
+     * prohibited values, and the first part of the rule it states is that a prohibited value is OMITTED
+     * rather than abbreviated. What remains to say which revision was in hand is the version counter,
+     * which that same rule admits by name.</p>
      *
      * <p>Trade-offs: the two protected identifiers are still NAMED with a fixed marker rather than left
      * out of the rendering altogether, and that is a deliberate exception to the omit-rather-than-mask

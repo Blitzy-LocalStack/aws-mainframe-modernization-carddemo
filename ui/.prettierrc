@@ -44,10 +44,10 @@
 # combine to break one typed signature across three lines. The cost is soft wrapping in
 # a narrow split view, which is a per-reader viewer setting, whereas a hard wrap is
 # committed into the diff for everyone.
-# Alternatives Considered: 80, and 120. 80 is the default and the width the tree was
-# first written to, which is precisely why it lost -- deferring to what was authored
-# first ratifies an accident rather than deciding anything. 120 stops two files fitting
-# side by side on a common display, and this tree is read as screen-plus-test pairs.
+# Alternatives Considered: 80, and 120. 80 is Prettier's default, and defaulting is not a
+# decision -- at 80 the signatures above hard-wrap across three lines. 120 stops two files
+# fitting side by side on a common display, and this tree is read as screen-plus-test
+# pairs.
 # Assumptions: no width can corrupt the verbatim message catalog in
 # ui/src/messages/messages.ts, because Prettier never breaks a string literal. That is
 # what keeps a width change clear of Transformation Rule T8's character-for-character
@@ -95,8 +95,8 @@ trailingComma: 'all'
 
 # Trade-offs: a sole arrow-function parameter keeps its parentheses, so adding a type
 # annotation or a second parameter changes only the text inside parentheses that already
-# exist and the diff shows the change alone. The cost is slight noise on short callbacks;
-# omitting them was Prettier's pre-2.0 default and was changed for this reason.
+# exist and the diff shows the change alone. The cost is slight noise on short callbacks,
+# which is accepted because a typed callback is the common case in this tree.
 arrowParens: 'always'
 
 # Assumptions: line endings are normalised to LF because this application is built and

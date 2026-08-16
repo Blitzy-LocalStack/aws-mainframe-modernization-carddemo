@@ -331,14 +331,61 @@ public class SecurityConfig {
      * see.</p>
      *
      * <p>Trade-offs: because the grant is by authority, a browser opened straight at the view is refused,
-     * since a navigation carries no bearer token. The page is reachable to a caller that presents one,
-     * which is how the document is fetched for a contract comparison. The accepted cost is that the view
-     * is not a click-and-read page; the alternative was to make the whole API description anonymous,
-     * which the paragraph above declines.</p>
+     * since a navigation carries no bearer token. The accepted cost is that the view is not a
+     * click-and-read page; the alternative was to make the whole API description anonymous, which the
+     * paragraph above declines.</p>
+     *
+     * <p>⚠️ Assumptions: these paths are reachable <b>from inside the VPC only</b>, and this paragraph
+     * exists because an earlier form of it said the page "is reachable to a caller that presents one"
+     * without that qualification -- which read as a claim about the deployed edge and was false there.
+     * Neither environment root routes any of these five patterns. Both forward exactly
+     * {@code /api/v1/reference} and {@code /api/v1/reference/*} to this service's target group, so a
+     * request for {@code /v3/api-docs} or {@code /swagger-ui.html} arriving at the public edge is
+     * answered by the load balancer's default action and never reaches this chain. What a bearer token
+     * buys is access from a caller already on the private network -- a task in the application subnets, or
+     * an operator forwarding a port -- which is where a contract comparison is actually run.</p>
+     *
+     * <p>Alternatives Considered: adding service-prefixed documentation routes to the edge, by moving
+     * these addresses under {@code /api/v1/reference/} so the existing wildcard rule carries them.
+     * Rejected on two counts. It would publish an interactive request-issuing console at the internet
+     * edge, which is a wider reachable surface than the migration plan's security posture accepts for a
+     * document that is already committed to this repository as
+     * {@code src/main/resources/openapi/reference-api.yaml} -- so the edge route would buy nothing an
+     * integrator cannot already read from source. And the view's assets ship inside a webjar served from
+     * {@code /swagger-ui/}, which is not relocatable by the two springdoc path keys alone, so a
+     * prefix-only move would route the page and not its stylesheet and leave a console that loads and
+     * fails to render. The grant is therefore correct as it stands and it is the ROUTE, not the rule,
+     * that is deliberately absent.</p>
+     *
+     * <p>Assumptions: the grant is nonetheless required rather than dead configuration, and
+     * {@code ContractPublicationTest} is what holds that claim. Without it every address this module's
+     * {@code application.yml} pins answers the catch-all with 403 to a valid token of either group, so
+     * the packaged contract would be served from a static location, named by the view, and fetchable by
+     * nobody -- the exact defect the Refactoring Rationale above records a sibling context discovering at
+     * run time.</p>
      */
     private static final List<String> DOCUMENTATION_PATHS = List.of(
             "/v3/api-docs", "/v3/api-docs/**", "/reference-api.yaml",
             "/swagger-ui.html", "/swagger-ui/**");
+
+    /**
+     * Reports the paths this service serves its own API description at.
+     *
+     * <p>Assumptions: this accessor exists so a test can read the chain's OWN pattern list and match the
+     * addresses {@code application.yml} pins against it, rather than restating either side. A test that
+     * compared two literals would pass while the two files disagreed, which is precisely the failure the
+     * Refactoring Rationale on {@link #DOCUMENTATION_PATHS} records a sibling context discovering at run
+     * time. The sibling card context publishes the same accessor for the same reason.</p>
+     *
+     * <p>Assumptions: these paths are deliberately kept OUT of any published-operation inventory. The
+     * committed contract does not declare a documentation path as an operation and should not, so listing
+     * them alongside operations would make each inventory report the other as incomplete.</p>
+     *
+     * @return the documentation paths, in the order the chain grants them; never {@code null} or empty
+     */
+    public static List<String> documentationPaths() {
+        return DOCUMENTATION_PATHS;
+    }
 
     /*
      * WHY : Alternatives Considered: one MANAGEMENT_PATH pattern granted to ADMIN_AUTHORITY, with

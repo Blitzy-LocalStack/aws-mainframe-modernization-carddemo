@@ -49,10 +49,10 @@
 #
 # Parameters / Return values:
 #   None are declared here -- this file holds only resources and data sources.
-#   The module's TWENTY inputs, each carrying its own `type` and `description`,
+#   The module's TWENTY-ONE inputs, each carrying its own `type` and `description`,
 #   are declared in infra/modules/kms/variables.tf, and the identifiers, ARNs
 #   and alias names the module publishes to its caller are declared in
-#   infra/modules/kms/outputs.tf. All twenty inputs are consumed below: an input
+#   infra/modules/kms/outputs.tf. All twenty-one inputs are consumed below: an input
 #   this file stopped reading would be a contract still published to callers
 #   and to the module's generated documentation but no longer honoured, which is
 #   the case tflint's unused-declaration rule is enabled to catch.
@@ -69,7 +69,7 @@
 #       rejected by the service's own lockout safety check. Every policy below
 #       therefore opens with an administration statement; that check is relied
 #       on, never bypassed.
-#   NINETEEN of the twenty inputs carry a `validation` block -- every one except
+#   TWENTY of the twenty-one inputs carry a `validation` block -- every one except
 #   `tags`, whose keys and values are opaque to this module -- and each rejects a
 #   bad value at plan time before any of this file is reached; they are
 #   documented at the declarations themselves in variables.tf.
@@ -1469,6 +1469,71 @@ data "aws_iam_policy_document" "sqs" {
       test     = "StringEquals"
       variable = "kms:ViaService"
       values   = ["sqs.${data.aws_region.current.region}.amazonaws.com"]
+    }
+  }
+
+  # WHY : ⚠️ Refactoring Rationale: this statement was ABSENT, and its absence broke the
+  #       one path that exists to record a failure. The scheduler grant above covers
+  #       `scheduler.amazonaws.com`; the batch bracket finalizer and reconciler in
+  #       infra/modules/step-functions-batch are EventBridge RULES, which call KMS as
+  #       `events.amazonaws.com`. Their dead-letter queue is encrypted under this key, so
+  #       every event those rules could not deliver was itself rejected with a KMS
+  #       access denial -- the online read-only flag stayed set and the queue that exists
+  #       to say so held nothing. Two EventBridge features, two principals: a key policy
+  #       has to name both.
+  # WHY : Assumptions: the two actions are the pair an enqueue needs and no more.
+  #       GenerateDataKey* produces the data key the message is encrypted under and
+  #       Decrypt is required because SQS re-reads the key material on delivery; nothing
+  #       here needs Encrypt, ReEncrypt or any key-management action.
+  # WHY : Assumptions: three conditions narrow a grant that is otherwise usable by the
+  #       service on behalf of any account it serves. CallerAccount confines it to
+  #       requests made for this account. ViaService confines it to requests reaching
+  #       KMS THROUGH this region's queue service, so the principal cannot use the key
+  #       directly. aws:SourceArn confines it to rules matching this deployment's naming
+  #       convention, which is what stops an unrelated rule in the same account
+  #       encrypting under a key provisioned for the batch bracket -- the confused-deputy
+  #       condition the scheduler grant above leaves to CallerAccount alone.
+  #       Trade-offs: the source is a PATTERN, because the rules are created by a module
+  #       that consumes this key and exact ARNs would close a dependency cycle between
+  #       the two. ArnLike over a `rule/<prefix>-<environment>-*` pattern is the closest
+  #       narrowing available without that cycle; variables.tf refuses a pattern with a
+  #       wildcard account or region so the narrowing cannot be widened by input.
+  dynamic "statement" {
+    for_each = length(var.sqs_key_eventbridge_rule_source_arn_patterns) > 0 ? [1] : []
+
+    content {
+      sid    = "AllowEventBridgeRuleDeadLetterDeliveryThroughSqs"
+      effect = "Allow"
+
+      actions = [
+        "kms:GenerateDataKey*",
+        "kms:Decrypt",
+      ]
+
+      resources = ["*"]
+
+      principals {
+        type        = "Service"
+        identifiers = ["events.amazonaws.com"]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:CallerAccount"
+        values   = [data.aws_caller_identity.current.account_id]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["sqs.${data.aws_region.current.region}.amazonaws.com"]
+      }
+
+      condition {
+        test     = "ArnLike"
+        variable = "aws:SourceArn"
+        values   = var.sqs_key_eventbridge_rule_source_arn_patterns
+      }
     }
   }
 }

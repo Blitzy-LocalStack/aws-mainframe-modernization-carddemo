@@ -28,7 +28,7 @@
 #       is 0-based, DFSORT SYMNAMEs are 1-based - so leaving the base implicit
 #       is a guaranteed one-byte error on every field, not a stylistic risk.
 #   4.  User-specified Rule 1 (Explainability) is enforced here by authoring
-#       discipline alone. config/checkstyle/checkstyle.xml L185 scopes its
+#       discipline alone. config/checkstyle/checkstyle.xml L178 scopes its
 #       Checker to fileExtensions="java", so no file in this directory is ever
 #       scanned. There is no mechanical fallback; see section 2.3.
 # =============================================================================
@@ -210,8 +210,8 @@ times, `Alternatives Considered:` five times and `Trade-offs:` twice.
 
 ### 2.3 This is a review gate with no mechanical fallback
 
-`config/checkstyle/checkstyle.xml` L185 sets its `Checker` to
-`fileExtensions="java"`, with its own adjacent note at L176 recording that only
+`config/checkstyle/checkstyle.xml` L178 sets its `Checker` to
+`fileExtensions="java"`, with its own adjacent note at L169 recording that only
 Java carries Javadoc. **No file in this directory is ever scanned by
 Checkstyle.** The gate is triple-anchored and every anchor is human:
 
@@ -1154,8 +1154,8 @@ From `V1__reference.sql` and `V2__seed_reference.sql`, both read directly:
   characters plus three spaces. `CHAR(10)` reproduces that padding rather than
   storing an unpadded literal as a distinct value.
 - **The restricting foreign key is preserved by the constraint, and the baseline
-  index order is preserved by the primary key.** `V1__reference.sql` L176 to
-  L185 records that the composite `PRIMARY KEY (type_cd, cat_cd)` already builds
+  index order is preserved by the primary key.** `V1__reference.sql` L165 to
+  L174 records that the composite `PRIMARY KEY (type_cd, cat_cd)` already builds
   a unique B-tree on exactly those two columns in exactly that order, which is
   what the baseline's `XTRNTYCAT.ddl` unique index names, so **no separate
   `CREATE INDEX` is issued** - a second index on the same columns in the same

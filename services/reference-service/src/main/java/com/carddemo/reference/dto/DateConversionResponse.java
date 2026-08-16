@@ -17,12 +17,14 @@ import java.util.Locale;
  * caller receives.</p>
  *
  * <p>Refactoring Rationale: this paragraph said the shape was carried "by the queue route beside it"
- * as well, and named a listener type as the path both routes took to the rules. The queue route is
- * {@code com.carddemo.reference.service.DateInquiryMessageListener}; it answers with a fixed-width
- * forty-six-character body rendered by
- * {@code com.carddemo.reference.mapper.DateInquiryReplyMapper} and has never carried this shape. The
- * claim is corrected rather than dropped so that a reader does not go looking for a queue consumer
- * that serialises this record.</p>
+ * as well, and named a listener type as the path both routes took to the rules. The queue route
+ * answers with a fixed-width forty-six-character body rendered by
+ * {@code com.carddemo.common.codec.DateInquiryReplyCodec} and has never carried this shape. The claim
+ * is corrected rather than dropped so that a reader does not go looking for a queue consumer that
+ * serialises this record. Assumptions: that route is not implemented in this module at all -- the ONE
+ * shared inquiry request queue is owned by {@code com.carddemo.account.service.InquiryMessageListener},
+ * which dispatches on the request's function code -- so this record is the ONLY wire form of a date
+ * answer this module publishes.</p>
  *
  * <h2>Why the outcome travels as two independent members</h2>
  *

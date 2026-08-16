@@ -16,7 +16,7 @@
 #   the two environments visible in their own terraform.tfvars files instead of
 #   hidden in this module.
 #
-# Parameters -- TWENTY inputs, two required and eighteen optional, in three
+# Parameters -- TWENTY-ONE inputs, two required and nineteen optional, in three
 # groups. The count and the grouping are measurements over this file
 # (`grep -c '^variable "'`), not a description written once and left behind:
 #
@@ -42,7 +42,7 @@
 #                                                  one key a workload role calls
 #                                                  directly.
 #
-#   Conditions that narrow those grants, and the service-principal grants (10):
+#   Conditions that narrow those grants, and the service-principal grants (11):
 #     aurora_encryption_context_ids           list(string) aws:rds:db-id values.
 #     s3_encryption_context_bucket_arns       list(string) aws:s3:arn values.
 #     secrets_encryption_context_arns         list(string) SecretARN values.
@@ -66,6 +66,15 @@
 #                                                          granted a data key.
 #     cloudwatch_log_group_arns               list(string) Exact log groups.
 #     sns_topic_arns                          list(string) Exact alert topics.
+#     sqs_key_eventbridge_rule_source_arn_patterns
+#                                             list(string) EventBridge RULE ARN
+#                                                          patterns whose
+#                                                          dead-letter writes may
+#                                                          use the queue key. A
+#                                                          pattern, not exact
+#                                                          ARNs, because the rules
+#                                                          are created by a module
+#                                                          that consumes this key.
 #
 #   Each block below carries the full `type` and `description` that TFLint's
 #   terraform_typed_variables and terraform_documented_variables rules require;
@@ -86,7 +95,7 @@
 #   infra/modules/kms/outputs.tf.
 #
 # Errors / Exceptions:
-#   NINETEEN of the twenty inputs carry a `validation` block -- every one except
+#   TWENTY of the twenty-one inputs carry a `validation` block -- every one except
 #   `tags`, whose keys and values are opaque to this module -- and each rejects a
 #   bad value during `terraform plan`, before any request leaves the machine,
 #   rather than letting the service reject it part-way through
@@ -94,7 +103,7 @@
 #   reject later: `environment` (not one of the two environments that have a
 #   root), `name_prefix` (characters an alias name cannot hold),
 #   `enable_key_rotation` (anything but `true`), and `deletion_window_in_days`
-#   (outside the range the service accepts, or fractional). The fifteen list and
+#   (outside the range the service accepts, or fractional). The sixteen list and
 #   ARN inputs reject the shapes that would silently WIDEN a grant rather than
 #   break it -- a wildcard, an assumed-role session ARN, a user, a root, a
 #   service principal, or a duplicate entry -- which is the class of mistake a
@@ -102,7 +111,7 @@
 #   otherwise be valid and permissive.
 #   `environment` and `cloudfront_distribution_arn` have no default, so omitting
 #   either stops the run with a missing-required-argument error.
-#   Assumptions: the nineteen is a MEASUREMENT, reproducible with
+#   Assumptions: the twenty is a MEASUREMENT, reproducible with
 #   `grep -c '^  validation {' infra/modules/kms/variables.tf`, and it covers the
 #   list inputs as well as the scalars. An understated count would invite a
 #   contributor to add an unvalidated list input believing that is the established
@@ -548,6 +557,63 @@ variable "sqs_key_user_role_arns" {
 # policy application in main.tf, so the key ARN can create an Aurora cluster,
 # bucket or secret first and the resulting exact resource identity can then
 # narrow the final key policy without a dependency cycle.
+# WHY : Refactoring Rationale: this input exists because the SQS key policy granted
+#       the SCHEDULER service principal and nothing else, while two EventBridge RULES
+#       -- the batch bracket finalizer and its reconciler, declared in
+#       infra/modules/step-functions-batch -- deliver to a dead-letter queue encrypted
+#       under this key. EventBridge Rules call KMS as `events.amazonaws.com`, which the
+#       scheduler grant does not cover, so every bracket-release event EventBridge
+#       could not deliver was itself undeliverable: the queue that exists to catch a
+#       lost release rejected the write with a KMS access denial, leaving the online
+#       read-only flag set with no record of why. Rules and schedules are different
+#       principals even though both are EventBridge, which is exactly the kind of
+#       distinction a key policy has to state rather than imply.
+#
+# WHY : Assumptions: the value is an ARN PATTERN rather than the exact rule ARNs, and
+#       the reason is a module cycle rather than convenience. The rules live in the
+#       step-functions-batch module, which consumes this key's ARN; feeding their ARNs
+#       back here would make each module depend on the other and no root could resolve
+#       it. A pattern built from the naming convention -- `rule/<prefix>-<environment>-*`
+#       -- is resolvable at plan time from values the root already holds, and it still
+#       binds the grant to this deployment's own rules rather than to every rule in the
+#       account.
+#       Alternatives Considered: (a) leaving the queue on SQS-managed encryption so no
+#       key grant were needed. Rejected because the queue carries which night's release
+#       was lost and for which account, and AAP section 0.4.1.9 puts every queue in this
+#       deployment under a customer-managed key; a single exception would be the one
+#       store whose retention and access an operator could not reason about with the
+#       others. (b) Granting `events.amazonaws.com` with no SourceArn condition, which
+#       is what most published examples show. Rejected: a service-principal grant with
+#       only an account condition is usable by that service on behalf of any rule in the
+#       account, so a rule created for an unrelated purpose could encrypt under this
+#       key.
+#
+# WHY : Trade-offs: a pattern cannot assert that the two rules exist, only that nothing
+#       outside the naming convention is covered. Accepted because the alternative is
+#       the cycle above, and because the pattern is narrowed on three axes at once --
+#       the calling account, the source rule ARN and `kms:ViaService` for this region's
+#       queue service -- so the grant authorises the enqueue path it was added for and
+#       nothing else.
+variable "sqs_key_eventbridge_rule_source_arn_patterns" {
+  description = "Same-account EventBridge RULE ARN patterns whose dead-letter deliveries may use the SQS key. Each entry becomes an ArnLike condition on an events.amazonaws.com grant that also requires the calling account and kms:ViaService for this region's queue service. A pattern rather than an exact ARN because the rules are created by a module that consumes this key, so exact ARNs would close a dependency cycle. Empty installs no EventBridge service-principal grant."
+  type        = list(string)
+  default     = []
+
+  validation {
+    # WHY : Assumptions: the pattern must be an EventBridge rule ARN in this partition
+    #       family with at most a trailing-name wildcard. Admitting a bare `*` for the
+    #       rule name is deliberate and admitting one for the ACCOUNT is not: the whole
+    #       point of the condition is to keep the grant inside this deployment, and a
+    #       wildcard account would silently return the grant to the state this input was
+    #       added to fix.
+    condition = length(distinct(var.sqs_key_eventbridge_rule_source_arn_patterns)) == length(var.sqs_key_eventbridge_rule_source_arn_patterns) && alltrue([
+      for pattern in var.sqs_key_eventbridge_rule_source_arn_patterns :
+      can(regex("^arn:(aws|aws-us-gov|aws-cn):events:[a-z0-9-]+:[0-9]{12}:rule/[A-Za-z0-9._-]+\\*?$", pattern))
+    ])
+    error_message = "sqs_key_eventbridge_rule_source_arn_patterns must contain unique EventBridge rule ARNs for an explicit region and twelve-digit account, optionally ending in a single * to cover a name prefix. A wildcard region or account is refused because the condition exists to confine the grant to this deployment."
+  }
+}
+
 variable "aurora_encryption_context_ids" {
   description = "Aurora cluster resource identifiers accepted in the `aws:rds:db-id` KMS encryption context. A non-empty Aurora role trust list requires at least one exact identifier."
   type        = list(string)

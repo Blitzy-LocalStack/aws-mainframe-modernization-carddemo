@@ -463,7 +463,7 @@ graph TB
     end
 
     subgraph MSG["Six primary managed queues · each with a dead-letter queue"]
-        FIFOREQ[["Authorization request<br/>opaque per-card group<br/>quarantine boundary on failure"]]
+        FIFOREQ[["Authorization request<br/>group is the card number itself<br/>quarantine boundary on failure"]]
         FIFOREP[["Authorization reply"]]
         ACCTREQ[["Account-inquiry request"]]
         DATEREQ[["Date-inquiry request"]]
@@ -628,9 +628,14 @@ present ones.
   [`security-and-identity.md`](security-and-identity.md) a property of
   the topology rather than an aspiration. That isolation only works because service
   traffic to managed APIs — the registry, logs, the secret store, keys, queues, the
-  orchestrator and the parameter store — leaves through interface endpoints inside
+  orchestrator, the parameter store, the trace collector's export target and the
+  identity provider — leaves through interface endpoints inside
   the network, with a gateway endpoint for the object store, so no task needs a path
-  to the internet to reach the platform services it depends on. The target egress
+  to the internet to reach the platform services it depends on. Refactoring
+  Rationale: the last two were added to this list rather than left implicit. Tracing
+  and identity were the two managed dependencies the endpoint set originally omitted,
+  and an enumeration that stops before them is exactly the reading under which the
+  omission looked deliberate. The target egress
   path is drawn dashed and scoped: address translation from the private application
   subnets only, never from the data subnets. The network module currently has no
   resource graph, so these are intended absences and paths rather than deployed ones.

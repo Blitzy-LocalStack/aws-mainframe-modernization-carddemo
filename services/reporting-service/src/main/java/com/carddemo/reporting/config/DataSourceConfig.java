@@ -33,8 +33,15 @@ import org.springframework.context.annotation.Configuration;
  * to obtain a private schema would create a second truth for figures whose whole purpose is to
  * restate the first one exactly.
  *
- * <p>Assumptions: the login role this pool authenticates as can read the seven views and nothing
- * else, and that is enforced by the database rather than trusted to query authors. Section 5 of
+ * <p>Assumptions: the login role this pool authenticates as can read TEN views, execute ONE function
+ * and reach nothing else, and that is enforced by the database rather than trusted to query authors.
+ * ⚠️ Refactoring Rationale: that read "the seven views and nothing else". Eight views come from
+ * {@code V1__reporting_views.sql}, two aggregate-only verification relations come from
+ * {@code V3__verification_surfaces.sql} and are granted to this same login, and V1 grants
+ * {@code EXECUTE} on {@code reporting.resolve_card(character varying)} after revoking it from
+ * {@code PUBLIC} -- so "nothing else" was carrying an executable privilege the sentence denied. This
+ * class asserts the pool's posture and does not police access, which is exactly why the surface it
+ * describes has to be stated accurately. Section 5 of
  * {@code V0__schemas_and_roles.sql}, "Cross-schema privileges for the reporting role", grants it
  * {@code USAGE ON SCHEMA reporting} and then closes everything else: {@code REVOKE CREATE ON SCHEMA
  * reporting}, a {@code REVOKE ALL ON ALL TABLES} for each of {@code ledger}, {@code account},
@@ -56,7 +63,7 @@ import org.springframework.context.annotation.Configuration;
  * pool depends on survives the table's existence intact.
  *
  * <p>Assumptions: the views, the roles and the grants all belong to the data-migration package and
- * never to this module. The seven views are created by
+ * never to this module. The eight production views this service reads are created by
  * {@code data-migration/sql/V1__reporting_views.sql}, which builds each one with a security
  * barrier, assigns it to the owner role, masks the card number every ledger-derived view publishes,
  * and grants read on each view by name. A view missing at run time is therefore a defect to report
@@ -69,7 +76,7 @@ import org.springframework.context.annotation.Configuration;
  * {@code V0__schemas_and_roles.sql} sets an {@code ALTER DEFAULT PRIVILEGES} keyed on the owner role
  * so that a view is readable the moment it is created, then issues a one-time {@code GRANT SELECT ON
  * ALL TABLES IN SCHEMA reporting} to cover anything that already existed; {@code
- * V1__reporting_views.sql} then grants each of the seven views by name. The wildcard forms are safe
+ * V1__reporting_views.sql} then grants each of the eight views by name. The wildcard forms are safe
  * here only because they are scoped to the {@code reporting} schema, which reaches no base table in
  * any source schema, and because the single non-view relation in it is revoked by name afterwards.
  * The by-name grants are what make the intended surface legible in the file that defines it.

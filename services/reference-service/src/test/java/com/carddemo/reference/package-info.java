@@ -11,51 +11,50 @@
  * about what belongs there, and that second half is the half a reader cannot
  * reconstruct from the files.</p>
  *
- * <p>What is present in the tree, enumerated so the
- * distinction above is checkable rather than merely declared: EIGHT
- * subpackages exist, each carrying its own charter, and ALL EIGHT
- * carry at least one test class. {@code api} holds FOUR --
- * {@code ReferenceApiRoutingContractTest},
- * {@code DateEvaluationDispatcherTest},
- * {@code ReferenceParameterConstraintTest} and
- * {@code DateConversionRefusalTest}. {@code config} holds THREE --
- * {@code ReferenceApiContractTest},
- * {@code SecurityConfigTest} and {@code SqsConfigTest}. {@code domain} holds ONE,
- * {@code ReferenceKeyCanonicalityTest}. {@code dto} holds TWO --
- * {@code ReferenceWireContractTest} and
- * {@code DomainRefusalDisclosureTest}. {@code fixtures} holds TWO --
- * {@code ReferenceFixtureContractTest} and {@code ReferenceFixtureTest}.
- * {@code mapper} holds THREE -- {@code DateInquiryReplyMapperTest},
- * {@code ReferenceDescriptionTrimTest} and {@code TransactionCategoryMapperTest}.
- * {@code service} holds TEN --
- * {@code DateInquiryMessageListenerTest},
- * {@code ReferenceWriteBehaviourTest}, {@code TransactionTypeBrowseTest},
- * {@code DateConversionServiceTest}, {@code DisclosureGroupServiceTest},
- * {@code ReferenceBatchUpdateServiceTest},
- * {@code ReferenceQueueConsumerContractTest},
- * {@code ReferenceServiceStructureTest}, {@code TransactionCategoryServiceTest} and
- * {@code TransactionTypeServiceTest}. The eighth, {@code repository}, holds NINE --
- * {@code TransactionTypeRepositoryIT},
- * {@code TransactionCategoryRepositoryIT},
- * {@code DisclosureGroupRepositoryIT},
- * {@code UsPhoneAreaCodeRepositoryIT}, {@code UsStateRepositoryIT},
- * {@code UsStateZipPrefixRepositoryIT}, {@code PhoneAreaCodeRepositoryIT},
- * {@code StateRepositoryIT} and {@code StateZipPrefixRepositoryIT}, together with
- * the container base type the first of those hosts. This package root holds this
- * charter and {@code ReferenceMoneyPathRulesTest}. That is TWENTY-SIX classes named
- * {@code Test}, collected by Surefire, and NINE named {@code IT}, collected by
- * Failsafe -- thirty-five in total.</p>
+ * <p>What is present in the tree: EIGHT subpackages exist, each carrying its
+ * own charter, and ALL EIGHT hold at least one test class -- though
+ * {@code repository}'s are named {@code IT} rather than {@code Test}, so a
+ * {@code mvn test} alone reaches seven of the eight. The class NAMES are
+ * not enumerated here. Each subpackage charter is the authority for its own
+ * directory, and the per-package figures are published once, in the census of
+ * {@code services/reference-service/README.md} section 6, beside the two totals
+ * that census marker pins: THIRTY-FIVE classes named {@code Test}, collected by
+ * Surefire at the {@code test} phase, and TEN named {@code IT}, collected by
+ * Failsafe at {@code verify} -- forty-five in total. Those two figures are
+ * machine-checked: {@code common-lib}'s {@code ServiceReadmeInventoryTest}
+ * parses that README's {@code test-inventory} comment and re-counts both tiers
+ * from this tree, so a class added without updating the marker fails the build.
+ * One file under {@code src/test/java} is in neither tier and is named here
+ * because no count reaches it -- {@code repository/ReferencePersistenceBase},
+ * the shared container base type, which carries no case of its own.</p>
  *
- * <p>Refactoring Rationale: the totals above are re-measured, and the two figures they
- * replaced -- fifteen and six, twenty-one in total -- had gone stale by fourteen classes.
- * Two further claims of that paragraph had also been overtaken: it described
- * {@code ReferenceMoneyPathRulesTest} as a name reserved rather than a file, and that file
- * now sits in this directory, and it credited {@code api}, {@code config},
- * {@code mapper} and {@code service} with fewer classes than each holds. The per-subpackage
- * figures are given so a reader re-measuring finds one stale entry rather than one stale
- * total, and each subpackage charter carries the directory marker line that
- * {@code common-lib}'s {@code PackageCharterInventoryTest} re-measures on every build, which
- * is where the counting now happens.</p>
+ * <p>Refactoring Rationale: this paragraph used to enumerate every class by name
+ * and state a per-subpackage figure for each of the eight, and the enumeration
+ * is withdrawn rather than merely corrected. It had gone stale AGAIN -- it
+ * claimed {@code api} FOUR where nine are present, {@code config} THREE where
+ * six are, {@code service} TEN where twelve are, {@code repository} NINE
+ * classes where ten files sit, and twenty-six-plus-nine where thirty-five and
+ * ten are correct -- and the three rationale paragraphs below record the two
+ * earlier occasions it went stale before that. The paragraph below argues FOR
+ * the enumeration on the ground that one stale entry stays legible as one stale
+ * entry rather than discrediting the charter around it. Measured against what
+ * happened, that reasoning did not hold: the entries went stale six at a time,
+ * nothing re-measured them, and a reader checking any one of them found it
+ * wrong. Assumptions: the totals kept above are exactly the two a test
+ * re-counts, so this charter now states no number that can drift without a
+ * build failure. Trade-offs: a reader who wants the per-package breakdown has
+ * to open the README, which is one more file than before; what is bought is
+ * that the breakdown they find is re-derived from the tree rather than
+ * remembered.</p>
+ *
+ * <p>Assumptions: the two totals are stated as two rather than one because the
+ * two suffixes are collected by DIFFERENT plugins in different lifecycle
+ * phases, and a single total conceals which command runs which half. The
+ * distinction is structural rather than cosmetic: a container-backed class
+ * misnamed {@code Test} runs with no container and fails for the wrong reason,
+ * while a boundary test misnamed {@code IT} is passed over by Surefire and
+ * appears to succeed by never having run -- and the second is indistinguishable
+ * from success in every report.</p>
  *
  * <p>Refactoring Rationale: an earlier revision of the enumeration read "SEVEN of the
  * eight carry at least one test class", listed ten classes, and stated that
@@ -65,10 +64,10 @@
  * one: {@code repository} holds nine classes named {@code IT}, so a reader
  * taking this charter at its word would have concluded that this module's
  * Failsafe run collects nothing and that a green {@code mvn test} was therefore
- * the whole of its verification. The totals are stated as two rather
- * than one because the two suffixes are collected by DIFFERENT plugins in
- * different lifecycle phases, and a single total conceals which command runs
- * which half.</p>
+ * the whole of its verification. The claim about {@code IT} is the one worth
+ * keeping in view, because it is the only kind of error here that changes what a
+ * reader believes has been VERIFIED rather than only how much of the tree they
+ * have been shown.</p>
  *
  * <p>Refactoring Rationale: this enumeration read "seven subpackages exist,
  * each carrying its own charter, and each carries at least one test class",
@@ -80,25 +79,32 @@
  * directory the charter did not mention, and the only conclusions available
  * would have been that the charter was stale or that the directory was
  * unauthorised; neither is true. That earlier correction left the ten-class
- * total in place, and the total is the part the paragraph ABOVE has since had to
- * recount: it was accurate when it was written and had gone stale by five
- * classes, which is exactly why a count has to be measured against the
- * directory rather than derived from a list a reader is not obliged to
- * re-verify. The paragraph above supersedes this one on every number; this one
- * is retained because it records how the omission arose.</p>
+ * total in place, and that total then went stale by five classes, and its
+ * replacement went stale again -- which is exactly why a count has to be
+ * measured against the directory rather than derived from a list a reader is not
+ * obliged to re-verify, and why the withdrawal recorded at the head of this
+ * charter delegates every per-package figure to a census a test re-derives.
+ * The head of this charter supersedes this paragraph and the two around it on
+ * every number; the three are retained because they record how the omissions
+ * arose and, taken together, are the evidence for the withdrawal.</p>
  *
- * <p>Refactoring Rationale: the paragraph above is written as an enumeration a
- * reader can check entry by entry instead of as a summary, and the reason is
- * recorded experience rather than preference. The main-tree charter of this
- * same context carries a labelled rationale admitting that its description of
- * the exposed surface was authored before any of that surface existed and was
- * then left unrevised while the packages filled in. A state sentence that goes
- * stale is worse than no state sentence at all: a reader who checks one claim,
- * finds it wrong, and has no way to tell which of the remaining claims are
- * also wrong stops trusting the whole file, including the rulings that are
- * still sound. Naming each class individually is what keeps one stale entry
- * legible as one stale entry instead of discrediting the charter around
- * it.</p>
+ * <p>Refactoring Rationale: this charter's state paragraph WAS written as an
+ * enumeration a reader could check entry by entry instead of as a summary, on
+ * recorded experience rather than preference. The main-tree charter of this same
+ * context carries a labelled rationale admitting that its description of the
+ * exposed surface was authored before any of that surface existed and was then
+ * left unrevised while the packages filled in, and the premise drawn from that
+ * still holds: a state sentence that goes stale is worse than no state sentence
+ * at all, because a reader who checks one claim, finds it wrong, and cannot tell
+ * which of the remaining claims are also wrong stops trusting the whole file,
+ * including the rulings that are still sound. What did NOT hold is the
+ * conclusion -- that naming each class individually keeps one stale entry
+ * legible as one stale entry. Naming forty-five classes multiplied the number of
+ * sentences that could go stale without making any of them checkable, and they
+ * duly went stale in groups. The premise now points the other way: the only
+ * state figures this charter states are the two a test re-counts, and the names
+ * live in the eight subpackage charters that sit beside the directories they
+ * describe.</p>
  *
  * <h2>Why this subtree mirrors the main tree package for package</h2>
  *

@@ -91,10 +91,21 @@
 > `reporting-service` (D-2), and `account-service`, `card-service`,
 > `transaction-service` and `reference-service` through the structural divergences
 > in [§7.3](#73-structural-divergences-that-are-not-defects). **One consumer is not
-> a service:** the user-interface shell under `ui/src/layout` consumes it for
-> [D-7](#d-7--the-header-clock-and-the-zone-it-is-read-in), which belongs to no
-> service because the header band it concerns is realised as a client-side component
-> rather than behind an endpoint — the same reason two programs appear in
+> a service:** the user interface consumes it directly, for
+> [D-7](#d-7--the-header-clock-and-the-zone-it-is-read-in) from the shell under
+> `ui/src/layout`, for
+> [D-10](#d-10--the-user-update-screen-renders-no-credential-control) from
+> `ui/src/screens/userUpdate`, for
+> [D-11](#d-11--the-failed-read-sentence-is-the-services-not-a-reconstructed-cics-diagnostic)
+> from `ui/src/screens/accountView` — whose second entry,
+> [D-12](#d-12--withdrawn-the-account-view-information-line-no-longer-announces-a-successful-read),
+> is **withdrawn** and is retained only as a record of a divergence that screen no longer takes — and for
+> [D-13](#d-13--a-committed-delete-returns-the-transaction-type-browse-to-its-first-page)
+> from `ui/src/screens/refTypeList`. **None** of the five belongs to a
+> service: the header band the first concerns is realised as a client-side component
+> rather than behind an endpoint, the second is a control a screen declines to
+> render at all, and the last three are what a screen puts on the glass and where it
+> leaves the operator — decisions no endpoint takes — the same reason two programs appear in
 > [§2.9](#29-realised-as-user-interface-routes-rather-than-as-a-service) with no
 > service owner. Eight sibling
 > documents name this document as the owner of the register they defer to.
@@ -397,7 +408,7 @@ than service logic.
 
 | Program | Type | Source | Target artifact | Notes |
 |---|---|---|---|---|
-| `COACTVWC` | online | [`app/cbl/COACTVWC.cbl`](../../app/cbl/COACTVWC.cbl) | `AccountController` view, `AccountViewService` | Composes customer and cross-reference data |
+| `COACTVWC` | online | [`app/cbl/COACTVWC.cbl`](../../app/cbl/COACTVWC.cbl) | `AccountController` view, `AccountViewService` | Composes customer and cross-reference data. **The two screen regions are guarded by different predicates and the migration reproduces both**: the account region by the disjunction `IF FOUND-ACCT-IN-MASTER` at **L471** continued `OR FOUND-CUST-IN-MASTER` at **L472**, the customer region by `IF FOUND-CUST-IN-MASTER` alone at **L493**. An account located with no customer row is therefore a state the reference PAINTS, so `AccountViewResponse.customer` is published nullable, the operation answers 200 rather than 404 for it, and no entity tag is issued because a revision derived from one of two rows would not describe the pair. What L493 guards is the **eighteen named value fields**; the region's labels are among the **63** of the mapset's 100 `DFHMDF` definitions that carry no name and only an `INITIAL=` literal — 35 of those at row 11 or below — and a literal definition is part of the map, transmitted on every send, so the migrated screen keeps the heading and the labels on that arm with their values blank |
 | `COACTUPC` | online | [`app/cbl/COACTUPC.cbl`](../../app/cbl/COACTUPC.cbl) | `AccountController` update, `AccountUpdateService` | The before-image comparison becomes a version column; see [§7.3](#73-structural-divergences-that-are-not-defects) and [D-UPDATE-CASE-SENSITIVE-COMPARE](#d-update-case-sensitive-compare--the-concurrency-comparison-is-case-sensitive-where-the-baseline-folded-ten-fields) |
 | `CBACT01C` | batch | [`app/cbl/CBACT01C.cbl`](../../app/cbl/CBACT01C.cbl) | `AccountRepository` sequential read | Account master access |
 | `CBACT03C` | batch | [`app/cbl/CBACT03C.cbl`](../../app/cbl/CBACT03C.cbl) | `CardXrefController`, `CardXrefRepository` | Includes the by-account path that replaces `CXACAIX` |
@@ -430,7 +441,7 @@ than service logic.
 | `COTRTLIC` | online | [`COTRTLIC.cbl`](../../app/app-transaction-type-db2/cbl/COTRTLIC.cbl) | `TransactionTypeController` list | Inline edit over the reference tables |
 | `COTRTUPC` | online | [`COTRTUPC.cbl`](../../app/app-transaction-type-db2/cbl/COTRTUPC.cbl) | `TransactionTypeController` maintenance | The referential-integrity restriction surfaces as a conflict response rather than a database error |
 | `COBTUPDT` | batch | [`COBTUPDT.cbl`](../../app/app-transaction-type-db2/cbl/COBTUPDT.cbl) | Reference-data update service | Batch reference maintenance |
-| `CODATE01` | online | [`CODATE01.cbl`](../../app/app-vsam-mq/cbl/CODATE01.cbl) | `DateConversionController` plus a queue consumer | The date-conversion request/reply flow |
+| `CODATE01` | online | [`CODATE01.cbl`](../../app/app-vsam-mq/cbl/CODATE01.cbl) | `DateConversionController` here; its QUEUE half is answered by `account-service`'s `InquiryMessageListener`, the single owner of the shared inquiry request queue, rendering the reply from `common-lib`'s `DateInquiryReplyCodec` | The date-conversion request/reply flow. Refactoring Rationale: this row read "plus a queue consumer" in this context. One queue admits one owning consumer and the baseline drives both inquiry programs from one request destination ([`app/app-vsam-mq/README.md`](../../app/app-vsam-mq/README.md) L53, L71), so the queue half is answered where the queue is owned; the divergence that follows is [`D-INQUIRY-UNRECOGNISED-FUNCTION`](#d-inquiry-unrecognised-function--an-unrecognised-inquiry-function-code-is-refused-rather-than-answered-with-the-date) |
 
 ### 2.6 `batch-service`
 
@@ -1176,6 +1187,172 @@ each produce one registered divergence.
 
 ### 7.2 Divergences owed to this register by its siblings
 
+#### D-10 — the user-update screen renders no credential control
+
+* **Why the identifier is D-10 and not D-8.** Assumptions: **D-8** and **D-9** are
+  already consumed as *class-local* numbering inside `batch-service`'s own
+  documentation — `ImportJobTest` cites D-8 at five sites and D-9 at one, and
+  `DatasetJobBodiesTest` cites D-9 — and
+  [§7.5](#75-withdrawn-divergence-identifiers) records the earlier collision that a
+  duplicated identifier caused. Numbering this entry 8 would recreate exactly that,
+  so the next unused numeral is taken instead and the skip is stated rather than left
+  to look like a gap.
+* **Baseline behaviour.** [`app/bms/COUSR02.bms`](../../app/bms/COUSR02.bms) paints a
+  credential control on row 13 — the label `Password:` at **L125–L129**, the input
+  `PASSWD` at `LENGTH=8` with `ATTRB=(DRK,FSET,UNPROT)` at **L130–L134**, and the hint
+  `(8 Char)` at **L135–L139**. [`app/cbl/COUSR02C.cbl`](../../app/cbl/COUSR02C.cbl)
+  then does four things with it: blanks it before the read at **L160**, pre-fills it
+  from the stored plaintext value with
+  `MOVE SEC-USR-PWD TO PASSWDI OF COUSR2AI` at **L169**, refuses a blank one with
+  `Password can NOT be empty...` in the cascade arm at **L198–L203**, and compares it
+  against the stored value at **L227–L230** so that a change to it sets
+  `USR-MODIFIED-YES` and is written.
+* **Target behaviour.** `ui/src/screens/userUpdate/index.tsx` renders **four of the
+  five** editable controls the mapset paints. The credential control is absent, and
+  with it the hint, the width, the blank refusal, the pre-fill and the comparison.
+  Four of the mapset's own field definitions and one of the program's ten sentences
+  therefore have no target on this screen.
+* **Category.** Documented divergence — a control and one of the program's ten sentences are not
+  reproduced, because neither has a destination in the target.
+* **Why the difference is accepted.** It follows from
+  [D-4](#d-4--the-plaintext-credential-field-is-not-carried-forward), which is where
+  the decision is actually taken: AAP §0.7.8 declines parity on identity explicitly,
+  the user table carries no credential column, and the published
+  `UpdateUserRequest` in
+  [`auth-api.yaml`](../../services/auth-service/src/main/resources/openapi/auth-api.yaml)
+  seals itself with `additionalProperties: false` over three properties, none of them a
+  credential. What D-4 leaves open is what the *screen* should do about a control whose
+  value has nowhere to go, and this entry closes it.
+* **Refactoring Rationale: the alternative that was shipped first, and why it is
+  withdrawn.** An earlier shape of this screen KEPT the control, KEPT its blank
+  refusal, and omitted the value from the request — defending that as preserving "a
+  user-visible behaviour of the screen rather than a property of the request". A code
+  review found the reasoning insufficient and it is withdrawn here. Requiring an
+  administrator to type a credential that is then discarded is worse than either
+  alternative, and the cost is not cosmetic: every affordance a form has states that
+  the value will be used, so an administrator who typed a new credential had good
+  reason to believe the account's password had changed when nothing anywhere had
+  changed. A control whose value is thrown away is also a control a password manager
+  will offer to fill and a browser will retain, so the discarded value does not stay
+  discarded — which is why the retired implementation needed an `autocomplete="off"`
+  declaration to defend a guarantee it could not otherwise keep.
+* **Alternatives Considered: implementing a truthful credential reset.** Rejected on
+  scope rather than on difficulty. The AAP publishes no administrative
+  credential-reset operation, and `auth-api.yaml` declares **eight** operations — sign
+  on, refresh, answer challenge, list, create, get, update, delete — none of which is
+  one. The onboarding path's own credential is published as
+  `CreatedUserResponse.credentialSecretName`, the **name** of a managed-secret entry
+  rather than the credential, precisely so no credential travels in a response body; a
+  reset faithful to that design needs a service endpoint, a user-pool administrative
+  grant and its own contract, which is a capability to plan rather than a control to
+  re-label. Recording the removal and leaving the capability unbuilt is the lower-risk
+  half of that pair.
+* **What a human must do if a reset is wanted.** Add the operation to the auth
+  contract, grant `auth-service`'s task role the user-pool administrative action it
+  needs, and reinstate the control against it. Nothing in this entry blocks that; the
+  control was removed because it had no destination, not because a destination would be
+  unwelcome.
+* **Where it is verified.** `ui/src/screens/userUpdateScreen.test.tsx` asserts that no
+  control on this screen accepts a credential and that the update request carries
+  exactly the three published members. Like
+  [D-7](#d-7--the-header-clock-and-the-zone-it-is-read-in) this divergence has **no
+  golden master** — the online programs cannot run end to end without a CICS runtime
+  ([`tests/README.md`](../../tests/README.md) §1.1) — so the mapset's field
+  definitions and the program's cascade are the oracle instead of a produced output.
+* **Files.** `ui/src/screens/userUpdate/index.tsx`, which cites this identifier at every one of the six
+  places the credential once appeared, and `ui/src/screens/userUpdateScreen.test.tsx`.
+
+#### D-11 — the failed-read sentence is the service's, not a reconstructed CICS diagnostic
+
+* **Baseline behaviour.** Each of the three read failures on the account view screen composes a
+  diagnostic carrying a CICS response code.
+  [`app/cbl/COACTVWC.cbl`](../../app/cbl/COACTVWC.cbl) builds
+  `'Account:… not found in Cross ref file.  Resp:… Reas:…'` at **L747–L757**, the account-master and
+  customer-master equivalents at **L797–L802** and **L847–L852**, and `WS-FILE-ERROR-MESSAGE` at
+  **L86–L105** appends `RESP` and `RESP2`. Four friendly `88`-level alternatives are declared at
+  **L129–L136** — `DID-NOT-FIND-ACCT-IN-CARDXREF`, `DID-NOT-FIND-ACCT-IN-ACCTDAT`,
+  `DID-NOT-FIND-CUST-IN-CUSTDAT` and `XREF-READ-ERROR` — and **none of them is ever `SET`**, because
+  the statements that would set two of them are commented out at **L792** and **L842**; the
+  `IF DID-NOT-FIND-*` tests at **L704** and **L713** therefore cannot fire.
+* **Target behaviour.** `ui/src/screens/accountView/index.tsx` renders the sentence the service supplied
+  and reconstructs no diagnostic, falling back to
+  `'Did not find this account in account master file'` — the reference's own wording for the commonest
+  of the three failures — when the problem document carries no sentence.
+* **Category.** Documented divergence — the sentence an operator reads on a failed read is the
+  service's rather than a reconstruction of the terminal's.
+* **Why the difference is accepted.** A CICS response code has no analogue in the target at all, so the
+  decorated form cannot be reproduced rather than being declined. The friendly alternatives cannot be
+  reproduced either, because the baseline never reaches them. Trade-offs: the target additionally
+  declines to disclose WHICH of the three reads failed, and that is a narrowing rather than a
+  consequence: `ui/src/api/accounts.ts` records that a missing account, a missing cross-reference row
+  and a missing customer row are all answered with one status, so no finer branch is establishable in
+  the client, and the one literal chosen introduces no text the baseline does not hold.
+* **Where it is verified.** `ui/src/screens/accountView` is exercised by its own screen tests. Like
+  [D-7](#d-7--the-header-clock-and-the-zone-it-is-read-in) this divergence has **no golden master** —
+  the online programs cannot run end to end without a CICS runtime
+  ([`tests/README.md`](../../tests/README.md) §1.1) — so the program's own literals are the oracle.
+* **Files.** `ui/src/screens/accountView/index.tsx`, which cites this identifier on
+  `screenMessageFrom`.
+
+#### D-12 — withdrawn: the account-view information line no longer announces a successful read
+
+* **Status.** **Withdrawn.** This entry recorded a divergence that the account-view screen no longer
+  takes. It is retained rather than deleted so that a reader who finds the identifier cited in an older
+  revision, a review note or a commit message can see what it claimed and why it stopped being true.
+* **Baseline behaviour.** [`app/cbl/COACTVWC.cbl`](../../app/cbl/COACTVWC.cbl) declares
+  `WS-INFORM-OUTPUT` — `'Displaying details of given Account'` — as a `88`-level value at
+  **L115–L116** and **never `SET`s it anywhere in the program**. **L528–L530** then forces the
+  standing prompt back into the information field whenever that field is empty, so the reference's
+  information line is effectively always the prompt, even while a record is on display.
+* **What the divergence was.** The screen fell back to that same `WS-INFORM-OUTPUT` literal when a
+  response supplied no information line, so a successful read announced itself in a sentence the
+  reference never puts on the glass.
+* **Why it was withdrawn.** The reasoning that accepted it rested on the sentence being "the
+  baseline's own text used for the state its own condition name describes". A condition name is a value
+  the program COULD write; only the program says which are written, and this one is written nowhere.
+  Reaching for it therefore invented a behaviour rather than transcribing one — and the same fault was
+  present a second time in this screen, for `WS-EXIT-MESSAGE` at **L119–L120**, likewise declared and
+  never `SET`, whose PF3 arm at **L323–L345** moves navigation fields and transfers control without
+  writing any message. Both are now driven by what the program DOES. Transformation Rule T8 is
+  unaffected: `ui/src/messages/messages.ts` still holds every declared literal, because the
+  transcription is complete whether or not a given sentence is reachable.
+* **Target behaviour now.** The information line falls back to `WS-PROMPT-FOR-INPUT`, which is what
+  L528–L530 guarantees in every state, and `AccountViewService` publishes that same prompt on every
+  response — so the fallback agrees with the service instead of contradicting it precisely where
+  nothing is watching. The exit key emits no sentence at all.
+* **Where it is verified.** `ui/src/screens/accountView/accountView.test.tsx` asserts both halves: the
+  prompt is present after a successful read and `WS_INFORM_OUTPUT` is absent, and the exit leaves the
+  destination with no carried sentence.
+* **Files.** `ui/src/screens/accountView/index.tsx`, which cites this identifier at the
+  successful-read handler and at the exit arm.
+
+#### D-13 — a committed delete returns the transaction-type browse to its first page
+
+* **Baseline behaviour.** [`COTRTLIC.cbl`](../../app/app-transaction-type-db2/cbl/COTRTLIC.cbl) blanks
+  the deleted row's action cell at **L1391–L1398** and leaves the operator where they were. The
+  screen's own array still holds the remaining rows of the page it read, so the browse position
+  survives the delete.
+* **Target behaviour.** `ui/src/screens/refTypeList/index.tsx` calls the paging hook's `reset` after a
+  committed delete, which re-reads from the first page.
+* **Category.** Documented divergence — the operator's browse POSITION after a delete, not any
+  displayed value.
+* **Why the difference is accepted.** The alternative is worse in a way the baseline never had to
+  confront. The migrated browse is **keyset**-paginated, so the page is addressed by the cursor of the
+  row at its edge — and a delete can remove exactly that row, leaving the cursor addressing nothing.
+  Merging the deletion locally, as the update path merges its result, would additionally leave the
+  seventh slot of a seven-row page blank until something re-read. Trade-offs: an operator who deletes a
+  row deep in the table returns to the first page and must page forward again; what is bought is that
+  every row on display is a row that exists and every cursor on display addresses a row.
+* **Alternatives Considered: re-reading the SAME page rather than the first.** Rejected because the
+  cursor that identified it may be the deleted row's, so the read that restored the position is exactly
+  the read that can no longer be issued. A screen that guessed a neighbouring cursor would be
+  inventing a browse position rather than restoring one.
+* **Where it is verified.** `ui/src/screens/refTypeListFilter.test.tsx` and the sibling screen tests
+  exercise this screen; the divergence itself is a position rather than a value, so it carries no
+  golden master, as for [D-11](#d-11--the-failed-read-sentence-is-the-services-not-a-reconstructed-cics-diagnostic).
+* **Files.** `ui/src/screens/refTypeList/index.tsx`, which cites this identifier at the committed-delete
+  path.
+
 #### D-4 — the plaintext credential field is not carried forward
 
 * **Baseline behaviour.** [`app/cpy/CSUSR01Y.cpy`](../../app/cpy/CSUSR01Y.cpy) **L21**
@@ -1214,6 +1391,15 @@ each produce one registered divergence.
   cleartext credential column cannot both hold. The user-visible surface is preserved:
   the three sign-on outcomes and their exact message text carry across unchanged, so a
   user sees the same messages in the same situations.
+* **The field reached two screens, and this entry covers one of them.** The sign-on
+  screen is where the comparison happened, and it is the surface this entry and its three
+  `D-SIGNON-*` siblings describe. The user update screen painted the same field, pre-filled
+  it from the stored value, refused a blank one and re-persisted it, and the screen-level
+  consequence of declining parity there is registered separately as
+  `D-USER-UPDATE-NO-CREDENTIAL-CONTROL` below. Refactoring Rationale: it is a separate entry
+  rather than a bullet here because it removes a **user-visible control and a sentence an
+  operator reads**, where this entry removes a column and a comparison — a reader auditing
+  the screens should not have to infer the second consequence from the first.
 * **Where it is verified.** Schema tests asserting that no credential column exists,
   and sign-on tests asserting the three outcomes by stable identifier.
   [`security-and-identity.md`](security-and-identity.md) owns the full treatment,
@@ -1583,7 +1769,7 @@ which carries the same citations at its update method.
 ### 7.4 Divergences claimed by shipped code
 
 Every entry below is claimed as registered by a comment or docstring in shipped
-source, and all **ninety-one** are cited **by identifier**, the identifier here being the
+source, and all **ninety-five** are cited **by identifier**, the identifier here being the
 identifier used there character for character. They reached that state by three routes,
 recorded because the routes explain the difference in tone between them. Some were cited
 by identifier from the outset. Others were cited generically as "registered" or
@@ -1593,18 +1779,19 @@ a claim of registration that names nothing cannot be checked, and a difference t
 nothing cannot be found. The `D-REFDATA-*` entries that close the section were authored
 the other way round — identifier first, then cited from the published reference contract —
 which is the discipline this section asks of everything added after them. Assumptions:
-ninety-eight is a measured count of the `####` headings in **the whole document** and not a
+one hundred and three is a measured count of the `####` headings in **the whole document** and not a
 running tally kept by hand, so a reader adding an entry updates one number here and nothing
 else. Count them document-wide and not within `## 7` alone: the register
 continues past the horizontal rule that follows *Related documents*, where entries were
 appended after this section had already been closed, so a count confined to `## 7` -- its
 five subsections 7.1 through 7.5, which is the quantity the paragraph after next calls the
-section-confined one -- omits those twelve and returns **eighty-six**. Refactoring Rationale:
+section-confined one -- omits those twelve and returns **ninety-one**. Refactoring Rationale:
 that instruction read "the body between this heading and `## 8`", which is a THIRD quantity
-again and returns seventy-seven, because it excludes the seven headings in 7.1 and 7.2.
+again and returns eighty-seven, because it excludes the seven headings in 7.1 and 7.2.
 Refactoring Rationale: that third figure was quoted as sixty-five, which was never a count of
 any population in this document -- 7.1 and 7.2 hold three and four headings between them, so
-excluding them from eighty-four leaves seventy-seven. It is restated as the measured value for
+excluding those seven from the section-confined count is what leaves it, which is eighty-seven
+against the ninety-four measured now and was seventy-seven against the eighty-four measured then. It is restated as the measured value for
 the same reason the others are: a figure carried forward without being re-measured is how the
 first two came to be wrong. The
 figure quoted beside it was always the whole of `## 7`, so the instruction is corrected to
@@ -1612,11 +1799,21 @@ name the population the figure counts rather than the figure being changed to ma
 population nobody meant. Count the `####`
 headings themselves rather than the ones beginning `D-`: one entry is identified
 `C-ROUNDING`, so a count restricted to a `D-` identifier is short by one and returns
-**ninety-seven**. Assumptions: a literal search for lines beginning `#### D-` returns
-**ninety-six** rather than ninety-seven, because two headings carry their identifier in
+**one hundred and two**. Assumptions: a literal search for lines beginning `#### D-` returns
+**one hundred and one** rather than one hundred and two, because two headings carry their identifier in
 backticks -- `C-ROUNDING` and `D-REJECT-109-DURABLE` -- so the second is a `D-` entry that
 the naive pattern misses. The two figures are stated together so that the search result a
 reader gets is predicted here rather than read as drift.
+Refactoring Rationale, eighteenth recount: `D-ECR-THIRD-PARTY-MIRROR` and
+`D-LAMBDA-PACKAGED-OUTSIDE-TERRAFORM` were added to 7.4, both registering infrastructure
+divergences from the frozen plan's inventories rather than behavioural ones. Every figure in
+this block was re-measured from the file rather than incremented by two, which is the
+discipline the preceding paragraphs exist to enforce: document-wide `####` headings are one
+hundred and six, the `## 7`-confined count is ninety-four, the between-7.4-and-`## 8` count is
+eighty-seven, `D-`-identified entries are one hundred and five, and a literal `^#### D-` search
+returns one hundred and four. The two subtractions still check the first — one hundred and six
+less the twelve appended after *Related documents* is ninety-four, and less the single
+`C-ROUNDING` heading is one hundred and five.
 Refactoring Rationale: the figure read forty-three when the section already held forty-five
 headings, so three entries were added against a number that was already two short. It is
 restated as the measured value rather than incremented from the stale one, because
@@ -1722,8 +1919,8 @@ opened with two withdrawn identifiers, which join the whole of `## 7` without jo
 Neither figure is a check on the other and the two subtractions above are; a reader wanting one
 number from this paragraph should take the document-wide count, because it is the only one a single
 search reproduces. Assumptions: the third quantity this paragraph corrects above -- the body between
-the 7.4 heading and `## 8` -- now returns eighty rather than the seventy-seven recorded there,
-because §7.5's two entries sit inside that span; the earlier figure is left standing as the record of
+the 7.4 heading and `## 8` -- now returns eighty-one rather than the seventy-seven recorded there,
+because §7.5's one entry sits inside that span; the earlier figure is left standing as the record of
 what was corrected and this one states what the same instruction measures today.
 All five figures were re-measured a TWELFTH time, from the file, when
 `D-POSTING-GENERATION-DATE` was added inside this section's body. The measured values are:
@@ -1752,6 +1949,34 @@ direction it had not been exercised against -- not a figure left behind by an ap
 figure written AHEAD of the entry it counted. The entry has since landed, which is why the
 subtraction is now sound; the figures are measured rather than deduced from that fact.
 
+All five figures were re-measured a FOURTEENTH time, from the file, when three entries were added
+together inside this section's body -- `D-CONFIRMED-CARD-BINDING`, `D-COPY-LAST-KEY-ONLY-REQUEST` and
+`D-SIGNON-PASSWORD-HINT`. The measured values are: this section's population **ninety-three**, the
+document-wide count **one hundred and one**, the section-confined count **eighty-nine**, the count of
+`D-`-identified entries **one hundred** and the literal `^#### D-` search result **ninety-nine**.
+Both subtractions were evaluated and agree: one hundred and one less the twelve appended after
+*Related documents* is eighty-nine, and one hundred and one less the single `C-ROUNDING` heading is
+one hundred.
+Assumptions: the gap between this section's population and the section-confined count is unchanged
+at four, because all three entries were placed inside this section's body and therefore joined both
+counts together. ⚠️ Refactoring Rationale: the four figures quoted in this subsection's OPENING
+paragraph were restated in this pass rather than only here, because each of them is phrased as a
+prediction of what a present reader's own search returns -- and the thirteenth pass corrected this
+paragraph while leaving that paragraph reading ninety-one, ninety-eight, eighty-six, ninety-seven
+and ninety-six. A figure that a reader is invited to reproduce by running a search is not history;
+leaving it stale converts this paragraph's own warning about drift into an instance of it. The two
+figures deliberately NOT touched are the third quantity's seventy-seven and the eighty-four it is
+subtracted from, both of which the eleventh pass explicitly preserves as the record of what was
+corrected; that same instruction -- the body between the 7.4 heading and `## 8` -- returns
+**eighty-two** today, because §7.5's entry and these three new ones all sit inside that span.
+Assumptions: these two entries are also the first in this paragraph's history to have been added
+because a citation named an entry that did not exist ANYWHERE rather than resolving to the wrong
+one: three shipped sites cited `D-CONFIRMED-CARD-BINDING` by identifier before the entry was
+written. That is the tenth pass's failure mode in its more direct form, and it is recorded because
+the two are worth distinguishing -- a citation resolving to the wrong entry stops a reader who
+follows it, while a citation resolving to nothing tells a reader the register is incomplete without
+telling them what is missing.
+
 Assumptions: this was also the first recount in which a heading was REMOVED as well as added,
 and the distinction is worth recording because a remover who decrements instead of recounting
 reintroduces exactly the drift the fourth and fifth failures above record: a removal can take
@@ -1759,14 +1984,91 @@ one heading out of this section's body and another out of the appended continuat
 measurement distinguishes that from two out of either. Every figure above is taken from the file
 for that reason.
 
+All five figures were re-measured a FIFTEENTH time, from the file, when one entry was added inside
+this section's body -- `D-MONEY-MASK-NO-TRUNCATION`. The measured values are: this section's
+population **ninety-four**, the document-wide count **one hundred and two**, the section-confined
+count **ninety**, the count of `D-`-identified entries **one hundred and one** and the literal
+`^#### D-` search result **one hundred**. Both subtractions were evaluated and agree: one hundred and
+two less the twelve appended after *Related documents* is ninety, and one hundred and two less the
+single `C-ROUNDING` heading is one hundred and one. Assumptions: the gap between this section's
+population and the section-confined count is unchanged at four, because the entry was placed inside
+this section's body and therefore joined both counts together; the third quantity -- the body
+between the 7.4 heading and `## 8` -- returns **eighty-three** today. The four live figures in this
+subsection's OPENING paragraph were restated in this pass as well as here, for the reason the
+fourteenth pass records: each is phrased as a prediction of what a present reader's own search
+returns, so leaving one stale converts this paragraph's warning about drift into an instance of it.
+
+Assumptions: this entry was placed ADJACENT to the two it has to be read against --
+`D-EDIT-MASK-OVERFLOW` immediately above it -- rather than appended at the end of the section, and
+the placement is the decision rather than the convenience. Three entries now record three different
+dispositions of one condition, a monetary value too wide for the field rendering it: raise, saturate
+and widen. Separated by fifty entries they read as a contradiction a reader has to reconcile alone;
+adjacent, with the reason for each stated in terms of who decides, they read as one resolved
+question. Trade-offs: the cost is that this section is no longer in the order entries were written,
+which the `D-REFDATA-*` note above relies on when it calls itself the closing group. That ordering
+was never load-bearing for anything but that one sentence, and it remains true of the entries it
+names.
+
+All five figures were re-measured a SIXTEENTH time, from the file, when one entry was added inside
+this section's body -- `D-USER-UPDATE-NO-CREDENTIAL-CONTROL`. The measured values are: this
+section's population **ninety-five**, the document-wide count **one hundred and three**, the
+section-confined count **ninety-one**, the count of `D-`-identified entries **one hundred and two**
+and the literal `^#### D-` search result **one hundred and one**. Both subtractions were evaluated
+and agree: one hundred and three less the twelve appended after *Related documents* is ninety-one,
+and one hundred and three less the single `C-ROUNDING` heading is one hundred and two. Assumptions:
+the gap between this section's population and the section-confined count is unchanged at four,
+because the entry was placed inside this section's body and therefore joined both counts together;
+the third quantity -- the body between the 7.4 heading and `## 8` -- returns **eighty-four** today.
+The four live figures in this subsection's OPENING paragraph were restated in this pass as well as
+here, for the reason the fourteenth pass records.
+
+Assumptions: this entry was placed after `D-USER-ID-CANONICAL-DOMAIN` and before the
+`D-REFDATA-*` group rather than beside the three `D-SIGNON-*` credential entries it shares a root
+cause with, and the placement is a decision between two adjacencies rather than a default. The
+credential cluster is read by someone auditing the SIGN-ON surface; this entry is read by someone
+auditing the USER ADMINISTRATION surface, which is where its consequence is visible and where
+`D-USER-ID-CANONICAL-DOMAIN` already sits. Trade-offs: the cost is that a reader arriving from
+`D-4` has to follow a named forward reference rather than find the entry immediately below, which
+is why `D-4` now carries that reference explicitly rather than leaving the second consequence to
+be inferred.
+
+
 Assumptions: the gap between this section's population and the section-confined count is four,
-and it decomposes exactly: the population is the seventy-eight headings in §7.4's body plus the
-twelve appended past *Related documents*, while the confined count is the seven headings that
-precede §7.4 plus that same seventy-eight plus the ONE heading in §7.5 -- so the gap is the
-twelve appended less those eight, which is four. §7.5 holds one withdrawn identifier and not
+and it decomposes exactly, with no absolute figure needed. The population is §7.4's body plus the
+twelve headings appended past *Related documents*; the confined count is the seven headings that
+precede §7.4 plus that same body plus the ONE heading in §7.5. The body cancels, so the gap is
+the twelve appended less those eight, which is four -- and it stays four however the body grows,
+which is why it is stated this way. Measured at this pass, that body holds eighty-one headings,
+so the population is ninety-three and the confined count is eighty-nine. §7.5 holds one withdrawn identifier and not
 two; an earlier statement of this reasoning above said two, and the mechanism it described is
 right while the count was not. Neither figure is a check on the other and the two subtractions
 are, which is why a reader wanting a single number should take the document-wide count.
+
+All five figures were re-measured a FOURTEENTH time, from the file, when
+`D-SIGNON-RETIRED-WIDTH-HINT` was added inside this section's body. The measured values are:
+this section's population **ninety-one**, the document-wide count **ninety-nine**, the
+section-confined count **eighty-seven**, the count of `D-`-identified entries **ninety-eight**
+and the literal `^#### D-` search result **ninety-seven**. Both subtractions were evaluated and
+agree: ninety-nine less the twelve appended after *Related documents* is eighty-seven, and
+ninety-nine less the single `C-ROUNDING` heading is ninety-eight. The gap between this section's
+population and the section-confined count is unchanged at four and decomposes as before — the
+population is §7.4's own seventy-nine headings plus the twelve appended, the confined count is
+the seven headings preceding §7.4 plus that seventy-nine plus §7.5's one — because the entry was
+placed inside this section's body and therefore joined both counts together.
+
+⚠️ Assumptions: this pass is the first in which two figures stated ABOVE became correct by an
+entry being added rather than by being edited, and both are recorded because a reader who
+compares them against the thirteenth pass will otherwise read the agreement as a contradiction.
+The opening paragraph of this section says "all **ninety-one** are cited **by identifier**",
+which was one AHEAD of the ninety this section's population then measured, and the correction
+above to the 7.4-heading-to-`## 8` span says it "now returns eighty", which was one ahead of the
+seventy-nine that span then measured. Adding one entry to this section's body raised both
+populations by one, so both statements now measure exactly what they claim. Neither was edited,
+because neither is wrong today and rewriting a sentence that measures correctly would be the
+adjust-rather-than-measure habit the rest of this paragraph exists to break. That two figures
+written ahead of their entries came right is luck rather than method: the same two would have
+been wrong in the other direction had this entry been withdrawn instead, which is the reason
+every figure in this pass is taken from the file.
 
 Assumptions: several entries carry TWO identifiers in one heading, and both are the
 identifier used in shipped source character for character. The four purge entries that
@@ -2337,6 +2639,71 @@ a register of this size stays true.
 * **Files.**
   `services/reporting-service/src/main/java/com/carddemo/reporting/mapper/CobolEditMask.java`.
 
+#### D-MONEY-MASK-NO-TRUNCATION — the browser's account edit mask widens where the baseline drops a digit
+
+* **Baseline behaviour.** The two account screens render the same five amounts through the
+  same `+ZZZ,ZZZ,ZZZ.99` picture, by two different mechanisms. On the view screen the MAPSET
+  edits: [`app/bms/COACTVW.bms`](../../app/bms/COACTVW.bms) declares
+  `PICOUT='+ZZZ,ZZZ,ZZZ.99'` at **L120**, **L141**, **L162**, **L174** and **L195**, and the
+  generated symbolic map declares those five fields with that picture —
+  [`app/cpy-bms/COACTVW.CPY`](../../app/cpy-bms/COACTVW.CPY) `ACRDLIMO` **L302**, `ACSHLIMO`
+  **L314**, `ACURBALO` **L326**, `ACRCYCRO` **L332**, `ACRCYDBO` **L344** — so
+  [`app/cbl/COACTVWC.cbl`](../../app/cbl/COACTVWC.cbl) **L475** simply moves the raw record
+  field in, and that program's own `EDIT-FIELD-9-2 PIC +ZZZ,ZZZ,ZZZ.99` sits **commented out**
+  at **L69** because its map edits for it. On the update screen the PROGRAM edits:
+  [`app/cpy-bms/COACTUP.CPY`](../../app/cpy-bms/COACTUP.CPY) declares `ACRDLIMO PIC X(15)` at
+  **L416** and `ACURBALO PIC X(15)` at **L464** with no `PICOUT` anywhere in
+  [`app/bms/COACTUP.bms`](../../app/bms/COACTUP.bms), and
+  [`app/cbl/COACTUPC.cbl`](../../app/cbl/COACTUPC.cbl) **L371** declares
+  `WS-EDIT-CURRENCY-9-2-F PIC +ZZZ,ZZZ,ZZZ.99` and moves the edited result into the unedited
+  field. Either way the picture provides **nine** integer positions for a record field
+  declared `ACCT-CURR-BAL PIC S9(10)V99` at **L7** of
+  [`app/cpy/CVACT01Y.cpy`](../../app/cpy/CVACT01Y.cpy), which holds **ten**. A
+  decimal-aligned `MOVE` therefore discards the high-order digit without signalling, so a
+  balance of `1234567890.12` displays as `+234,567,890.12` — understating it by a thousand
+  million, in a well-formed string that carries no evidence of the loss.
+* **Target behaviour.** `applyMoneyEditMask` reproduces the picture exactly for every value
+  that fits it — the fixed sign position, zero suppression to blanks including any separator
+  inside the suppressed run, the two group separators, the always-visible decimal positions,
+  and a total width of fifteen. For a value needing a tenth integer digit it **widens**,
+  emitting every digit with grouping intact, rather than truncating.
+* **Category.** Documented divergence — overflow disposition on a display path.
+* **Why the difference is accepted.** Truncation here is a display defect in the reference,
+  not a business rule, and it is the plausible-number-that-is-wrong failure this migration
+  treats as the most dangerous class in the money path: the operator is shown a correct-looking
+  balance that is wrong by a factor of ten, with nothing on the screen to indicate it. The
+  value is bounded server-side by `Money.MAX_MAGNITUDE` of `9999999999.99`, ten integer digits,
+  so the case is reachable rather than theoretical. Widening costs column alignment for the
+  one value class that overflows and keeps it for every value that does not; truncating costs
+  correctness. Where the two meet the operator wins, which is the same resolution
+  `D-SIGNON-PASSWORD-HINT` reaches on a different control.
+* **Why this is a third disposition and not a contradiction.** The register now holds three
+  answers to one question, and they differ because the deciders differ. `D-EDIT-MASK-OVERFLOW`
+  **raises** in `CobolEditMask`, and records in terms that hand this decision onward: the
+  guard "stays reachable only because the shared money type admits ten integer digits, so the
+  narrowing decision belongs to the caller assembling the band — the only place that can decide
+  what a balance too wide for its own field should show." This entry is one such caller's
+  answer. `D-AUTH-SUMMARY-MONEY-DOMAIN` **saturates**, because that column's meaning is a
+  bounded domain rather than an amount. A browser screen can do neither: raising would replace
+  a correct amount with a blank screen during render, and saturating would state a different
+  wrong number. Widening is the only disposition that keeps the amount true, which is why the
+  three coexist rather than compete.
+* **What was wrong before.** The mask had **no implementation in either layer**. Money crosses
+  the boundary through `MoneyModule`, which writes `Money.toPlainString()`, so the wire carries
+  `-1234.56`; the account-view screen painted that text raw while its own prose asserted that
+  "the baseline's own presentation is the `PICOUT='+ZZZ,ZZZ,ZZZ.99'` edit mask the service
+  already applies", and `AccountViewResponse` stated that the view program moved its amounts
+  into `PIC X(15)` screen fields "with no edit mask" — a description of the UPDATE screen's
+  mapset attributed to the view screen's. Two documents in the two places a reviewer would look
+  each named the other layer as the owner, and neither owned it.
+* **Where it is verified.** `ui/src/format/money.test.ts` pins the exact character output for
+  every branch of the picture, asserts the widened form for a tenth digit **and** asserts the
+  truncated form is not produced, and proves no numeric conversion occurs by rendering a value
+  that a double cannot hold digit for digit.
+* **Files.** `ui/src/format/money.ts`, `ui/src/screens/accountView/index.tsx`,
+  `ui/src/screens/accountUpdate/index.tsx`.
+
+
 #### D-AUTH-REASON-WIDTH — the composed authorization reason is capped at the screen's twenty
 
 * **Baseline behaviour.** The authorization reason is one composed field, not two.
@@ -2628,6 +2995,164 @@ a register of this size stays true.
   write-only and required.
 * **Files.** `services/auth-service/src/main/resources/openapi/auth-api.yaml`,
   `services/auth-service/src/main/java/com/carddemo/auth/config/SecurityConfig.java`.
+
+#### D-SIGNON-CREDENTIAL-WIDTH — the painted width hint is not repeated beside the credential
+
+* **Baseline behaviour.** [`COSGN00.bms`](../../app/bms/COSGN00.bms) paints the same eight
+  characters `(8 Char)` **twice**, once beside each entry field — at **L164-L169**,
+  `POS=(19,52)`, beside the identifier, and again at **L184-L189**, `POS=(20,52)`, beside the
+  credential, both `LENGTH=8` and `COLOR=BLUE`. Beside the credential the hint was accurate
+  three times over: `PASSWD` is declared `ATTRB=(DRK,FSET,UNPROT)` with `LENGTH=8` at **L175**,
+  the receiving field is `02 PASSWDI PIC X(8).` at
+  [`COSGN00.CPY`](../../app/cpy-bms/COSGN00.CPY) **L78**, and the stored column is
+  `05 SEC-USR-PWD PIC X(08).` at [`CSUSR01Y.cpy`](../../app/cpy/CSUSR01Y.cpy) **L21**.
+* **Target behaviour.** The hint is transcribed and painted beside the **identifier** only,
+  where all of that still holds — the identifier is `SEC-USR-ID PIC X(08)`, a column
+  `auth.users` does carry, and the control is capped at the same eight. Beside the two
+  credential controls the screen paints an authored hint instead, `(Up to 256 characters)`,
+  composed from `PASSWORD_MAX_LENGTH` rather than written out so that it cannot come to
+  disagree with the `maxLength` the controls carry. The replacement-credential control, which
+  previously carried no hint at all, now carries the same one.
+* **Category.** Documented divergence — a transcribed user-visible literal is painted at one of
+  its two source positions, and authored text stands at the other.
+* **Why the difference is accepted.** It follows necessarily from `D-4`. The field the hint
+  describes is precisely the field that entry declines to carry forward, so beside the
+  credential the sentence had no remaining subject — and it had become worse than merely
+  unmoored. `infra/modules/cognito/variables.tf` refuses any `password_minimum_length` below
+  **12** and defaults to **14**, so no environment this repository can express accepts an
+  eight-character credential: the hint was instructing an operator to type a value guaranteed
+  to be refused. That is the one shape in which transformation rule T8's verbatim obligation
+  has nothing left to be faithful to, because honouring the literal works against the operator
+  it was written for. ⚠️ Refactoring Rationale: an earlier revision reached the opposite
+  conclusion, flagged the conflict in place and kept painting the hint on the ground that
+  re-wording a designer's string is a designer's decision. The reasoning was sound and the
+  premise was not: the choice was never between two wordings, it was between a sentence that
+  misdirects and a sentence that describes the control actually rendered. Assumptions: the
+  authored replacement states only the **ceiling** and deliberately no minimum. The browser is
+  never told the provider's policy — `RuntimeConfig` carries only `apiBaseUrl` — so both
+  candidate minima are wrong somewhere: 12 is the floor the module will not go below but every
+  environment on its default demands 14, so "at least 12" would invite a refusal, while "at
+  least 14" would be false wherever a shorter policy is set. The ceiling is the only claim true
+  in every expressible configuration, and the provider's own refusal carries the policy when a
+  credential falls short of it.
+* **Where it is verified.** `ui/src/screens/signon/signon.test.tsx` asserts the transcribed hint
+  is rendered beside the identifier, that the credential control renders the composed hint and
+  not the transcribed one, that the number in the composed hint is the control's own `maxLength`
+  rather than a written literal, and that the replacement-credential control carries the same
+  hint once the challenge is presented.
+* **Files.** `ui/src/screens/signon/index.tsx`.
+
+#### D-SESSION-REVOCATION — signing out revokes the grant, where the baseline ended nothing
+
+* **Baseline behaviour.** Signing off is a **transfer of control and nothing more**.
+  [`COMEN01C.cbl`](../../app/cbl/COMEN01C.cbl) **L196-L203** returns to the sign-on program
+  with `XCTL PROGRAM(CDEMO-TO-PROGRAM)` carrying **no** `COMMAREA` clause — the one transfer
+  in the estate that omits it, which is what makes the next program start with
+  `EIBCALEN = 0` and no identity. Nothing is revoked because there is nothing revocable: the
+  terminal session **was** the session, it was bounded by the terminal's connection to the
+  region, and no credential outlived it. `USRSEC` holds a password and no grant.
+* **Target behaviour.** `POST /api/v1/auth/signout` accepts the held refresh token and calls
+  the pool's `RevokeToken` operation with the confidential client's credentials, so the grant
+  is ended **at the provider** rather than only in the browser. It answers `204` both for a
+  token it revoked and for one the pool declines to accept — already revoked, expired, or not
+  a revocable type — and `500` only when the pool could not be reached, because then the token
+  is still live. The browser half is unconditional and runs first: `useAuth.signOut` discards the
+  held session record and publishes the anonymous reading whether the revocation succeeds, fails
+  or has nothing to revoke.
+* **Category.** Documented divergence — an operation added with no baseline source.
+* **Why the difference is accepted.** It follows necessarily from `D-4`. Identity moved to a
+  managed user pool, and a pool session is carried by a refresh token provisioned with a
+  **thirty-day** life — `refresh_token_validity_days` defaults to 30 in
+  `infra/modules/cognito/variables.tf` — where the baseline's session lasted as long as a
+  terminal connection. Migrating the sign-off faithfully, as a navigation that discards local
+  state, would therefore have carried across the baseline's *behaviour* while inverting its
+  *effect*: a copy of the token taken from a browser store, a synchronised profile or a shared
+  workstation would go on minting one-hour access tokens for a month after the operator believed
+  the session was over, and no action available anywhere in the application would stop it. Assumptions: that reasoning stands even though the browser no
+  longer persists the token — see `D-SESSION-NOT-PERSISTED`. Removing the browser store closed the
+  route by which a script or a synchronised profile obtained a copy; it does nothing about a copy
+  already taken, a token captured in transit by a compromised intermediary, or the operator who
+  simply walks away, and only a revocation ends the grant itself. Two
+  further choices inside the entry are deliberate. The operation is **unauthenticated**, because
+  gating it behind a live access token would refuse the revocation in exactly the case that most
+  needs it — an abandoned session whose access token has expired and whose refresh token has weeks
+  left — and its authority is possession of the refresh token, the only credential `RevokeToken`
+  accepts. And the local clear does **not** await the remote one, because awaiting it would leave
+  a signed-out operator signed on whenever the provider was unreachable, which is the worse of the
+  two failures by a wide margin. Assumptions: revocation stops the grant, not the access tokens
+  already issued from it — an unexpired bearer stays valid at every resource server until it
+  expires, which is why the access-token lifetime is one hour and not longer.
+* **Where it is verified.** `CognitoIdentityServiceTest` asserts the revocation carries the token
+  and the client secret, that a token the pool will not accept still completes the sign-out, and
+  that an unreachable pool fails it rather than reporting it done; `SignOutRequestValidationTest`
+  asserts the body's single member, its bound, and that no refusal echoes the token;
+  `OperationCensusTest` and `AuthApiContractTest` assert the operation is published, mapped and
+  unauthenticated in both the contract and the filter chain; and
+  `ui/src/hooks/signOutRevocation.test.tsx` asserts the browser half empties the tab in all three
+  remote outcomes and reads the token before clearing it.
+* **Files.** `services/auth-service/src/main/java/com/carddemo/auth/service/CognitoIdentityService.java`,
+  `services/auth-service/src/main/java/com/carddemo/auth/dto/SignOutRequest.java`,
+  `services/auth-service/src/main/resources/openapi/auth-api.yaml`,
+  `services/auth-service/src/main/java/com/carddemo/auth/config/SecurityConfig.java`,
+  `ui/src/api/auth.ts`, `ui/src/hooks/useAuth.ts`,
+  `infra/modules/api-gateway-http/variables.tf`.
+
+#### D-SESSION-NOT-PERSISTED — the browser holds the session in memory, so a reload signs the operator on again
+
+* **Baseline behaviour.** The 3270 session **survived far more than a screen refresh**. CICS is
+  pseudo-conversational, so the task ends at every turn and continuity is carried in storage the
+  terminal hands back: [`COSGN00C.cbl`](../../app/cbl/COSGN00C.cbl) **L65-L67** declares
+  `01 DFHCOMMAREA` with `05 LK-COMMAREA PIC X(01) OCCURS 1 TO 32767 TIMES DEPENDING ON EIBCALEN`,
+  **L80** detects first entry with `IF EIBCALEN = 0`, and **L98-L101** ends each turn with
+  `EXEC CICS RETURN ... COMMAREA(CARDDEMO-COMMAREA)`. The identity in that area —
+  `CDEMO-USER-ID PIC X(8)` and `CDEMO-USER-TYPE PIC X(1)`
+  ([`COCOM01Y.cpy`](../../app/cpy/COCOM01Y.cpy) **L19-L44**) — therefore persisted across every
+  screen turn for as long as the terminal stayed connected to the region, and re-displaying a map
+  cost the operator nothing.
+* **Target behaviour.** The browser holds the session **only in memory**. `ui/src/hooks/useAuth.ts`
+  keeps one frozen record — the identifier, the identity token, the renewal token and the bearer's
+  expiry instant — in a module variable, and `ui/src/api/client.ts` keeps the bearer in another that
+  nothing outside it can read. No credential is written to `sessionStorage`, `localStorage`, a
+  cookie or IndexedDB. A client-side route change keeps the session, because the module is not
+  re-evaluated; a **page reload, a restored tab or a second tab holds nothing**, and
+  `ui/src/routes/guards.tsx` sends that caller to the sign-on screen.
+* **Category.** Documented divergence — a deliberate reduction in session durability, accepted to
+  remove a credential exposure.
+* **Why the difference is accepted.** ⚠️ The tokens **were** persisted, in four tab-scoped
+  `sessionStorage` keys, and a review established that as an exposure rather than a trade-off. All
+  four were readable by any script executing on the origin that renders every screen, and one of
+  them was a renewal token provisioned with a thirty-day life
+  (`refresh_token_validity_days` defaults to 30 in `infra/modules/cognito/variables.tf`) — so a
+  single read yields a month of one-hour bearers, which is the same exposure `D-SESSION-REVOCATION`
+  exists to bound and this one exists to prevent. The argument that had justified persisting them —
+  that the content-security policy in `ui/nginx.conf` admits no third-party script, so no
+  supply-chain path to a reader exists — was **false**, and its shape is worth recording because it
+  is a tempting one: third-party code here is **bundled**, so a compromised dependency executes as
+  first-party script from `'self'` and the policy never sees a foreign origin to refuse. Two
+  alternatives were weighed and both are foreclosed by this architecture rather than by preference.
+  An `HttpOnly; Secure; SameSite` cookie is unreadable by script and would be the right answer for a
+  same-origin deployment — but the SPA is served by CloudFront and the API by API Gateway, and
+  `infra/modules/cloudfront-spa/main.tf` declares one S3 origin, no `origin_group` and no
+  API cache behaviour, so the cookie would need `SameSite=None`; that readmits cross-site requests
+  and lets any page the operator visits trigger a rotation which invalidates the legitimate tab's
+  token, trading a script-read exposure for a cross-site one. Holding the session **server-side** is
+  foreclosed outright: the services are stateless by requirement — the whole point of
+  `D-1`'s elimination of pseudo-conversational state — and there is no cache tier to hold a session
+  in, both of which are architecture decisions rather than omissions. What is lost is measured and
+  small beside that: one sign-on after a reload. Assumptions: it is **not** the loss of a working
+  session mid-task, because a reload is an explicit act and the renewal timer keeps a session alive
+  indefinitely while the page is open; and it is not the loss of the baseline's own continuity across
+  screen turns, because a route change in a single-page application is not a reload.
+* **Where it is verified.** `ui/src/hooks/sessionIntegrity.test.ts` asserts the session is one
+  atomic record — an incomplete issued set and a set whose identity token names another operator
+  each establish nothing — and that the renewal timer is armed again when a consumer mounts anew,
+  which is what keeps an in-memory session alive across a remount; `ui/src/api/client.test.ts`
+  asserts the bearer is observable only as a header on a dispatched request; and
+  `ui/src/test/authSessionSignal.test.ts` and `ui/src/hooks/authInvalidation.test.tsx` assert the
+  whole record is discarded together on a refused session. Assumptions: no test asserts the
+  ABSENCE of a storage key, and the omission is deliberate — there is no key to name, and a test
+  enumerating names that no longer appear anywhere in the tree would pass for the wrong reason.
+* **Files.** `ui/src/hooks/useAuth.ts`, `ui/src/api/client.ts`, `ui/.env.example`.
 
 #### D-RUNTIME-CREDENTIAL-HANDOVER — a created user's first credential is returned once, in the create response
 
@@ -3568,7 +4093,7 @@ a register of this size stays true.
   `CAST(TRC_CAT_DATA AS CHAR(50))` at **L109** of
   [`TRANEXTR.jcl`](../../app/app-transaction-type-db2/jcl/TRANEXTR.jcl).
 * **Target behaviour.** Both columns are `description VARCHAR(50) NOT NULL` —
-  `V1__reference.sql` **L117** for types and **L209** for categories — and both mappers publish
+  `V1__reference.sql` **L110** for types and **L198** for categories — and both mappers publish
   `TransactionTypeMapper.trimTrailing(...)`, so a response body carries `Regular Sales Draft` and
   not that value followed by thirty-one spaces. `TransactionTypeMapper` applies it to the type
   description and `TransactionCategoryMapper` to the category description; there is one rule and
@@ -3658,6 +4183,50 @@ a register of this size stays true.
 * **Files.** `services/reference-service/src/main/resources/openapi/reference-api.yaml`.
 
 
+#### D-SIGNON-PASSWORD-HINT — the credential's width hint names the bound the screen enforces
+
+* **Baseline behaviour.** [`app/bms/COSGN00.bms`](../../app/bms/COSGN00.bms) paints the same
+  hint twice: `INITIAL='(8 Char)'` at **L169**, beside the identifier field, and again at
+  **L189**, beside the password field. Both are `LENGTH=8` fields at `POS=(19,52)` and
+  `POS=(20,52)`, and the hint is accurate for both, because
+  [`app/cpy/CSUSR01Y.cpy`](../../app/cpy/CSUSR01Y.cpy) declares
+  `SEC-USR-ID PIC X(08)` at **L18** and `SEC-USR-PWD PIC X(08)` at **L21**.
+* **Target behaviour.** The identifier keeps the transcribed hint verbatim. The credential
+  control is given a target-owned hint, `(min 12 Char)`, and its `maxLength` is the service
+  contract's 256 rather than the mapset's eight.
+* **Category.** A **user-guidance** divergence on a transcribed string, and the only one on
+  this screen.
+* **Why the difference is accepted.** The password field has no successor in the target —
+  the same root cause as `D-SIGNON-CASE-SENSITIVE-PASSWORD` and `D-PASSWORD-CHALLENGE`
+  above and below it — so every constraint the baseline expressed about it describes a field
+  that no longer exists. What makes this one a defect rather than a curiosity is that eight
+  characters is not merely a stale figure, it is a length **no environment this repository
+  can express will accept**: [`infra/modules/cognito/variables.tf`](../../infra/modules/cognito/variables.tf)
+  defaults `password_minimum_length` to **14** and its own `validation` block refuses any
+  value below **12**. The transcribed hint therefore named the one length guaranteed to be
+  refused, on the control where a refusal costs the operator their sign-on. Preserving a
+  transcription is a fidelity goal; instructing an operator to enter a value the system will
+  reject is a defect, and where the two meet the operator wins.
+* **What was wrong before.** The hint was painted beside BOTH controls and the disagreement
+  was recorded as an unresolved design-source conflict, on the ground that wording is a
+  designer's decision rather than a screen's. That reasoning was right about transcription
+  and wrong about the reader: it left a live screen instructing an operator toward a
+  guaranteed refusal while the note explaining why sat in a source comment they will never
+  read. The transcription is not lost — it is still painted, still verbatim, beside the
+  control it is still true of.
+* **Why the figure is the floor and not the default.** The screen names **twelve**, the
+  policy floor, rather than the deployed default of fourteen, because a browser bundle cannot
+  read the deployed policy: `password_minimum_length` is a Terraform variable admitting 12
+  through 99, so a screen naming fourteen would be wrong for any environment that set it
+  otherwise, while a screen naming the floor is never wrong about what is definitely too
+  short. The provider's own sentence reports the exact requirement when it refuses, and that
+  sentence now reaches the control — see the `newPassword` mapping recorded below.
+* **Where it is verified.** `signon.test.tsx` renders the screen and its four
+  challenge-refusal cases read the replacement control, so the hint's own constant is
+  exercised by rendering; the two hints are separate exported constants, so a future revision
+  cannot restore one over the other without changing a name.
+* **Files.** `ui/src/screens/signon/index.tsx`.
+
 #### D-SIGNON-CASE-SENSITIVE-PASSWORD — the credential is compared case-sensitively where the baseline folded it
 
 * **Baseline behaviour.** [`COSGN00C.cbl`](../../app/cbl/COSGN00C.cbl) folds **both**
@@ -3732,6 +4301,62 @@ a register of this size stays true.
 * **Where it is claimed.** `services/auth-service/src/main/resources/openapi/auth-api.yaml`,
   `infra/modules/cognito/main.tf`, `infra/modules/cognito/README.md` and
   `docs/architecture/context-and-container-diagrams.md`, each citing this identifier.
+
+#### D-SIGNON-RETIRED-WIDTH-HINT — the second `(8 Char)` hint is not painted, because the column it describes was retired
+
+* **Baseline behaviour.** [`COSGN00.bms`](../../app/bms/COSGN00.bms) paints the literal
+  `(8 Char)` **twice**, as two separate `DFHMDF` fields with identical operands —
+  `ATTRB=(ASKIP,NORM)`, `COLOR=BLUE`, `LENGTH=8` — at **POS=(19,52)** with its `INITIAL=`
+  on **L169**, beside the `USERID` field, and at **POS=(20,52)** with its `INITIAL=` on
+  **L189**, beside the `PASSWD` field. Each states the width of the control it sits beside:
+  both controls are `LENGTH=8`, and `PASSWD` even carries `INITIAL='________'` — eight
+  underscores — at **L175**.
+* **Target behaviour.** The first occurrence is rendered, as the identifier control's
+  description. The second is **not rendered at all**. `ui/src/screens/signon/index.tsx`
+  paints one hint, associates it with the identifier through `aria-describedby`, and paints
+  none beside either password control.
+* **Category.** Documented divergence — a transcribed string withheld because its subject
+  no longer exists, not a change of wording.
+* **Why the difference is accepted.** The two occurrences look identical and describe
+  different kinds of fact. Beside the identifier, eight is a width that **survived** the
+  migration: it is declared three times over — `LENGTH=8` at **L156** of the mapset,
+  `02 USERIDI PIC X(8).` at **L72** of
+  [`app/cpy-bms/COSGN00.CPY`](../../app/cpy-bms/COSGN00.CPY) and
+  `10 CDEMO-USER-ID PIC X(08).` at **L25** of
+  [`app/cpy/COCOM01Y.cpy`](../../app/cpy/COCOM01Y.cpy) — and the browser control enforces it
+  through `USER_ID_MAX_LENGTH`. Beside the credential, eight is the width of
+  `SEC-USR-PWD PIC X(08)` at **L21** of
+  [`app/cpy/CSUSR01Y.cpy`](../../app/cpy/CSUSR01Y.cpy), a field this migration does not carry
+  forward at all ([D-4](#d-4--the-plaintext-credential-field-is-not-carried-forward)): there
+  is no password column in `auth.users`, no successor to the comparison at **L223** of
+  [`COSGN00C.cbl`](../../app/cbl/COSGN00C.cbl), and the pool that judges the credential now
+  refuses anything shorter than its configured minimum — `password_minimum_length` in
+  `infra/modules/cognito/variables.tf` defaults to 14 and its validation refuses any value
+  below 12. So the second hint instructs an operator to enter a credential that **cannot be
+  accepted in any environment this repository can express**. Transformation rule T8 carries
+  user-visible text across unchanged; it does not require carrying across an instruction to
+  fail, and rule T9 admits the omission as a documented divergence, which is what this entry
+  is.
+* **The alternative that was rejected, and why.** Replacing the second occurrence with the
+  target policy's own minimum keeps a hint beside the control and was refused on the same
+  ground the service refuses to restate that policy in `SignOnChallengeRequest`: the number
+  is configured per environment in the pool, so a copy painted on this screen becomes wrong
+  the first time an environment tightens it, and it would be a user-visible string this
+  screen owns rather than one it transcribes. Leaving the hint painted with a
+  `DESIGN_SOURCE_CONFLICT` flag beside it — which is what the screen did before this entry —
+  was also refused: a flag in a source comment is invisible to the operator being misled.
+* **What is NOT diverged.** The identifier keeps its hint and its eight-character bound.
+  Every other string this mapset paints is still painted verbatim, including both `LENGTH=13`
+  field labels with their interior padding. Nothing about the credential's own bound changes
+  here: it was already the service's 256 rather than the mapset's 8, for the reason recorded
+  on `PASSWORD_MAX_LENGTH` in `ui/src/api/auth.ts`.
+* **Where it is claimed and verified.** `ui/src/screens/signon/index.tsx` cites this
+  identifier on `SIGN_ON_FIELD_WIDTH_HINT` and in its file overview.
+  `ui/src/screens/signon/signon.test.tsx` pins the outcome in
+  *paints the width hint only beside the identifier*, which asserts the rendered count is one
+  and that the one carries the identifier control's hint id — so painting the hint elsewhere
+  on the screen cannot satisfy it either.
+* **Files.** `ui/src/screens/signon/index.tsx`, `ui/src/screens/signon/signon.test.tsx`.
 
 #### D-USER-ID-CANONICAL-DOMAIN — the logon identifier is held to a canonical form the baseline never checked
 
@@ -3820,6 +4445,87 @@ a register of this size stays true.
 * **Files.**
   `services/auth-service/src/main/java/com/carddemo/auth/service/UserService.java`,
   `services/auth-service/src/main/resources/db/migration/V6__auth_canonical_user_id.sql`.
+
+#### D-USER-UPDATE-NO-CREDENTIAL-CONTROL — the user update screen paints no credential control, and emits no credential refusal
+
+* **Baseline behaviour.** The user update screen is the baseline's second credential surface,
+  and it carries the field end to end. [`app/bms/COUSR02.bms`](../../app/bms/COUSR02.bms)
+  paints the label `INITIAL='Password:'` at **L125-L129**, the input `PASSWD` at
+  **L130-L134** as `ATTRB=(DRK,FSET,UNPROT)`, `COLOR=GREEN`, `HILIGHT=UNDERLINE`,
+  `LENGTH=8`, `POS=(13,16)`, and the hint `INITIAL='(8 Char)'` at **L135-L139** beside it;
+  [`app/cpy-bms/COUSR02.CPY`](../../app/cpy-bms/COUSR02.CPY) declares both map ends,
+  `PASSWDI PIC X(8)` at **L78** and `PASSWDO PIC X(8)` at **L152**.
+  [`app/cbl/COUSR02C.cbl`](../../app/cbl/COUSR02C.cbl) then uses all of it: it blanks the
+  control on the fetch arm at **L160**, **pre-fills it from the stored plaintext credential**
+  at **L169** (`MOVE SEC-USR-PWD TO PASSWDI OF COUSR2AI`), refuses a blank one at
+  **L198-L203** with `Password can NOT be empty...`, compares it at **L227**, re-persists it
+  at **L228** (`MOVE PASSWDI OF COUSR2AI TO SEC-USR-PWD`, which sets `USR-MODIFIED-YES`), and
+  blanks it again in `INITIALIZE-ALL-FIELDS` at **L409**. The field behind every one of those
+  seven statements is `05 SEC-USR-PWD PIC X(08).` at
+  [`app/cpy/CSUSR01Y.cpy`](../../app/cpy/CSUSR01Y.cpy) **L21**.
+* **Target behaviour.** The screen paints **four** editable controls, not five, and emits
+  **ten** of the eleven sentences the catalog files against `COUSR02C` — the eleventh being
+  the credential's blank refusal. There is no credential control, no credential label, no
+  `(8 Char)` hint, no blank refusal for it, and no member of the request that could carry one:
+  `UpdateUserRequest` declares exactly `firstName`, `lastName` and `userType` and seals itself
+  with `additionalProperties: false`. The four surviving refusal arms keep the reference's
+  relative order exactly, so the user type is still tested last and still only after the three
+  before it carry values.
+* **Category.** Documented divergence — a **user-visible control and its sentence removed**,
+  as the screen-level consequence of `D-4`.
+* **Why the difference is accepted.** `D-4` declines credential parity at the schema and the
+  sign-on comparison; this entry records what that decision costs on the one *other* screen the
+  field reached. The two available options were both losses, and the smaller one was taken.
+  Keeping the control means asking an administrator to type a credential, refusing them if they
+  leave it blank, transmitting nothing, and then reporting `User <id> has been updated ...` —
+  a screen that looks like a password reset, behaves like one all the way to its success
+  sentence, and resets nothing. That is a **false affordance on the highest-consequence field
+  the screen has**, and it is worse than an absence, because an absence is discoverable and a
+  silent discard is not. Removing the control means the mapset field, its label, its hint and
+  its refusal are visibly gone, which a reader can see and this register explains.
+* **Why not add a credential-reset operation instead.** Because `auth-service` publishes no
+  such operation anywhere: its whole surface is `/api/v1/auth/signon`, `/api/v1/auth/refresh`,
+  `/api/v1/auth/challenge`, `/api/v1/users` (`get`, `post`) and `/api/v1/users/{userId}`
+  (`get`, `put`, `delete`). An administrative credential reset is a new capability with its own
+  authorization, audit and provider-side semantics; introducing one to keep a transcribed
+  control company would add unplanned surface rather than close a gap, and the plan does not
+  ask for it. The gap is therefore recorded rather than filled.
+* **The reference supplies the precedent for the shape that remains.** Its own sibling delete
+  screen already publishes the three-field user without a credential:
+  [`app/cbl/COUSR03C.cbl`](../../app/cbl/COUSR03C.cbl) **L165-L167** echoes exactly the first
+  name, the last name and the user type after its read, and the token `PASSWD` appears **zero**
+  times in either half of its map
+  ([`app/bms/COUSR03.bms`](../../app/bms/COUSR03.bms),
+  [`app/cpy-bms/COUSR03.CPY`](../../app/cpy-bms/COUSR03.CPY)). So the post-removal screen is
+  not an invented shape — it is the shape the baseline itself uses for the sibling operation
+  that does not change a credential.
+* **What is *not* affected.** The `Please modify to update ...` outcome (**L239**) becomes
+  *more* reachable, not less. With the control present, a freshly-typed credential differed from
+  the absent stored one on every save, so the change comparison would report a change every
+  time and that outcome could never be reached; with the control gone, the three comparable
+  values decide it, exactly as the reference's other three arms do. Nothing else on the screen
+  changes: the two-turn workflow, the PF3-saves exception, the short-circuit refusal order, the
+  composed success sentence and its `DELIMITED BY SPACE` truncation all carry across unchanged.
+* **Where it is verified.** `ui/src/screens/userUpdate/userUpdate.test.tsx` asserts the absence
+  four ways, none of them by eye. *No credential surface*: the rendered screen carries no control
+  of password type and no password wrapper, and neither the `Password:` caption nor the
+  `(8 Char)` hint appears — three witnesses, because each would survive a different partial
+  removal. *No credential slot*: the exported label and width records' key sets are each exactly
+  the four fields the field union names, and the hint record's is exactly `userType`; the field
+  renderer reads a label and a width per field, so a restored control would have to grow one of
+  them. *The fourth refusal arm is reachable*: clearing the user type after a read and saving
+  answers `User Type can NOT be empty...` and never `Password can NOT be empty...`, which is the
+  reachability proof — a screen still demanding a credential would answer the credential's arm
+  and the user type's own refusal would be unreachable from a browser. *Nothing extra is
+  transmitted*: a committed save's request body has a key set of exactly `firstName`, `lastName`
+  and `userType`, asserted as a key set and not as three present values, because the defect being
+  closed was a fourth value collected and dropped. Each of those four assertions was confirmed
+  to fail against a deliberate perturbation of the code it covers.
+* **What the catalog keeps.** `ui/src/messages/messages.ts` still publishes
+  `SHARED_MESSAGES.PASSWORD_CAN_NOT_BE_EMPTY`, because `app/cbl/COUSR01C.cbl` **L138** raises
+  it as well, so the catalog does not lose the sentence — only this screen stops emitting it.
+* **Files.** `ui/src/screens/userUpdate/index.tsx`.
+
 
 #### D-REFDATA-ACTION-TOKEN — an unrecognised action token is refused, not soft-rejected
 
@@ -5242,7 +5948,10 @@ this register for the identifier learns why it is absent rather than concluding 
   class-level `AtLeastOneKey` constraint, and `openapi/transaction-api.yaml` publishes the
   pair as `anyOf` with neither branch forbidding the other. `TransactionAddService`
   resolves account-first and discards a card number supplied alongside an account
-  identifier, silently, exactly as **L209** does.
+  identifier, exactly as **L209** does. The discard is silent on a PREVIEW turn, where the
+  response reports the resolved card in its own `resolvedCardNumber` member; on a CONFIRMING turn a
+  submitted card that is not the resolved one is refused rather than discarded. See
+  `D-CONFIRMED-CARD-BINDING` below, which records why that one turn differs.
 * **Category.** Not a divergence — a **correction** to one. The delivered code carried an
   unregistered divergence that is now removed, and this entry records it so a reader
   comparing the two revisions does not read the removal as a regression.
@@ -5270,6 +5979,174 @@ this register for the identifier learns why it is absent rather than concluding 
 * **Files.**
   `services/transaction-service/src/main/java/com/carddemo/transaction/dto/TransactionAddRequest.java`,
   `services/transaction-service/src/main/resources/openapi/transaction-api.yaml`.
+
+#### D-CONFIRMED-CARD-BINDING — the confirming turn is bound to the card the preview reported
+
+* **Baseline behaviour.** [`app/cbl/COTRN02C.cbl`](../../app/cbl/COTRN02C.cbl) **L164-L165**
+  runs `VALIDATE-INPUT-KEY-FIELDS` and `VALIDATE-INPUT-DATA-FIELDS` and only then, at
+  **L169**, evaluates the confirmation. So key resolution runs on EVERY turn before the
+  confirmation is examined: on the account arm **L208** reads the cross-reference and
+  **L209** moves `XREF-CARD-NUM` into `CARDNINI OF COTRN2AI` — the screen's own input field
+  — and on the confirming turn **L172** performs `ADD-TRANSACTION` immediately afterwards.
+  The card written is therefore the card **L209** just placed there, by construction. The
+  operator is never confirming a different value either, because the preceding turn took the
+  `LOW-VALUES` arm at **L176-L181**, which moves `'Confirm to add this transaction...'` and
+  performs `SEND-TRNADD-SCREEN` — re-sending the screen **after** the overwrite. A
+  disagreement between the card an operator sees and the card that is written is
+  **unreachable** in the reference, and no sentence exists for it.
+* **Target behaviour.** Two halves, one for each turn. The preview turn returns
+  `TransactionAddPreview.resolvedAccountId` and `TransactionAddPreview.resolvedCardNumber` on
+  EVERY withheld answer, and additionally `TransactionAddPreview.copied` — a
+  `CopiedTransactionData` of eleven members, being the source row's identifier and the ten data
+  values — on a copy turn. ⚠️ The resolved pair are members of the PREVIEW rather than of the
+  copied record, and that placement is load-bearing: `VALIDATE-INPUT-KEY-FIELDS` runs on every
+  turn (**L166** for the Enter arm, **L473** for the copy arm) and writes both key fields, so a
+  pair reachable only on a copy turn published the repaint on one of the two turns that perform
+  it and left an ordinary capture unable to show it. A twelve-member `EffectiveCapture` block
+  carrying the pair together with the ten data values was authored first and is not used, for
+  that reason. The confirming turn calls
+  `TransactionAddService.requireTheConfirmedCardIsTheResolvedCard` immediately before
+  `appendTransaction`: it passes when no card number was submitted, and refuses with
+  `MESSAGE_CONFIRM_RESOLVED_CARD` — `"Card Number changed. Review the transaction and
+  confirm again..."` — when a submitted card number is not the one the supplied key resolved
+  to.
+* **Category.** A target-owned **refusal and disclosure** for a condition the baseline
+  cannot reach, introduced because splitting one screen turn into two HTTP requests removed
+  the mechanism that made it unreachable.
+* **Why the reference's mechanism does not survive the split.** **L209** writes into the
+  screen field and the screen is re-sent, so the correction and the confirmation share one
+  piece of state. Across two stateless requests they do not: a client may submit
+  `accountId=A, cardNumber=B` on the confirming turn, and this service resolves `A` to `C`
+  and would write `C` while the client still displays `B`. Nothing in the reference
+  authorises writing a card the operator was never shown. Reporting the resolved identity
+  restores the re-sent screen as a response body; refusing a disagreeing confirmation
+  restores the guarantee that the confirmed card IS the written card.
+* **Why the sentence is target-owned.** Transformation rule T8 governs sentences that
+  exist; this condition has none, because the reference cannot produce it. Reusing either of
+  the reference's key sentences was rejected: the not-numeric complaint is false of a
+  perfectly numeric card, and the neither-key complaint is false of a submission that plainly
+  supplied one. A sentence that misdescribes a refusal is worse than one that is new, because
+  an operator acts on it. The wording therefore names the remedy — re-read the preview and
+  confirm the card it reports — rather than the cross-reference or the resolution order,
+  neither of which the operator can change.
+* **Why the body carries the card number in full.** A masked suffix cannot distinguish two
+  cards on one account, which is the only comparison this disclosure exists to support. The
+  sensitive-data constraint this service observes prohibits DURABLE diagnostics carrying an
+  unmasked number, which is why `TransactionAddPreview.toString()` renders the resolved account
+  identifier and withholds the resolved card number, and why the response body does not.
+* **Where it is verified.**
+  `TransactionAddServiceTest.theAccountDirectionWinsAndTheSubmittedCardIsReportedAsResolved`
+  asserts the replacement is reported on the preview turn through
+  `preview.resolvedCardNumber()`, which is the re-sent screen expressed as a body.
+  `aConfirmingTurnNamingAnUnresolvedCardIsRefused` asserts the refusal names `cardNumber`,
+  allocates no identifier and saves nothing;
+  `aConfirmingTurnNamingTheResolvedCardIsAdmitted` asserts the binding refuses the
+  DISAGREEMENT rather than the presence of the member.
+  `TransactionControllerTest.copyPublishesTheResolvedPairAndTheCopiedRecord` asserts the pair
+  and all eleven copied members reach the wire, and
+  `TransactionApiContractTest.previewBodiesPublishExactlyThePreviewRecordMembers` asserts the
+  published `TransactionAddPreview` schema declares exactly the record's six components —
+  including the two resolved members — requires every one and is closed, while
+  `everySerialisedBodySatisfiesItsPublishedSchema` serialises a real preview against it.
+  On the browser side,
+  `transactionAddTurns.test.tsx > names the resolved card and not the typed one` asserts BOTH
+  that the confirmation surface names the RESOLVED card's masked suffix and that it does not
+  name the typed card's, using two different sixteen-digit values so the case cannot pass by
+  reading either source; `names the resolved account from a card key` covers the opposite
+  resolution direction, which is a separate arm in the reference; `offers no summary before a
+  preview` keeps those two from being satisfied by a surface that always rendered the same
+  text; and `withdraws the summary when a key is edited` asserts the surface stops describing
+  a record once the values it was resolved from change.
+* **How the browser half completes it.** The service refusal covers a client that submits a
+  card number the supplied key does not resolve to. The browser never submits one — its
+  request builders send exactly ONE key, the account when both are keyed, mirroring the
+  precedence at **L196** — so the refusal is unreachable from this client by construction, and
+  what the browser needed instead was the DISCLOSURE. Two surfaces carry it. The screen
+  repaints its two key CONTROLS from the resolved pair on every withheld answer, which is
+  exactly what **L206**, **L209**, **L220** and **L221** do before the screen is re-sent; and
+  its confirmation popover names the resolved account and the masked resolved card, held in
+  state of its own and discarded the moment either key control is edited, so no summary can
+  outlive the values it was resolved from. Before that the screen named the discarded card when
+  both keys were keyed and named no card at all when only an account was.
+* **Where the browser half is verified.**
+  `transactionAddTurns.test.tsx > names the resolved card and not the typed one` asserts BOTH
+  that the confirmation surface names the RESOLVED card's masked suffix and that it does not
+  name the typed card's, using two different sixteen-digit values so the case cannot pass by
+  reading either source; `names the resolved account from a card key` covers the opposite
+  resolution direction, which is a separate arm in the reference; `offers no summary before a
+  preview` keeps those two from being satisfied by a surface that always rendered the same
+  text; and `withdraws the summary when a key is edited` asserts the surface stops describing a
+  record once the values it was resolved from change. `transactionAdd.test.tsx > paints the
+  eleven copied values, per lines 481 to 492` asserts the card CONTROL holds the resolved card
+  after a copy turn, and `copyLast.test.tsx > puts every copied value on the screen, and leaves
+  the keys alone` asserts the account control still holds the operator's own key.
+* **Files.**
+  `services/transaction-service/src/main/java/com/carddemo/transaction/service/TransactionAddService.java`,
+  `services/transaction-service/src/main/java/com/carddemo/transaction/dto/TransactionAddPreview.java`,
+  `services/transaction-service/src/main/java/com/carddemo/transaction/dto/CopiedTransactionData.java`,
+  `services/transaction-service/src/main/resources/openapi/transaction-api.yaml`,
+  `ui/src/api/types.ts`, `ui/src/api/transactions.ts`,
+  `ui/src/screens/transactionAdd/index.tsx`.
+
+#### D-COPY-LAST-KEY-ONLY-REQUEST — the copy operation binds a key-and-confirmation shape of its own
+
+* **Baseline behaviour.** [`app/cbl/COTRN02C.cbl`](../../app/cbl/COTRN02C.cbl) **L471**
+  opens `COPY-LAST-TRAN-DATA`, which validates the key fields at **L473**, positions past
+  the end of the file and reads one record backwards across **L475-L478**, then moves eleven
+  fields out of that record into the screen's data fields across **L480-L492**. The function
+  key that reaches it is pressed on a screen the operator has NOT filled in — every data
+  field is about to be overwritten — so the only submission this path ever receives carries
+  a key and nothing else.
+* **Target behaviour.** The operation binds `CopyLastRequest`, a record declaring the
+  two key components and the confirmation ONLY, annotated with the same at-least-one-key
+  constraint through a second validator. It no longer binds `TransactionAddRequest`. The
+  contract PUBLISHES that shape under the same name, and the copy-last operation names it as
+  its request body; the browser client's `copyLastTransaction` takes it, and the screen's copy
+  turn validates the key fields alone before composing it.
+* **Category.** A **structural** divergence in the request shape, adopted to make a
+  reference behaviour reachable rather than to change one. No copied value, no field order
+  and no message text differs.
+* **What was wrong.** The operation was published over the capture shape, whose eleven data
+  components each carry a not-blank and a width or shape constraint. Bean validation runs on
+  the bound body BEFORE the handler is entered, so the empty submission the reference's
+  function key produces was refused with eleven field errors and never reached the service at
+  all — while the service method behind it was correct and its own tests passed, because a
+  service-level call bypasses bean validation entirely. The reachable form of the request was
+  the one form the boundary refused.
+* **Alternatives considered.** Making the eleven data components optional on the capture
+  shape was rejected: it would weaken the create operation, whose validation of those exact
+  fields is transcribed parity. A Bean Validation group was rejected because it is invisible
+  in the published document, so the contract would still describe a body the operation
+  refuses.
+* **Where it is verified.**
+  `TransactionControllerTest.copyAcceptsAKeyAndConfirmationAlone` posts a key and a
+  confirmation with no data member through the real validation pipeline, asserts **200** and
+  verifies the service was reached — status alone would not distinguish a refusal that
+  happened to answer 200 from a submission that was processed.
+  `TransactionAddServiceTest.copySubmission` documents why the previous capture-shaped call
+  passed while the endpoint was unreachable.
+  `TransactionApiContractTest.theCopyLastBodyCarriesKeysAndConfirmationOnly` asserts the
+  operation names this schema and that the schema's members are exactly the record's
+  components, which is
+  the half that had been missed: the handler bound three components while the DOCUMENT still
+  declared the eleven-member capture shape, so a client generated from the contract could not
+  compose the ordinary copy at all and nothing failed. Its key rule and its optional
+  confirmation are covered alongside the sibling bodies by
+  `theKeyRuleIsAtLeastOneOnBothSides` and
+  `confirmationIsPublishedUnderTheBoundNameAndOptionalOnBothBodies`.
+  On the browser side, `transactionAddTurns.test.tsx > copies from a key alone` asserts the copy
+  operation is CALLED and the capture operation is not — under the previous shape neither
+  happened, so asserting only the capture's absence would have passed — and `sends only the key
+  on a copy turn` asserts the body's member set EXACTLY, since a containment assertion would be
+  satisfied by a body still carrying the eleven discarded members. `still validates and sends
+  the full capture body` guards the relaxation against having been applied to the wrong turn.
+* **Files.**
+  `services/transaction-service/src/main/java/com/carddemo/transaction/dto/CopyLastRequest.java`,
+  `services/transaction-service/src/main/java/com/carddemo/transaction/dto/TransactionAddRequest.java`,
+  `services/transaction-service/src/main/java/com/carddemo/transaction/api/TransactionController.java`,
+  `services/transaction-service/src/main/resources/openapi/transaction-api.yaml`,
+  `ui/src/api/transactions.ts`,
+  `ui/src/screens/transactionAdd/index.tsx`.
 
 #### `C-ROUNDING` — the interest accrual rounds half up where the baseline discards the surplus digits
 
@@ -5496,6 +6373,226 @@ throughout and never modified. Convention:
 * **Where it is verified.** `PreflightDailyTransactionsJobTest` seeds three records and asserts three
   lookups rather than four, and asserts that no trailing diagnostic follows the last real record.
 * **Files.** `services/batch-service/src/main/java/com/carddemo/batch/job/PreflightDailyTransactionsJob.java`.
+
+#### D-USER-UPDATE-CREDENTIAL-CONTROL — the update screen paints no credential control and refuses none
+
+* **Baseline behaviour.** [`COUSR02.bms`](../../app/bms/COUSR02.bms) paints a credential
+  field on row 13: the label `Password:` at **L125-L129**, the input `PASSWD` at
+  **L130-L134** declared `LENGTH=8` and `ATTRB=(DRK,FSET,UNPROT)`, and the hint
+  `(8 Char)` at **L135-L139**. [`COUSR02C.cbl`](../../app/cbl/COUSR02C.cbl) uses it four
+  ways: it blanks it before a read at **L158-L161**, pre-fills it from the stored
+  plaintext credential with `MOVE SEC-USR-PWD TO PASSWDI OF COUSR2AI` at **L169**, refuses
+  it when blank with `'Password can NOT be empty...'` at **L198-L203**, and compares it
+  against the stored value at **L227-L230** as one of the four tests that decide whether
+  anything was modified. `UPDATE-USER-SEC-FILE` at **L358-L390** then writes it back.
+* **Target behaviour.** The screen renders four controls where the mapset paints five. No
+  credential control exists, no blank refusal for one is reachable, no credential is
+  compared, and the update request carries three members — `firstName`, `lastName` and
+  `userType` — under a contract sealed with `additionalProperties: false`.
+* **Category.** Documented divergence — a field is withdrawn rather than relocated,
+  following a datastore change already registered elsewhere.
+* **Why the difference is accepted.** All four baseline uses read or write a value the
+  target does not hold. AAP section 0.4.1.3 records that the plaintext
+  `05 SEC-USR-PWD PIC X(08).` field at [`CSUSR01Y.cpy`](../../app/cpy/CSUSR01Y.cpy)
+  **L21** "is deliberately not carried forward — a documented security correction", and
+  AAP section 0.7.8 names that "the one place where parity is explicitly declined":
+  identity moved to a managed user pool and `auth.users` keeps only a subject reference.
+  An earlier revision of this screen kept the control anyway, and the result was worse
+  than an absent field rather than closer to the baseline: an administrator had to type
+  eight characters which were validated, retained and then discarded unsent, so the screen
+  implied a credential had been set when none had. A refusal is only faithful when the
+  value it guards has somewhere to go. **Alternatives considered.** Implementing a real
+  administrative credential reset alongside the row update, which would have given the
+  control a purpose. Rejected because it is not this screen's contract to offer: AAP
+  section 0.5.1.2 scopes auth-service to sign-on plus the four user-CRUD programs and
+  names no reset operation, the update contract admits no credential member, and adding a
+  privileged reset path to satisfy a mapset field would widen the authored attack surface
+  beyond the plan rather than close a gap the plan left open.
+* **What is preserved.** The four surviving controls keep their mapset labels, widths and
+  colours; the blank refusals for the identifier, both names and the user type keep the
+  reference's short-circuit order and its verbatim sentences; and the
+  `'Please modify to update ...'` outcome at **L239** stays reachable, which it could not
+  have been had the control been retained — a freshly typed credential differs from a
+  value that does not exist on every turn, so that outcome would have been dead.
+  `'Password can NOT be empty...'` remains catalogued in `ui/src/messages/messages.ts`
+  with its provenance, because the catalog transcribes the baseline rather than the
+  authored screens and holds sentences for programs whose screens are not authored.
+* **Where it is verified.** `ui/src/screens/userUpdate/credentialControl.test.tsx` asserts
+  that no label, hint or masked input for a credential is rendered, that exactly four
+  labelled controls and four raw inputs exist, that a blank first name raises the
+  first-name sentence with no credential sentence anywhere, and that the write carries
+  exactly the three contract members by comparing the request body's own key set.
+* **Files.** `ui/src/screens/userUpdate/index.tsx`,
+  `ui/src/screens/userUpdate/credentialControl.test.tsx`,
+  `services/auth-service/src/main/resources/openapi/auth-api.yaml`.
+
+#### D-ACCOUNT-VIEW-NO-URL-SELECTION — an account selection never travels in a request line
+
+* **Baseline behaviour.** The account view screen is reached with a selection already in
+  the shared communication area — `CDEMO-ACCT-ID PIC 9(11)` at
+  [`COCOM01Y.cpy`](../../app/cpy/COCOM01Y.cpy) **L38** — and
+  [`COACTVWC.cbl`](../../app/cbl/COACTVWC.cbl) moves it into the map field while composing
+  the map at **L465-L469** whenever the filter flag is not blank. First entry with no data
+  passed sets `WS-PROMPT-FOR-INPUT` at **L462-L463** and sends the map without reading;
+  the read happens only on the re-entry arm at **L361-L373**.
+* **Target behaviour.** The screen reads nothing from its location. It has no path
+  parameter and no query member, so its only input is the control the operator types into,
+  and Enter is still required before any read is issued.
+* **Category.** Documented divergence — a handover carrier is withdrawn, not relocated.
+* **Why the difference is accepted.** An earlier revision accepted `?accountId=` and
+  pre-filled the filter from it. An eleven-digit account identifier written into a request
+  line reaches three stores before any application code runs: the browser's history, the
+  `Referer` header of every subsequent same-origin request, and the load balancer's access
+  log, which `infra/modules/alb` enables and no input can disable. None of them is
+  reachable by anything the screen could add afterwards, and
+  [`CVCUS01Y.cpy`](../../app/cpy/CVCUS01Y.cpy) binds an account to a named customer, so
+  the identifier is a handle on one person's records — the same class of value the card
+  number was taken out of every card route for, registered above as `D-CARD-SELECTOR`.
+  Nothing reachable is lost by removing it, because nothing produced it: the baseline's
+  carrier is the pseudo-conversational communication area, which AAP section 0.7.1
+  withdraws, and in the authored tree every path to this screen is the main menu, which
+  carries no selection — both this screen and the account-update screen exit to the menu,
+  as their mapsets' own two-key legends require. **Alternatives considered.** Relocating
+  the value rather than removing it, either into React Router's location state or into a
+  module-scoped read-once store. Either would be correct for a future handover and both
+  keep it out of the request line; location state is the weaker of the two, because React
+  Router keeps it in `history.state`, which the browser persists with the history entry,
+  while a module-scoped store dies with the document. Both were rejected now because a
+  carrier with no producer is an exported function nothing calls. **A future handover uses
+  the read-once in-memory store**, and this entry is where that decision is recorded.
+* **What is preserved.** The first-entry behaviour, exactly: the information line opens on
+  the reference's own `WS-PROMPT-FOR-INPUT` prompt, no read is issued until the operator
+  presses Enter, and both local refusals — the blank marker and the non-zero eleven-digit
+  rule — are unchanged.
+* **Where it is verified.** `ui/src/screens/screenSelectionCarriers.test.tsx` mounts the
+  screen at `/account/view?accountId=00000000011` and asserts three separate things: the
+  control is empty, the value appears nowhere in the rendered document, and no read was
+  issued — each of which a partially defective screen would satisfy on its own.
+* **Files.** `ui/src/screens/accountView/index.tsx`,
+  `ui/src/screens/screenSelectionCarriers.test.tsx`.
+
+#### D-AUTHORITY-WITHDRAWN-ON-DEMOTION — an administrator loses authority before the demotion is reported
+
+* **Baseline behaviour.** [`COUSR02C.cbl`](../../app/cbl/COUSR02C.cbl) writes the user type
+  to the security file in `UPDATE-USER-SEC-FILE` at **L358-L390** and reports success at
+  **L371-L375**. Authority is re-read from that record on the next sign-on, and the
+  reference holds no session credential at all: `CDEMO-USER-TYPE PIC X(1)` at
+  [`COCOM01Y.cpy`](../../app/cpy/COCOM01Y.cpy) **L19-L44** travels in the communication
+  area for the life of one pseudo-conversation, so a demotion takes effect as soon as the
+  record is written.
+* **Target behaviour.** A demotion — a user type moving from `'A'` to anything else —
+  removes the administrative group membership and globally signs the user out of the
+  identity provider **as the last statement of the write transaction**, before the row is
+  committed and before success is reported. A provider that refuses either step fails the
+  whole update, so the row is not written at all.
+* **Category.** Documented divergence — an added synchronous step with no baseline
+  counterpart, closing a window the target's own architecture opens.
+* **Why the difference is accepted.** The target replaces a record read per turn with a
+  signed bearer token validated offline at each resource server, which is what AAP section
+  0.7.1 requires for stateless services. That substitution creates a window the baseline
+  does not have: a demoted administrator's existing token still carries the administrative
+  group claim, so without this step the demotion would take effect only when that token
+  expired. The direction of the two calls is deliberate and is the opposite of the
+  intuitive one: the group membership is removed FIRST and the sessions ended second,
+  because ending sessions first would leave a racing token renewal able to mint a fresh
+  administrative token from a membership still in place — one that would outlive the
+  revocation. Placing both inside the write transaction is what makes the outcome
+  fail-closed: reporting success before convergence, which an earlier revision did, left a
+  failed reconciliation able to preserve administrative membership indefinitely while the
+  relational row said otherwise. **Alternatives considered.** Leaving convergence to the
+  post-commit reconciliation ledger, which already records the intention and retries it.
+  Rejected because that ledger's outcome is deliberately not fatal to the update, so a
+  demotion could be reported as done while authority stood.
+* **What is preserved.** The relational row, the reported sentence and every validation
+  outcome are unchanged, and a promotion withdraws nothing — only a movement away from
+  `'A'` triggers the step. **The residual is stated rather than closed**, and it is the
+  same residual `D-SESSION-REVOCATION` records: revocation stops the grant, not the access
+  tokens already issued from it, so an unexpired bearer stays valid at every resource
+  server until it expires, which is why the access-token lifetime is one hour and not
+  longer. A deny-list at each resource server, or a shorter bearer lifetime, are the only
+  stronger options and neither is adopted here.
+* **Where it is verified.** `UserServiceTest` asserts with an ordered verification that the
+  withdrawal runs after the row is flushed and the intention recorded but before the span
+  commits, that a provider refusal rolls the span back and commits nothing, and that a
+  promotion withdraws nothing; `CognitoUserProvisioningServiceTest` asserts the group is
+  removed before the sessions are ended, that a refusal propagates, and that a withdrawal
+  ends every session before a delete.
+* **Files.** `services/auth-service/src/main/java/com/carddemo/auth/service/UserService.java`,
+  `services/auth-service/src/main/java/com/carddemo/auth/service/CognitoUserProvisioningService.java`,
+  `services/auth-service/src/test/java/com/carddemo/auth/service/UserServiceTest.java`,
+  `services/auth-service/src/test/java/com/carddemo/auth/service/CognitoUserProvisioningServiceTest.java`,
+  `infra/envs/dev/main.tf`, `infra/envs/prod/main.tf`.
+
+#### D-ECR-THIRD-PARTY-MIRROR — one cached third-party repository sits beside the ten deployables
+
+* **Baseline / plan.** The frozen plan fixes the container registry at **ten** repositories
+  (AAP §0.4.1.6, "10 repositories with scan-on-push and lifecycle policy"; §0.5.1.12, "Ten
+  repositories with scan-on-push, replacing the load library"). Those ten are this
+  migration's own build outputs: the eight services, the browser SPA and the ETL image.
+* **Delivered.** Eleven repositories are provisioned. The ten deployables are declared in
+  `var.repository_names`, whose `validation` now asserts them as an **exact set** rather
+  than a count, so a substituted name cannot pass by keeping the total right. The eleventh
+  is declared separately in `var.third_party_mirror_repository_names`, bounded at one entry,
+  and holds a mirror of the pinned telemetry collector image — an artifact this migration
+  caches, ships no source for and builds nothing into.
+* **Why the eleventh cannot simply be removed.** Two other plan requirements produce it
+  jointly. The plan requires tracing as a cross-cutting concern (§0.1.1.2, and Phase F's
+  "centralized logging, metrics, tracing"), which `infra/modules/ecs-service` delivers with
+  an OTLP collector sidecar created for every workload — `enable_telemetry_collector`
+  defaults to `true` and neither root overrides it. The plan also requires an application
+  tier whose egress is enumerated rather than open (§0.4.1.9, §0.7.8), and the public
+  registry the collector is published to has neither an interface endpoint nor a managed
+  prefix list. With that egress enumerated no task could pull its sidecar, so no task could
+  start at all — an outage that plans cleanly. Mirroring the image into this registry puts
+  the pull on the `ecr.api` and `ecr.dkr` endpoints the tasks already reach.
+* **Alternatives considered and rejected.** Re-opening `0.0.0.0/0` egress on 443 for the
+  pull — rejected outright, as that is the allow-all the enumerated egress replaced.
+  Pushing the collector into one of the ten repositories under a distinct tag — rejected
+  because a repository's lifecycle policy expires images by count, so ordinary service
+  releases would expire the third-party image. Dropping the sidecar and exporting straight
+  to the X-Ray OTLP endpoint, which needs no image — rejected because it requires an `xray`
+  interface endpoint and an ADOT SDK dependency in every service, and neither appears in
+  the plan's endpoint list (§0.4.1.9) or its dependency inventory (§0.6.1.1), trading a
+  one-repository divergence for a larger multi-component one. An ECR pull-through cache —
+  rejected because the registry still materialises a cache repository on first pull, so the
+  provisioned total is unchanged while digest-pinned references stop resolving until a tag
+  pull has warmed the cache.
+* **What is asserted.** `local.repository_names` unions the two lists, so every output key
+  and all fifteen consuming files are unchanged. The ten are held by the module's own
+  `validation` at plan time and, independently, by the "Verify hand-written Terraform prose
+  counts against the declarations" gate in `.github/workflows/infra-ci.yml`, which reads the
+  literal default and compares the **whole** list — a prefix comparison was tried first and
+  let a smuggled eleventh entry pass, so the gate is mutation-verified from both sides.
+* **Files.** `infra/modules/ecr/variables.tf`, `infra/modules/ecr/main.tf`,
+  `infra/modules/ecr/outputs.tf`, `.github/workflows/infra-ci.yml`.
+
+#### D-LAMBDA-PACKAGED-OUTSIDE-TERRAFORM — operational Lambda archives are built by a script, not a provider
+
+* **Baseline / plan.** The plan's provider inventory for the environment roots is
+  `hashicorp/aws` and `hashicorp/random` (§0.6.1.4). It names no archiving provider.
+* **Delivered.** The four operational Lambda functions are packaged by
+  `infra/lambda/build_packages.py`, a stdlib-only deterministic packager, and consumed with
+  `filename` plus `filebase64sha256(...)`. The roots previously declared
+  `hashicorp/archive` and built the archives in-graph, which added a provider the frozen
+  plan does not list — and a comment is not an instrument that can amend the plan's
+  inventory.
+* **Why a script rather than the provider.** Removing the provider requires the bytes to
+  exist before `plan`, so they are produced by an explicit build step run ahead of
+  `init`/`validate`/`plan` in `infra-ci.yml` and ahead of `init` in `deploy.yml`, and
+  documented as Step 2c of `docs/runbooks/deploy.md`. Determinism is preserved deliberately,
+  because it is what the provider used to supply: a fixed 1980-01-01 timestamp and a fixed
+  0644 mode on every member, so the archive hashes identically across machines and runs and
+  `terraform plan` shows no spurious `source_code_hash` diff. `--check` mode rebuilds and
+  compares bytes, so a stale committed artifact fails rather than deploys.
+* **Trade-off accepted.** The build is now a pipeline responsibility rather than a graph
+  edge, so a `plan` run without the build step reports a missing-file error at
+  `filebase64sha256`. That failure is loud and immediate, which is why it was preferred to
+  carrying an undeclared provider; `infra/lambda/dist/` is git-ignored so a stale artifact
+  cannot be committed in place of a build.
+* **Files.** `infra/lambda/build_packages.py`, `infra/envs/dev/main.tf`,
+  `infra/envs/prod/main.tf`, `infra/envs/dev/versions.tf`, `infra/envs/prod/versions.tf`,
+  `.github/workflows/infra-ci.yml`, `.github/workflows/deploy.yml`,
+  `docs/runbooks/deploy.md`, `.gitignore`.
 
 ### 7.5 Withdrawn divergence identifiers
 
@@ -6082,6 +7179,56 @@ trees.
   `services/reference-service/src/main/java/com/carddemo/reference/mapper/package-info.java`,
   `services/reference-service/src/main/java/com/carddemo/reference/service/TransactionTypeService.java`.
 
+#### D-INQUIRY-UNRECOGNISED-FUNCTION — an unrecognised inquiry function code is refused rather than answered with the date
+
+* **Baseline behaviour.** The two inquiry programs are triggered from ONE request
+  destination — `DEFINE QLOCAL('CARDDEMO.REQUEST.QUEUE')` at
+  [`app/app-vsam-mq/README.md`](../../app/app-vsam-mq/README.md) **L53**, aliased to CICS
+  as `MQQUEUE(CARDREQ)` at **L71** — and they read that request differently.
+  [`COACCT01.cbl`](../../app/app-vsam-mq/cbl/COACCT01.cbl) tests it: **L393** reads
+  `IF WS-FUNC = 'INQA' AND WS-KEY > ZEROES`, and a request failing that test receives the
+  invalid-parameters sentence its **L448**–**L456** build.
+  [`CODATE01.cbl`](../../app/app-vsam-mq/cbl/CODATE01.cbl) tests NOTHING: it declares
+  `WS-FUNC` at **L110** and `WS-KEY` at **L111** and reads neither anywhere in its 524
+  lines, so it answers ANY message with the system date and time built at
+  **L355**–**L360**. On the baseline, therefore, a request carrying an unrecognised
+  function code received a date reply or a refusal depending on which program's trigger
+  consumed it — and since both were triggered from one queue, on which one CICS presented
+  it to.
+* **Target behaviour.** The one shared request queue has one owning consumer,
+  `account-service`'s `InquiryMessageListener`, which dispatches on the four-character
+  function code: `'INQA'` takes the account route, `'DATE'` takes the date route rendered
+  by `common-lib`'s `DateInquiryReplyCodec`, and **anything else receives `COACCT01`'s own
+  invalid-parameters reply**, transcribed verbatim. The comparison is case-sensitive, as
+  the baseline's COBOL literal comparison is, so `'date'` is an unrecognised code.
+* **Category.** Documented divergence — one of two baseline behaviours is selected where
+  the baseline itself was nondeterministic between them.
+* **Why the difference is accepted.** The nondeterminism is not preservable. A single
+  queue admits exactly one OWNING consumer in the target transport, because a receive
+  hides the message from every other consumer rather than delivering a copy to each, so
+  there is no arrangement in which an unrecognised code is sometimes answered with a date
+  and sometimes refused. Of the two available behaviours the refusal is the stricter and
+  the only one whose text the baseline documents: answering an unrecognised code with the
+  system date would make a malformed request look serviced, and a producer would learn
+  nothing about the field it had got wrong. Assumptions: no recognised flow is affected —
+  `'INQA'` and `'DATE'` are both answered exactly as their own programs answer them, and
+  the date answer is byte-identical to `CODATE01`'s because it is rendered from the same
+  transcribed layout. Trade-offs: the accepted cost is that a producer relying on
+  `CODATE01`'s indifference to its own request — sending, say, a blank function code and
+  expecting the date — now receives a refusal. That reliance is not visible anywhere in
+  the baseline sources: the only producer this repository contains is a test stub, and the
+  date request's own documented shape carries `REQUEST-TYPE PIC X(4) VALUE 'DATE'`.
+  Alternatives Considered: answering an unrecognised code with the date, on the ground
+  that `CODATE01` did. Rejected because it would make the refusal branch of `COACCT01` —
+  which the baseline does document, with verbatim text — unreachable on the merged queue,
+  so one program's behaviour would be preserved by discarding the other's.
+* **Registered at.** `services/account-service/.../service/InquiryMessageListener.java`,
+  on `replyFor`; asserted by `InquiryMessageListenerTest`
+  (`aLowerCaseDateCodeIsRefused`, `aDateFunctionCodeIsAnsweredFromTheClock`); the topology
+  it follows from is recorded in
+  [`messaging-contracts.md`](messaging-contracts.md) and
+  [`../adr/ADR-004-messaging.md`](../adr/ADR-004-messaging.md).
+
 #### D-AUTHORIZATION-FIFO-IDENTITY-METADATA — the queue's two identities are the card and transaction values themselves
 
 * **Baseline behaviour.** The reference consumer publishes its reply through a message
@@ -6465,6 +7612,159 @@ trees.
   `services/reporting-service/src/main/java/com/carddemo/reporting/mapper/CategoryBalanceLineLayout.java`,
   `services/reporting-service/src/main/java/com/carddemo/reporting/service/CategoryBalanceReportService.java`,
   `services/reporting-service/src/main/java/com/carddemo/reporting/task/CategoryBalanceArtifactPublisher.java`.
+
+### 7.1 Provisioned-topology divergences from the specification's stated counts
+
+The entries above record differences between the BASELINE's behaviour and the target's. The
+five below record a different kind: places where the delivered infrastructure holds a
+different COUNT of a resource than the technical specification states, or provisions a
+control the specification asks for that no request path yet exercises. They are collected
+here rather than argued only at their declaration sites, because a count is the one figure a
+reviewer checks against the specification and finding a mismatch with no register entry is
+indistinguishable from finding drift.
+
+Assumptions: in every one of the first four, the count was not chosen freely. Each is forced
+by ANOTHER clause of the same specification, and closing the count would violate that clause
+-- so the difference is recorded with the clause that forces it rather than resolved by
+matching the number. Where a reader wants the full argument it is stated at the declaration
+site in Terraform; what is here is the divergence, the forcing clause, and what bounds the
+cost.
+
+#### D-NETWORK-ENDPOINT-SECURITY-GROUP -- the application group permits task-to-task 443
+
+* **Specification.** &sect;0.4.1.9 states that the security groups permit only
+  balancer-to-application on the container port, application-to-Aurora on the database port
+  and application-to-endpoint on 443. &sect;0.5.1.12 states that the module creates three
+  security groups.
+* **Delivered.** Three security groups -- the load-balancer group, the application group and
+  the isolated-data group -- with the interface-endpoint elastic network interfaces carrying
+  the APPLICATION group. The application-to-endpoint flow is therefore a self-referencing
+  443 rule pair on that group, which as a side effect also permits task-to-task 443.
+* **Category.** Documented flow divergence -- one permitted flow beyond the three stated,
+  arising from the group count being held at the stated three.
+* **Why the difference is accepted.** The two clauses cannot both be satisfied exactly: an
+  interface endpoint must carry a security group, so the task-to-endpoint flow has to
+  terminate on one, and every three-group arrangement adds a permitted flow beyond
+  &sect;0.4.1.9's three. A fourth, dedicated endpoint group was the arrangement for a period
+  and is the narrower rule set, but it exceeds &sect;0.5.1.12's stated count. The count is
+  held and the flow is registered here, because the extra flow reaches nothing: the module
+  validates `app_container_port` to exclude 443, so no service listens on it, and the only
+  443 listener in this VPC carries the load-balancer group. The divergence is therefore
+  visible in a plan rather than exploitable at run time.
+* **Where it is verified.** `infra/modules/network/main.tf` declares exactly three
+  `aws_security_group` resources and `outputs.tf` publishes all three, so a fourth
+  reappearing is visible in both the plan and the module's published contract; the port
+  validation that bounds the widened flow is asserted by that variable's own `validation`
+  block, so removing it fails the plan rather than silently widening the flow.
+* **Files.** `infra/modules/network/main.tf`, `infra/modules/network/variables.tf`.
+
+#### D-SQS-PRIMARY-QUEUE-COUNT -- six primary queues where the specification tabulates five
+
+* **Specification.** &sect;0.4.1.8 tabulates five primary queues, each with a dead-letter
+  companion.
+* **Delivered.** Six primary queues and six dead-letter queues.
+* **Category.** Documented topology divergence -- one primary queue more than the stated
+  count.
+* **Why the difference is accepted.** The specification assigns the two inquiry flows to two
+  DIFFERENT services: &sect;0.5.1.3 places the account-inquiry consumer (`COACCT01`) in
+  `account-service`, and &sect;0.5.1.6 places the date-conversion consumer (`CODATE01`) in
+  `reference-service`. One shared request queue cannot serve two independently-owned
+  consumers, because a queue offers no per-consumer selection: each receive removes whatever
+  message is next, so either service would destroy requests intended for the other and the
+  sender would observe a silent loss rather than an error. Splitting the shared request queue
+  into one per owning service is what makes &sect;0.5.1.3 and &sect;0.5.1.6 satisfiable at
+  once. The reply direction is split the same way, so a reply is never delivered to the
+  service that did not answer.
+* **Where it is verified.** Each consuming service names only its own queue in its
+  configuration, so a crossed wiring fails that service's own configuration closure test
+  rather than being discovered in production.
+* **Files.** `infra/modules/sqs/main.tf`, `infra/envs/dev/main.tf`, `infra/envs/prod/main.tf`.
+
+#### D-ECR-REPOSITORY-COUNT -- eleven repositories where the specification states ten
+
+* **Specification.** &sect;0.4.1.6 and &sect;0.5.1.12 state ten container-image repositories.
+* **Delivered.** Eleven. The eleventh, `aws-otel-collector`, holds a MIRROR of a pinned
+  third-party image rather than an artifact this repository builds.
+* **Category.** Documented topology divergence -- one repository more than the stated count,
+  holding no first-party artifact.
+* **Why the difference is accepted.** Two other clauses force it together. &sect;0.1.1.2 and
+  the cross-cutting requirements in &sect;0.9.4 mandate distributed tracing, delivered by a
+  collector sidecar in every task; and &sect;0.4.1.9 states that task traffic to AWS services
+  never leaves the private network and that the application tier has no internet route. With
+  no egress path a task cannot pull a sidecar image from a public registry, so without the
+  mirror no task could start -- from a plan that reported nothing wrong.
+* **Where it is verified.** The deployment workflow pushes only the first-party repositories
+  and performs the mirror as its own step, so an empty mirror is a failed deployment step
+  rather than a repository that silently never reports.
+* **Files.** `infra/modules/ecr/main.tf`, `infra/envs/dev/main.tf`, `infra/envs/prod/main.tf`,
+  `.github/workflows/deploy.yml`.
+
+#### D-NETWORK-INTERFACE-ENDPOINT-COUNT -- ten interface endpoints where the specification lists eight
+
+* **Specification.** &sect;0.4.1.9 lists eight interface endpoints -- the two
+  container-registry endpoints, logs, Secrets Manager, KMS, the queue service, the
+  orchestrator and the parameter store -- plus an object-store gateway endpoint.
+* **Delivered.** Ten interface endpoints. The two beyond the list are the tracing endpoint and
+  the identity-provider endpoint.
+* **Category.** Documented topology divergence -- two endpoints more than the stated list.
+* **Why the difference is accepted.** Both are the minimum private path for a capability the
+  same specification requires, under the constraint that the application tier has no internet
+  route. Tracing is mandated by &sect;0.1.1.2 and &sect;0.9.4 and the collector must reach the
+  tracing service; sign-on is an acceptance criterion in &sect;0.9.4 and the resource servers
+  must fetch the identity provider's signing keys to validate a token. Without these two
+  endpoints the only way to satisfy either requirement is an egress route from the application
+  tier, which &sect;0.4.1.9 forbids. Note the direction of the trade: adding them is precisely
+  what allowed a blanket application-tier egress rule to `0.0.0.0/0` to be deleted outright
+  rather than narrowed, so this count divergence buys a strictly SMALLER reachable surface
+  than the eight-endpoint arrangement it replaces.
+* **Where it is verified.** The endpoint set is asserted by name, and the continuous-integration
+  gate refuses any application-tier egress rule carrying a CIDR block, so a reintroduced public
+  route fails the pipeline rather than review.
+* **Files.** `infra/modules/network/main.tf`, `.github/workflows/infra-ci.yml`.
+
+#### D-AUTHORIZATION-MESSAGING-TOKENISER-UNUSED -- WITHDRAWN: the unexercised tokeniser is retired rather than recorded
+
+* **Specification.** &sect;0.4.1.9 requires a primary account number to be masked wherever it
+  would otherwise be exposed, and &sect;0.4.1.8 maps the message-descriptor correlation
+  identifier onto a queue attribute.
+* **Status.** ⚠️ **This divergence no longer exists, and the entry is kept only so a reader
+  who arrives from an earlier revision finds the resolution rather than a missing anchor.**
+  Both environment roots once generated a messaging HMAC key into the secret store, delivered
+  it to the authorization task as `CARDDEMO_MESSAGING_HMAC_KEY`, and the service keyed a
+  tokeniser bean from `carddemo.messaging.hmac-key` that no component injected. Every one of
+  those four artefacts is now withdrawn: the property, the bean's class, the task's
+  environment entry and the root-level local that composed it.
+* **Why the record was written, and why it was superseded.** The entry argued that retiring the
+  capability was a coordinated change across the property, the bean, a container-module
+  assertion and both roots, and that recording the unexercised capability kept the decision
+  auditable rather than leaving each layer justify the secret by pointing at the other. The
+  first half was a correct description of the cost; the second was the wrong conclusion drawn
+  from it. A registered divergence is for behaviour the migration deliberately delivers
+  differently from the baseline, and an unreached bean is not behaviour at all -- so
+  registering it made the register the place a dead component was preserved. The coordinated
+  change the entry described as the obstacle is simply the change that was then made, and it is
+  smaller than the entry implied, because a bean nothing injects has no call site to migrate.
+* **Why nothing is lost by retiring it.** The two uses the tokeniser was authored for remain
+  unavailable, for the reasons the entry already gave and which still hold. The queue's group
+  and deduplication identities are frozen as literal values by &sect;0.4.1.8 and &sect;0.7.6 --
+  see `D-AUTHORIZATION-FIFO-IDENTITY-METADATA` above: a derived group identity orders one
+  card's messages only while every producer computes the same value, and a derived
+  deduplication identity suppresses a resend only while the requester can predict it. The
+  reply's correlation identifier is echoed from the request unaltered, which is what lets a
+  requester match its own answer, so deriving it would break the matching it exists for.
+  Masking itself is unaffected: it is performed where &sect;0.4.1.9 requires it, without a
+  keyed derivation.
+* **Where the retirement is verified.** `EnvironmentClosureTest` asserts that neither root
+  composes `CARDDEMO_MESSAGING_HMAC_KEY` nor a `messaging_hmac` secret local, and
+  `InjectedPropertyClosureTest` asserts that no source in the context reads
+  `carddemo.messaging.hmac-key`. The two together fail if any single layer reintroduces its
+  half, which is the closure the original entry wanted and could not get from prose.
+* **Files.** `infra/envs/dev/main.tf`, `infra/envs/prod/main.tf`,
+  `services/authorization-service/src/main/resources/application.yml`,
+  `services/authorization-service/src/main/java/com/carddemo/authorization/config/package-info.java`,
+  `services/authorization-service/src/test/java/com/carddemo/authorization/config/EnvironmentClosureTest.java`,
+  `services/authorization-service/src/test/java/com/carddemo/authorization/config/InjectedPropertyClosureTest.java`.
+
 
 <sub>Apache-2.0 · Authoritative artifact-to-target matrix, retirement register and
 behavioural-divergence register for CardDemo. The baseline under `app/**` is cited

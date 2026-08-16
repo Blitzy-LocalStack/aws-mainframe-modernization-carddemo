@@ -252,12 +252,20 @@
  *       owned by account-service, which the baseline satisfied from the shared
  *       file set named at {@code app/cbl/COTRN02C.cbl} lines 40 to 42 -- is
  *       issued by the service layer, and the client that carries its connect
- *       and read timeouts is built there. Alternatives Considered: promoting
- *       that client to a bean here was rejected because a single shared client
- *       would then carry one timeout budget for every caller, and the timeout
- *       is a property of the call being made rather than of the module making
- *       it; the accepted cost is that the value is set at the call site instead
- *       of in one place.</li>
+ *       and read timeouts is built there -- in the constructor of the one
+ *       adapter {@code RestAccountContextClient}, which both consuming services
+ *       are given by injection. Alternatives Considered: promoting that client
+ *       to a bean here was rejected because a bean declared in this package
+ *       would be assembled from this package's own configuration, and the
+ *       timeout belongs to the hop rather than to the module making it.
+ *       ⚠️ Refactoring Rationale: the accepted cost recorded here used to be
+ *       "the value is set at the call site instead of in one place", and that
+ *       cost is not paid: both timeouts are bound on that adapter's constructor
+ *       from the {@code carddemo.account-context} connect-timeout and
+ *       read-timeout keys, so a deployment changes them in one file and no call
+ *       site carries a literal. Leaving the sentence would have described a
+ *       scattering this module does not have, in the bullet a reader consults
+ *       before deciding to add the very configuration class it rules out.</li>
  *   <li>There is no {@code logback-spring.xml} and no logging configuration
  *       class. Assumptions: the observability contribution this module makes is
  *       the metric tag set, and it arrives through

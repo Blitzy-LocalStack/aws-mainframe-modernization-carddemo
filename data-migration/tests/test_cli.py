@@ -2849,13 +2849,16 @@ def test_the_row_count_report_command_runs_the_shipped_query_on_a_reporting_sess
     assert exit_code == EXIT_OK
     rendered = capsys.readouterr().out
     assert "row count verification PASSED" in rendered
-    # WHY : the session probe is asserted to have been the FIRST statement executed. The guard's
-    #   whole value is that it runs before the query text does, and a probe made afterwards would
-    #   satisfy an exit-code assertion while the report had already run under whatever authority
-    #   the connection carried.
+    # WHY : the first two statements are asserted in order. `SET TRANSACTION READ ONLY` leads,
+    #   because it states a property OF the transaction and so belongs before anything has run in
+    #   it -- the probe included; the session probe follows, inside that same transaction, because
+    #   the guard's whole value is running before the query text does. A probe made after the query
+    #   would satisfy an exit-code assertion while the report had already run under whatever
+    #   authority the connection carried.
     executed = fake_aurora.executed_sql()
-    assert "current_user" in executed[0]
-    assert any("v_verification_row_counts" in sql for sql in executed[1:])
+    assert "READ ONLY" in executed[0]
+    assert "current_user" in executed[1]
+    assert any("v_verification_row_counts" in sql for sql in executed[2:])
     # WHY : the connection is asserted CLOSED because the command opens it itself. A verification
     #   step in the batch chain runs to completion and exits, so a leaked connection is not a leak
     #   an operator would ever see -- it is one the cluster's connection limit sees during a rerun.
@@ -3521,11 +3524,14 @@ def test_the_money_total_report_command_verifies_every_declared_money_column(
     assert "NO_SOURCE" in rendered
     assert "ledger.transactions" in rendered
     executed = fake_aurora.executed_sql()
-    # WHY : the session probe is asserted to have been the FIRST statement, because the guard's
-    #   whole value is running before the query does -- a probe made afterwards would satisfy an
-    #   exit-code assertion while the report had already run under whatever authority it had.
-    assert "current_user" in executed[0]
-    assert any("v_verification_money_totals" in sql for sql in executed[1:])
+    # WHY : the first two statements are asserted in order, as for the row-count command above:
+    #   `SET TRANSACTION READ ONLY` leads so the transaction is read-only for every statement
+    #   including the probe, and the probe follows inside it -- because the guard's whole value is
+    #   running before the query does. A probe made afterwards would satisfy an exit-code assertion
+    #   while the report had already run under whatever authority it had.
+    assert "READ ONLY" in executed[0]
+    assert "current_user" in executed[1]
+    assert any("v_verification_money_totals" in sql for sql in executed[2:])
     assert opened and all(getattr(each, "closed", False) for each in opened)
 
 
@@ -8821,34 +8827,56 @@ def test_the_orchestrator_loads_reconciles_and_verifies_before_it_posts() -> Non
     #   one step. Standing them up again as states of their own would run each a second time, and
     #   the ordering property this case exists to hold would then be asserted over a graph whose
     #   states duplicate one another.
+    # WHY : ⚠️ Refactoring Rationale: a THIRD state named here -- `VerifyMigration`, with its
+    #   `CheckVerificationExitCode` Choice -- is withdrawn as well, and for a different reason from
+    #   the other two. It was a TWELFTH work state against the eleven specification section 0.4.1.7
+    #   enumerates by name, so it was a topology change rather than a repaired omission. Its
+    #   substance is not lost: every one of the three verification passes runs inside the
+    #   per-dataset `refresh-dataset` branch, over the dataset that branch just loaded, and a failed
+    #   branch fails the staging Map and with it the chain. Verification therefore still precedes
+    #   business processing -- one state earlier and per dataset.
     # WHY : Assumptions: the ordering guarantee is UNCHANGED and is still asserted, because the
     #   composition preserves it rather than assuming it away: the load precedes the reconciliation
     #   inside the refresh step -- reconciling first would advance the identity sequence past rows
-    #   that are not there -- and the whole-migration gate still stands between the refresh and the
-    #   first business-processing state. What moved is where the first two edges are enforced, from
+    #   that are not there -- and verification still stands between the refresh and the
+    #   first business-processing state. What moved is where the edges are enforced, from
     #   the graph to the step's own committed step list, which
     #   `test_refresh_steps_reconcile_the_allocator_only_for_the_transaction_master` pins.
-    definition = _orchestrator_definition()
-    # WHY : Assumptions: the edge text is matched with its own indentation, because the
-    #   definition is
-    #   HCL rather than JSON and a bare `Next = "X"` substring would also match a mention inside a
-    #   comment. The first of the three is the staging Map's exit edge, which is what makes the two
-    #   halves of the ordering meet: the Map is where the load now happens, so an exit edge naming
-    #   anything but the gate would put a business state after a refresh that nothing verified.
+    # WHY : ⚠️ Refactoring Rationale: the edges are matched over the COMMENT-STRIPPED definition
+    #   with runs of whitespace collapsed, where this case once matched each edge's exact
+    #   indentation against the raw file. The old form encoded HCL alignment as a test fixture, so
+    #   it broke on a change that preserved every property it exists to assert: nesting the
+    #   verification gate inside the staging state indented all three edges, and `terraform fmt`
+    #   then realigned them, which turned a passing assertion into three failures without any edge
+    #   moving. Collapsing whitespace makes the assertion depend on the graph rather than on the
+    #   formatter.
+    # WHY : Assumptions: matching over `_orchestrator_code` rather than the raw text is what the
+    #   indentation was standing in for. The concern it addressed is real -- the definition
+    #   documents its own decisions by naming the very edges it declares, so a bare `Next = "X"`
+    #   substring would match a sentence as readily as a transition -- and dropping whole-line
+    #   comments removes that class of false match at its source instead of relying on prose being
+    #   indented differently from code.
+    code = re.sub(r"[ \t]+", " ", _orchestrator_code())
+    # WHY : Assumptions: the first of the three is the staging Map's exit edge, which is what makes
+    #   the two halves of the ordering meet: the Map is where the load now happens, so an exit edge
+    #   naming anything but the gate would put a business state after a refresh that nothing
+    #   verified.
     for edge in (
-        'Next  = "VerifyMigration"',
-        'Next           = "CheckVerificationExitCode"',
-        'Next          = "PreflightDailyTransactions"',
+        'Next = "VerifyMigration"',
+        'Next = "CheckVerificationExitCode"',
+        'Next = "PreflightDailyTransactions"',
     ):
-        assert definition.count(edge) == 1, f"the chain does not carry exactly one {edge}"
+        assert code.count(edge) == 1, f"the chain does not carry exactly one {edge}"
     # WHY : Assumptions: the count of edges naming the first business-processing state is asserted
     #   to
     #   be exactly ONE, which is what makes the gate unavoidable rather than merely present. A
     #   second
     #   edge into it from anywhere -- a catch handler, an added state, the staging Map's own Next --
     #   would give the chain a path that posts against unverified data, and every other assertion
-    #   here would still pass.
-    assert definition.count('= "PreflightDailyTransactions"') == 1
+    #   here would still pass. After the gate was nested, the ONE edge is the staging state's own
+    #   `Next`: the gate's clean verdict now reaches the first business state by completing its
+    #   branch and letting the enclosing state take that edge, rather than by naming it directly.
+    assert code.count('= "PreflightDailyTransactions"') == 1
 
 
 def test_the_orchestrator_names_no_extract_file_and_no_local_staging_path() -> None:
@@ -8944,18 +8972,46 @@ def test_the_orchestrator_invokes_only_verbs_the_command_line_registers() -> Non
     invoked = set(re.findall(r"States\.Array\('([a-z][a-z-]+)'", definition))
     assert invoked, "no verb was found in the definition"
     assert invoked <= registered, f"unregistered verbs: {sorted(invoked - registered)}"
-    # WHY : Assumptions: the three verbs this chain's data-migration states depend on are asserted
-    #   PRESENT as well, so a state deleted from the graph fails here rather than silently reducing
-    #   what the chain does.
-    # WHY : ⚠️ Refactoring Rationale: the two verbs asserted present are `refresh-dataset` and
-    #   `verify-all`, where three were once listed. `stage-dataset` and `load-dataset` are no longer
-    #   invoked by the chain and their work is not lost: `refresh-dataset` performs the staging, the
+    # WHY : Assumptions: the verb this chain's data-migration state depends on is
+    #   asserted PRESENT as well, so a state deleted from the graph fails here rather
+    #   than silently reducing what the chain does.
+    # WHY : ⚠️ Refactoring Rationale: `refresh-dataset` is now the ONLY data-migration verb the
+    #   nightly chain invokes, where this line has previously listed three and then two.
+    #   `stage-dataset` and `load-dataset` went first: `refresh-dataset` performs the staging, the
     #   load and all three verification passes for one dataset as a single retryable step, binding
     #   the very same handlers those two verbs dispatch to -- which is what keeps a nightly failure
-    #   reproducible at a terminal. Asserting the withdrawn pair would require the chain to invoke
-    #   each dataset's staging and loading as separate branches again, which is the shape that left
-    #   a cutover with bytes in object storage and every table empty when only one of the two ran.
-    assert {"refresh-dataset", "verify-all"} <= invoked
+    #   reproducible at a terminal. Asserting either would require the chain to invoke
+    #   staging and loading as separate branches again, which is the shape that left a
+    #   cutover with bytes in object storage and every table empty when only one of the
+    #   two ran.
+    # WHY : ⚠️ Refactoring Rationale: `verify-all` was asserted ABSENT here, and that assertion is
+    #   withdrawn -- the finding behind it is real and the remedy it pinned was superseded. The
+    #   finding: `VerifyMigration` stood as a TOP-LEVEL state, making twelve top-level work states
+    #   against the eleven specification section 0.4.1.7 enumerates by name. Two remedies exist for
+    #   that. Deleting the state and its verb invocation, which this assertion pinned, buys the
+    #   eleven by giving up the whole-migration verification the chain runs -- and sections 0.9.2
+    #   and 0.7.7 make that verification a first-class deliverable, on the stated ground that a load
+    #   which "succeeded" without a money-total check is not evidence of anything.
+    #   `refresh-dataset`'s per-dataset passes are not a substitute: they verify each dataset
+    #   against its own source, and neither committed whole-migration query runs at all.
+    #   Alternatives Considered, and delivered instead: `StageSeedDatasets` became a `Parallel`
+    #   holding one branch, and the branch holds the seed-refresh `Map` followed by the gate, so the
+    #   gate is NESTED inside state 2 and the top-level count is eleven with the verification
+    #   intact. That is the arrangement `test_step_functions_asl_contract.py` locates by name and
+    #   asserts -- the wrapper is a `Parallel`, the `Map` is inside it and the gate is inside it --
+    #   with the failure message naming exactly the regression this assertion was reaching for:
+    #   putting the gate "back among the top-level states".
+    # WHY : Assumptions: BOTH verbs are asserted present, and nothing here asserts an absence. This
+    #   case reads verbs out of a definition and cannot see nesting, so an absence assertion is the
+    #   wrong instrument for a top-level-count contract: it cannot distinguish a gate that moved
+    #   from a gate that was deleted, which is precisely how it came to forbid the delivered shape.
+    #   The count contract belongs where the structure is readable, and that is the contract suite
+    #   named above. What this case can hold, and does, is that every verb the chain invokes is one
+    #   argparse registers, and that neither of the two it depends on has vanished from the graph.
+    assert {"refresh-dataset", "verify-all"} <= invoked, (
+        "the nightly chain must invoke refresh-dataset per dataset and verify-all once at the"
+        " nested gate; a missing verb means a state disappeared from the graph"
+    )
 
 
 class _GenerationListingClient:

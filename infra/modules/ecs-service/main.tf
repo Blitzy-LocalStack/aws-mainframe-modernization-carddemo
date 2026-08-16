@@ -132,225 +132,45 @@ locals {
     Service     = var.service_name
   }, var.tags)
 
-  # WHY : Refactoring Rationale: every online service already exposes
-  #       `/actuator/prometheus`, but without a scraper those meters stay inside
-  #       the task. A sidecar shares the task network namespace, so it can scrape
-  #       loopback and receive OTLP traces without exposing either endpoint
-  #       through a security group or a load-balancer route.
-  telemetry_receivers = merge(
-    {
-      otlp = {
-        protocols = {
-          grpc = {
-            endpoint = "0.0.0.0:4317"
-          }
-          http = {
-            endpoint = "0.0.0.0:4318"
-          }
-        }
-      }
-    },
-    var.create_service ? {
-      prometheus = {
-        config = {
-          scrape_configs = [{
-            job_name        = local.resource_name
-            scrape_interval = "60s"
-            metrics_path    = "/actuator/prometheus"
-            scheme          = "https"
-            static_configs = [{
-              targets = ["127.0.0.1:${var.container_port}"]
-            }]
-            tls_config = {
-              # WHY : Assumptions: the scrape deliberately uses loopback so the
-              #       metrics endpoint is never exposed through a security-group
-              #       rule, and the TLS channel still protects the bytes inside
-              #       the task namespace.
-              # WHY : Refactoring Rationale: verification is skipped because the
-              #       listener certificate is UNANCHORED, not because of its
-              #       names. This note used to say "hostname verification cannot
-              #       succeed against 127.0.0.1", which
-              #       config/docker/generate-listener-material.sh:164 contradicts
-              #       -- it mints the leaf with
-              #       `SAN=dns:<cn>,dns:localhost,ip:127.0.0.1`, so loopback IS a
-              #       subject-alternative name. What no container in the task has
-              #       is the issuer: the leaf is self-signed and minted per task,
-              #       so nothing can anchor it. Measured with the generator's own
-              #       keytool arguments against a loopback TLS listener: a
-              #       verifying client fails with "self-signed certificate (18)"
-              #       and reports no name mismatch at all. The distinction is why
-              #       supplying a name would not remove this flag, and why the only
-              #       alternative would be exporting the per-task leaf into the
-              #       collector's own trust store on every start.
-              insecure_skip_verify = true
-            }
-          }]
-        }
-      }
-    } : {},
-  )
-
-  telemetry_processors = {
-    memory_limiter = {
-      check_interval  = "5s"
-      limit_mib       = 128
-      spike_limit_mib = 32
-    }
-    resource = {
-      attributes = [
-        {
-          key    = "service.name"
-          action = "upsert"
-          value  = var.service_name
-        },
-        {
-          key    = "deployment.environment.name"
-          action = "upsert"
-          value  = var.environment
-        },
-        {
-          key    = "service.version"
-          action = "upsert"
-          value  = lookup(var.environment_variables, "CARDDEMO_VERSION", "unspecified")
-        },
-      ]
-    }
-    tail_sampling = {
-      decision_wait = "10s"
-      policies = [
-        {
-          name = "errors"
-          type = "status_code"
-          status_code = {
-            status_codes = ["ERROR"]
-          }
-        },
-        {
-          name = "successful-sample"
-          type = "probabilistic"
-          probabilistic = {
-            sampling_percentage = var.telemetry_success_sample_percentage
-          }
-        },
-      ]
-    }
-    batch = {}
-  }
-
-  telemetry_exporters = {
-    awsxray = {}
-    awsemf = {
-      namespace               = "CardDemo"
-      log_group_name          = local.log_group_name
-      log_stream_name         = "${var.service_name}-telemetry"
-      dimension_rollup_option = "NoDimensionRollup"
-      resource_to_telemetry_conversion = {
-        enabled = true
-      }
-    }
-  }
-
-  # WHY : Refactoring Rationale: the metrics pipeline is created for EVERY workload
-  #       and its receiver list now includes otlp, where it used to exist only when
-  #       create_service was true and read the Prometheus receiver alone. The
-  #       consequence of the old shape was that the two task-mode workloads -- batch
-  #       and data-migration -- ran a collector that exported traces and no metrics at
-  #       all, so a failed nightly step produced spans and left every counter, timer
-  #       and gauge the job recorded unexported. There was nothing to scrape in those
-  #       tasks either: batch starts with no web listener, so a scrape receiver could
-  #       not have supplied them whatever it was pointed at.
-  # WHY : Assumptions: the two receivers serve two DIFFERENT modes and cannot
-  #       double-count, because a workload only ever feeds one of them. A serving task
-  #       is scraped -- telemetry_environment_variables below leaves Micrometer's OTLP
-  #       registry disabled for it, exactly as before -- and a one-shot task pushes,
-  #       with the registry enabled and the scrape target absent. Enabling both on one
-  #       workload is what would export a meter twice, which is the hazard the earlier
-  #       single-receiver shape was written to avoid, and it stays avoided by the
-  #       environment split rather than by omitting a pipeline.
-  # WHY : Trade-offs: reporting-service is create_service = true and its task
-  #       definition is ALSO started directly by the batch state machine, in
-  #       WebApplicationType.NONE. That one shape therefore carries a Prometheus
-  #       scrape configuration with no listener behind it while it runs as a task; the
-  #       collector reports the scrape failure at warn level and exports nothing extra.
-  #       The state machine supplies the push variables as container overrides for
-  #       those runs, so the metrics still arrive. Splitting reporting into two task
-  #       definitions would remove the harmless warning at the cost of two revisions to
-  #       keep in step for one image, which is the duplication this module exists to
-  #       prevent.
-  telemetry_pipelines = merge(
-    {
-      traces = {
-        receivers  = ["otlp"]
-        processors = ["memory_limiter", "resource", "tail_sampling", "batch"]
-        exporters  = ["awsxray"]
-      }
-      metrics = {
-        receivers  = var.create_service ? ["otlp", "prometheus"] : ["otlp"]
-        processors = ["memory_limiter", "resource", "batch"]
-        exporters  = ["awsemf"]
-      }
-    },
-  )
-
-  telemetry_collector_configuration = yamlencode({
-    receivers  = local.telemetry_receivers
-    processors = local.telemetry_processors
-    exporters  = local.telemetry_exporters
-    service = {
-      telemetry = {
-        logs = {
-          level = "warn"
-        }
-      }
-      pipelines = local.telemetry_pipelines
-    }
-  })
-
-  # WHY : Assumptions: the OpenTelemetry starter is on every service classpath
-  #       through common-lib, but common defaults leave export disabled for
-  #       local runs. These task-only variables activate OTLP explicitly and
-  #       point it at loopback; no collector endpoint is exposed outside the
-  #       task. Metrics remain Prometheus-scraped to avoid exporting the same
-  #       meter through both OTLP and the collector's Prometheus receiver.
-  # WHY : Assumptions: OTEL_METRICS_EXPORTER stays "none" for every workload, and it
-  #       is NOT the switch that turns metrics on. It configures the OpenTelemetry SDK,
-  #       which this estate uses for TRACES only; the meters come from Micrometer, whose
-  #       own OTLP registry is on every service's runtime classpath and is governed by
-  #       the management.otlp.metrics.export.* properties that
-  #       carddemo-common-defaults.yml disables for local runs. Setting the SDK
-  #       exporter here would create a second, independently configured metrics path
-  #       rather than enabling the one that exists.
-  # WHY : Refactoring Rationale: the three MANAGEMENT_OTLP_METRICS_EXPORT_* names below
-  #       are supplied to the task-mode workloads and withheld from the serving ones,
-  #       and that split is what stops a meter being exported twice. A serving task
-  #       publishes /actuator/prometheus and the collector scrapes it; a one-shot task
-  #       publishes nothing to scrape, so it pushes instead. Before this, the push path
-  #       was configured nowhere and the scrape path did not exist in task mode, so
-  #       batch and data-migration exported no metrics at all.
-  # WHY : Assumptions: the step is shortened to fifteen seconds for a pushing workload.
-  #       The registry's own default publishes once a minute, and a batch step that
-  #       finishes inside that window would exit having exported nothing -- the
-  #       shutdown flush is best effort and a one-shot container is the case most likely
-  #       to lose it. Fifteen seconds bounds that loss to a quarter of a step at four
-  #       times the request volume, which is negligible against a nightly chain.
-  telemetry_environment_variables = var.enable_telemetry_collector ? merge({
-    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://127.0.0.1:4318/v1/traces"
-    OTEL_EXPORTER_OTLP_TRACES_PROTOCOL = "http/protobuf"
-    OTEL_LOGS_EXPORTER                 = "none"
-    OTEL_METRICS_EXPORTER              = "none"
-    OTEL_RESOURCE_ATTRIBUTES           = "deployment.environment.name=${var.environment},service.version=${lookup(var.environment_variables, "CARDDEMO_VERSION", "unspecified")}"
-    OTEL_SERVICE_NAME                  = var.service_name
-    OTEL_TRACES_EXPORTER               = "otlp"
-    OTEL_TRACES_SAMPLER                = "always-on"
-    }, var.create_service ? {} : {
-    MANAGEMENT_OTLP_METRICS_EXPORT_ENABLED = "true"
-    MANAGEMENT_OTLP_METRICS_EXPORT_STEP    = "15s"
-    MANAGEMENT_OTLP_METRICS_EXPORT_URL     = "http://127.0.0.1:4318/v1/metrics"
-  }) : {}
+  # WHY : Refactoring Rationale: this module composed an AWS Distro for
+  #       OpenTelemetry collector sidecar into every task -- a receiver, processor,
+  #       exporter and pipeline configuration rendered as YAML, a set of OTEL_*
+  #       environment variables pointing the application at loopback, a writable
+  #       scratch volume, an X-Ray export policy on the task role and a container
+  #       dependency ordering the two. All of it is WITHDRAWN, and the reason is
+  #       scope rather than taste: the frozen technical specification contains no
+  #       collector. Section 0.4.1.6 defines the ecr module as TEN repositories --
+  #       one per deployable -- and section 0.4.1.9 fixes the interface-endpoint set
+  #       at exactly eight services, none of which is xray. The sidecar could not be
+  #       delivered inside either number: pulling its image from a private subnet
+  #       required an ELEVENTH repository to mirror it into, because Amazon ECR
+  #       Public is a separate service that the ecr.api and ecr.dkr endpoints do not
+  #       serve, and exporting its spans required a NINTH endpoint for xray. So one
+  #       out-of-specification component was forcing two out-of-specification
+  #       topology changes, each of which then had to be defended on its own.
+  #       Alternatives Considered: (a) keeping the sidecar and pulling the image
+  #       straight from public.ecr.aws -- rejected, that needs general outbound
+  #       internet access from the application subnets, which is the allow-all
+  #       egress this module's own network peer deliberately does not ship;
+  #       (b) keeping the sidecar and adding the xray endpoint -- rejected, it is a
+  #       ninth endpoint against a set the specification states exactly;
+  #       (c) keeping the collector configuration behind a default-off flag --
+  #       rejected, a disabled pipeline is still four variables, an IAM document and
+  #       a container definition that a reader has to evaluate, and it would leave
+  #       the eleventh repository defensible again the moment someone enabled it.
+  #       Trade-offs: what is lost is span EXPORT to a managed tracing backend. What
+  #       is kept is everything the specification actually names for this concern:
+  #       container logs delivered to the group below, application metrics exposed
+  #       on /actuator/prometheus by micrometer-registry-prometheus, the common
+  #       metric tags of common-lib's MetricsConfig, and end-to-end request
+  #       correlation through common-lib's CorrelationIdFilter, which puts one
+  #       identifier into the diagnostic context and onto the response so a request
+  #       is followable across services in the logs. Re-introducing export is a
+  #       deliberate act that has to argue for its own endpoint or its own egress,
+  #       which is the argument that was previously skipped.
 
   effective_environment_variables = merge(
     var.environment_variables,
-    local.telemetry_environment_variables,
   )
 
   # WHY : Assumptions: ECS stores the environment array in the order supplied,
@@ -497,9 +317,9 @@ locals {
     #       workload to be batch, so admitting it here does not admit it everywhere.
     "CARDDEMO_ACCOUNT_CONTEXT_APPROVED_ORIGIN",
     "CARDDEMO_ACCOUNT_CONTEXT_BASE_URL",
-    "CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE",
-    "CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE",
-    "CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE",
+    "CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE_URL",
+    "CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE_URL",
+    "CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE_URL",
     "CARDDEMO_MESSAGING_ERROR_QUEUE_URL",
     # WHY : Refactoring Rationale: CARDDEMO_AUTH_COGNITO_CLIENT_ID and
     #       CARDDEMO_COGNITO_APP_CLIENT_ID were both admitted here and both are
@@ -575,11 +395,19 @@ locals {
     #       carddemo.reference-context.base-url through a fallback-free @Value, so an
     #       unpublished name aborts context refresh rather than degrading one screen -- the
     #       same failure the account-context names above were added to prevent.
+    # WHY : Refactoring Rationale: the three CARDDEMO_REFERENCE_INQUIRY_* names were
+    #       admitted here and are WITHDRAWN, because the reader they were admitted for no
+    #       longer exists. The reference context consumed a date-inquiry request queue of
+    #       its own; that queue was withdrawn when the two per-consumer inquiry request
+    #       queues were merged into the one shared queue the baseline defines
+    #       (app/app-vsam-mq/README.md:53), leaving exactly one owning consumer -- the
+    #       account context -- and reference-service answering date conversion
+    #       synchronously alone. Leaving the names admitted would let a root publish
+    #       three addresses that nothing binds, and the biconditional precondition below
+    #       would then be asserting a reader set that is empty.
     "CARDDEMO_REFERENCE_CONTEXT_APPROVED_ORIGIN",
     "CARDDEMO_REFERENCE_CONTEXT_BASE_URL",
-    "CARDDEMO_REFERENCE_INQUIRY_ERROR_QUEUE",
-    "CARDDEMO_REFERENCE_INQUIRY_REPLY_QUEUE",
-    "CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE",
+
     "CARDDEMO_REPORTING_S3_OUTPUT_BUCKET",
     "CARDDEMO_REPORTING_STEP_FUNCTIONS_STATE_MACHINE_ARN",
     # WHY : Refactoring Rationale: this name was absent from this set while BOTH
@@ -641,19 +469,28 @@ locals {
     "CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY",
     "CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY",
     "CARDDEMO_MASK_HMAC_KEY",
-    # WHY : Assumptions: this is a SEPARATE name from CARDDEMO_MASK_HMAC_KEY above,
-    #       and the separation is the point rather than an accident of naming. The
-    #       mask key is held by the one-off migration workload that reads cardholder
-    #       extracts; this key is held by the long-running authorization consumer and
-    #       is shared with every other producer on the pending-authorization queue,
-    #       because the queue group identity has to be equal for equal cards ACROSS
-    #       producers -- that equality is the per-card ordering guarantee itself.
-    #       Alternatives Considered: reusing the mask key for both purposes, which is
-    #       one fewer secret to provision and rotate. Rejected on two counts: it would
-    #       give the migration workload the ability to compute production queue group
-    #       identities, and rotating either purpose would require a coordinated stop of
-    #       an interactive consumer and a batch workload at once.
-    "CARDDEMO_MESSAGING_HMAC_KEY",
+    # WHY : Refactoring Rationale: CARDDEMO_MESSAGING_HMAC_KEY stood in this set,
+    #       admitted for the authorization workload alone, and it is WITHDRAWN. The
+    #       withdrawal is recorded here rather than left as an absence because this set
+    #       is the gate: a name it does not admit cannot be supplied by any root, so a
+    #       reader finding the variable in an older task definition needs to know the
+    #       admission was removed deliberately. It keyed one Spring bean in the
+    #       authorization context, and nothing injected that bean once specification
+    #       sections 0.4.1.8 and 0.7.6 fixed the queue group and deduplication
+    #       identities as the literal card number and transaction identifier. The
+    #       entry stated a further claim that was never true of the delivered system --
+    #       that the key was "shared with every other producer on the queue" so that a
+    #       derived group identity would be equal for equal cards across producers.
+    #       Nothing provisioned it to any producer but this one, which is exactly why a
+    #       derived group identity could not carry the ordering guarantee and why the
+    #       specification freezes the literal value instead.
+    #       Alternatives Considered: leaving the name admitted while removing only the
+    #       bean, so a future consumer would need no module change. Rejected because an
+    #       admitted secret name with no reader is what let the chain persist through
+    #       two reviews: the roots provisioned a secret because the module admitted it,
+    #       and the module admitted it because the roots provisioned it. A future
+    #       consumer re-adds the name here in the same change that adds the consumer,
+    #       which is one edit and makes the reader and the credential arrive together.
     # WHY : Refactoring Rationale: this name was absent from this set while every
     #       service holding the dependency could not start without it, and the absence
     #       was the whole defect.
@@ -688,12 +525,12 @@ locals {
     #       principal able to describe the task definition could then forge a cursor
     #       and page into rows no query scoped to it.
     # WHY : Assumptions: it is a SEPARATE name from the two internal-identity signing keys
-    #       and CARDDEMO_MESSAGING_HMAC_KEY above, and the separation is purpose-scoping
-    #       rather than naming habit. Its holder set is the seven services enumerated
-    #       above; the internal-identity key's is three and the messaging key's is one. Sharing
-    #       one value across the three purposes would mean a service able to seal a
-    #       cursor could also mint an internal bearer token, and rotating any purpose
-    #       would invalidate all three at once.
+    #       above, and the separation is purpose-scoping rather than naming habit. Its
+    #       holder set is the seven services enumerated above, while each
+    #       internal-identity key is held by two -- one signer and the verifier. Sharing
+    #       one value across the purposes would mean a service able to seal a
+    #       cursor could also mint an internal bearer token, and rotating either purpose
+    #       would invalidate both at once.
     "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY",
     # WHY : Assumptions: this keys the OBJECT KEY under which the reporting service
     #       publishes a statement, and it is admitted here -- in the secret channel --
@@ -713,11 +550,11 @@ locals {
     #       why the tokeniser is KEYED rather than a bare digest: an account identifier
     #       is eleven digits, so an unkeyed digest is confirmed by enumeration and would
     #       disclose the value it was meant to withhold while looking like a control.
-    # WHY : Assumptions: it is a SEPARATE name from CARDDEMO_MASK_HMAC_KEY,
-    #       CARDDEMO_MESSAGING_HMAC_KEY and CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY
+    # WHY : Assumptions: it is a SEPARATE name from CARDDEMO_MASK_HMAC_KEY and
+    #       CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY
     #       above, and the separation is purpose-scoping rather than naming habit. Each
-    #       of those has a different holder set -- the migration workload, the
-    #       authorization consumer, the list-publishing services -- and this one is held
+    #       of those has a different holder set -- the migration workload and the
+    #       list-publishing services -- and this one is held
     #       by reporting alone. Sharing one value would mean a holder of any single
     #       capability could exercise the others, and rotating one purpose would
     #       invalidate all of them at once. The gate below asserts the holder set
@@ -810,12 +647,10 @@ locals {
   #       because a region is neither confidential nor deployment-derived -- both roots
   #       supply it as var.aws_region, the same value the provider is configured with.
   # WHY : Refactoring Rationale: CARDDEMO_VERSION is required of EVERY workload, and
-  #       until now it was required of none. Three independent consumers read it --
-  #       carddemo-common-defaults.yml binds carddemo.version, the collector's resource
-  #       processor upserts service.version, and OTEL_RESOURCE_ATTRIBUTES carries the
-  #       same value onto every span -- and all three fall back to the literal
-  #       "unspecified" when it is absent. Because no root supplied it, every log
-  #       record, every metric series and every trace in this estate was labelled
+  #       until now it was required of none. carddemo-common-defaults.yml binds
+  #       carddemo.version from it, and that binding falls back to the literal
+  #       "unspecified" when the variable is absent. Because no root supplied it,
+  #       every log record and every metric series in this estate was labelled
   #       "unspecified", so no signal could be attributed to a release and a
   #       regression could not be bracketed between two deployments. Requiring the
   #       name here, and refusing a blank or placeholder value in the precondition at
@@ -883,8 +718,8 @@ locals {
     #       three, and the asymmetry has now become wrong. It was defensible while
     #       account-service contained no consumer: an unbound configuration key is
     #       never resolved, so a missing variable could not fail anything.
-    #       service/InquiryMessageListener.java now binds all three -- request-queue
-    #       through its @SqsListener annotation, reply-queue and error-queue through
+    #       service/InquiryMessageListener.java now binds all three -- request-queue-url
+    #       through its @SqsListener annotation, reply-queue-url and error-queue-url through
     #       constructor @Value parameters with no defaults -- so each is resolved with
     #       resolveRequiredPlaceholders and each aborts context refresh when unset.
     #       Requiring them here moves that failure from container start to plan time,
@@ -917,9 +752,9 @@ locals {
     #       two values a root published from one expression rather than between a value and
     #       itself.
     account = toset([
-      "CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE",
-      "CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE",
-      "CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE",
+      "CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE_URL",
+      "CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE_URL",
+      "CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE_URL",
       "CARDDEMO_REFERENCE_CONTEXT_APPROVED_ORIGIN",
       "CARDDEMO_REFERENCE_CONTEXT_BASE_URL",
       "CARDDEMO_SECURITY_CUSTOMER_IDENTIFIER_KEY_ID",
@@ -970,9 +805,15 @@ locals {
       #       account context -- and not of account itself. Both names follow the same
       #       rule, that a service address is required of whoever dials it; listing this
       #       one under its owner broke the rule rather than extending it.
-      "CARDDEMO_REFERENCE_INQUIRY_ERROR_QUEUE",
-      "CARDDEMO_REFERENCE_INQUIRY_REPLY_QUEUE",
-      "CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE",
+      # WHY : Refactoring Rationale: the three CARDDEMO_REFERENCE_INQUIRY_* names were
+      #       required here and are withdrawn with the consumer that bound them. The
+      #       reference context no longer binds a queue name anywhere: its
+      #       DateInquiryMessageListener and SqsConfig were retired when the inquiry
+      #       request queues were merged into the one shared queue the baseline defines,
+      #       and date conversion is answered by its synchronous route alone. Requiring a
+      #       name no application.yml resolves would oblige every root to publish three
+      #       addresses that reach no reader, which is the drift the biconditional
+      #       precondition below exists to catch.
       "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID",
       "SPRING_DATASOURCE_URL",
       "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
@@ -1237,7 +1078,7 @@ locals {
     #       that key; with no key supplied, the only per-card stable value it holds is
     #       the card number, so the card number became the FIFO group identity and was
     #       published as SQS message metadata on every reply -- outside the encrypted
-    #       body, into queue telemetry, and into every log that observes the queue.
+    #       body, into the queue's own metrics, and into every log that observes it.
     #       Requiring the name here is what makes a deployment that forgets it fail at
     #       plan rather than start and leak. authorization is the only Java service
     #       listed, because it is the only producer this repository contains.
@@ -1266,7 +1107,6 @@ locals {
       #       @Value, so a deployment without it fails at container start rather than
       #       consuming authorizations it can never resolve an account context for.
       "CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY",
-      "CARDDEMO_MESSAGING_HMAC_KEY",
       # WHY : Assumptions: this service requires the cursor signing key because at least
       #       one of its components takes CursorToken as a constructor argument, and
       #       common-lib withholds that bean when the key is unset. The failure is a
@@ -1437,19 +1277,14 @@ data "aws_iam_policy_document" "execution" {
   #       through the root rather than being reconstructed from the image URI,
   #       because parsing an ARN out of a registry reference would encode the
   #       registry hostname format in this module.
-  # WHY : Refactoring Rationale: the Resource list holds the SECOND repository
-  #       too, and the omission it corrects would have stopped every task. A task
-  #       with the telemetry sidecar pulls two images, and the mirrored collector
-  #       lives in its own repository so that ordinary service releases cannot
-  #       expire it out of a shared one -- so a role granted only the service's
-  #       repository can pull the application container and not its sidecar, and a
-  #       task whose sidecar cannot be pulled does not start degraded, it fails to
-  #       start.
-  #       Assumptions: compact() removes the null rather than a conditional
-  #       expression choosing between two lists, so a caller that names no mirror
-  #       grants exactly one repository and the statement never carries an empty
-  #       or null element -- a policy with a null Resource is rejected at apply
-  #       time with a message naming neither the input nor the statement.
+  # WHY : Refactoring Rationale: the Resource list held a SECOND repository, the
+  #       one a mirrored telemetry collector image was pulled from, and it is
+  #       withdrawn with the sidecar itself for the reason recorded in the locals
+  #       block above. One task now pulls one image, so one repository ARN is the
+  #       whole grant, and compact() is no longer needed to drop a null second
+  #       element. Keeping the two-element shape "in case" would have re-created
+  #       the grant for an image nothing pulls, which is exactly the kind of
+  #       leftover privilege a least-privilege execution role exists to avoid.
   statement {
     sid    = "AllowEcrImagePull"
     effect = "Allow"
@@ -1460,10 +1295,7 @@ data "aws_iam_policy_document" "execution" {
       "ecr:GetDownloadUrlForLayer",
     ]
 
-    resources = compact([
-      var.ecr_repository_arn,
-      var.telemetry_collector_repository_arn,
-    ])
+    resources = [var.ecr_repository_arn]
   }
 
   # WHY : Assumptions: logs:CreateLogGroup is deliberately absent, and its
@@ -1604,6 +1436,54 @@ data "aws_iam_policy_document" "task_sqs" {
       resources = sort(tolist(var.sqs_receive_queue_arns))
     }
   }
+
+  # WHY : Assumptions: the action set is derived from DIRECTION rather than granted
+  #       uniformly. A producer needs kms:GenerateDataKey to obtain the data key the
+  #       message body is sealed with, and kms:Decrypt because SendMessage also
+  #       unwraps that key; a consumer needs kms:Decrypt only. Granting
+  #       GenerateDataKey to a receive-only service would let it seal traffic it has
+  #       no business producing, so it is added only when a send list exists.
+  # WHY : Assumptions: BOTH conditions are applied, and they answer different
+  #       escapes. kms:ViaService confines the key to use made THROUGH the queue
+  #       service in this Region, so a principal that reached this role cannot call
+  #       Decrypt directly on ciphertext of its own choosing. The encryption-context
+  #       condition confines it further to this service's OWN queues: SQS sets
+  #       aws:sqs:arn to the queue being used on every SSE-KMS request, so a task
+  #       cannot use the shared queue key against a queue outside its two lists even
+  #       though the key ARN is one value shared by every queue in the environment.
+  # WHY : Alternatives Considered: one key per queue, which would make the resource
+  #       ARN itself the boundary and remove the need for the context condition.
+  #       Rejected against AAP section 0.4.1.6, which provisions FOUR customer-managed
+  #       keys -- one for the queue estate as a whole -- so the per-queue narrowing
+  #       has to come from a condition rather than from the key inventory.
+  dynamic "statement" {
+    for_each = var.sqs_kms_key_arn == null ? [] : [true]
+
+    content {
+      sid    = "UseQueueEncryptionKey"
+      effect = "Allow"
+      actions = concat(
+        ["kms:Decrypt"],
+        length(var.sqs_send_queue_arns) > 0 ? ["kms:GenerateDataKey"] : [],
+      )
+      resources = [var.sqs_kms_key_arn]
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["sqs.${data.aws_region.current.region}.amazonaws.com"]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:EncryptionContext:aws:sqs:arn"
+        values = sort(distinct(concat(
+          tolist(var.sqs_send_queue_arns),
+          tolist(var.sqs_receive_queue_arns),
+        )))
+      }
+    }
+  }
 }
 
 
@@ -1684,10 +1564,17 @@ resource "aws_iam_role_policy" "execution" {
 #       service's secrets -- every service every other service's access, which
 #       is the exact opposite of the per-service least privilege that stands in
 #       for RACF here. The caller passes what its own service needs -- its own
-#       queues, secrets and key usage -- while the telemetry statement below is
-#       invariant across all services and contains no business resource. No
-#       wildcard action reaches this role; the sole wildcard Resource is on the
-#       two X-Ray ingestion actions, which do not support resource scoping.
+#       queues, secrets and key usage -- and nothing else is attached here.
+# WHY : Refactoring Rationale: this paragraph continued "while the telemetry
+#       statement below is invariant across all services and contains no business
+#       resource. No wildcard action reaches this role; the sole wildcard Resource
+#       is on the two X-Ray ingestion actions, which do not support resource
+#       scoping." It is withdrawn with the collector sidecar: it would otherwise
+#       describe a policy document this file no longer contains, and it would
+#       concede a wildcard Resource that this role now does not hold. Neither a
+#       wildcard action nor a wildcard resource reaches this role any more, which
+#       is a stronger property than the sentence was explaining and is worth
+#       stating rather than leaving as a stale concession.
 resource "aws_iam_role" "task" {
   name                 = "${local.resource_name}-task"
   description          = "Application task role for ${local.resource_name}."
@@ -1781,53 +1668,18 @@ resource "aws_iam_role_policy_attachment" "task" {
   policy_arn = each.value
 }
 
-data "aws_iam_policy_document" "task_telemetry" {
-  statement {
-    sid    = "AllowTelemetryLogExport"
-    effect = "Allow"
-
-    actions = [
-      "logs:CreateLogStream",
-      "logs:DescribeLogStreams",
-      "logs:PutLogEvents",
-    ]
-
-    resources = [
-      local.log_group_arn,
-      "${local.log_group_arn}:*",
-    ]
-  }
-
-  statement {
-    sid    = "AllowXrayTraceExport"
-    effect = "Allow"
-
-    # WHY : Assumptions: X-Ray ingestion actions do not support resource-level
-    #       permissions, so the Resource wildcard is imposed by the API while
-    #       the action set remains limited to writing trace segments and
-    #       telemetry records. Sampling happens in the task-local collector and
-    #       requires no X-Ray rule-read permission.
-    actions = [
-      "xray:PutTelemetryRecords",
-      "xray:PutTraceSegments",
-    ]
-
-    resources = ["*"]
-  }
-}
-
-# WHY : Alternatives Considered: requiring every one of the nine callers to
-#       repeat these statements was rejected because the permissions are a
-#       property of this module-created sidecar, not of any bounded context.
-#       Keeping them here means disabling the sidecar removes the policy too,
-#       while each service's queue, database and secret grants stay root-owned.
-resource "aws_iam_role_policy" "task_telemetry" {
-  count = var.enable_telemetry_collector ? 1 : 0
-
-  name   = "${local.resource_name}-telemetry"
-  role   = aws_iam_role.task.id
-  policy = data.aws_iam_policy_document.task_telemetry.json
-}
+# WHY : Refactoring Rationale: a task_telemetry policy document and inline policy
+#       stood here. It carried two statements -- CloudWatch Logs stream creation and
+#       PutLogEvents on this workload's own group, and the two X-Ray ingestion
+#       actions on the wildcard resource those APIs require -- and both existed for
+#       the withdrawn collector sidecar rather than for the application. The
+#       application's own container logs travel through the awslogs driver, which
+#       runs under the EXECUTION role and is granted by the AllowLogWrite statement
+#       above, so removing this document takes nothing away from the workload; what
+#       it removes is a wildcard trace-export grant held by every task role in the
+#       deployment for an exporter that no longer runs. Leaving it in place would
+#       have been a standing privilege with no consumer, which is the shape a
+#       least-privilege review is meant to catch.
 
 
 # -----------------------------------------------------------------------------
@@ -1848,7 +1700,7 @@ resource "aws_ecs_task_definition" "this" {
   #       edge in this module was from the service to the execution-role policy, and
   #       Terraform infers ordering from references alone -- the container
   #       definitions reference the two role ARNs, not the inline policies attached
-  #       to them, so all five policy resources were free to be created after this
+  #       to them, so all four policy resources were free to be created after this
   #       one. Two consequences followed. A task started before its application
   #       policy existed received access-denied on its first queue receive, its first
   #       write-gate read or its first log export, which presents as an application
@@ -1862,8 +1714,8 @@ resource "aws_ecs_task_definition" "this" {
   #       with no readiness barrier unprotected. The service keeps its own edge
   #       below, which now names the task-role policies as well, so a rolling
   #       deployment cannot begin before the grants it will run under are in place.
-  # WHY : Trade-offs: the list names the four conditional policy resources with
-  #       splat expressions rather than being derived, so adding a sixth policy to
+  # WHY : Trade-offs: the list names the three conditional policy resources with
+  #       splat expressions rather than being derived, so adding a fifth policy to
   #       this role means adding a line here. That friction is preferred to a
   #       depends_on on the role itself, which would NOT work: an inline policy is a
   #       separate resource that depends on the role, so depending on the role
@@ -1872,7 +1724,6 @@ resource "aws_ecs_task_definition" "this" {
     aws_iam_role_policy.task,
     aws_iam_role_policy.task_sqs,
     aws_iam_role_policy.task_online_write_gate,
-    aws_iam_role_policy.task_telemetry,
     aws_iam_role_policy_attachment.task,
     aws_iam_role_policy.execution,
   ]
@@ -1929,36 +1780,29 @@ resource "aws_ecs_task_definition" "this" {
     }
   }
 
-  dynamic "volume" {
-    for_each = var.enable_telemetry_collector ? [true] : []
-
-    content {
-      # WHY : Assumptions: the collector runs with a read-only root filesystem
-      #       and receives its own ephemeral /tmp rather than sharing an
-      #       application scratch volume that may contain business data.
-      name = "telemetry-tmp"
-    }
-  }
-
-  container_definitions = jsonencode(concat([
+  # WHY : Refactoring Rationale: this was a concat() of the application container
+  #       with a conditional single-element list holding the collector sidecar. The
+  #       sidecar is withdrawn for the reason recorded in the locals block above, so
+  #       the concat had one operand and is replaced by the list itself. Keeping the
+  #       concat would have implied a second container definition somewhere for a
+  #       reader to find.
+  container_definitions = jsonencode([
     {
       name  = local.container_name
       image = var.image_uri
 
-      # WHY : Assumptions: the application remains essential even when the
-      #       telemetry sidecar is present. Otherwise the task could remain in
-      #       RUNNING after the only container serving business traffic exited.
+      # WHY : Assumptions: the application container is essential, so the task
+      #       stops when it stops. With the telemetry sidecar withdrawn this is now
+      #       the only container in the task, which makes the flag a statement of
+      #       intent rather than a live discriminator -- it is kept explicit because
+      #       ECS defaults it per-container and a task whose sole container is
+      #       non-essential can sit in RUNNING with nothing serving traffic.
+      # WHY : Refactoring Rationale: a dependsOn ordering the application after the
+      #       collector's START is withdrawn with the sidecar. There is no second
+      #       container to order against, and an empty dependency array left behind
+      #       would read as an ordering constraint that had been satisfied rather
+      #       than one that no longer applies.
       essential = true
-
-      # WHY : Assumptions: START waits only for the collector process to begin,
-      #       not for an external health endpoint. OTLP exporters buffer and
-      #       retry during the short interval before its receivers are ready,
-      #       while omitting the dependency can lose the first startup spans
-      #       before the sidecar process exists at all.
-      dependsOn = var.enable_telemetry_collector ? [{
-        containerName = "aws-otel-collector"
-        condition     = "START"
-      }] : []
 
       # WHY : Assumptions: container_user carries a numeric uid, which must
       #       match the non-root user the service's own Dockerfile creates -- a
@@ -2080,72 +1924,7 @@ resource "aws_ecs_task_definition" "this" {
         startPeriod = var.health_check_grace_period_seconds
       }
     }
-    ],
-    var.enable_telemetry_collector ? [
-      {
-        name      = "aws-otel-collector"
-        image     = var.telemetry_collector_image
-        essential = true
-
-        # WHY : Assumptions: the image supports an environment-backed config
-        #       URI. Supplying the complete typed configuration through the
-        #       task definition avoids an S3 config object, its read policy and
-        #       a second deployment artifact that could drift from this revision.
-        command = ["--config=env:AOT_CONFIG_CONTENT"]
-
-        cpu               = 128
-        memoryReservation = 128
-
-        # WHY : Assumptions: tail sampling waits up to ten seconds before a
-        #       decision. A thirty-second stop window lets the collector make
-        #       that decision and flush its final batch after the application
-        #       exits, which is load-bearing for short-lived batch tasks.
-        stopTimeout = 30
-
-        readonlyRootFilesystem = true
-        mountPoints = [{
-          containerPath = "/tmp"
-          readOnly      = false
-          sourceVolume  = "telemetry-tmp"
-        }]
-
-        environment = [
-          {
-            name  = "AOT_CONFIG_CONTENT"
-            value = local.telemetry_collector_configuration
-          },
-          {
-            name  = "AWS_REGION"
-            value = data.aws_region.current.region
-          },
-        ]
-
-        portMappings = [
-          {
-            containerPort = 4317
-            protocol      = "tcp"
-          },
-          {
-            containerPort = 4318
-            protocol      = "tcp"
-          },
-        ]
-
-        # WHY : Assumptions: application and collector share the task network
-        #       namespace, while the task security group admits only the
-        #       application port. Declaring the OTLP ports documents the
-        #       listeners without exposing them outside the task.
-        logConfiguration = {
-          logDriver = "awslogs"
-          options = {
-            "awslogs-group"         = aws_cloudwatch_log_group.this.name
-            "awslogs-region"        = data.aws_region.current.region
-            "awslogs-stream-prefix" = "telemetry"
-          }
-        }
-      },
-    ] : [],
-  ))
+  ])
 
   tags = local.tags
 
@@ -2209,11 +1988,19 @@ resource "aws_ecs_task_definition" "this" {
       # WHY : Assumptions: the value has to be PRESENT, non-blank and not the literal
       #       fallback, because those are three different ways of arriving at the same
       #       useless label and only the first is caught by the required-name check
-      #       above. carddemo-common-defaults.yml resolves carddemo.version to
-      #       "unspecified" when the variable is absent, and this module's own
-      #       resource-attribute and OTEL_RESOURCE_ATTRIBUTES expressions use the same
-      #       word, so a task that supplied the placeholder explicitly would be
-      #       indistinguishable from one that supplied nothing -- while looking wired.
+      #       above. carddemo-common-defaults.yml resolves carddemo.version to the
+      #       literal "unspecified" when the variable is absent, so a task that supplied
+      #       that placeholder explicitly would be indistinguishable from one that
+      #       supplied nothing -- while looking wired.
+      #       Refactoring Rationale: this also named "this module's own
+      #       resource-attribute and OTEL_RESOURCE_ATTRIBUTES expressions" as sharing the
+      #       fallback word. The module no longer has either: both belonged to the
+      #       telemetry sidecar it used to add, and that sidecar was withdrawn because the
+      #       specification's module inventory contains no collector -- the same removal
+      #       that retired the eleventh ECR repository mirroring its image. The
+      #       precondition is unaffected, because the reason it exists is the
+      #       application-side fallback above, which is still present; only the withdrawn
+      #       consumers are dropped from the sentence.
       # WHY : Assumptions: the release identity is not checked for SHAPE, only for
       #       being a real value. Both roots derive it from the same expression that
       #       chooses this workload's image -- the immutable digest where one is
@@ -2230,7 +2017,7 @@ resource "aws_ecs_task_definition" "this" {
         trimspace(lookup(var.environment_variables, "CARDDEMO_VERSION", "")) != "" &&
         lookup(var.environment_variables, "CARDDEMO_VERSION", "") != "unspecified"
       )
-      error_message = "every task must set CARDDEMO_VERSION to the release identity of the image it runs, and it may be neither blank nor the literal \"unspecified\": that word is the fallback carddemo-common-defaults.yml, the collector's service.version attribute and OTEL_RESOURCE_ATTRIBUTES all resolve to when the variable is absent, so supplying it explicitly would leave every log record, metric series and span unattributable to a release while appearing to be configured."
+      error_message = "every task must set CARDDEMO_VERSION to the release identity of the image it runs, and it may be neither blank nor the literal \"unspecified\": that word is the fallback carddemo-common-defaults.yml resolves carddemo.version to when the variable is absent, so omitting it would leave every log record and metric series unattributable to a release while appearing to be configured."
     }
 
     precondition {
@@ -2243,14 +2030,10 @@ resource "aws_ecs_task_definition" "this" {
       #       the on-demand state machine it starts. Every clause is biconditional on
       #       purpose: a name reaching the wrong service is as much a defect as a name
       #       missing from the right one.
-      # WHY : Refactoring Rationale: clauses were added for the messaging HMAC key and
-      #       for the two account-context parameters, each biconditional for the same
-      #       reason as the original four. The messaging clause closes an omission whose
-      #       halves were both wrong at once: authorization did not receive the key it
-      #       needs to derive an opaque queue group identity, so it fell back to
-      #       publishing a primary account number as SQS metadata, and nothing stopped a
-      #       root handing that key to a service that produces no queue message. The
-      #       address clauses close a gap of the same shape: authorization received no
+      # WHY : Refactoring Rationale: clauses were added for the two account-context
+      #       parameters, each biconditional for the same
+      #       reason as the original four. They close a gap of one shape: authorization
+      #       received no
       #       account-context address and crash-looped on the unresolvable placeholder,
       #       while nothing stopped a root handing the address of a cardholder-data
       #       dependency to a service that never calls it.
@@ -2258,6 +2041,21 @@ resource "aws_ecs_task_definition" "this" {
       #       as adding "a fifth clause". They were written in separate passes and the
       #       later one subsumed the earlier; leaving both left a reader counting six
       #       clauses against two conflicting descriptions of which was fifth.)
+      # WHY : ⚠️ Refactoring Rationale: a clause for CARDDEMO_MESSAGING_HMAC_KEY stood
+      #       here too, biconditional on the authorization service, and it is WITHDRAWN
+      #       with the rest of that chain -- the property, the bean, the admissible name
+      #       above, the provisioned secret in both roots and the task-role read grant.
+      #       Its stated purpose was that authorization must receive a key through which
+      #       to DERIVE an opaque queue group identity, on pain of falling back to
+      #       publishing a card number as queue metadata. Specification sections 0.4.1.8
+      #       and 0.7.6 settle that differently: the literal card number IS the group
+      #       identity the target publishes, and the exposure is registered as a
+      #       divergence with compensating controls, so nothing derived the identity and
+      #       nothing injected the bean the key fed. No replacement clause asserts the
+      #       name's ABSENCE, deliberately: the admissible-name check above already
+      #       refuses any secret name this module does not list, so a root re-supplying
+      #       it fails at plan on that check, and a second clause saying the same thing
+      #       would leave a reader unsure which of the two owned the rule.
       # WHY : Assumptions: there are TWO internal-identity clauses below and each is gated on
       #       a PAIR, and both the pairing and the split are required rather than stylistic.
       #       Each value is a symmetric signing key belonging to one caller: authorization
@@ -2278,7 +2076,6 @@ resource "aws_ecs_task_definition" "this" {
       #       service that never calls it is the widening the biconditional refuses.
       condition = (
         (var.service_name == "data-migration") == contains(keys(var.secret_arns), "CARDDEMO_MASK_HMAC_KEY") &&
-        (var.service_name == "authorization") == contains(keys(var.secret_arns), "CARDDEMO_MESSAGING_HMAC_KEY") &&
         # WHY : Assumptions: biconditional on the CARD service alone, for the same reason
         #       every clause here is biconditional. Only card-service mints and opens the
         #       opaque row selector this key seals, so a task that never addresses a card by
@@ -2393,15 +2190,17 @@ resource "aws_ecs_task_definition" "this" {
       #       service could be handed the reporting state-machine ARN, and reference
       #       the account inquiry queues, and both would plan cleanly. The block above
       #       closed that for eleven names one at a time as each was noticed; the
-      #       fifteen clauses here -- fourteen over ssm_parameter_arns and one over
+      #       thirteen clauses here -- twelve over ssm_parameter_arns and one over
       #       secret_arns -- complete the set, so "exact allowlist" now constrains the
       #       pairing of name and workload rather than the name alone.
-      # WHY : Refactoring Rationale: the count above was corrected when the batch clause
-      #       was added, and it is stated as two numbers that sum rather than as one
-      #       total because the previous wording said "thirteen" while the block held
-      #       fourteen -- the figure had counted only the parameter clauses and read as
-      #       though it counted them all. A prose count in a file with a machine-checkable
-      #       answer should say which population it counts.
+      # WHY : Refactoring Rationale: the count above is stated as two numbers that sum
+      #       rather than as one total, because an earlier wording said "thirteen" while
+      #       the block held fourteen parameter clauses -- the figure had counted only
+      #       the parameter clauses and read as though it counted them all. A prose count
+      #       in a file with a machine-checkable answer should say which population it
+      #       counts. It moved from fifteen to thirteen when the three
+      #       CARDDEMO_REFERENCE_INQUIRY_* clauses were withdrawn with the consumer that
+      #       bound those names.
       # WHY : Assumptions: every clause is biconditional, and the reverse direction is
       #       the half that earns the block. Forward-only ("if the service is card it
       #       must have the CVV key alias") catches an omission, which the required
@@ -2448,9 +2247,6 @@ resource "aws_ecs_task_definition" "this" {
         (var.service_name == "account") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE") &&
         (var.service_name == "account") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE") &&
         (var.service_name == "account") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE") &&
-        (var.service_name == "reference") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_REFERENCE_INQUIRY_ERROR_QUEUE") &&
-        (var.service_name == "reference") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_REFERENCE_INQUIRY_REPLY_QUEUE") &&
-        (var.service_name == "reference") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE") &&
         (var.service_name == "reporting") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_REPORTING_STEP_FUNCTIONS_STATE_MACHINE_ARN") &&
         (var.service_name == "card") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_SECURITY_CVV_KEY_ID") &&
         (!contains(keys(var.ssm_parameter_arns), "CARDDEMO_MESSAGING_ERROR_QUEUE_URL") || var.service_name == "batch") &&
@@ -2766,7 +2562,7 @@ resource "aws_ecs_service" "this" {
   # WHY : Refactoring Rationale: the list named the execution-role policy alone,
   #       which ordered the image pull correctly and left the APPLICATION role's
   #       grants unordered -- so the first tasks of a new service could be placed
-  #       before their queue, write-gate or telemetry statements existed and would
+  #       before their queue or write-gate statements existed and would
   #       fail their first request rather than fail to start. The task-role policies
   #       are named here as well as on the task definition above: the definition's
   #       edge protects the two task-only workloads that have no service, and this
@@ -2777,7 +2573,6 @@ resource "aws_ecs_service" "this" {
     aws_iam_role_policy.task,
     aws_iam_role_policy.task_sqs,
     aws_iam_role_policy.task_online_write_gate,
-    aws_iam_role_policy.task_telemetry,
     aws_iam_role_policy_attachment.task,
   ]
 

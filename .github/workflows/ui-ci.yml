@@ -12,8 +12,12 @@
 #   Prettier check on a manual diagnostic run; type, documentation, test, audit,
 #   and production-build gates are never optional.
 # Return values:
-#   A failing gate returns failure and a Vitest JUnit artifact is uploaded even
-#   when an earlier step fails.
+#   A failing gate returns failure. The report upload is ATTEMPTED unconditionally
+#   (`if: always()`), and the ABSENCE of a report is itself gating: the upload runs
+#   with `if-no-files-found: error`, so a run whose type, documentation, contract or
+#   lint gate failed before Vitest executed fails at the upload with no artifact
+#   rather than producing one. An artifact is therefore promised only for a run that
+#   reached the test step.
 # Exceptions or errors:
 #   The annotation publisher may degrade without masking Vitest. No other
 #   non-zero exit is tolerated.
@@ -304,6 +308,14 @@ jobs:
       # channel by which the test results leave this job. `if-no-files-found: error`
       # is what makes a silently absent Vitest report fail here, which is why the
       # publisher job downstream is allowed to tolerate a missing artifact.
+      # Assumptions: `if: always()` means the upload is ATTEMPTED after an earlier
+      # failure, NOT that an artifact exists after one. A run that failed its
+      # typecheck, documentation, contract or lint gate never reached the test step,
+      # so `ui-reports/` is empty and this step fails on no files -- adding a second
+      # red step to an already-red run and producing nothing to download. That is the
+      # intended behaviour of the two settings together and it is stated here because
+      # the pair reads as a promise of an artifact in every outcome; the header's
+      # Return values section states the same bound so a reader meets it first.
       - name: Upload Vitest reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

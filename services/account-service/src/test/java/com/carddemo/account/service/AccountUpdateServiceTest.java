@@ -189,6 +189,40 @@ class AccountUpdateServiceTest {
     }
 
     /**
+     * The validation turn reaches the same verdict as the write and saves nothing.
+     *
+     * <p>Assumptions: BOTH halves are asserted in one case because either alone would be misleading. That
+     * no row is saved proves the turn is safe; that the verdict equals {@code editMapInputs}' own proves it
+     * is useful. Had they diverged, a screen could show a green validation and then fail the save on the
+     * very same values, which is the failure this operation exists to prevent.</p>
+     *
+     * <p>Returns no value. A saved row, or a verdict that differs from the shared edit pass, is reported as
+     * a JUnit assertion failure.</p>
+     */
+    @Test
+    @DisplayName("the validation turn matches the write's own verdict and saves nothing")
+    void theValidationTurnMatchesTheEditPassAndSavesNothing() {
+        Fixture fixture = new Fixture();
+        when(fixture.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(fixture.account));
+        when(fixture.customers.findById(CUSTOMER_ID)).thenReturn(Optional.of(fixture.customer));
+
+        AccountUpdateRequest submission = fixture.request().creditLimit("NOT-A-NUMBER").build();
+
+        AccountUpdateService.EditVerdict viaValidation =
+                fixture.service.validateOnly(ACCOUNT_ID, submission);
+        AccountUpdateService.EditVerdict viaEditPass =
+                fixture.service.editMapInputs(submission, fixture.account, fixture.customer);
+
+        assertThat(viaValidation.inputError()).isTrue();
+        assertThat(viaValidation.fieldErrors())
+                .as("the verdict a caller sees is the verdict the write would reach")
+                .isEqualTo(viaEditPass.fieldErrors());
+
+        verify(fixture.accounts, never()).saveAndFlush(any());
+        verify(fixture.customers, never()).saveAndFlush(any());
+    }
+
+    /**
      * Confirms the two key edits run the generic form edit FIRST and only then compare against the row.
      *
      * <p>Assumptions: {@code editAccountKeyNamesRow} is a composition and not a second edit -- a
@@ -1216,6 +1250,44 @@ class AccountUpdateServiceTest {
      * decomposed form and asserts they are accepted and rejoined, which is what proves the offsets are
      * gone rather than merely relocated.</p>
      *
+     * <p>Refactoring Rationale: every one of the four submitted dates DIFFERS from the value the fixture
+     * stores, and each differs in all three components. This case previously submitted the builder's
+     * defaults, which re-state the stored row exactly, so the four assertions below compared each stored
+     * date against itself: an implementation that discarded the submitted components entirely -- or
+     * rejoined them into the wrong order, or into the wrong field -- passed unchanged. Varying every
+     * component is what makes the assertion about REJOINING rather than about the fixture. The values are
+     * also chosen so that no two are interchangeable: the four years, the four months and the four days
+     * are distinct across the set, so a rejoin that crossed two dates cannot produce a matching result.</p>
+     *
+     * <p>Assumptions: the submitted values respect the edits that actually apply, which is why they are
+     * not arbitrary. Only the date of birth is range-checked -- {@code recordDateEdit} passes
+     * {@code rangeChecked} as {@code true} for that one alone -- so it must not be in the future against
+     * the fixed clock of 18 July 2022, and 4 March 1917 is not. The other three carry no range edit at
+     * all, so 29 February 2016 is admissible as an open date and exercises the validator's leap-year
+     * arm at the same time; a 2016 open date beside a 2031 expiry is chronologically coherent in any
+     * case. Alternatives Considered: also varying the credit score or the address so the submission
+     * differed more widely, rejected because a second changed field would give a refusal two possible
+     * sources and this case exists to attribute one.</p>
+     *
+     * <p>Assumptions: the absent-property names asserted below are the stems the service actually
+     * records under, taken from {@code recordDateEdit}'s call sites: {@code openDate},
+     * {@code expirationDate}, {@code reissueDate} and {@code dateOfBirth}, each suffixed
+     * {@code Year}, {@code Month} or {@code Day} by {@code datePartProperty}. The expiry stem is
+     * {@code expirationDate} and not {@code expiryDate}, which is worth stating because the label the
+     * user sees reads "Expiry" -- a case naming the label's spelling would assert the absence of a
+     * property that can never be present and would therefore hold even while the expiry edit refused.</p>
+     *
+     * <p>Refactoring Rationale: the rejoined values are read off the rows the service HANDS TO THE
+     * REPOSITORY, reached through {@code update}, rather than off the rows an edit pass was given. That
+     * is a correction of what this case measured: {@code editMapInputs} edits and accumulates and mutates
+     * nothing at all -- the composition lives in {@code AccountMapper.applyUpdate} and
+     * {@code CustomerMapper}, which only the write path invokes -- so four assertions made after an edit
+     * pass were reading the fixture's own seeded rows back. With identical submitted and stored dates they
+     * were tautologies; with differing ones they fail, which is how the gap was confirmed rather than
+     * argued. Both channels are still asserted here, the edit pass through the absent property names and
+     * the composition through the saved rows, because a date can be refused by the first or mis-composed
+     * by the second and the two failures need to stay distinguishable.</p>
+     *
      * <p>Returns no value. A date rejected after decomposed submission, or one whose halves are rejoined
      * wrongly, is reported as a JUnit assertion failure.</p>
      */
@@ -1223,22 +1295,43 @@ class AccountUpdateServiceTest {
     @DisplayName("the decomposed date halves are rejoined without the reference's offset arithmetic")
     void theDecomposedDatesAreRejoinedWithoutOffsetArithmetic() {
         Fixture fixture = new Fixture();
-
-        AccountUpdateService.EditVerdict verdict = fixture.service
-                .editMapInputs(fixture.request().build(), fixture.account, fixture.customer);
+        AccountUpdateRequest submission = fixture.request()
+                .openDate("2016", "02", "29")
+                .expirationDate("2031", "10", "15")
+                .reissueDate("2022", "07", "04")
+                .dateOfBirth("1917", "03", "22")
+                .build();
 
         // WHY : Assumptions: the four dates are asserted through the ABSENCE of their field names from
         //       the accumulated errors rather than through a returned value, because the driver's
         //       contract is an error array and a date that survives its edit contributes nothing to it.
-        //       Naming the six components explicitly is what distinguishes "accepted" from "not edited".
+        //       Naming the twelve components explicitly is what distinguishes "accepted" from "not
+        //       edited".
+        AccountUpdateService.EditVerdict verdict =
+                fixture.service.editMapInputs(submission, fixture.account, fixture.customer);
         assertThat(verdict.fieldNames()).doesNotContain("openDateYear", "openDateMonth",
-                "openDateDay", "expiryDateYear", "expiryDateMonth", "expiryDateDay",
+                "openDateDay", "expirationDateYear", "expirationDateMonth", "expirationDateDay",
                 "reissueDateYear", "reissueDateMonth", "reissueDateDay",
                 "dateOfBirthYear", "dateOfBirthMonth", "dateOfBirthDay");
-        assertThat(fixture.account.getOpenDate()).isEqualTo(LocalDate.of(2020, 1, 1));
-        assertThat(fixture.account.getExpirationDate()).isEqualTo(LocalDate.of(2027, 12, 31));
-        assertThat(fixture.account.getReissueDate()).isEqualTo(LocalDate.of(2024, 6, 1));
-        assertThat(fixture.customer.getDateOfBirth()).isEqualTo(LocalDate.of(1906, 12, 9));
+
+        fixture.service.update(ACCOUNT_ID, submission, CURRENT_REVISION);
+
+        ArgumentCaptor<Account> savedAccount = ArgumentCaptor.forClass(Account.class);
+        ArgumentCaptor<Customer> savedCustomer = ArgumentCaptor.forClass(Customer.class);
+        verify(fixture.accounts).saveAndFlush(savedAccount.capture());
+        verify(fixture.customers).saveAndFlush(savedCustomer.capture());
+        assertThat(savedAccount.getValue().getOpenDate())
+                .as("the submitted leap day must be rejoined, not the stored 2020-01-01")
+                .isEqualTo(LocalDate.of(2016, 2, 29));
+        assertThat(savedAccount.getValue().getExpirationDate())
+                .as("the submitted expiry must be rejoined, not the stored 2027-12-31")
+                .isEqualTo(LocalDate.of(2031, 10, 15));
+        assertThat(savedAccount.getValue().getReissueDate())
+                .as("the submitted reissue date must be rejoined, not the stored 2024-06-01")
+                .isEqualTo(LocalDate.of(2022, 7, 4));
+        assertThat(savedCustomer.getValue().getDateOfBirth())
+                .as("the submitted birth date must be rejoined, not the stored 1906-12-09")
+                .isEqualTo(LocalDate.of(1917, 3, 22));
     }
 
     /**
@@ -1300,6 +1393,28 @@ class AccountUpdateServiceTest {
      * 75-character field declared at L479, and a channel that accumulated into it would overflow that
      * width on a form with several errors.</p>
      *
+     * <p>Refactoring Rationale: the latch is asserted by naming the EXACT sentence the first failure
+     * composes and then excluding the two later ones, because this case previously asserted only that the
+     * sentence was non-null and no wider than the slot. Both of those hold for a channel that
+     * OVERWRITES: a later refusal is equally non-null and equally short, so an implementation that
+     * dropped the still-empty guard and left the user reading the last failure instead of the first
+     * passed unchanged. The three submitted refusals are recorded in a known order -- the credit limit at
+     * the driver's third {@code latch.record} call, the given name and the postal code well after it --
+     * so the first is determined rather than incidental.</p>
+     *
+     * <p>Assumptions: the expected sentence is composed from the service's own published label and suffix
+     * constants rather than written out as a literal, so a change to either travels into this assertion
+     * instead of breaking it. The composition is exact because {@code composed} pads the label to the
+     * 25-character width the reference declares and then trims it, which returns a label shorter than the
+     * width unchanged.</p>
+     *
+     * <p>Assumptions: the two later refusals are read back out of the per-field array and asserted to
+     * be PRESENT and DIFFERENT from the aggregate, rather than being written out here. That is what
+     * distinguishes a latched channel from a channel that never received them: if the pass had stopped at
+     * the credit limit, the two would be absent and the exclusion would hold vacuously. Their text is
+     * deliberately not restated, because their wording belongs to the cases that assert those two edits
+     * and duplicating it here would give one sentence two owners.</p>
+     *
      * <p>Returns no value. A pass that stops at the first failure, or an aggregate sentence overwritten
      * by a later failure, is reported as a JUnit assertion failure.</p>
      */
@@ -1316,12 +1431,43 @@ class AccountUpdateServiceTest {
                         .build(),
                 fixture.account, fixture.customer);
 
+        String firstFailure = AccountUpdateService.LABEL_CREDIT_LIMIT
+                + AccountUpdateService.SUFFIX_IS_NOT_VALID;
+        String laterNameFailure = refusalFor(verdict, "firstName");
+        String laterPostalFailure = refusalFor(verdict, AccountUpdateService.FIELD_ZIP_CODE);
+
         assertThat(verdict.inputError()).isTrue();
         assertThat(verdict.fieldNames())
                 .contains("creditLimit", "firstName", AccountUpdateService.FIELD_ZIP_CODE);
+        assertThat(laterNameFailure)
+                .as("the given-name edit must have run and refused, or the exclusion below is vacuous")
+                .isNotBlank();
+        assertThat(laterPostalFailure)
+                .as("the postal-code edit must have run and refused, or the exclusion below is vacuous")
+                .isNotBlank();
         assertThat(verdict.message())
-                .isNotNull()
+                .as("the user must read the FIRST refusal, which is the credit limit's")
+                .isEqualTo(firstFailure)
+                .isNotEqualTo(laterNameFailure)
+                .isNotEqualTo(laterPostalFailure)
+                .doesNotContain(AccountUpdateService.LABEL_FIRST_NAME)
+                .doesNotContain(AccountUpdateService.LABEL_ZIP)
                 .hasSizeLessThanOrEqualTo(75);
+    }
+
+    /**
+     * Reads one field's refusal sentence out of a verdict's per-field array.
+     *
+     * @param verdict the verdict to read; must not be {@code null}
+     * @param field the request property whose refusal to read; must not be {@code null}
+     * @return the sentence recorded against that property, or {@code null} when it carries no entry
+     */
+    private static String refusalFor(AccountUpdateService.EditVerdict verdict, String field) {
+        return verdict.fieldErrors().stream()
+                .filter(entry -> field.equals(entry.field()))
+                .map(ApiError.FieldError::message)
+                .findFirst()
+                .orElse(null);
     }
 
     /**
@@ -1383,6 +1529,71 @@ class AccountUpdateServiceTest {
         assertThat(response.fieldErrors()).isEmpty();
         assertThat(response.returnMessage()).isNotNull();
         assertThat(response.accountId()).isNotBlank();
+    }
+
+    /**
+     * Confirms the edit check reaches the validation sentence and writes neither row.
+     *
+     * <p>Purpose: the baseline treats validation and writing as two screen turns --
+     * {@code 2000-DECIDE-ACTION}'s show-details arm at {@code app/cbl/COACTUPC.cbl} L2582 to L2590 moves
+     * to {@code 88 ACUP-CHANGES-OK-NOT-CONFIRMED} once every edit has passed, and only the later PF5 turn
+     * performs {@code 9600-WRITE-PROCESSING}. This case pins the first turn's two defining properties
+     * together: it answers {@code Looks Good.... so far}, which is precisely the sentence
+     * {@code 1200-EDIT-MAP-INPUTS} latches when every edit passed, and it saves nothing.</p>
+     *
+     * <p>Assumptions: no precondition is passed because the method takes none, and that is itself part of
+     * what is asserted -- a signature demanding a revision would not compile against this call. The write
+     * turn's precondition is unaffected and is asserted by its own cases above.</p>
+     *
+     * <p>Returns no value. An answer carrying the commit sentence, or either row reaching the repository,
+     * is reported as a JUnit assertion failure.</p>
+     */
+    @Test
+    @DisplayName("the edit check answers the validation sentence and writes neither row")
+    void theEditCheckValidatesAndWritesNothing() {
+        Fixture fixture = new Fixture();
+
+        AccountUpdateResponse response = fixture.service.validateEdits(ACCOUNT_ID,
+                fixture.request().creditLimit("6000.00").build());
+
+        assertThat(response.fieldErrors()).isEmpty();
+        assertThat(response.returnMessage())
+                .isEqualTo(AccountUpdateService.MESSAGE_UPDATE_ACCEPTED);
+        verify(fixture.accounts, never()).saveAndFlush(any(Account.class));
+        verify(fixture.customers, never()).saveAndFlush(any(Customer.class));
+    }
+
+    /**
+     * Confirms the edit check refuses the same submission the write turn refuses, in the same words.
+     *
+     * <p>Purpose: the whole reason the check exists is that the SERVICE stays the single authority on what
+     * is acceptable, so a submission the write turn would refuse has to be refused here too and with the
+     * same field names. If the two turns could disagree, a screen would validate successfully and then be
+     * refused on save -- the exact failure the check was added to remove.</p>
+     *
+     * <p>Assumptions: the provoking value is the one {@code aMalformedSubmissionIsRefusedAsClientInput}
+     * uses against the write turn, deliberately, so the two cases are comparable and a divergence between
+     * the turns would show as one passing and the other failing.</p>
+     *
+     * <p>Returns no value. A refusal that names a different field, or a submission accepted here and
+     * refused by the write turn, is reported as a JUnit assertion failure.</p>
+     *
+     * @throws ClientInputException never propagates from this method: the refusal is provoked and
+     *     captured by the assertion below, which is what the case exists to demonstrate
+     */
+    @Test
+    @DisplayName("the edit check refuses what the write refuses, naming the same field")
+    void theEditCheckRefusesWhatTheWriteRefuses() {
+        Fixture fixture = new Fixture();
+
+        assertThatExceptionOfType(ClientInputException.class)
+                .isThrownBy(() -> fixture.service.validateEdits(ACCOUNT_ID,
+                        fixture.request().creditLimit("5000.0A").build()))
+                .matches(refusal -> refusal.fields().contains("creditLimit"),
+                        "the refusal must name the failing field");
+
+        verify(fixture.accounts, never()).saveAndFlush(any(Account.class));
+        verify(fixture.customers, never()).saveAndFlush(any(Customer.class));
     }
 
     /**
@@ -1658,6 +1869,18 @@ class AccountUpdateServiceTest {
         /** The submitted government-issued identifier, or {@code null} to omit it. */
         private String governmentIssuedId = "GOVTID0001";
 
+        /** The submitted account open date as three decomposed parts, re-stating the stored value. */
+        private String[] openDate = {"2020", "01", "01"};
+
+        /** The submitted account expiry date as three decomposed parts, re-stating the stored value. */
+        private String[] expirationDate = {"2027", "12", "31"};
+
+        /** The submitted account reissue date as three decomposed parts, re-stating the stored value. */
+        private String[] reissueDate = {"2024", "06", "01"};
+
+        /** The submitted customer date of birth as three decomposed parts, re-stating the stored value. */
+        private String[] dateOfBirth = {"1906", "12", "09"};
+
         /**
          * Varies the submitted account key.
          *
@@ -1725,6 +1948,58 @@ class AccountUpdateServiceTest {
         }
 
         /**
+         * Varies the submitted account open date, decomposed as the screen presents it.
+         *
+         * @param year the four-character year part to submit
+         * @param month the two-character month part to submit
+         * @param day the two-character day part to submit
+         * @return this builder
+         */
+        RequestBuilder openDate(String year, String month, String day) {
+            this.openDate = new String[] {year, month, day};
+            return this;
+        }
+
+        /**
+         * Varies the submitted account expiry date, decomposed as the screen presents it.
+         *
+         * @param year the four-character year part to submit
+         * @param month the two-character month part to submit
+         * @param day the two-character day part to submit
+         * @return this builder
+         */
+        RequestBuilder expirationDate(String year, String month, String day) {
+            this.expirationDate = new String[] {year, month, day};
+            return this;
+        }
+
+        /**
+         * Varies the submitted account reissue date, decomposed as the screen presents it.
+         *
+         * @param year the four-character year part to submit
+         * @param month the two-character month part to submit
+         * @param day the two-character day part to submit
+         * @return this builder
+         */
+        RequestBuilder reissueDate(String year, String month, String day) {
+            this.reissueDate = new String[] {year, month, day};
+            return this;
+        }
+
+        /**
+         * Varies the submitted customer date of birth, decomposed as the screen presents it.
+         *
+         * @param year the four-character year part to submit
+         * @param month the two-character month part to submit
+         * @param day the two-character day part to submit
+         * @return this builder
+         */
+        RequestBuilder dateOfBirth(String year, String month, String day) {
+            this.dateOfBirth = new String[] {year, month, day};
+            return this;
+        }
+
+        /**
          * Omits both protected identifiers, so the submission asks that the stored ones be kept.
          *
          * <p>Assumptions: an omitted protected identifier means PRESERVE and not delete, so a
@@ -1753,13 +2028,13 @@ class AccountUpdateServiceTest {
         AccountUpdateRequest build() {
             return new AccountUpdateRequest(
                     this.accountId, "Y", this.creditLimit, "500.00", "100.00", "0.00", "0.00",
-                    "2020", "01", "01",
-                    "2027", "12", "31",
-                    "2024", "06", "01",
+                    this.openDate[0], this.openDate[1], this.openDate[2],
+                    this.expirationDate[0], this.expirationDate[1], this.expirationDate[2],
+                    this.reissueDate[0], this.reissueDate[1], this.reissueDate[2],
                     "DEFAULT", "900000001",
                     this.nationalIdentifierPart1, this.nationalIdentifierPart2,
                     this.nationalIdentifierPart3,
-                    "1906", "12", "09",
+                    this.dateOfBirth[0], this.dateOfBirth[1], this.dateOfBirth[2],
                     "800",
                     this.firstName, null, this.lastName,
                     "1 NAVY YARD", null, "ARLINGTON", this.stateCode, "USA", this.zipCode,

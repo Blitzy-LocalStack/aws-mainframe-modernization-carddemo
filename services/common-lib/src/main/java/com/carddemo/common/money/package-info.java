@@ -221,8 +221,8 @@
  * no fourth file here and none is to be added: the arithmetic contract and its wire-format
  * companion are the whole of the concern, and a third type would be either a second money
  * representation or a concern belonging to another package. Across {@code com.carddemo.common} as a
- * whole the module holds six production classes in {@code codec}, four in {@code control}, seven in
- * {@code error}, four in {@code messaging}, two in {@code money}, four in {@code observability},
+ * whole the module holds seven production classes in {@code codec}, four in {@code control}, seven in
+ * {@code error}, five in {@code messaging}, two in {@code money}, four in {@code observability},
  * nine in {@code security}, one in {@code time}, two in {@code validation} and four in
  * {@code web}, the package root contributing one -- the auto-configuration class that registers this package's codec
  * module, and the {@code Clock}, the cursor-token signer, the correlation filter, the meter filter
@@ -231,8 +231,8 @@
  * read back by the drift test named below:</p>
  *
  * <pre>
- * production classes:  1 + 6 + 4 + 7 + 4 + 2 + 4 + 9 + 1 + 2 + 4 = 44
- * compilation units:   44 production + 11 package descriptors = 55
+ * production classes:  1 + 7 + 4 + 7 + 5 + 2 + 4 + 9 + 1 + 2 + 4 = 46
+ * compilation units:   46 production + 11 package descriptors = 57
  * </pre>
  *
  * <p>The eleven descriptors are one for the package root and one for each of its ten subpackages.
@@ -242,7 +242,7 @@
  * <p>Refactoring Rationale: every figure above was previously a TARGET rather than a measurement,
  * and the paragraph that said so argued that a target "keeps this paragraph true at every point in
  * that sequence". That reasoning held only while the tree was a subset of the target. It is not: the
- * module now holds forty-four production classes against a target of seventeen, and one whole
+ * module now holds forty-five production classes against a target of seventeen, and one whole
  * subpackage -- {@code messaging}, with {@code MessageExpiry}, {@code MessagingCorrelationId},
  * {@code QueueClientBudget} and {@code RethrowingDigestErrorHandler} -- that the target never named
  * at all. A target that the delivery

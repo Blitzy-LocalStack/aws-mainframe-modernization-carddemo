@@ -72,15 +72,14 @@ import org.springframework.stereotype.Component;
  * left implicit, because the cheapest way to breach that rule is for a class believed to handle no
  * amount to acquire one later.</p>
  */
-// WHY : Refactoring Rationale: this mapper had no construction site at all. It declares a
-//       constructor taking the deployment's selector sealer, and nothing contributed either the
-//       mapper or the sealer, so no route in this context could mint a selector or open one -- the
-//       type compiled and was unreachable. It is a component now, and
-//       com.carddemo.card.config.CardSelectorConfig contributes the sealer it needs.
-// WHY : Alternatives Considered: a @Bean method beside that sealer, which would keep both
-//       contributions in one file. Declined because this class holds no configuration of its own
-//       beyond the collaborator it is handed, so a factory method would add a second place to look
-//       for it; component scanning states the dependency once, in the constructor that needs it.
+// Assumptions: this mapper is a component so that the context has a construction site for it. It
+//     takes the deployment's selector sealer on its constructor, and without a contribution of both
+//     the mapper and that sealer no route in this context could mint a selector or open one --
+//     com.carddemo.card.config.CardSelectorConfig contributes the sealer it needs.
+// Alternatives Considered: a @Bean method beside that sealer, which would keep both contributions in
+//     one file. Declined because this class holds no configuration of its own beyond the collaborator
+//     it is handed, so a factory method would add a second place to look for it; component scanning
+//     states the dependency once, in the constructor that needs it.
 @Component
 public class CardMapper {
 
@@ -178,22 +177,25 @@ public class CardMapper {
     /**
      * Builds a mapper over the deployment's row-selector sealer.
      *
-     * <p>Refactoring Rationale: the sealer is injected rather than constructed here, because it holds
-     * key material and that is configuration this class has no business reading. Injecting it also
-     * makes the instance that mints a selector the same instance that opens one, which is what
-     * guarantees a token this class issues is a token it will later accept.</p>
+     * <p>Assumptions: the sealer is injected rather than constructed here, because it holds key
+     * material and that is configuration this class has no business reading. Injecting it also makes
+     * the instance that mints a selector the same instance that opens one, which is what guarantees a
+     * token this class issues is a token it will later accept.</p>
      *
      * @param cardSelectorSealer the deployment's selector sealer, which must not be {@code null}
      * @throws NullPointerException if {@code cardSelectorSealer} is {@code null}, because a mapper with
      *     no sealer could publish neither a row selector nor a route to the row it names
      */
-    // WHY : Alternatives Considered: declaring this class a Spring stereotype so the container builds
-    //       it. Declined, because no bean of the sealer type is declared anywhere in this module's
-    //       configuration, so a stereotype here would make every context load fail on an unsatisfied
-    //       dependency rather than only the paths that actually seal something. The sibling
-    //       com.carddemo.authorization.mapper.PendingAuthViewMapper is a plain class constructed by
-    //       whichever component owns its sealer, and this follows that established shape; the cost is
-    //       that the component owning the sealer must construct this class explicitly.
+    // Assumptions: the sealer this constructor takes is contributed by
+    //     com.carddemo.card.config.CardSelectorConfig, which declares it as a bean guarded by a
+    //     missing-bean condition on its own type, so a deployment may substitute one and every
+    //     component in this context still seals and opens under a single instance.
+    // Alternatives Considered: leaving this class a plain type that whichever component owns the
+    //     sealer constructs explicitly, which is the shape the sibling
+    //     com.carddemo.authorization.mapper.PendingAuthViewMapper takes. Declined here because this
+    //     mapper is reached from more than one service in this context, so explicit construction would
+    //     put the same two-line wiring in each of them and leave two instances able to diverge on the
+    //     key material they hold.
     public CardMapper(SealedSelector cardSelectorSealer) {
         this.cardSelectorSealer =
                 Objects.requireNonNull(cardSelectorSealer, "cardSelectorSealer must not be null");
@@ -222,25 +224,25 @@ public class CardMapper {
         Objects.requireNonNull(card, "card must not be null");
         String cardNumber = Objects.requireNonNull(card.getCardNum(), "card number must not be null");
 
-        // WHY : Trade-offs: the number is published masked to its last four digits on this row and on
-        //       every other response of this service, the administrative read below being the single
-        //       exception. What is given up is real and is accepted deliberately: a caller holding only
-        //       the carddemo-user authority cannot copy a card number out of a listing, cannot
-        //       reconcile one against a statement or an acquirer file, and cannot search for one, so
-        //       any such workflow must go through the one route that discloses the number and the
-        //       authority that guards it. That cost is accepted because a listing is the widest
-        //       surface this service has -- seven rows to every caller who can reach the endpoint --
-        //       and it is the surface least able to justify carrying the number in full.
-        // WHY : Assumptions: the last four digits are the disclosed part, and the masker rather than
-        //       this class decides that. CardNumberMasker.mask replaces the leading positions instead
-        //       of removing them, so the rendering is as wide as the value it hides and the record's
-        //       own masked-shape constraint is satisfied by construction.
-        // WHY : Assumptions: this is an ADDITION to what the storage platform offered rather than a
-        //       repair of it. The three card transactions are defined CONFDATA(NO) at
-        //       app/csd/CARDDEMO.CSD:353, :363 and :374, alongside DUMP(YES) TRACE(YES) on the line
-        //       above each, so the platform did not suppress confidential data in a dump or a trace and
-        //       the programs written against it had no facility to ask it to. Masking at this boundary
-        //       is a capability the target has and that platform did not.
+        // Trade-offs: the number is published masked to its last four digits on this row and on
+        // every other response of this service, the administrative read below being the single
+        // exception. What is given up is real and is accepted deliberately: a caller holding only
+        // the carddemo-user authority cannot copy a card number out of a listing, cannot
+        // reconcile one against a statement or an acquirer file, and cannot search for one, so
+        // any such workflow must go through the one route that discloses the number and the
+        // authority that guards it. That cost is accepted because a listing is the widest
+        // surface this service has -- seven rows to every caller who can reach the endpoint --
+        // and it is the surface least able to justify carrying the number in full.
+        // Assumptions: the last four digits are the disclosed part, and the masker rather than
+        // this class decides that. CardNumberMasker.mask replaces the leading positions instead
+        // of removing them, so the rendering is as wide as the value it hides and the record's
+        // own masked-shape constraint is satisfied by construction.
+        // Assumptions: this is an ADDITION to what the storage platform offered rather than a
+        // repair of it. The three card transactions are defined CONFDATA(NO) at
+        // app/csd/CARDDEMO.CSD:353, :363 and :374, alongside DUMP(YES) TRACE(YES) on the line
+        // above each, so the platform did not suppress confidential data in a dump or a trace and
+        // the programs written against it had no facility to ask it to. Masking at this boundary
+        // is a capability the target has and that platform did not.
         String maskedCardNumber = CardNumberMasker.mask(cardNumber);
 
         return new CardSummary(
@@ -274,9 +276,8 @@ public class CardMapper {
         Objects.requireNonNull(card, "card must not be null");
         String cardNumber = Objects.requireNonNull(card.getCardNum(), "card number must not be null");
 
-        // WHY : Refactoring Rationale: no component of this body carries the card verification value,
-        //       and that PRESERVES an absence the baseline already had rather than withdrawing
-        //       something it displayed. The value appears in no presentation artifact of the three card
+        // Assumptions: no component of this body carries the card verification value, which PRESERVES
+        //     an absence the baseline already has rather than withdrawing something it displays. The value appears in no presentation artifact of the three card
         //       programs: neither app/cpy-bms/COCRDSL.CPY, COCRDLI.CPY nor COCRDUP.CPY names it, and
         //       neither do the mapsets app/bms/COCRDSL.bms, COCRDLI.bms or COCRDUP.bms. The list
         //       screen's display row is only app/cbl/COCRDLIC.cbl:258-260 -- an account number, a card
@@ -285,29 +286,28 @@ public class CardMapper {
         //       source at :1464, and no statement anywhere in that program moves a value INTO it, which
         //       is why no update shape carries it either. So the stored value reaches a screen from
         //       nowhere in the baseline and reaches a body from nowhere here.
-        // WHY : Trade-offs: the value is ABSENT rather than masked or truncated. Masking was the
-        //       alternative and is rejected on a specific ground: a masked rendering still discloses
-        //       the length and the shape of what it hides, and for a three-digit value whose whole
-        //       domain is a thousand possibilities that is most of what there is to know. An absent
-        //       member discloses neither. It follows that the value is also written to no log and
-        //       placed in no error payload by this class, which is why no refusal below quotes a value
-        //       it rejected.
-        // WHY : Refactoring Rationale: the target field and column are spelled expirationDate and
-        //       expiration_date, where the record field at app/cpy/CVACT02Y.cpy:9 carries a misspelling
-        //       of the word. This is a TARGET-SIDE NAMING DECISION and nothing more: the baseline tree
-        //       is reference material that keeps its own spelling, the snapshot group at
-        //       app/cbl/COCRDUPC.cbl:297 carries the same one, and the pairing is recorded in
-        //       docs/architecture/data-model-and-schema-mapping.md so the lineage reads from either
-        //       side. It is the only field of this record renamed; the other five keep the names their
-        //       declarations give them.
-        // WHY : Assumptions: seven components are built from six stored fields and none from the
-        //       59-byte FILLER at app/cpy/CVACT02Y.cpy:11. Those bytes pad CARD-RECORD out to the
-        //       constant length that RECORDSIZE(150 150) at app/jcl/CARDFILE.jcl:55 requires, which
-        //       app/cbl/CBACT02C.cbl:39-40 confirms from the other side as a 16-byte key ahead of 134
-        //       bytes of data. The assumption is that the fixed length is a storage artefact of the
-        //       indexed file and not data: the field names nothing, no program reads it, and a JSON
-        //       body has no constant length for it to pad out. The seventh component is the
-        //       concurrency counter, which corresponds to a column and not to a record field.
+        // Trade-offs: the value is ABSENT rather than masked or truncated. Masking was the
+        // alternative and is rejected on a specific ground: a masked rendering still discloses
+        // the length and the shape of what it hides, and for a three-digit value whose whole
+        // domain is a thousand possibilities that is most of what there is to know. An absent
+        // member discloses neither. It follows that the value is also written to no log and
+        // placed in no error payload by this class, which is why no refusal below quotes a value
+        // it rejected.
+        // Assumptions: the source field CARD-EXPIRAION-DATE at app/cpy/CVACT02Y.cpy:9 maps to the
+        //     target property expirationDate over the expiration_date column. This is a target-side
+        //     naming decision and nothing more: the baseline tree is reference material that keeps its
+        //     own spelling, the snapshot group at app/cbl/COCRDUPC.cbl:297 carries the same one, and the
+        //     pairing is recorded in docs/architecture/data-model-and-schema-mapping.md so the lineage
+        //     reads from either side. It is the only field of this record whose name differs; the other
+        //     five keep the names their declarations give them.
+        // Assumptions: seven components are built from six stored fields and none from the
+        // 59-byte FILLER at app/cpy/CVACT02Y.cpy:11. Those bytes pad CARD-RECORD out to the
+        // constant length that RECORDSIZE(150 150) at app/jcl/CARDFILE.jcl:55 requires, which
+        // app/cbl/CBACT02C.cbl:39-40 confirms from the other side as a 16-byte key ahead of 134
+        // bytes of data. The assumption is that the fixed length is a storage artefact of the
+        // indexed file and not data: the field names nothing, no program reads it, and a JSON
+        // body has no constant length for it to pad out. The seventh component is the
+        // concurrency counter, which corresponds to a column and not to a record field.
         return new CardDetail(
                 sealCardSelector(cardNumber),
                 CardNumberMasker.mask(cardNumber),
@@ -336,13 +336,13 @@ public class CardMapper {
      * @throws NullPointerException if {@code card} is {@code null}, or if the card number is unset on
      *     it
      */
-    // WHY : Trade-offs: this returns the number by itself rather than a fully composed administrative
-    //       body. The composed shape the contract declares is that of the core above plus this one
-    //       value, and building it here would require a type this package does not own and must not
-    //       invent. Handing back the single disclosed value keeps the decision -- which route may see
-    //       a full number -- in this class, where the masking decision also lives, while leaving the
-    //       composition to the route that holds the authority. The cost is that the administrative
-    //       route makes two calls where the others make one.
+    // Trade-offs: this returns the number by itself rather than a fully composed administrative
+    // body. The composed shape the contract declares is that of the core above plus this one
+    // value, and building it here would require a type this package does not own and must not
+    // invent. Handing back the single disclosed value keeps the decision -- which route may see
+    // a full number -- in this class, where the masking decision also lives, while leaving the
+    // composition to the route that holds the authority. The cost is that the administrative
+    // route makes two calls where the others make one.
     public String discloseCardNumberToAdministrator(Card card) {
         Objects.requireNonNull(card, "card must not be null");
         return Objects.requireNonNull(card.getCardNum(), "card number must not be null");
@@ -374,49 +374,49 @@ public class CardMapper {
         Objects.requireNonNull(request, "request must not be null");
         Objects.requireNonNull(card, "card must not be null");
 
-        // WHY : Assumptions: this method converts and does not validate, and it depends on two external
-        //       contracts to make that safe. The request record carries the whole domain of each
-        //       component as bean-validation constraints -- letters and spaces within fifty characters,
-        //       a status of Y or N, a month of 01 to 12 and a year of 1950 to 2099 -- and the service
-        //       layer has rejected a request that failed any of them before calling here. Each of those
-        //       four domains is a transcription of one baseline edit paragraph, invoked from the block
-        //       at app/cbl/COCRDUPC.cbl:698-708: 1230-EDIT-NAME at :806, 1240-EDIT-CARDSTATUS at :845
-        //       whose 88-level at :91 admits 'Y' and 'N' and is the provenance of the check constraint
-        //       on this column, 1250-EDIT-EXPIRY-MON at :877 whose 88-level at :95 admits 1 through 12,
-        //       and 1260-EDIT-EXPIRY-YEAR at :913 whose 88-level at :99 admits 1950 through 2099.
-        // WHY : Alternatives Considered: re-checking those four domains here as a defensive measure.
-        //       Rejected because it would make this class a SECOND place each rule is written, and two
-        //       statements of one rule diverge the first time only one is edited -- with the copy here
-        //       being the one no request ever reaches, since a request that failed the first copy never
-        //       arrives. The refusals below are of a different kind and are kept: they guard the
-        //       WIDTH and shape of what this class itself renders, which is this class's own output and
-        //       nobody else's rule.
+        // Assumptions: this method converts and does not validate, and it depends on two external
+        // contracts to make that safe. The request record carries the whole domain of each
+        // component as bean-validation constraints -- letters and spaces within fifty characters,
+        // a status of Y or N, a month of 01 to 12 and a year of 1950 to 2099 -- and the service
+        // layer has rejected a request that failed any of them before calling here. Each of those
+        // four domains is a transcription of one baseline edit paragraph, invoked from the block
+        // at app/cbl/COCRDUPC.cbl:698-708: 1230-EDIT-NAME at :806, 1240-EDIT-CARDSTATUS at :845
+        // whose 88-level at :91 admits 'Y' and 'N' and is the provenance of the check constraint
+        // on this column, 1250-EDIT-EXPIRY-MON at :877 whose 88-level at :95 admits 1 through 12,
+        // and 1260-EDIT-EXPIRY-YEAR at :913 whose 88-level at :99 admits 1950 through 2099.
+        // Alternatives Considered: re-checking those four domains here as a defensive measure.
+        // Rejected because it would make this class a SECOND place each rule is written, and two
+        // statements of one rule diverge the first time only one is edited -- with the copy here
+        // being the one no request ever reaches, since a request that failed the first copy never
+        // arrives. The refusals below are of a different kind and are kept: they guard the
+        // WIDTH and shape of what this class itself renders, which is this class's own output and
+        // nobody else's rule.
         card.setEmbossedName(request.embossedName());
         card.setActiveStatus(request.activeStatus());
 
-        // WHY : Assumptions: the day of the month is taken from the value already stored and never from
-        //       the request, and this is a documented behavioural divergence rather than a
-        //       transcription. What the baseline does: it snapshots the stored date as three parts,
-        //       CCUP-OLD-EXPIRAION-DATE at app/cbl/COCRDUPC.cbl:297 being a four-character year at
-        //       :298, a two-character month at :299 and a two-character day at :300 -- eight characters
-        //       where the stored field is ten, the two hyphens not being snapshotted, which is why the
-        //       comparison at :1503-1508 reads positions (1:4), (6:2) and (9:2) and steps over
-        //       positions 5 and 8. It does capture a typed day at :621, notably without the blank
-        //       normalisation its month at :623-628 and its year at :630 onward each receive, and it
-        //       does concatenate that day back into the record at :1467-1474. Yet it never shows the
-        //       typed day back: :1285 renders the field non-display, the four attribute lines that
-        //       would have shown it are commented out, its own comment at :1119-1120 says the field is
-        //       one the user is not being allowed to change, the line that would redisplay the typed
-        //       day at :1122 is commented out while the line redisplaying the stored day at :1123 is
-        //       live, and there is no 1270-EDIT paragraph at all, so the typed day is never validated.
-        //       Neither app/cpy-bms/COCRDSL.CPY nor app/cpy-bms/COCRDLI.CPY carries a day field.
-        //       What the Java implements: the stored day is preserved and no day is ever accepted from
-        //       a caller, which is why CardUpdateRequest carries a month and a year and no day
-        //       component. The divergence is registered in
-        //       docs/architecture/cobol-to-service-traceability.md.
-        // WHY : Assumptions: the day is not read from the wall clock either. Doing so would make the
-        //       same request produce a different stored row depending on when it was replayed, which is
-        //       the property that makes an update impossible to reason about after the fact.
+        // Assumptions: the day of the month is taken from the value already stored and never from
+        // the request, and this is a documented behavioural divergence rather than a
+        // transcription. What the baseline does: it snapshots the stored date as three parts,
+        // CCUP-OLD-EXPIRAION-DATE at app/cbl/COCRDUPC.cbl:297 being a four-character year at
+        // :298, a two-character month at :299 and a two-character day at :300 -- eight characters
+        // where the stored field is ten, the two hyphens not being snapshotted, which is why the
+        // comparison at :1503-1508 reads positions (1:4), (6:2) and (9:2) and steps over
+        // positions 5 and 8. It does capture a typed day at :621, notably without the blank
+        // normalisation its month at :623-628 and its year at :630 onward each receive, and it
+        // does concatenate that day back into the record at :1467-1474. Yet it never shows the
+        // typed day back: :1285 renders the field non-display, the four attribute lines that
+        // would have shown it are commented out, its own comment at :1119-1120 says the field is
+        // one the user is not being allowed to change, the line that would redisplay the typed
+        // day at :1122 is commented out while the line redisplaying the stored day at :1123 is
+        // live, and there is no 1270-EDIT paragraph at all, so the typed day is never validated.
+        // Neither app/cpy-bms/COCRDSL.CPY nor app/cpy-bms/COCRDLI.CPY carries a day field.
+        // What the Java implements: the stored day is preserved and no day is ever accepted from
+        // a caller, which is why CardUpdateRequest carries a month and a year and no day
+        // component. The divergence is registered in
+        // docs/architecture/cobol-to-service-traceability.md.
+        // Assumptions: the day is not read from the wall clock either. Doing so would make the
+        // same request produce a different stored row depending on when it was replayed, which is
+        // the property that makes an update impossible to reason about after the fact.
         card.setExpirationDate(expirationDatePreservingStoredDay(
                 request.expirationMonth(), request.expirationYear(), card.getExpirationDate()));
 
@@ -433,14 +433,14 @@ public class CardMapper {
      * still names a row of the ordered set whether or not this method could render it. A page therefore
      * remains continuable in both directions even when a row is omitted from it.</p>
      *
-     * <p>Refactoring Rationale: an unrenderable row is OMITTED here, where this method previously let the
-     * refusal from {@link #toSummary(Card)} propagate and take the whole page with it. Runtime testing
-     * reported the consequence: a single stored key that is not sixteen digit characters -- an alphabetic
-     * sixteen, or a fifteen-digit value blank-padded into the fixed-width column -- cannot satisfy the
-     * masked rendering the listing row's own constructor requires, so every caller of the browse received
-     * a server failure and no rows at all, including callers narrowing to accounts the offending row has
-     * nothing to do with. One row of one account denying the endpoint to everybody is a worse answer than
-     * a page missing that row, so the page is served and the row is recorded.</p>
+     * <p>Trade-offs: an unrenderable row is OMITTED here rather than allowed to propagate the refusal
+     * from {@link #toSummary(Card)} and take the whole page with it. A single stored key that is not
+     * sixteen digit characters -- an alphabetic sixteen, or a fifteen-digit value blank-padded into the
+     * fixed-width column -- cannot satisfy the masked rendering the listing row's own constructor
+     * requires, and propagating that would give every caller of the browse a server failure and no rows
+     * at all, including callers narrowing to accounts the offending row has nothing to do with. One row
+     * of one account denying the endpoint to everybody is a worse answer than a page missing that row, so
+     * the page is served and the row is recorded.</p>
      *
      * <p>Assumptions: this path is unreachable in a conforming database and is defence in depth rather
      * than a substitute for the guard that closes it. The domain is closed at the point data enters, by
@@ -477,29 +477,27 @@ public class CardMapper {
         for (int ordinal = 0; ordinal < rows.size(); ordinal++) {
             Card row = rows.get(ordinal);
 
-            // WHY : Assumptions: the test is on the STORED key's own characters and not on a caught
-            //       refusal from the conversion. Catching would also swallow a rendering failure with a
-            //       different cause -- a sealer that has come apart from the selector shape its consumers
-            //       declare, say -- and turn a defect in this service into rows quietly missing from a
-            //       page. Testing the one condition that is a property of the DATA keeps every other
-            //       cause loud.
+            // Assumptions: the test is on the STORED key's own characters and not on a caught
+            // refusal from the conversion. Catching would also swallow a rendering failure with a
+            // different cause -- a sealer that has come apart from the selector shape its consumers
+            // declare, say -- and turn a defect in this service into rows quietly missing from a
+            // page. Testing the one condition that is a property of the DATA keeps every other
+            // cause loud.
             if (!renderableCardNumber(row.getCardNum())) {
-                // WHY : Assumptions: the row is COUNTED and POSITIONED here and quoted nowhere. A value
-                //       reaching this branch is not a card number, but it is a value from the card master
-                //       and may be a mistyped or mis-offset one, so quoting it -- or the account it
-                //       belongs to -- would write cardholder material into a durable record, the one
-                //       destination the masking everywhere else in this class exists to keep it out of.
-                // WHY : ⚠️ Refactoring Rationale: the record this feeds named the ACCOUNT IDENTIFIER and
-                //       the invalid key's STORED WIDTH, and both are withdrawn. The observability
-                //       standard -- docs/architecture/observability.md, "A prohibited value is OMITTED,
-                //       not abbreviated" -- names the account identifier as prohibited outright and
-                //       states that a protected value's LENGTH is prohibited on the same terms as its
-                //       content, so the width was not a safe abbreviation of the key but a measurement
-                //       of it. The comment defending them said they were "what an operator needs to find
-                //       the row"; that is true and is not a permission. What replaces them is what the
-                //       standard itself nominates for exactly this case: the correlation identifier,
-                //       which locates the request, and a per-page ORDINAL, which locates the row within
-                //       the page the same query returns. Both disclose nothing.
+                // Assumptions: the row is COUNTED and POSITIONED here and quoted nowhere. A value
+                // reaching this branch is not a card number, but it is a value from the card master
+                // and may be a mistyped or mis-offset one, so quoting it -- or the account it
+                // belongs to -- would write cardholder material into a durable record, the one
+                // destination the masking everywhere else in this class exists to keep it out of.
+                // Assumptions: the record this feeds names neither the ACCOUNT IDENTIFIER nor the
+                //     invalid key's STORED WIDTH. The observability standard --
+                //     docs/architecture/observability.md, "A prohibited value is OMITTED, not
+                //     abbreviated" -- names the account identifier as prohibited outright and states
+                //     that a protected value's LENGTH is prohibited on the same terms as its content,
+                //     so a width is a measurement of the key rather than a safe abbreviation of it.
+                //     What the record carries instead is what the standard nominates for this case: the
+                //     correlation identifier, which locates the request, and a per-page ORDINAL, which
+                //     locates the row within the page the same query returns. Both disclose nothing.
                 //       Alternatives Considered: a keyed opaque token over the account identifier
                 //       through OpaqueIdentifier, which the sibling authorization mapper does hold.
                 //       Rejected here because it would add key material and its configuration to this
@@ -510,15 +508,15 @@ public class CardMapper {
                 //       identifier, and that is a real cost the standard accepts explicitly. The ordinal
                 //       plus the correlation identifier reach it in two steps instead of one: re-run the
                 //       listing the correlated request made, and count.
-                // WHY : Alternatives Considered: emitting the line HERE, once per unrenderable row.
-                //       Rejected in favour of accumulating the ordinal and recording ONCE for the page
-                //       below: a per-row line reports the same reason once per row, so a wholly corrupt
-                //       page writes one line per row and none of them says what proportion of the page
-                //       was affected -- which is the figure that tells an operator whether a page is
-                //       degraded or empty. Accumulating loses neither datum: the page-level record names
-                //       every omitted row's ordinal as well as the proportion, so the position this
-                //       branch establishes survives into the record without the volume that emitting it
-                //       here would cost.
+                // Alternatives Considered: emitting the line HERE, once per unrenderable row.
+                // Rejected in favour of accumulating the ordinal and recording ONCE for the page
+                // below: a per-row line reports the same reason once per row, so a wholly corrupt
+                // page writes one line per row and none of them says what proportion of the page
+                // was affected -- which is the figure that tells an operator whether a page is
+                // degraded or empty. Accumulating loses neither datum: the page-level record names
+                // every omitted row's ordinal as well as the proportion, so the position this
+                // branch establishes survives into the record without the volume that emitting it
+                // here would cost.
                 omittedOrdinals.add(ordinal + 1);
                 continue;
             }
@@ -529,40 +527,39 @@ public class CardMapper {
             recordOmittedRows(omittedOrdinals, rows.size());
         }
 
-        // WHY : Trade-offs: the two boundary tokens are carried across VERBATIM -- neither masked, nor
-        //       re-sealed, nor inspected -- even though every row's card number in the same response is
-        //       masked. Masking them uniformly was the alternative and would silently break paging,
-        //       because a caller can only continue from a position the server can reconstruct and no
-        //       position can be reconstructed from a masked value. The compromise this leaves is
-        //       narrower than it first appears, and it is worth naming exactly: these tokens are not
-        //       raw keys. The contract types them as an opaque paging position bound to the query, the
-        //       caller and the direction it was minted for, and the envelope's own constructor refuses
-        //       a component that is not one, so a card number cannot travel in either of them. What is
-        //       accepted instead is that this class cannot verify them: it holds no binding and no
-        //       cursor key material, so it trusts whichever component minted them and re-publishes
-        //       them. That is why the shape check lives in the envelope, which every instance passes
-        //       through, rather than here, which only this one conversion passes through.
-        // WHY : Assumptions: the tokens are minted by the caller and not by this class, which is what
-        //       keeps the direction out of this method. The forward position and the backward position
-        //       are bound to different directions, and only the component that issued the query knows
-        //       which way it read; a mapper that minted them would have to be told, and would then be
-        //       able to mint the wrong one.
+        // Trade-offs: the two boundary tokens are carried across VERBATIM -- neither masked, nor
+        // re-sealed, nor inspected -- even though every row's card number in the same response is
+        // masked. Masking them uniformly was the alternative and would silently break paging,
+        // because a caller can only continue from a position the server can reconstruct and no
+        // position can be reconstructed from a masked value. The compromise this leaves is
+        // narrower than it first appears, and it is worth naming exactly: these tokens are not
+        // raw keys. The contract types them as an opaque paging position bound to the query, the
+        // caller and the direction it was minted for, and the envelope's own constructor refuses
+        // a component that is not one, so a card number cannot travel in either of them. What is
+        // accepted instead is that this class cannot verify them: it holds no binding and no
+        // cursor key material, so it trusts whichever component minted them and re-publishes
+        // them. That is why the shape check lives in the envelope, which every instance passes
+        // through, rather than here, which only this one conversion passes through.
+        // Assumptions: the tokens are minted by the caller and not by this class, which is what
+        // keeps the direction out of this method. The forward position and the backward position
+        // are bound to different directions, and only the component that issued the query knows
+        // which way it read; a mapper that minted them would have to be told, and would then be
+        // able to mint the wrong one.
         return new PageResponse<>(items, page.firstKey(), page.lastKey(), page.hasNext());
     }
 
     /**
      * Records that a page omitted rows, naming each one's position and no identifier of any of them.
      *
-     * <p>⚠️ Refactoring Rationale: this record used to be emitted per row and to carry
-     * {@code accountId={}} in the clear. Both halves were wrong. The clear account identifier is
-     * prohibited outright by the sensitive-data logging contract in
+     * <p>Assumptions: the record is emitted ONCE PER PAGE and carries no account identifier. A clear
+     * account identifier is prohibited outright by the sensitive-data logging contract in
      * {@code docs/architecture/observability.md}, whose target prohibition names account and customer
-     * identifiers alongside the primary account number — a log group is durable, operator-facing and
-     * exported, so an identifier written there has left the boundary every mask in this class exists
-     * to hold. {@code CardListService} logs the same read with booleans only
-     * ({@code accountNarrowed=}), so this class was the one place in the module that broke the rule
-     * the rest of it keeps. The per-row emission was the lesser fault and is corrected with it: a page
-     * of twenty non-conforming rows wrote twenty lines saying the same thing.</p>
+     * identifiers alongside the primary account number -- a log group is durable, operator-facing and
+     * exported, so an identifier written there has left the boundary every mask in this class exists to
+     * hold, and {@code CardListService} logs the same read with booleans only
+     * ({@code accountNarrowed=}). Per-page rather than per-row emission follows from the same
+     * reasoning about what the line has to say: a page of twenty non-conforming rows would otherwise
+     * write twenty lines saying the same thing.</p>
      *
      * <p>Assumptions: the operator does not need an identifier from this line, and that is why
      * removing it costs nothing operationally. The rows this line reports are exactly the rows
@@ -595,14 +592,14 @@ public class CardMapper {
      * @param selected the number of rows the caller's query returned, which bounds
      *     {@code omittedOrdinals}
      */
-    // WHY : Assumptions: the ORDINALS are named alongside the counts, and the position is the row's own
-    //       place in the STORED page rather than in the answer -- the answer is what the omission
-    //       already changed, while re-running the correlated listing returns the stored page, so the
-    //       stored position is the only count an operator can reproduce.
-    // WHY : Trade-offs: every ordinal is named rather than the first few and a count. The list is
-    //       bounded by the page, and the page is bounded by the contract's published maximum, so the
-    //       line cannot grow without limit; a truncated list, by contrast, would report a proportion
-    //       whose rows an operator could not finish enumerating from the record alone.
+    // Assumptions: the ORDINALS are named alongside the counts, and the position is the row's own
+    // place in the STORED page rather than in the answer -- the answer is what the omission
+    // already changed, while re-running the correlated listing returns the stored page, so the
+    // stored position is the only count an operator can reproduce.
+    // Trade-offs: every ordinal is named rather than the first few and a count. The list is
+    // bounded by the page, and the page is bounded by the contract's published maximum, so the
+    // line cannot grow without limit; a truncated list, by contrast, would report a proportion
+    // whose rows an operator could not finish enumerating from the record alone.
     private static void recordOmittedRows(List<Integer> omittedOrdinals, int selected) {
         LOG.warn("event=card.list.rows.unrenderable reason=card-number-outside-domain"
                         + " omitted={} selected={} rowOrdinal={} correlationId={}",
@@ -636,19 +633,19 @@ public class CardMapper {
         try {
             return cardSelectorSealer.open(SELECTOR_PURPOSE, selector);
         } catch (IllegalArgumentException refused) {
-            // WHY : Trade-offs: the refusal quotes neither the offered value nor the sealer's own
-            //       account of what was wrong with it, and it carries no cause. A rejected selector is
-            //       attacker-supplied text, and the one thing it most often is in practice is a raw
-            //       card number a client assigned to the wrong field -- so echoing it would copy the
-            //       number this class masks everywhere else into an error body and a log line, the two
-            //       destinations that masking does not reach. What is given up is the detail an
-            //       operator could have read directly from the message; what stands in for it is the
-            //       stable code, which identifies every refusal of this kind and is what such an
-            //       operator correlates on.
-            // WHY : Assumptions: the condition is reported as client input rather than as a fault,
-            //       because a selector legitimately stops opening -- a deployment key is rotated, or a
-            //       bookmarked route is followed later -- and the remedy is the client's: list the
-            //       cards again and take the selector the row carries.
+            // Trade-offs: the refusal quotes neither the offered value nor the sealer's own
+            // account of what was wrong with it, and it carries no cause. A rejected selector is
+            // attacker-supplied text, and the one thing it most often is in practice is a raw
+            // card number a client assigned to the wrong field -- so echoing it would copy the
+            // number this class masks everywhere else into an error body and a log line, the two
+            // destinations that masking does not reach. What is given up is the detail an
+            // operator could have read directly from the message; what stands in for it is the
+            // stable code, which identifies every refusal of this kind and is what such an
+            // operator correlates on.
+            // Assumptions: the condition is reported as client input rather than as a fault,
+            // because a selector legitimately stops opening -- a deployment key is rotated, or a
+            // bookmarked route is followed later -- and the remedy is the client's: list the
+            // cards again and take the selector the row carries.
             throw new ClientInputException(SELECTOR_REFUSAL_CODE, SELECTOR_FIELD,
                     "the card selector presented is not one this service issued, or can no longer be"
                             + " opened; list the cards again and use the selector carried by the row");
@@ -667,9 +664,9 @@ public class CardMapper {
      * @throws IllegalStateException if the platform cannot perform the sealing, which is a deployment
      *     fault and not a caller fault, and is therefore left to propagate unchanged
      */
-    // WHY : Assumptions: a selector is minted per response rather than stored, and it is STABLE for one
-    //       card, which the contract relies on when it calls a route built from one bookmarkable. That
-    //       stability is a property of the sealer under a fixed key and purpose, not of this class.
+    // Assumptions: a selector is minted per response rather than stored, and it is STABLE for one
+    // card, which the contract relies on when it calls a route built from one bookmarkable. That
+    // stability is a property of the sealer under a fixed key and purpose, not of this class.
     private String sealCardSelector(String cardNumber) {
         return cardSelectorSealer.seal(SELECTOR_PURPOSE, cardNumber);
     }
@@ -721,9 +718,9 @@ public class CardMapper {
      */
     private static String correlationIdOrAbsent() {
         String correlationId = MDC.get(CorrelationIdFilter.CORRELATION_ID_MDC_KEY);
-        // WHY : Assumptions: a BLANK value is treated as absent alongside a null one. The filter never
-        //       publishes one, but a value made only of spaces would otherwise render as spaces after
-        //       the field name, which reads as a truncated line rather than as no correlation at all.
+        // Assumptions: a BLANK value is treated as absent alongside a null one. The filter never
+        // publishes one, but a value made only of spaces would otherwise render as spaces after
+        // the field name, which reads as a truncated line rather than as no correlation at all.
         return correlationId == null || correlationId.isBlank() ? CORRELATION_ID_ABSENT : correlationId;
     }
 
@@ -741,23 +738,23 @@ public class CardMapper {
     private static String accountIdDigits(Long accountId) {
         Objects.requireNonNull(accountId, "account identifier must not be null");
 
-        // WHY : Assumptions: identifiers are published as digit characters and never as JSON numbers,
-        //       which is how the baseline itself holds them. app/cpy/CVCRD01Y.cpy declares CC-ACCT-ID as
-        //       PIC X(11) at :34-35 and overlays CC-ACCT-ID-N as PIC 9(11) on the same bytes by
-        //       REDEFINES at :36, and does the same for the card number at :37-39 and the customer
-        //       identifier at :40-42; app/cbl/COCRDLIC.cbl:99-101 repeats the pattern for this very
-        //       field. Characters are therefore the transport form and the number is only what
-        //       arithmetic and validation see. Two consequences follow and either alone settles it: a
-        //       leading zero is data here and every numeric type discards it, and a sixteen-digit card
-        //       number exceeds the largest integer an IEEE-754 double represents exactly, so a client
-        //       that parsed such a value as a JSON number would read back a different card than the one
-        //       it was sent.
-        // WHY : Trade-offs: the width is asserted rather than assumed, so an identifier too wide to
-        //       publish is refused here instead of shipping as a body that violates the contract's own
-        //       pattern. This is a guard on what this class renders and not a re-statement of anyone
-        //       else's validation rule: the column is BIGINT and so admits values the eleven-digit
-        //       record field does not, and the response record does not check this component, so
-        //       nothing else in the path would notice.
+        // Assumptions: identifiers are published as digit characters and never as JSON numbers,
+        // which is how the baseline itself holds them. app/cpy/CVCRD01Y.cpy declares CC-ACCT-ID as
+        // PIC X(11) at :34-35 and overlays CC-ACCT-ID-N as PIC 9(11) on the same bytes by
+        // REDEFINES at :36, and does the same for the card number at :37-39 and the customer
+        // identifier at :40-42; app/cbl/COCRDLIC.cbl:99-101 repeats the pattern for this very
+        // field. Characters are therefore the transport form and the number is only what
+        // arithmetic and validation see. Two consequences follow and either alone settles it: a
+        // leading zero is data here and every numeric type discards it, and a sixteen-digit card
+        // number exceeds the largest integer an IEEE-754 double represents exactly, so a client
+        // that parsed such a value as a JSON number would read back a different card than the one
+        // it was sent.
+        // Trade-offs: the width is asserted rather than assumed, so an identifier too wide to
+        // publish is refused here instead of shipping as a body that violates the contract's own
+        // pattern. This is a guard on what this class renders and not a re-statement of anyone
+        // else's validation rule: the column is BIGINT and so admits values the eleven-digit
+        // record field does not, and the response record does not check this component, so
+        // nothing else in the path would notice.
         if (accountId < 0) {
             throw new IllegalArgumentException(
                     "account identifier is negative; the record field is unsigned and an unsigned"
@@ -787,17 +784,17 @@ public class CardMapper {
     private static String isoExpirationDate(LocalDate expirationDate) {
         Objects.requireNonNull(expirationDate, "expiration date must not be null");
 
-        // WHY : Assumptions: the stored date is rendered whole and is never reassembled from parts. The
-        //       baseline's detail map shows a month and a year only -- app/cpy-bms/COCRDSL.CPY carries
-        //       EXPMONI and EXPYEARI and no day field -- whereas the contract publishes all ten
-        //       characters of the stored value. That is a target-side presentation decision settled by
-        //       card-api.yaml, and honouring it means emitting what the column holds rather than
-        //       composing a value from the two parts a screen happened to display.
-        // WHY : Assumptions: the platform's own ISO rendering is used rather than a formatter declared
-        //       here, because it emits the year, month and day in that order with each part zero-padded
-        //       to its declared width, which is exactly the ten-character form the field carries. It
-        //       widens the year beyond four digits for dates far outside this domain, which is the one
-        //       case the width refusal below exists to catch.
+        // Assumptions: the stored date is rendered whole and is never reassembled from parts. The
+        // baseline's detail map shows a month and a year only -- app/cpy-bms/COCRDSL.CPY carries
+        // EXPMONI and EXPYEARI and no day field -- whereas the contract publishes all ten
+        // characters of the stored value. That is a target-side presentation decision settled by
+        // card-api.yaml, and honouring it means emitting what the column holds rather than
+        // composing a value from the two parts a screen happened to display.
+        // Assumptions: the platform's own ISO rendering is used rather than a formatter declared
+        // here, because it emits the year, month and day in that order with each part zero-padded
+        // to its declared width, which is exactly the ten-character form the field carries. It
+        // widens the year beyond four digits for dates far outside this domain, which is the one
+        // case the width refusal below exists to catch.
         String rendered = expirationDate.toString();
         if (rendered.length() != EXPIRATION_DATE_WIDTH) {
             throw new IllegalArgumentException(
@@ -834,23 +831,23 @@ public class CardMapper {
         YearMonth target =
                 YearMonth.of(Integer.parseInt(expirationYear), Integer.parseInt(expirationMonth));
 
-        // WHY : Trade-offs: where the stored day does not exist in the submitted month, the day is
-        //       brought back to that month's last day rather than the update being refused. The two
-        //       alternatives were both weighed. Refusing would fail an update over a value the caller
-        //       was never shown and cannot edit -- the day is non-display in the baseline and absent
-        //       from the request shape -- so the caller could not act on the refusal. Carrying the day
-        //       through unchanged is not available at all: the target column is a true date and the
-        //       impossible combination the baseline can hold, because it concatenates characters into a
-        //       ten-byte field at app/cbl/COCRDUPC.cbl:1467-1474 without consulting a calendar, has no
-        //       representation here. Bringing the day back preserves the two parts the caller did
-        //       choose, which is the outcome closest to what was asked for. The cost is that one
-        //       specific day value is not round-tripped exactly, and it is the one part of the date
-        //       nothing in the baseline lets a user set.
-        // WHY : Assumptions: the day is bounded against the target month explicitly rather than by
-        //       adjusting the stored date one field at a time. Adjusting the year and then the month
-        //       brings the day back twice for a leap day, and adjusting them in the other order brings
-        //       it back once, so the two orders disagree; computing the bound against the settled
-        //       target month has no order to get wrong.
+        // Trade-offs: where the stored day does not exist in the submitted month, the day is
+        // brought back to that month's last day rather than the update being refused. The two
+        // alternatives were both weighed. Refusing would fail an update over a value the caller
+        // was never shown and cannot edit -- the day is non-display in the baseline and absent
+        // from the request shape -- so the caller could not act on the refusal. Carrying the day
+        // through unchanged is not available at all: the target column is a true date and the
+        // impossible combination the baseline can hold, because it concatenates characters into a
+        // ten-byte field at app/cbl/COCRDUPC.cbl:1467-1474 without consulting a calendar, has no
+        // representation here. Bringing the day back preserves the two parts the caller did
+        // choose, which is the outcome closest to what was asked for. The cost is that one
+        // specific day value is not round-tripped exactly, and it is the one part of the date
+        // nothing in the baseline lets a user set.
+        // Assumptions: the day is bounded against the target month explicitly rather than by
+        // adjusting the stored date one field at a time. Adjusting the year and then the month
+        // brings the day back twice for a leap day, and adjusting them in the other order brings
+        // it back once, so the two orders disagree; computing the bound against the settled
+        // target month has no order to get wrong.
         int day = Math.min(storedExpirationDate.getDayOfMonth(), target.lengthOfMonth());
         return target.atDay(day);
     }

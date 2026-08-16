@@ -505,11 +505,17 @@ point, and nothing here modifies the COBOL baseline or the parity oracle.
 ---
 
 *This README is the mandatory Explainability carrier for the four record files in this
-directory, required by master section 10 and by user-specified Rule 1. Exactly one gate reads
-it: `config/rule1/rule1_gate.py` decides the **form** of the rationale labels above,
-repository-wide and including Markdown, which is why they are written plain rather than
-emphasised. Nothing else does -- `config/checkstyle/checkstyle.xml` limits its audit set to
-`java`, so no linter reads a byte of the prose. Whether each rationale names a real
+directory, required by master section 10 and by user-specified Rule 1. **No gate reads this prose.**
+`config/checkstyle/checkstyle.xml` limits its audit set to `java`, and `config/rule1/rule1_gate.py`
+excludes every path containing `/src/test/resources/fixtures/` in its `_is_governed` check, which is
+this path -- so neither its `labels` check nor its `what` check ever opens this file. Refactoring
+Rationale: this paragraph previously credited `config/rule1/rule1_gate.py` with deciding the form of
+the rationale labels above "repository-wide and including Markdown". The gate does run
+repository-wide, which is what made the claim plausible, but this path is explicitly outside its
+remit, so the sentence let a green build be read as evidence about a document the gate never opens.
+The canonical label form is used here regardless, because `docs/CODE_DOCUMENTATION_STANDARD.md` fixes
+one written form repository-wide and a Rule 1 audit finds a rationale by literal string search;
+compliance in this path is therefore **review-based** rather than mechanical. Whether each rationale names a real
 consequence, and whether every number and line citation here is true, are review obligations
 that no lexical gate can decide, which makes the discipline more important here rather than
 less.*

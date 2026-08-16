@@ -13,14 +13,19 @@
 //       evidence rather than a supplement.
 //
 // WHY (non-obvious design decisions):
-//   1.  Assumptions: this file is the sixth test class in a directory whose
-//       charter measured five. That charter carries NO counted directory
-//       marker and declares no case count, so common-lib's
-//       PackageCharterInventoryTest does not hold it to this directory and
-//       nothing here falsifies a machine-checked claim. Its prose figure goes
-//       stale, and its own closing paragraph nominates itself as the thing to
-//       re-measure when a class is added; the figure that IS machine-checked
-//       lives in this module's README and moves with this file.
+//   1.  Refactoring Rationale: this note used to say that this file was the
+//       sixth test class in a directory whose charter measured five, and both
+//       halves of that are now stale: the directory holds NINE test classes plus
+//       the charter, and the charter states nine. It is corrected rather than
+//       deleted because the reason it was written still holds and is worth
+//       finding here. That charter carries NO counted directory marker -- it
+//       enumerates six main-source CONTROLLERS in a second list, which the
+//       members check would fail on -- so common-lib's
+//       PackageCharterInventoryTest does not hold it to this directory, and a
+//       figure in its prose can therefore go stale without failing a build. The
+//       figure that IS machine-checked lives in this module's README, which
+//       ServiceReadmeInventoryTest re-counts from the tree, so that is the count
+//       to trust and the one a new class must update.
 //   2.  Refactoring Rationale: the projection that specified this file
 //       described a LookupController reading three repositories directly and
 //       answering the state browse with an unpaged array. Neither exists. The
@@ -31,14 +36,29 @@
 //       the assertion it changes, so a reader arriving with the projection has
 //       a reason to prefer the tree over it rather than reversing this file
 //       back to a contract the service does not publish.
-//   3.  Trade-offs: this class assembles a web application context and installs
-//       the deployed security chain, which costs one refresh per class where a
-//       standalone dispatcher costs none. The cost is accepted because the
-//       authorisation cases are the reason the file exists in the shape it
-//       does: a dispatcher with no chain admits every request, so those cases
-//       would pass against a read that had been guarded shut and would report
-//       as green while proving nothing.
-//   4.  Assumptions: the seven-line page bound of the transaction-type browse,
+//   3.  Refactoring Rationale: this class used to assemble its own web
+//       application context by hand, and that context installed the deployed
+//       security chain but registered the controller, the shared advice and the
+//       converters itself. Both halves of that arrangement have changed. The
+//       chain is still the deployed one -- a dispatcher with no chain admits
+//       every request, so the authorisation cases would otherwise pass against
+//       a read that had been guarded shut and report as green while proving
+//       nothing -- but the controller, the advice, the message converters and
+//       the exact-money module now arrive from the deployed configuration
+//       through the MVC test slice this module's pom.xml newly makes available.
+//       What that buys is the set of failures a hand-registered context cannot
+//       report at all: a component scan that stopped finding this controller, a
+//       converter or serialisation setting the deployed configuration publishes
+//       and this file forgot, an advice the deployed configuration would have
+//       supplied, and a profile that resolves a bean differently. The cost is
+//       unchanged, one context refresh per class rather than none.
+//   4.  Assumptions: the wiring class this slice imports keeps @EnableWebSecurity
+//       and the chain, converter and decoder beans, and no longer declares the
+//       controller or the advice. It also drops @EnableWebMvc: inside a slice
+//       that annotation would REPLACE the auto-configured MVC setup, taking the
+//       message converters and the money module with it, which is precisely
+//       what importing the shared auto-configuration is here to obtain.
+//   5.  Assumptions: the seven-line page bound of the transaction-type browse,
 //       the referential refusal on a type delete, and the padded default
 //       disclosure group are all owned elsewhere in this reactor and are
 //       neither asserted nor contradicted here.
@@ -56,8 +76,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.carddemo.common.CardDemoCommonAutoConfiguration;
 import com.carddemo.common.error.ApiError;
-import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.security.JwtRoleConverter;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
@@ -68,7 +88,6 @@ import com.carddemo.reference.dto.PhoneAreaCodeResponse;
 import com.carddemo.reference.dto.UsStateResponse;
 import com.carddemo.reference.dto.UsStateZipPrefixResponse;
 import com.carddemo.reference.service.AddressLookupService;
-import jakarta.servlet.Filter;
 import java.io.UnsupportedEncodingException;
 import java.lang.reflect.RecordComponent;
 import java.time.Clock;
@@ -79,29 +98,29 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Set;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.security.oauth2.server.resource.autoconfigure.OAuth2ResourceServerAutoConfiguration;
+import org.springframework.boot.security.oauth2.server.resource.autoconfigure.web.OAuth2ResourceServerWebSecurityAutoConfiguration;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
-import org.springframework.mock.web.MockServletContext;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
-import org.springframework.test.web.servlet.setup.MockMvcBuilders;
-import org.springframework.web.context.support.AnnotationConfigWebApplicationContext;
-import org.springframework.web.servlet.config.annotation.EnableWebMvc;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -125,25 +144,34 @@ import tools.jackson.databind.json.JsonMapper;
  * nothing in its own tree to read. The relationship is over the published contract and over the
  * schema, never through code, so no type of that context is named anywhere in this file.</p>
  *
- * <h2>How the dispatcher is assembled, and why not with the slice annotation</h2>
+ * <h2>How the dispatcher is assembled</h2>
  *
- * <p>Alternatives Considered: the servlet slice annotation is the obvious wiring and is not on this
- * module's test class path. The framework moved it out of {@code spring-boot-test-autoconfigure} into
- * a separate artifact that {@code services/reference-service/pom.xml} does not declare and that the
- * framework test starter does not pull in; the annotation class is absent from the resolved
- * dependency set, so a class using it would not compile. Declaring the artifact would add a test
- * dependency to a sibling-owned build file, so the dispatcher is assembled here from types that are
- * on the path. That is also the mechanism this package's charter records for every other dispatcher
- * class in this directory.</p>
+ * <p>Refactoring Rationale: the servlet slice annotation is the wiring, and this class used to record
+ * that it could not be: the framework had moved it out of {@code spring-boot-test-autoconfigure} into a
+ * separate artifact, and declaring that artifact would have edited a sibling-owned build file. That
+ * reason no longer holds -- {@code services/reference-service/pom.xml} declares it -- and what changes is
+ * not the wiring's shape but the set of failures it can report. The controller now arrives by scanning
+ * the deployed application package, so a scan that stopped finding it fails here; the message converters
+ * and the exact-money module arrive from the deployed configuration, so a serialisation setting this file
+ * once had to remember is now the deployed one; and the active profile is resolved rather than
+ * bypassed.</p>
  *
- * <p>Assumptions: {@code com.carddemo.common.error.GlobalExceptionHandler} is registered
- * EXPLICITLY, as a bean of the context below, and every status this class asserts on a refused
- * request depends on that registration. It is the only advice in this migration and it lives outside
- * the {@code com.carddemo.reference} scan root, so nothing hands it to a dispatcher assembled here
- * automatically. Without it the same refusals would be rendered by a servlet-container default: a
- * status would still arrive, so a wrong mapping would read as green rather than failing. Removing
- * the bean and watching a status assertion fail is what shows the registration is load-bearing, and
- * no second advice is declared anywhere in this file to keep that proof unambiguous.</p>
+ * <p>Refactoring Rationale: {@code com.carddemo.common.error.GlobalExceptionHandler} used to be
+ * registered EXPLICITLY as a bean of a context this file assembled, and every status asserted on a
+ * refused request depended on that hand registration. It now reaches the dispatcher through the shared
+ * kernel's auto-configuration, imported by this class, which is the route a deployed task receives it by.
+ * The property that made the old note worth writing is unchanged and is now stronger: it is the only
+ * advice in this migration, it lives outside the {@code com.carddemo.reference} scan root, and without it
+ * the same refusals would be rendered by a servlet-container default -- a status would still arrive, so a
+ * wrong mapping would read as green rather than failing. No second advice is declared anywhere in this
+ * file, so which one answered is never in question.</p>
+ *
+ * <p>Assumptions: the deployed security chain is still installed, and it is installed as the bean the
+ * security configuration contributes rather than assembled here. A chain built by this class would be a
+ * chain this class had authored, so an authorisation case would assert its own wiring and would keep
+ * passing if the deployed rules changed underneath it. The slice does not admit the security
+ * configuration by scanning -- it is a plain configuration class rather than a web configurer -- so the
+ * wiring class at the foot of this file names it, which is the one place the deployed chain enters.</p>
  *
  * <p>Assumptions: the token decoder is the ONE participant replaced by a stand-in; every other
  * participant is the deployed one. The real {@link SecurityConfig#filterChain} is built, the real
@@ -201,6 +229,13 @@ import tools.jackson.databind.json.JsonMapper;
  * declaration, so parameters, return values and exceptions are inapplicable here rather than omitted;
  * each member below carries its own.</p>
  */
+@WebMvcTest(controllers = AddressLookupController.class,
+        excludeAutoConfiguration = {
+            OAuth2ResourceServerAutoConfiguration.class,
+            OAuth2ResourceServerWebSecurityAutoConfiguration.class
+        })
+@Import({CardDemoCommonAutoConfiguration.class, LookupControllerTest.DispatcherWiring.class})
+@ActiveProfiles("test")
 class LookupControllerTest {
 
     /**
@@ -356,50 +391,59 @@ class LookupControllerTest {
     /** The query parameter carrying the area-code classification filter. */
     private static final String PARAM_CODE_CLASS = "codeClass";
 
+    /**
+     * The page width the browse publishes, which every full page below must carry exactly.
+     *
+     * <p>Assumptions: it is asserted equal to {@code AddressLookupService.PAGE_SIZE} in the first domain
+     * case rather than merely copied from it, so a change to the published width fails there instead of
+     * silently changing what a full page means here. The published page schema declares the same figure
+     * as {@code maxItems}, so a page wider than this is a contract break and not a tuning choice.</p>
+     */
+    private static final int PAGE_WIDTH = 20;
+
+    /**
+     * The largest number of pages any walk below is allowed to read.
+     *
+     * <p>Trade-offs: a bound rather than a loop that ends when the browse says so. A browse always
+     * reporting a further page would otherwise hang the build, which reports nothing at all; the bound is
+     * far above the twenty-five pages the largest domain needs, so a genuinely short walk still fails on
+     * its size.</p>
+     */
+    private static final int MAX_PAGES = 64;
+
     /** The reader the envelope assertions inspect a rendered body with. */
     private static final JsonMapper MAPPER = JsonMapper.builder().build();
 
-    /** The context the deployed chain and the controller are built in, refreshed once for the class. */
-    private static AnnotationConfigWebApplicationContext context;
-
-    /** The entry point every request below is issued through, with the deployed chain in front of it. */
+    /**
+     * The entry point every request below is issued through, with the deployed chain in front of it.
+     *
+     * <p>Assumptions: it is bound from the slice's own injected dispatcher rather than assembled, so the
+     * controller, the shared advice, the message converters and the exact-money module all arrive from
+     * the configuration a deployed task would run, and the deployed filter chain is installed in front of
+     * it by the security test support. It stays a STATIC field because six {@code @Nested} groups read it
+     * by simple name; binding an instance field instead would have renamed every one of those reads
+     * without changing what any of them asserts.</p>
+     */
     private static MockMvc mockMvc;
 
-    /** The stand-in decoder that answers for the bearer value a caller presents. */
-    private static JwtDecoder jwtDecoder;
-
-    /** The stand-in for the one collaborator the controller holds. */
-    private static AddressLookupService lookups;
+    /**
+     * The stand-in decoder that answers for the bearer value a caller presents.
+     *
+     * <p>Assumptions: constructed where it is declared and published to the slice by the wiring class
+     * below, so one instance is reachable both from the context and from the helper that stubs it. It is
+     * never asked to fetch a key or reach an issuer; every case hands it the token it should answer
+     * with.</p>
+     */
+    private static final JwtDecoder jwtDecoder = mock(JwtDecoder.class);
 
     /**
-     * Refreshes the context once and installs the deployed chain in front of the dispatcher.
+     * The stand-in for the one collaborator the controller holds.
      *
-     * <p>Assumptions: the chain is installed by name, as the bean the security configuration
-     * contributes, rather than assembled here. A chain built by this class would be a chain this class
-     * had authored, so an authorisation case would assert its own wiring and would keep passing if the
-     * deployed rules changed underneath it.</p>
+     * <p>Assumptions: constructed where it is declared, for the same reason as the decoder above, and
+     * cleared before every case by {@link #resetStandIns(MockMvc)} so no case inherits another's
+     * stubbing.</p>
      */
-    @BeforeAll
-    static void refreshDispatcher() {
-        context = new AnnotationConfigWebApplicationContext();
-        context.setServletContext(new MockServletContext());
-        context.register(DispatcherWiring.class);
-        context.refresh();
-
-        jwtDecoder = context.getBean(JwtDecoder.class);
-        lookups = context.getBean(AddressLookupService.class);
-        mockMvc = MockMvcBuilders.webAppContextSetup(context)
-                .addFilters(context.getBean("springSecurityFilterChain", Filter.class))
-                .build();
-    }
-
-    /** Closes the context so the class leaves no refreshed application behind it. */
-    @AfterAll
-    static void closeDispatcher() {
-        if (context != null) {
-            context.close();
-        }
-    }
+    private static final AddressLookupService lookups = mock(AddressLookupService.class);
 
     /**
      * Clears both stand-ins and grants the ordinary group, so each case starts from one known posture.
@@ -409,9 +453,18 @@ class LookupControllerTest {
      * granting it once also means a case added later cannot forget it and report an authorisation
      * refusal as an envelope or domain failure. The authorisation cases restate the grant themselves,
      * because for them it is the subject under test rather than a precondition.</p>
+     *
+     * @param injected the dispatcher the slice built from the deployed web configuration, resolved from
+     *     the test context by the framework rather than assembled here
      */
     @BeforeEach
-    void resetStandIns() {
+    void resetStandIns(@Autowired MockMvc injected) {
+        // WHY : Assumptions: the dispatcher is bound through a method PARAMETER rather than a field,
+        //       because the field it is bound to is static and a slice injects into the test instance.
+        //       The framework resolves an @Autowired parameter on a lifecycle method from the same
+        //       context, which is what lets the six nested groups keep reading one static name while the
+        //       dispatcher itself still comes from the deployed configuration.
+        mockMvc = injected;
         reset(jwtDecoder, lookups);
         grantGroups(JwtRoleConverter.USER_AUTHORITY);
     }
@@ -495,6 +548,42 @@ class LookupControllerTest {
     }
 
     /**
+     * Makes the area-code browse answer the slice of a population each request's position selects.
+     *
+     * @param population every row of the domain in the order the browse publishes them; must not be
+     *     {@code null}
+     */
+    private static void stubPagedAreaCodes(List<PhoneAreaCodeResponse> population) {
+        when(lookups.listAreaCodes(any(LookupPageRequest.class), anyString()))
+                .thenAnswer(invocation -> pageSliceOf(population,
+                        invocation.<LookupPageRequest>getArgument(0).cursor()));
+    }
+
+    /**
+     * Makes the state browse answer the slice of a population each request's position selects.
+     *
+     * @param population every row of the domain in the order the browse publishes them; must not be
+     *     {@code null}
+     */
+    private static void stubPagedStates(List<UsStateResponse> population) {
+        when(lookups.listStates(any(LookupPageRequest.class), anyString()))
+                .thenAnswer(invocation -> pageSliceOf(population,
+                        invocation.<LookupPageRequest>getArgument(0).cursor()));
+    }
+
+    /**
+     * Makes the postal-prefix browse answer the slice of a population each request's position selects.
+     *
+     * @param population every row of the domain in the order the browse publishes them; must not be
+     *     {@code null}
+     */
+    private static void stubPagedZipPrefixes(List<UsStateZipPrefixResponse> population) {
+        when(lookups.listZipPrefixes(any(LookupPageRequest.class), anyString()))
+                .thenAnswer(invocation -> pageSliceOf(population,
+                        invocation.<LookupPageRequest>getArgument(0).cursor()));
+    }
+
+    /**
      * Builds a page carrying the whole seeded area-code population, classified as the copybook splits it.
      *
      * <p>Assumptions: the population is composed as the two sub-lists rather than as one undifferentiated
@@ -505,7 +594,7 @@ class LookupControllerTest {
      * @return a page of one reply per seeded area code, the general-purpose members first; never
      *     {@code null}
      */
-    private static PageResponse<PhoneAreaCodeResponse> wholeAreaCodePage() {
+    private static List<PhoneAreaCodeResponse> wholeAreaCodePopulation() {
         List<PhoneAreaCodeResponse> rows = new ArrayList<>(SEEDED_AREA_CODES);
         for (int index = 0; index < GENERAL_PURPOSE_AREA_CODES; index++) {
             rows.add(new PhoneAreaCodeResponse(distinctAreaCode(index),
@@ -516,7 +605,76 @@ class LookupControllerTest {
                     distinctAreaCode(GENERAL_PURPOSE_AREA_CODES + index),
                     PhoneAreaCodeResponse.CodeClass.EASILY_RECOGNISABLE));
         }
-        return PageResponse.ofRows(rows, LEADING_POSITION, TRAILING_POSITION, false);
+        return rows;
+    }
+
+    /**
+     * Answers the slice of a population a request's position selects, at the published page width.
+     *
+     * <p>Refactoring Rationale: this replaces two helpers that each answered the WHOLE population as one
+     * page. Those pages could not exist: {@code AddressLookupService.PAGE_SIZE} is twenty and the
+     * published page schema declares {@code maxItems: 20}, so a single page of four hundred and ninety
+     * rows was twenty-four times the maximum a deployment can return, and the multi-request walk a client
+     * actually performs was exercised by nothing. The failures that walk exposes are the ones a single
+     * page cannot show at all -- a row repeated at every boundary, or one skipped -- so the domain cases
+     * now read every page in turn.</p>
+     *
+     * <p>Assumptions: this stand-in encodes a PAGE ORDINAL in the positions it mints, which the real
+     * browse does not: the real one seals a row key. The ordinal is used because the stand-in has to
+     * decide which slice to answer from an opaque value and holds no rows to compare a key against. What
+     * the boundary is being held to is unaffected -- that it hands the position it received to the browse
+     * and re-issues with the one it was given back -- and the real keyed seek is asserted against real
+     * rows in {@code com.carddemo.reference.repository}.</p>
+     *
+     * @param <T> the reply type the browse publishes for this domain
+     * @param population every row of the domain in the order the browse publishes them; must not be
+     *     {@code null}
+     * @param cursor the position the request carried, or {@code null} on a first request
+     * @return one page of at most the published width, its two positions and its forward availability
+     */
+    private static <T> PageResponse<T> pageSliceOf(List<T> population, String cursor) {
+        int pageIndex = pageIndexFrom(cursor);
+        int start = Math.min(pageIndex * PAGE_WIDTH, population.size());
+        int end = Math.min(start + PAGE_WIDTH, population.size());
+        return PageResponse.ofRows(
+                new ArrayList<>(population.subList(start, end)),
+                walkPosition(pageIndex),
+                walkPosition(pageIndex + 1),
+                end < population.size());
+    }
+
+    /**
+     * Mints a position of the published sealed shape that carries a page ordinal for the stand-in.
+     *
+     * <p>Assumptions: the value satisfies the shape expression the shared cursor type publishes -- the
+     * version, a sixteen-character segment and a payload segment -- so it is accepted by the request
+     * constraint, which decides shape without a key. It carries no authentic seal and is never opened,
+     * because the browse beneath the handler is a stand-in.</p>
+     *
+     * @param pageIndex the zero-based ordinal of the page this position continues from
+     * @return a shaped position encoding that ordinal; never {@code null}
+     */
+    private static String walkPosition(int pageIndex) {
+        // WHY : Assumptions: the middle segment is padded to EXACTLY sixteen characters, because that is
+        //       the width the published sealed shape declares and both the request constraint and the page
+        //       envelope reject a position that misses it. A fifteen-character segment was tried first and
+        //       every walk answered 500 from the envelope's own shape check rather than from anything the
+        //       case asserted, which is the failure this padding exists to prevent.
+        return CursorToken.VERSION + ".walkposition" + String.format("%04d", pageIndex)
+                + ".page-" + pageIndex;
+    }
+
+    /**
+     * Reads the page ordinal back out of a position this class minted.
+     *
+     * @param cursor the position a request carried, or {@code null} on a first request
+     * @return zero for an absent position, otherwise the ordinal the position encodes
+     */
+    private static int pageIndexFrom(String cursor) {
+        if (cursor == null) {
+            return 0;
+        }
+        return Integer.parseInt(cursor.substring(cursor.lastIndexOf("page-") + "page-".length()));
     }
 
     /**
@@ -543,14 +701,87 @@ class LookupControllerTest {
      *
      * @return a page of one reply per seeded pair, spanning the published range; never {@code null}
      */
-    private static PageResponse<UsStateZipPrefixResponse> wholeZipPrefixPage() {
+    private static List<UsStateZipPrefixResponse> wholeZipPrefixPopulation() {
         List<UsStateZipPrefixResponse> rows = new ArrayList<>(SEEDED_ZIP_PREFIXES);
         rows.add(new UsStateZipPrefixResponse(FIRST_ZIP_PREFIX));
-        for (int index = 1; index < SEEDED_ZIP_PREFIXES - 1; index++) {
+        for (int index = 0; index < SEEDED_ZIP_PREFIXES - 2; index++) {
             rows.add(new UsStateZipPrefixResponse(distinctZipPrefix(index)));
         }
         rows.add(new UsStateZipPrefixResponse(LAST_ZIP_PREFIX));
-        return PageResponse.ofRows(rows, LEADING_POSITION, TRAILING_POSITION, false);
+        return rows;
+    }
+
+    /**
+     * Builds the whole seeded state population as the replies the browse publishes for it.
+     *
+     * @return one reply per seeded state code, in the copybook's own order; never {@code null}
+     */
+    private static List<UsStateResponse> wholeStatePopulation() {
+        List<UsStateResponse> rows = new ArrayList<>(SEEDED_STATE_CODES.size());
+        for (String code : SEEDED_STATE_CODES) {
+            rows.add(new UsStateResponse(code));
+        }
+        return rows;
+    }
+
+    /**
+     * Reads every page of a browse in turn, following the position each page hands back.
+     *
+     * <p>Purpose: this is what a client does, and it is the only way the properties the domain cases
+     * assert can be observed at all: a single request cannot show that the pages add up to the population,
+     * that no boundary repeats a row, or that the walk terminates.</p>
+     *
+     * <p>Trade-offs: the walk is bounded by {@link #MAX_PAGES} rather than looping until the browse
+     * reports no further page. A browse that always reported one would otherwise turn a failing assertion
+     * into a run that never ends, and a hung build reports nothing; the bound is far above the pages the
+     * largest domain needs, so a short walk still fails on its size.</p>
+     *
+     * @param path the published browse path to read
+     * @return every item node the walk collected, in page order, with the page counts it took
+     * @throws Exception if a request cannot be performed
+     */
+    private static Walk walkEveryPage(String path) throws Exception {
+        List<JsonNode> items = new ArrayList<>();
+        int pages = 0;
+        int fullPages = 0;
+        String cursor = null;
+        for (int page = 0; page < MAX_PAGES; page++) {
+            MockHttpServletRequestBuilder request = authorisedGet(path);
+            if (cursor != null) {
+                request = request
+                        .param(PARAM_CURSOR, cursor)
+                        .param(PARAM_DIRECTION, PageDirection.NEXT.wireValue());
+            }
+
+            JsonNode body = bodyOf(mockMvc.perform(request)
+                    .andExpect(status().isOk())
+                    .andReturn());
+
+            int published = 0;
+            for (JsonNode row : body.get("items")) {
+                items.add(row);
+                published++;
+            }
+            pages++;
+            if (published == PAGE_WIDTH) {
+                fullPages++;
+            }
+            if (!body.get("hasNext").booleanValue()) {
+                break;
+            }
+            cursor = body.get("lastKey").stringValue();
+        }
+        return new Walk(items, pages, fullPages);
+    }
+
+    /**
+     * What a completed walk over a browse adds up to.
+     *
+     * @param items every item node the walk collected, in the order the pages published them
+     * @param pages how many pages the walk read
+     * @param fullPages how many of those pages carried exactly the published page width
+     */
+    private record Walk(List<JsonNode> items, int pages, int fullPages) {
     }
 
     /**
@@ -565,9 +796,17 @@ class LookupControllerTest {
      * @return a four-character pair distinct for each distinct index; never {@code null}
      */
     private static String distinctZipPrefix(int index) {
-        char firstLetter = (char) ('A' + (index / 100) % 26);
-        char secondLetter = (char) ('A' + (index / 2600) % 26);
-        return String.valueOf(firstLetter) + secondLetter + String.format("%02d", index % 100);
+
+        // WHY : Refactoring Rationale: the rendering is confined to the letters B, C and D so that every
+        //       generated pair sorts strictly BETWEEN the two named boundary pairs and no generated pair
+        //       can equal either. The previous scheme varied the first letter from A upward and produced
+        //       AA34 at index 34 -- a duplicate of the named first pair -- while also placing values below
+        //       it, so the population was neither distinct nor ascending. Nothing noticed, because the
+        //       fixture was answered as a single impossible page and only membership of the two boundary
+        //       pairs was asserted. A walk reads the pages in order and counts them, so both properties
+        //       are now load-bearing: the population has to be a list the browse could actually publish.
+        char firstLetter = (char) ('B' + index / 100);
+        return String.valueOf(firstLetter) + 'A' + String.format("%02d", index % 100);
     }
 
     /**
@@ -866,25 +1105,32 @@ class LookupControllerTest {
          * @throws Exception if the request cannot be performed
          */
         @Test
-        @DisplayName("all 490 seeded area codes reach the surface")
+        @DisplayName("all 490 seeded area codes reach the surface across 25 pages")
         void theWholeAreaCodePopulationReachesTheSurface() throws Exception {
-            when(lookups.listAreaCodes(any(LookupPageRequest.class), anyString()))
-                    .thenReturn(wholeAreaCodePage());
+            assertThat(AddressLookupService.PAGE_SIZE)
+                    .as("the page arithmetic below is written against the published width")
+                    .isEqualTo(PAGE_WIDTH);
+            stubPagedAreaCodes(wholeAreaCodePopulation());
 
-            MvcResult result = mockMvc
-                    .perform(authorisedGet(AddressLookupController.AREA_CODE_PATH))
-                    .andExpect(status().isOk())
-                    .andReturn();
+            Walk walk = walkEveryPage(AddressLookupController.AREA_CODE_PATH);
 
-            JsonNode items = bodyOf(result).get("items");
-            assertThat(items.size()).isEqualTo(SEEDED_AREA_CODES);
             Set<String> distinct = new LinkedHashSet<>();
-            for (JsonNode row : items) {
+            for (JsonNode row : walk.items()) {
                 String areaCd = row.get("areaCd").stringValue();
                 assertThat(areaCd).hasSize(AREA_CODE_WIDTH);
                 distinct.add(areaCd);
             }
-            assertThat(distinct).hasSize(SEEDED_AREA_CODES);
+
+            assertThat(walk.items()).hasSize(SEEDED_AREA_CODES);
+            assertThat(distinct)
+                    .as("no page boundary may repeat a code, which an inclusive seek would do")
+                    .hasSize(SEEDED_AREA_CODES);
+            assertThat(walk.pages())
+                    .as("490 rows at a published width of 20 is 25 pages, the last carrying 10")
+                    .isEqualTo(25);
+            assertThat(walk.fullPages())
+                    .as("no page may exceed the published maximum, and only the last may be short")
+                    .isEqualTo(24);
         }
 
         /**
@@ -903,21 +1149,21 @@ class LookupControllerTest {
         @Test
         @DisplayName("all 56 seeded state codes reach the surface, district and territories included")
         void theWholeStatePopulationReachesTheSurface() throws Exception {
-            when(lookups.listStates(any(LookupPageRequest.class), anyString()))
-                    .thenReturn(statePage(SEEDED_STATE_CODES, false));
+            stubPagedStates(wholeStatePopulation());
 
-            MvcResult result = mockMvc
-                    .perform(authorisedGet(AddressLookupController.STATE_PATH))
-                    .andExpect(status().isOk())
-                    .andReturn();
+            Walk walk = walkEveryPage(AddressLookupController.STATE_PATH);
 
             List<String> emitted = new ArrayList<>();
-            for (JsonNode row : bodyOf(result).get("items")) {
+            for (JsonNode row : walk.items()) {
                 String stateCd = row.get("stateCd").stringValue();
                 assertThat(stateCd).hasSize(STATE_CODE_WIDTH);
                 emitted.add(stateCd);
             }
 
+            assertThat(walk.pages())
+                    .as("56 rows at a published width of 20 is 3 pages, the last carrying 16")
+                    .isEqualTo(3);
+            assertThat(walk.fullPages()).isEqualTo(2);
             assertThat(emitted).hasSize(56);
             assertThat(emitted).containsExactlyElementsOf(SEEDED_STATE_CODES);
             assertThat(emitted).containsAll(DISTRICT_AND_TERRITORIES);
@@ -937,23 +1183,31 @@ class LookupControllerTest {
         @Test
         @DisplayName("all 240 seeded prefix pairs reach the surface across the published span")
         void theWholePrefixPopulationReachesTheSurface() throws Exception {
-            when(lookups.listZipPrefixes(any(LookupPageRequest.class), anyString()))
-                    .thenReturn(wholeZipPrefixPage());
+            stubPagedZipPrefixes(wholeZipPrefixPopulation());
 
-            MvcResult result = mockMvc
-                    .perform(authorisedGet(AddressLookupController.ZIP_PREFIX_PATH))
-                    .andExpect(status().isOk())
-                    .andReturn();
+            Walk walk = walkEveryPage(AddressLookupController.ZIP_PREFIX_PATH);
 
-            JsonNode items = bodyOf(result).get("items");
-            assertThat(items.size()).isEqualTo(SEEDED_ZIP_PREFIXES);
             List<String> emitted = new ArrayList<>();
-            for (JsonNode row : items) {
+            for (JsonNode row : walk.items()) {
                 emitted.add(row.get("stateZipCd").stringValue());
             }
+
+            assertThat(emitted).hasSize(SEEDED_ZIP_PREFIXES);
+            assertThat(new LinkedHashSet<>(emitted))
+                    .as("no page boundary may repeat a pair, which an inclusive seek would do")
+                    .hasSize(SEEDED_ZIP_PREFIXES);
+            assertThat(emitted)
+                    .as("the browse publishes ascending, and a walk across pages must stay ascending")
+                    .isSorted();
             assertThat(emitted).contains(FIRST_ZIP_PREFIX, LAST_ZIP_PREFIX);
             assertThat(emitted.get(0)).isEqualTo(FIRST_ZIP_PREFIX);
             assertThat(emitted.get(emitted.size() - 1)).isEqualTo(LAST_ZIP_PREFIX);
+            assertThat(walk.pages())
+                    .as("240 rows at a published width of 20 is exactly 12 full pages")
+                    .isEqualTo(12);
+            assertThat(walk.fullPages())
+                    .as("every page is full, and the walk must still end after the twelfth")
+                    .isEqualTo(12);
         }
 
         /**
@@ -1019,16 +1273,12 @@ class LookupControllerTest {
         @Test
         @DisplayName("every code carries one of exactly two classifications and none is absent")
         void theClassificationIsTotalOverTheSurface() throws Exception {
-            when(lookups.listAreaCodes(any(LookupPageRequest.class), anyString()))
-                    .thenReturn(wholeAreaCodePage());
+            stubPagedAreaCodes(wholeAreaCodePopulation());
 
-            MvcResult result = mockMvc
-                    .perform(authorisedGet(AddressLookupController.AREA_CODE_PATH))
-                    .andExpect(status().isOk())
-                    .andReturn();
+            Walk walk = walkEveryPage(AddressLookupController.AREA_CODE_PATH);
 
             Set<String> observedClasses = new LinkedHashSet<>();
-            for (JsonNode row : bodyOf(result).get("items")) {
+            for (JsonNode row : walk.items()) {
                 assertThat(row.has("codeClass"))
                         .withFailMessage("an area code reached the surface with no classification, "
                                 + "which the partition forbids")
@@ -1041,6 +1291,9 @@ class LookupControllerTest {
                 observedClasses.add(codeClass.stringValue());
             }
 
+            assertThat(walk.items())
+                    .as("the partition is total over the WHOLE population, so every page is read")
+                    .hasSize(SEEDED_AREA_CODES);
             assertThat(observedClasses).containsExactlyInAnyOrder(
                     PhoneAreaCodeResponse.CodeClass.GENERAL_PURPOSE.wireValue(),
                     PhoneAreaCodeResponse.CodeClass.EASILY_RECOGNISABLE.wireValue());
@@ -1054,17 +1307,13 @@ class LookupControllerTest {
         @Test
         @DisplayName("the two classes are disjoint and sum to the master list")
         void theTwoClassesAreDisjointAndSumToTheMasterList() throws Exception {
-            when(lookups.listAreaCodes(any(LookupPageRequest.class), anyString()))
-                    .thenReturn(wholeAreaCodePage());
+            stubPagedAreaCodes(wholeAreaCodePopulation());
 
-            MvcResult result = mockMvc
-                    .perform(authorisedGet(AddressLookupController.AREA_CODE_PATH))
-                    .andExpect(status().isOk())
-                    .andReturn();
+            Walk walk = walkEveryPage(AddressLookupController.AREA_CODE_PATH);
 
             Set<String> general = new LinkedHashSet<>();
             Set<String> easilyRecognisable = new LinkedHashSet<>();
-            for (JsonNode row : bodyOf(result).get("items")) {
+            for (JsonNode row : walk.items()) {
                 String areaCd = row.get("areaCd").stringValue();
                 if (PhoneAreaCodeResponse.CodeClass.GENERAL_PURPOSE.wireValue()
                         .equals(row.get("codeClass").stringValue())) {
@@ -1472,8 +1721,14 @@ class LookupControllerTest {
         @Test
         @DisplayName("an invented re-entry or turn-count parameter steers nothing")
         void anInventedReEntryParameterSteersNothing() throws Exception {
+            // WHY : Refactoring Rationale: the page stubbed here is ONE page of the published width, and
+            //       it used to be all fifty-six seeded codes in a single page. That page cannot exist --
+            //       the browse publishes twenty rows and the schema declares the same as its maximum --
+            //       and nothing in this case needs a whole domain: what it compares is two bodies for the
+            //       same request. A page a deployment could return is the correct fixture, and the
+            //       whole-domain property now lives in the walk the domain cases perform.
             when(lookups.listStates(any(LookupPageRequest.class), anyString()))
-                    .thenReturn(statePage(SEEDED_STATE_CODES, false));
+                    .thenReturn(statePage(SEEDED_STATE_CODES.subList(0, PAGE_WIDTH), true));
 
             MvcResult plain = mockMvc
                     .perform(authorisedGet(AddressLookupController.STATE_PATH))
@@ -1517,10 +1772,26 @@ class LookupControllerTest {
      * <p>Assumptions: of the content elements the user rule enumerates, only Purpose applies to a type
      * declaration, so the other three are inapplicable here rather than omitted.</p>
      */
-    @Configuration(proxyBeanMethods = false)
-    @EnableWebMvc
+    // WHY : Refactoring Rationale: this is a @TestConfiguration and not a plain @Configuration, and the
+    //       difference is load-bearing rather than stylistic. This module now carries the Spring Boot MVC
+    //       test slice, and a slice component-scans from the application package -- which is this package's
+    //       own root -- while its include filter admits any WebMvcConfigurer it finds. A plain
+    //       @Configuration declared here therefore leaked into every sibling slice's context and collided
+    //       with the beans that slice declared for itself; the first symptom was a duplicate clock
+    //       definition reported against a class in a different file from the failing test.
+    //       @TestConfiguration carries @TestComponent, which the test type-exclude filter removes from
+    //       component scanning, while explicit registration and explicit import both still work -- which is
+    //       how the case that needs this class obtains it.
+    // WHY : Assumptions: the class is FINAL, which keeps the framework from ALSO reporting it as an
+    //       ignored default configuration class. Default-configuration detection admits only a static,
+    //       non-private, non-final nested class, and the cases here live in @Nested groups, for which that
+    //       detection is skipped entirely -- so the framework would otherwise log that it had found this
+    //       class and ignored it. Marking it final states in the type system that explicit registration is
+    //       the route being used, and proxyBeanMethods = false already declines the subclass that would
+    //       have needed the type to be extensible.
+    @TestConfiguration(proxyBeanMethods = false)
     @EnableWebSecurity
-    static class DispatcherWiring {
+    static final class DispatcherWiring {
 
         /**
          * Supplies the fixed clock the advice and the refusal renderers stamp every document from.
@@ -1533,13 +1804,18 @@ class LookupControllerTest {
         }
 
         /**
-         * Supplies the stand-in decoder the resource-server filter resolves a presented token with.
+         * Publishes the class's stand-in decoder, which the resource-server filter resolves a token with.
          *
-         * @return a stand-in for the token decoder, with no stubbing applied; never {@code null}
+         * <p>Assumptions: the ONE instance the class holds is published rather than a fresh one built
+         * here, so the helper that stubs a decoded token and the filter that consumes it are looking at
+         * the same object. Two instances would leave every authority case asserting against a decoder
+         * nobody had stubbed.</p>
+         *
+         * @return the class's stand-in for the token decoder; never {@code null}
          */
         @Bean
         JwtDecoder jwtDecoder() {
-            return mock(JwtDecoder.class);
+            return jwtDecoder;
         }
 
         /**
@@ -1570,36 +1846,23 @@ class LookupControllerTest {
         }
 
         /**
-         * Supplies the stand-in for the one collaborator the controller holds.
+         * Publishes the class's stand-in for the one collaborator the controller holds.
          *
-         * @return a stand-in for the address-lookup service; never {@code null}
+         * <p>Refactoring Rationale: the controller itself is no longer declared here. It used to be, and
+         * that was the reason a component scan which stopped finding it could not fail this class: the
+         * context held a hand-built instance whatever the scan did. The slice now obtains it by scanning
+         * the deployed application package, so only its collaborator is substituted.</p>
+         *
+         * <p>Refactoring Rationale: the shared advice is no longer declared here either. It reaches the
+         * slice through the imported shared auto-configuration, the same route a deployed task receives
+         * it by, so a status assertion below now rests on the deployed registration rather than on a bean
+         * method in this file.</p>
+         *
+         * @return the class's stand-in for the address-lookup service; never {@code null}
          */
         @Bean
         AddressLookupService addressLookupService() {
-            return mock(AddressLookupService.class);
-        }
-
-        /**
-         * Supplies the deployed controller over the stand-in service.
-         *
-         * @param lookups the stand-in service the handlers delegate to; must not be {@code null}
-         * @return the controller under test; never {@code null}
-         */
-        @Bean
-        AddressLookupController addressLookupController(AddressLookupService lookups) {
-            return new AddressLookupController(lookups);
-        }
-
-        /**
-         * Supplies the shared advice, which is what renders every refusal this class asserts on.
-         *
-         * @param clock the clock the rendered documents read their instant from; must not be
-         *     {@code null}
-         * @return the one advice of this migration; never {@code null}
-         */
-        @Bean
-        GlobalExceptionHandler globalExceptionHandler(Clock clock) {
-            return new GlobalExceptionHandler(clock);
+            return lookups;
         }
     }
 }

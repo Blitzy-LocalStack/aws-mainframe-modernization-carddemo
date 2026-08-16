@@ -26,6 +26,8 @@ import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminAddUse
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminCreateUserRequest;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminCreateUserResponse;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminDeleteUserRequest;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminRemoveUserFromGroupRequest;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminUserGlobalSignOutRequest;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AttributeType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.MessageActionType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.NotAuthorizedException;
@@ -563,6 +565,89 @@ class CognitoUserProvisioningServiceTest {
         verify(this.provider).adminDeleteUser(delete.capture());
         assertThat(delete.getValue().userPoolId()).isEqualTo(POOL_ID);
         assertThat(delete.getValue().username()).isEqualTo(USER_ID);
+    }
+
+    /**
+     * Verifies withdrawing ends every session BEFORE it deletes the account.
+     *
+     * <p>Purpose: deleting an account does not invalidate the tokens already minted from it. A resource
+     * server validates a signature and an expiry against the pool's public keys, so a deleted
+     * administrator's token goes on being accepted with its group claim intact until it expires. The
+     * sign-out is what stops the grant, and it must precede the delete because the operation is addressed
+     * by username -- after the delete there is no account left to sign out.</p>
+     */
+    @Test
+    @DisplayName("withdrawing signs the account out of every session before deleting it")
+    void withdrawEndsEverySessionBeforeDeleting() {
+        this.service.withdraw(USER_ID);
+
+        ArgumentCaptor<AdminUserGlobalSignOutRequest> signOut =
+                ArgumentCaptor.forClass(AdminUserGlobalSignOutRequest.class);
+        verify(this.provider).adminUserGlobalSignOut(signOut.capture());
+        assertThat(signOut.getValue().userPoolId()).isEqualTo(POOL_ID);
+        assertThat(signOut.getValue().username()).isEqualTo(USER_ID);
+
+        InOrder ordered = inOrder(this.provider);
+        ordered.verify(this.provider).adminUserGlobalSignOut(any(AdminUserGlobalSignOutRequest.class));
+        ordered.verify(this.provider).adminDeleteUser(any(AdminDeleteUserRequest.class));
+    }
+
+    /**
+     * Verifies the authority withdrawal removes the administrative group and THEN ends every session.
+     *
+     * <p>Purpose: every authorization decision in the fleet is made on a signed group claim, so a demotion
+     * is effective only once the account has lost the administrative group and the tokens minted under it
+     * can no longer be used or renewed.</p>
+     *
+     * <p>Assumptions: the ORDER is the assertion, and it is not interchangeable. Signing out first revokes
+     * the refresh tokens, so a renewal racing in that window would mint a fresh token still carrying the
+     * administrative group and would outlive the very revocation meant to end it. Removing the group first
+     * means every token minted from that instant carries the ordinary group.</p>
+     *
+     * <p>Assumptions: the ordinary group is NOT added here, and its absence is asserted. This method
+     * withdraws authority and nothing else; the projection that adds the replacement group is the
+     * synchronise call the write path makes after its commit, and doing both here would duplicate one
+     * decision in two places.</p>
+     */
+    @Test
+    @DisplayName("withdrawing authority removes the admin group and then ends every session")
+    void withdrawingAuthorityRemovesTheGroupThenEndsSessions() {
+        this.service.withdrawAdministrativeAuthority(USER_ID);
+
+        ArgumentCaptor<AdminRemoveUserFromGroupRequest> removal =
+                ArgumentCaptor.forClass(AdminRemoveUserFromGroupRequest.class);
+        verify(this.provider).adminRemoveUserFromGroup(removal.capture());
+        assertThat(removal.getValue().userPoolId()).isEqualTo(POOL_ID);
+        assertThat(removal.getValue().username()).isEqualTo(USER_ID);
+        assertThat(removal.getValue().groupName()).isEqualTo(ADMIN_GROUP);
+
+        InOrder ordered = inOrder(this.provider);
+        ordered.verify(this.provider)
+                .adminRemoveUserFromGroup(any(AdminRemoveUserFromGroupRequest.class));
+        ordered.verify(this.provider).adminUserGlobalSignOut(any(AdminUserGlobalSignOutRequest.class));
+
+        verify(this.provider, never()).adminAddUserToGroup(any(AdminAddUserToGroupRequest.class));
+        verify(this.provider, never()).adminDeleteUser(any(AdminDeleteUserRequest.class));
+    }
+
+    /**
+     * Verifies a withdrawal of authority the pool refuses propagates rather than reporting success.
+     *
+     * <p>Assumptions: nothing is swallowed here, unlike the account withdrawal's absent-account exemption.
+     * A demotion whose group removal or sign-out could not be applied has taken no authority away, and the
+     * write path depends on that failure reaching it: it is what rolls the row back rather than committing
+     * a demotion the provider never accepted.</p>
+     */
+    @Test
+    @DisplayName("a refused authority withdrawal propagates rather than reporting success")
+    void aRefusedAuthorityWithdrawalPropagates() {
+        when(this.provider.adminRemoveUserFromGroup(any(AdminRemoveUserFromGroupRequest.class)))
+                .thenThrow(NotAuthorizedException.builder().message("refused").build());
+
+        assertThatThrownBy(() -> this.service.withdrawAdministrativeAuthority(USER_ID))
+                .isInstanceOf(NotAuthorizedException.class);
+
+        verify(this.provider, never()).adminUserGlobalSignOut(any(AdminUserGlobalSignOutRequest.class));
     }
 
     /**

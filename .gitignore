@@ -200,6 +200,21 @@ build/
 #   what makes `terraform init` reproducible, so the slash is load-bearing.
 .terraform/
 
+# Built deployment packages for the operational Lambda functions.
+# Assumptions: these are BUILD OUTPUT, produced from the reviewed sources beside them
+#   by infra/lambda/build_packages.py. The sources are the deliverable; the archive is
+#   a derived artifact, and each environment root reads it through
+#   `aws_lambda_function.filename`.
+# Alternatives Considered: committing the three archives, which would let a plan run
+#   with no build step. Rejected because a committed archive hides reviewed source
+#   behind an opaque binary -- a reader can no longer see what the function runs and a
+#   diff cannot show a change to it. Every pipeline step that plans runs the builder,
+#   and the builder is deterministic, so nothing about reproducibility depends on the
+#   archive being tracked.
+# Trade-offs: the directory name is matched, not the archives by extension. A bare
+#   `*.zip` rule would also ignore any archive a future deliverable legitimately ships.
+infra/lambda/dist/
+
 # Terraform state, plus every backup and workspace-suffixed variant.
 # Trade-offs: state records the resolved value of every attribute it manages, including
 #   any marked sensitive, in cleartext, and nothing encrypts it inside the working tree.
@@ -331,3 +346,32 @@ env/
 # swallow a future authored directory using the same dunder convention, and the
 # point of naming this one path is that its contents are known to be disposable.
 ui/src/__documentation_gate_probe__/
+
+# Per-run browser-validation artifacts. The platform's headless-Chrome runner
+# writes its screenshots and screen recordings into these two directories inside
+# the working tree, which is how a runtime check reports what it saw -- a sign-on
+# flow reaching the admin menu, a refusal rendering its catalogued sentence.
+# Assumptions: `blitzy/documentation/` is deliberately NOT covered. That path
+# holds an authored, tracked document, so the two evidence directories are named
+# individually rather than ignoring `blitzy/` wholesale, which would silently
+# untrack it.
+# Trade-offs: the evidence is then not preserved by version control, and that is
+# the right trade. A single run deposits tens of megabytes of PNG and WEBM whose
+# value expires with the check that produced it, the runner is shared so a
+# directory can hold another run's captures as well, and a binary artifact
+# committed once stays in the history for good. What a run CONCLUDED belongs in
+# its written report, which is text and is reviewable; what it LOOKED LIKE is
+# disposable.
+blitzy/screenshots/
+blitzy/screen_recordings/
+
+# WHY : Assumptions: the per-run evidence directory is named here for exactly the
+# reason the two directories above are, and it is listed separately because it holds
+# TEXT rather than binaries -- the logs, scratch inputs and deliberately corrupted
+# fixtures a runtime check writes while it works. Being text made it look committable
+# in a way a PNG never does, and a `git add -A` during a wide edit swept a hundred of
+# them into the index; the rule closes that path rather than relying on the next
+# person noticing. Trade-offs: identical to the two above. What a run CONCLUDED
+# belongs in its written report; the scratch it produced on the way expires with the
+# check, and one of those files is a corrupted extract that exists to be rejected.
+blitzy/qa-evidence/

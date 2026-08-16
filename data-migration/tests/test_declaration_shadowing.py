@@ -33,7 +33,8 @@ Alternatives Considered:
     equality and permitting an exact duplicate as harmless. Rejected outright: an exact
     duplicate is the state this defect was FOUND in and the state it is least harmful in, so
     permitting it means the gate only fires once the copies have already diverged. (4)
-    Extending ``tests/test_docstring_gate.py``, which already walks both trees with ``ast``.
+    Extending ``tests/test_docstring_gate.py``, which already walks these two trees -- and
+    ``config/rule1`` besides -- with ``ast``.
     Rejected because that module is named and documented for docstring presence, and a file
     whose name understates what it enforces is the failure this checkpoint is about.
 

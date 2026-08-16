@@ -130,7 +130,7 @@ import software.amazon.awssdk.services.sqs.SqsClient;
  * its own owner in this package, enumerated in the charter at {@code package-info.java} -- and it
  * holds no batch concern at all. Chunk-oriented jobs belong to {@code batch-service}: the batch
  * starter is version-managed centrally but is deliberately not declared by this module, which
- * {@code services/account-service/pom.xml} records in prose at L682, so the framework types such a
+ * {@code services/account-service/pom.xml} records in prose at L673, so the framework types such a
  * class would reference are absent from the compile classpath and the omission is enforced by the
  * compiler rather than by agreement. The shared kernel's correlation filter is likewise not
  * registered here; it is an HTTP concern and its identifier is the same round-trip token this flow

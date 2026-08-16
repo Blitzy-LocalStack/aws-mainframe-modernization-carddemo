@@ -29,12 +29,18 @@ data "aws_caller_identity" "current" {}
 locals {
   health_check_path = "/actuator/health"
   parameter_prefix  = "/${var.name_prefix}"
-  # WHY : Assumptions: the name the internal listeners are certified for is an
-  #       input when the operator has a private zone for it and a composed default
-  #       otherwise. The composed form is deliberately under `.internal`, which is
-  #       not a resolvable public suffix, so a self-signed certificate for it cannot
-  #       be mistaken for one that would be trusted anywhere outside this VPC.
-  internal_service_dns_name = coalesce(var.internal_service_domain_name, "${var.name_prefix}-${var.environment}.services.internal")
+  # WHY : Refactoring Rationale: this read
+  #       `coalesce(var.internal_service_domain_name, "<prefix>-<env>.services.internal")`
+  #       and the note above it explained when the composed `.internal` default would
+  #       be selected. It never could be. That variable is declared `nullable = false`
+  #       with NO default, so Terraform demands a value and refuses null, and its
+  #       validation regex additionally refuses the empty string that is the only other
+  #       input `coalesce` would skip. The fallback was therefore unreachable, and the
+  #       rationale described a behaviour this root does not have -- which is worse than
+  #       no comment, because a reader planning a deployment without a private zone
+  #       would have believed a default existed. The alias is now the input itself, and
+  #       the requirement is visible at the point the value is read.
+  internal_service_dns_name = var.internal_service_domain_name
 
   # WHY : Assumptions: authorization-service reaches the account context over the
   #       INTERNAL load balancer at the same name the listener certificate is issued
@@ -48,7 +54,11 @@ locals {
   #       review, and two separately-typed values would instead make an ordinary
   #       deployment fail on a transcription difference while still admitting a
   #       coordinated edit of both.
-  account_context_origin = "https://${coalesce(var.internal_service_domain_name, "${var.name_prefix}-${var.environment}.services.internal")}"
+  # WHY : Refactoring Rationale: this carried the same unreachable `coalesce` as the
+  #       alias above, spelled out a second time. Both are gone, and this now composes
+  #       from the same required input -- so there is one place the internal name comes
+  #       from and no expression here that implies a default exists.
+  account_context_origin = "https://${var.internal_service_domain_name}"
 
   # WHY : Assumptions: the reference context answers on the SAME internal origin, because every
   #       migrated service sits behind the one internal load balancer and is addressed by path.
@@ -60,48 +70,26 @@ locals {
   #       of mismatch a later reader corrects in the wrong direction.
   reference_context_origin = local.account_context_origin
 
-  # WHY : Assumptions: the telemetry sidecar's image is pulled from THIS
-  #       deployment's registry, not from the public registry the upstream image
-  #       is published in. infra/modules/network enumerates the application
-  #       tier's egress rather than allowing 0.0.0.0/0, and the public registry
-  #       has neither an interface endpoint nor a managed prefix list, so a task
-  #       pointed at the upstream reference cannot pull its sidecar -- and because
-  #       infra/modules/ecs-service attaches that sidecar to every workload by
-  #       default, no task in this environment would start while the plan reported
-  #       nothing. infra/modules/ecr provisions the mirror repository and
-  #       .github/workflows/deploy.yml copies the pinned upstream image into it.
-  # WHY : Assumptions: the tag is the UPSTREAM version and not this release's
-  #       commit tag. The mirror holds a third-party artifact this repository does
-  #       not build, so tagging it with a CardDemo commit would assert a
-  #       provenance it does not have and would oblige a re-push on every release
-  #       of unrelated code. Trade-offs: a collector upgrade is therefore two
-  #       coordinated edits -- this value and the mirror push -- which is the same
-  #       friction the pinned upstream reference already carried and is what keeps
-  #       an upgrade a reviewed change rather than a silent one.
-  # WHY : Refactoring Rationale: advanced from v0.48.0, which upstream superseded
-  #       with v0.49.0 -- verified against the publishing registry rather than a
-  #       release note: the repository's tag list carries 84 tags of which the
-  #       highest semantic version is v0.49.0, and `latest` is the only non-semver
-  #       entry. Running a superseded collector is a supply-chain position rather
-  #       than a preference, because a sidecar attached to every workload is the one
-  #       container in this estate whose version nothing else compensates for.
-  # WHY : Assumptions: the tag names the artifact the deployment MIRRORS, and the
-  #       digest that pins it lives in .github/workflows/deploy.yml beside the pull
-  #       that resolves it. This value and that one are asserted equal by a gate in
-  #       .github/workflows/infra-ci.yml, because a version advanced here and not
-  #       there would mirror one release and register another.
-  telemetry_collector_image_tag  = "v0.49.0"
-  telemetry_collector_repository = "aws-otel-collector"
+  # WHY : Refactoring Rationale: two locals stood here, telemetry_collector_image_tag
+  #       and telemetry_collector_repository, naming the version and the mirror
+  #       repository of an AWS Distro for OpenTelemetry collector sidecar. Both are
+  #       withdrawn with the sidecar itself; the argument is recorded at the
+  #       ecs-service module block below, which is where the inputs they fed used to
+  #       be passed.
 
-  # WHY : Assumptions: an operator-issued ALB certificate is used when supplied and
-  #       the self-signed one otherwise. Both are terminated by the INTERNAL load
-  #       balancer, which publishes no public listener, so the trust decision is the
-  #       VPC's rather than a browser's -- which is what makes the self-signed
-  #       fallback acceptable here and unacceptable at the CloudFront edge, where
-  #       infra/modules/cloudfront-spa requires a real certificate unconditionally.
-  #       Trade-offs: supplying a certificate means an apply cannot silently fall
-  #       back to a self-signed leaf in an environment that has a real one, which is
-  #       the failure this input exists to prevent.
+  # WHY : Refactoring Rationale: this described a self-signed ALB certificate used
+  #       "when an operator-issued one is not supplied". There is no such fallback and
+  #       there is no longer a self-signed certificate resource in this root at all --
+  #       the generator was deleted, each task now mints its own leaf, and
+  #       var.alb_certificate_arn is `nullable = false` with no default, so an
+  #       operator-issued ARN is the only value this can ever hold. The note is
+  #       withdrawn rather than reworded because every clause in it rested on a
+  #       fallback that cannot occur, including its Trade-offs sentence about an apply
+  #       "silently falling back".
+  # WHY : Assumptions: the certificate is terminated by the INTERNAL load balancer,
+  #       which publishes no public listener, so the trust decision is the VPC's rather
+  #       than a browser's. That remains the reason this listener and the CloudFront
+  #       edge take their certificates from two separate required inputs.
   alb_certificate_arn = var.alb_certificate_arn
   jdbc_url            = "jdbc:postgresql://${module.aurora.writer_endpoint}:${module.aurora.port}/${module.aurora.database_name}"
   # WHY : Assumptions: the SPA's public origin is its FIRST alias, not the
@@ -125,6 +113,20 @@ locals {
   #       name the same path. A pattern without the prefix can never match a request
   #       forwarded from that edge, which is why infra/modules/alb validates it rather
   #       than accepting whatever a root supplies.
+  # WHY : Assumptions: these patterns carry BUSINESS operations only, and the omission
+  #       of each service's own API-description addresses is deliberate rather than an
+  #       oversight. Two contexts -- card and reference -- serve a generated document,
+  #       the committed contract and an interactive view at /v3/api-docs,
+  #       /<service>-api.yaml and /swagger-ui.html, and their filter chains grant those
+  #       addresses to a token carrying either group. None of them is listed here, so a
+  #       request for one at the public edge is answered by the load balancer's default
+  #       action: they are reachable from inside the VPC only. That is the intended
+  #       posture -- an interactive request-issuing console at the internet edge is a
+  #       wider surface than AAP 0.4.1.9 accepts for a document already committed to
+  #       this repository under services/*/src/main/resources/openapi/ -- and the
+  #       services assert their half of it, so the two cannot drift apart silently.
+  #       See the reachability rationale on SecurityConfig.DOCUMENTATION_PATHS and
+  #       ContractPublicationTest in each of those two modules.
   online_services = {
     # WHY : Refactoring Rationale: auth-service carries TWO patterns, not four. An
     #       earlier revision added `/api/v1/users` and `/api/v1/users/*` on the
@@ -389,14 +391,47 @@ locals {
     if name != "data-migration"
   }
 
-  # WHY : Assumptions: the eight RUNTIME service login roles are named by
-  #       data-migration/sql/V0__schemas_and_roles.sql and created there without a
-  #       password; this list is the same inventory in the same order, used to build
-  #       the ETL's alternate-login map and nothing else. It is written out rather
+  # WHY : Assumptions: the NINE login identities in V0's service_roles array -- the
+  #       eight bounded-context service roles plus the read-only verification
+  #       identity -- are named by data-migration/sql/V0__schemas_and_roles.sql and
+  #       created there without a password; this list is the same inventory in the
+  #       same order, used to build the ETL's alternate-login map and nothing else. It is written out rather
   #       than derived from local.workloads because reporting and batch share no
   #       one-to-one mapping with a role in that structure -- data-migration has no
   #       role at all -- so deriving it would need a filter that says less than the
   #       list does.
+  # WHY : ⚠️ Refactoring Rationale: the fourth entry read carddemo_transaction, which
+  #       V0 declares nowhere. The role for the transaction service's schema is
+  #       carddemo_ledger, because the schema is named ledger rather than transaction
+  #       -- V0's service_roles array names it at L252 and
+  #       carddemo_migration.config.ROLE_FOR_SCHEMA maps "ledger" to it. The cost was
+  #       not cosmetic: this list becomes the ETL's alternate-login ALLOWLIST, so a
+  #       name absent from the database made the real rotated ledger login
+  #       unrecognised and refused, while the invented name matched nothing and so
+  #       raised no error of its own. Nothing in an apply could have caught it, which
+  #       is why a closure gate against V0 now guards the list -- see the
+  #       "database role inventory" step in .github/workflows/infra-ci.yml.
+  #       Alternatives Considered: deriving the list from local.workloads and mapping
+  #       the transaction workload to its schema name, which is what would have made
+  #       the drift impossible in the first place. Rejected for the reason already
+  #       recorded above -- the mapping is not one-to-one for reporting, batch or
+  #       data-migration -- so the list stays explicit and the GATE, rather than the
+  #       expression, is what holds it to V0.
+  # WHY : ⚠️ Refactoring Rationale: carddemo_verifier was missing, and it is the SAME
+  #       defect as the one above rather than a separate concern. The ETL resolves the
+  #       verifier's credential through the identical resolver every other role goes
+  #       through -- carddemo_migration.config.verification_settings delegates to
+  #       _resolve_settings_for_role, whose contract refuses a secret whose user name
+  #       is "neither VERIFIER_ROLE nor an alternate allowlisted for it" -- so a
+  #       rotated verifier credential was refused for exactly the reason a rotated
+  #       ledger credential was. It was invisible for the same reason too: an absent
+  #       entry raises nothing until a rotation happens.
+  #       Assumptions: the SEVEN migrator logins stay absent even though V0 declares
+  #       them as credentialed identities in its section-6 array, because that array
+  #       is a different inventory answering a different question -- which roles need
+  #       a password applied -- while this list answers which roles the ETL itself
+  #       connects as. The gate therefore closes against V0's FIRST service_roles
+  #       array, the role-creation one, and not the section-6 sixteen.
   # WHY : Assumptions: the SEVEN carddemo_<context>_migrator logins V0 also creates
   #       are deliberately absent from this list, because the list feeds only the
   #       ETL's alternate-login allowlist and the ETL never connects as a migrator
@@ -410,11 +445,12 @@ locals {
     "carddemo_auth",
     "carddemo_account",
     "carddemo_card",
-    "carddemo_transaction",
+    "carddemo_ledger",
     "carddemo_reference",
     "carddemo_batch",
     "carddemo_authorization",
     "carddemo_reporting",
+    "carddemo_verifier",
   ]
 
   database_workload_names = toset([
@@ -522,6 +558,22 @@ locals {
     [module.s3_datasets.dataset_prefixes["tranrept"]],
   )
 
+  # WHY : Assumptions: this is the batch chain's object-key surface, and it is exactly
+  #   the TEN generation families module.s3_datasets publishes -- not the bucket. The
+  #   nightly chain writes and re-reads generations (the backup, the combined file, the
+  #   reject stream, the statement and report inputs it stages) and touches nothing
+  #   else in the bucket. The three non-generation reporting prefixes and the
+  #   authorization extract prefix are deliberately absent: they belong to two other
+  #   workloads whose own roles above grant them, and a batch task that could read them
+  #   would be able to read every statement and every pending-authorization extract in
+  #   the estate.
+  # WHY : Trade-offs: derived from the module's published map rather than written out
+  #   here, so adding a generation family to that module extends this grant with no edit
+  #   while a prefix that is not a generation family stays outside it. Writing the ten
+  #   names here instead would be a second inventory to keep in step, and the copy that
+  #   goes stale is the one nothing validates.
+  batch_generation_key_prefixes = values(module.s3_datasets.dataset_prefixes)
+
   # Assumptions: ONE prefix, and it is the prefix the authorization-extract state
   #   machine composes its two destination keys under. It is declared here rather than
   #   written into the policy document below so that the grant and the machine's key
@@ -535,37 +587,55 @@ locals {
   #   this role reaches nothing else in a bucket that also holds every nightly
   #   transaction generation.
   authorization_extract_key_prefix = "authorization/extract/"
+
+  # Assumptions: the TEN generation-family prefixes, taken from the module's own
+  #   `dataset_prefixes` output rather than restated, so this list cannot name a
+  #   family the module does not provision or miss one it does. Each value is the
+  #   `<domain>/<dataset>/` form; the `dt=` and `gen=` segments below it are chosen
+  #   per run by the writer and no policy can enumerate them.
+  # Assumptions: this is exactly the set the retention function can legitimately
+  #   reach. infra/lambda/dataset_generation_retention.py derives its working prefix
+  #   with `_family_prefix`, which returns everything before the `dt=` segment and
+  #   therefore returns one of these ten values or None -- a non-generation key is
+  #   ignored rather than pruned. Granting these ten is granting what the function
+  #   does, and nothing wider.
+  # Trade-offs: a prefix condition and an object-ARN restriction are BOTH applied to
+  #   the retention role, for the reason already recorded against
+  #   `reporting_object_key_prefixes` above -- an object ARN cannot bound
+  #   `ListBucket`, whose resource is the bucket itself, and an `s3:prefix` condition
+  #   does not apply to `DeleteObject`, whose scope is expressed only by the object
+  #   ARN. Applying one and not the other would leave the other call unbounded.
+  dataset_generation_key_prefixes = values(module.s3_datasets.dataset_prefixes)
 }
 
 # -----------------------------------------------------------------------------
 # Lambda deployment packages.
 # -----------------------------------------------------------------------------
 
-data "archive_file" "online_write_flag" {
-  type        = "zip"
-  source_file = "${path.root}/../../lambda/online_write_flag.py"
-  output_path = "${path.root}/.terraform/online-write-flag.zip"
-}
+# WHY : ⚠️ Refactoring Rationale: three archive-provider data sources stood here and
+#       built these packages during plan, which obliged this root to declare
+#       `hashicorp/archive`. AAP section 0.6.1.4 fixes the provider inventory at the
+#       Terraform CLI, `hashicorp/aws` and `hashicorp/random`, and a comment recording
+#       the extra provider does not amend a frozen plan. The packages are now built by
+#       infra/lambda/build_packages.py -- standard library only, no provider -- and
+#       consumed here through the AWS provider alone.
+# WHY : Assumptions: `filebase64sha256` reads the SAME bytes Lambda receives, so the
+#       hash still changes exactly when a handler changes and never otherwise. That
+#       property is what the builder's fixed timestamps exist to preserve; without them
+#       every plan would show all four functions being updated.
+# WHY : Trade-offs: a plan now requires the packages to exist, and they are ignored by
+#       git rather than committed. A plan run without the build step fails while
+#       resolving the hash and names the absent path, which is actionable; committing
+#       the archives instead would hide reviewed source behind an opaque binary. Both
+#       pipeline plan steps and docs/runbooks/deploy.md run the builder first.
+locals {
+  lambda_package_directory = "${path.root}/../../lambda/dist"
 
-data "archive_file" "database_admin" {
-  type        = "zip"
-  output_path = "${path.root}/.terraform/database-admin.zip"
-
-  source {
-    content  = file("${path.root}/../../lambda/database_admin.py")
-    filename = "database_admin.py"
+  lambda_packages = {
+    online_write_flag = "${local.lambda_package_directory}/online-write-flag.zip"
+    database_admin    = "${local.lambda_package_directory}/database-admin.zip"
+    dataset_retention = "${local.lambda_package_directory}/dataset-generation-retention.zip"
   }
-
-  source {
-    content  = file("${path.root}/../../../data-migration/sql/V0__schemas_and_roles.sql")
-    filename = "V0__schemas_and_roles.sql"
-  }
-}
-
-data "archive_file" "dataset_retention" {
-  type        = "zip"
-  source_file = "${path.root}/../../lambda/dataset_generation_retention.py"
-  output_path = "${path.root}/.terraform/dataset-generation-retention.zip"
 }
 
 # -----------------------------------------------------------------------------
@@ -636,6 +706,26 @@ module "kms" {
   #       narrowed to this one delivery source.
   cloudwatch_log_delivery_source_arns = [module.cloudfront_spa.log_delivery_source_arn]
 
+  # WHY : ⚠️ Assumptions: this closes the failure path of the batch bracket, and it is
+  #       carried here as well as in infra/envs/dev because AAP §0.4.1.6 confines
+  #       dev/prod differences to sizing and retention -- a key grant present in one
+  #       environment and absent in the other is exactly the divergence that makes a
+  #       production apply behave differently from the rehearsed one. The two EventBridge
+  #       RULES module.step_functions declares, named `<prefix>-<environment>-batch-*`,
+  #       deliver to a dead-letter queue encrypted with module.kms.sqs_key_arn, and an
+  #       EventBridge Rule calls KMS as `events.amazonaws.com`, which the key's scheduler
+  #       grant does not cover. Without this input the queue that records a lost
+  #       bracket release rejects the write with a KMS access denial and the online
+  #       read-only flag stays set with nothing saying why.
+  # WHY : Assumptions: a PATTERN rather than the exact rule ARNs, because those rules are
+  #       created by a module that consumes this key and feeding their ARNs back would
+  #       close a dependency cycle. The kms module additionally requires the calling
+  #       account and kms:ViaService for this region's queue service, and refuses a
+  #       pattern whose account or region is a wildcard.
+  sqs_key_eventbridge_rule_source_arn_patterns = [
+    "arn:${data.aws_partition.current.partition}:events:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:rule/${var.name_prefix}-${var.environment}-batch-*",
+  ]
+
   # WHY : Alternatives Considered: also wiring cloudwatch_log_group_arns and
   #       sns_topic_arns, which would narrow those two grants from an
   #       account-and-region pattern to exact ARNs. REJECTED on an apply-ordering
@@ -681,11 +771,30 @@ data "aws_iam_policy_document" "spa_publication_assume_role" {
   }
 }
 
+# WHY : Assumptions: this role is assumed from OUTSIDE the account by a workflow,
+#       which makes the boundary matter more here than on an in-account role and not
+#       less. Its inline document is scoped to the SPA bucket and the distribution,
+#       but the boundary is what holds if that document is ever widened by an edit
+#       that looks local -- the trust policy already lets a repository outside this
+#       account assume it.
 resource "aws_iam_role" "spa_publication" {
   name                 = "${var.name_prefix}-${var.environment}-spa-publication"
   description          = "OIDC-assumed GitHub Actions role that publishes only the ${var.environment} SPA bundle."
   assume_role_policy   = data.aws_iam_policy_document.spa_publication_assume_role.json
   max_session_duration = 3600
+
+  # WHY : ⚠️ Refactoring Rationale: this role carried no boundary while
+  #       var.permissions_boundary_arn was described as applying to "every role this
+  #       deployment creates". Of all ten roles that description over-claimed, this is
+  #       the one where the gap mattered most: it is assumed from OUTSIDE the account by
+  #       a GitHub Actions workflow through OIDC, so its ceiling is the only thing
+  #       standing between a compromised or mis-edited workflow and the rest of the
+  #       account. The boundary is evaluated in addition to its inline policy, so a
+  #       statement the boundary does not permit is denied even if that policy allows it.
+  # WHY : Assumptions: the short session duration and the subject-scoped trust policy are
+  #       not substitutes for it. Both bound WHO may assume the role and for how long;
+  #       neither bounds what the role may DO once assumed.
+  permissions_boundary = var.permissions_boundary_arn
 }
 
 data "aws_iam_policy_document" "spa_publication" {
@@ -710,6 +819,26 @@ data "aws_iam_policy_document" "spa_publication" {
       "kms:GenerateDataKey*",
       "kms:ReEncrypt*",
     ]
+    # WHY : Assumptions: kms:ViaService confines this key to use made THROUGH S3 in this
+    #       Region, so a principal that reached this role cannot call Decrypt directly on
+    #       ciphertext of its own choosing -- which is the capability an unconditioned
+    #       grant on a shared key hands out.
+    # WHY : Alternatives Considered: additionally conditioning on
+    #       kms:EncryptionContext:aws:s3:arn to name the bucket. Rejected here, and the
+    #       reason is specific rather than general: with bucket keys enabled -- they are,
+    #       at infra/modules/s3-datasets/main.tf and infra/modules/cloudfront-spa/main.tf
+    #       -- S3 sets that context to the BUCKET ARN, but it sets it to the OBJECT ARN
+    #       when they are not, so a StringEquals here would turn a storage-configuration
+    #       change into a runtime access denial on a path that only fails when it is
+    #       used. The narrowing it would express is already enforced anyway: the object
+    #       statements in this same document name the exact ARNs and prefixes, and a KMS
+    #       grant alone reaches no object without them.
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["s3.${data.aws_region.current.region}.amazonaws.com"]
+    }
+
     resources = [module.kms.s3_key_arn]
   }
 
@@ -736,6 +865,13 @@ module "network" {
   database_port           = 5432
   flow_log_retention_days = var.log_retention_days
   flow_log_kms_key_arn    = module.kms.s3_key_arn
+
+  # WHY : Assumptions: the SAME account boundary goes to every module that creates a
+  #       role, so "every role this deployment creates" means one ceiling rather than a
+  #       per-module one. infra/modules/ecs-service has always received it; network,
+  #       step_functions and eventbridge_scheduler did not, which is why their roles were
+  #       unbounded while this root's variable description claimed otherwise.
+  permissions_boundary_arn = var.permissions_boundary_arn
 }
 
 module "ecr" {
@@ -750,128 +886,39 @@ module "ecr" {
 module "aurora" {
   source = "../../modules/aurora-postgresql"
 
-  name_prefix                  = var.name_prefix
-  environment                  = var.environment
-  isolated_subnet_ids          = module.network.isolated_data_subnet_ids
-  security_group_ids           = [module.network.data_security_group_id]
-  kms_key_arn                  = module.kms.aurora_key_arn
-  secrets_kms_key_arn          = module.kms.secrets_key_arn
-  engine_version               = var.aurora_engine_version
-  parameter_group_family       = var.aurora_parameter_group_family
-  port                         = module.network.database_port
-  min_capacity                 = var.aurora_min_capacity
-  max_capacity                 = var.aurora_max_capacity
-  seconds_until_auto_pause     = var.aurora_seconds_until_auto_pause
-  backup_retention_period      = var.aurora_backup_retention_period
+  name_prefix              = var.name_prefix
+  environment              = var.environment
+  isolated_subnet_ids      = module.network.isolated_data_subnet_ids
+  security_group_ids       = [module.network.data_security_group_id]
+  kms_key_arn              = module.kms.aurora_key_arn
+  secrets_kms_key_arn      = module.kms.secrets_key_arn
+  engine_version           = var.aurora_engine_version
+  parameter_group_family   = var.aurora_parameter_group_family
+  port                     = module.network.database_port
+  min_capacity             = var.aurora_min_capacity
+  max_capacity             = var.aurora_max_capacity
+  seconds_until_auto_pause = var.aurora_seconds_until_auto_pause
+  backup_retention_period  = var.aurora_backup_retention_period
+
+  # WHY : Assumptions: these two windows are coupled to var.batch_schedule_expression, which
+  #       is set in a different module call (module.eventbridge_scheduler below), so the
+  #       relationship is invisible from either site alone. It is asserted at plan time by
+  #       terraform_data.batch_window_disjoint rather than left to a reader: the window in
+  #       which the nightly chain can be STARTED must not intersect either of these.
+  # WHY : Assumptions: what is asserted is the START separation, NOT the whole run. The
+  #       chain's own ceiling, var.state_machine_timeout_seconds, permits an execution
+  #       beginning at 02:00 to run for seventeen hours, so a long run may overlap the
+  #       backup window. That is tolerated because the snapshot stays transactionally
+  #       consistent -- nothing fails, and the only cost is that restoring it lands the
+  #       estate between posting steps, a state the baseline's nightly cycle never produced.
+  #       A chain that STARTS as a backup begins is the case worth preventing, because it
+  #       puts a fresh fan-out of loader tasks against the cluster at its least available
+  #       moment. Either value may move; they may not be moved onto each other.
   preferred_backup_window      = var.aurora_preferred_backup_window
   preferred_maintenance_window = var.aurora_preferred_maintenance_window
   deletion_protection          = var.deletion_protection
   skip_final_snapshot          = var.skip_final_snapshot
   enable_http_endpoint         = true
-}
-
-# =============================================================================
-# Internal listener material -- DELIBERATELY ABSENT from this root.
-# -----------------------------------------------------------------------------
-# WHY : Refactoring Rationale: this position held a key generator, a self-signed
-#       leaf, an imported ACM certificate and two Secrets Manager entries with
-#       their versions -- eight resources that produced ONE RSA private key, wrote
-#       it into Terraform state, imported it into ACM, copied it into Secrets
-#       Manager and injected it into every online task. Anyone able to read this
-#       environment's state file held the server private key of all eight services
-#       at once, and the comments here asserted the opposite. All eight are
-#       deleted. Each task now mints its OWN key pair and self-signed certificate
-#       at startup, in config/docker/generate-listener-material.sh, onto the task's
-#       encrypted ephemeral volume, and that material is destroyed with the task.
-#       No listener private key exists in state, in Secrets Manager, in a task
-#       definition or in plan output, and no two tasks share one.
-# WHY : Assumptions: the imported ACM certificate was already DEAD before this
-#       change. Its ARN was referenced only through
-#       `coalesce(var.alb_certificate_arn, ...)`, and var.alb_certificate_arn is
-#       `nullable = false` with no default, so the coalesce could never select it --
-#       the root created an ACM certificate on every apply that no listener ever
-#       used, while persisting its private key. Deleting it removes a resource, a
-#       cost and a key custody, and changes no behaviour.
-# WHY : Alternatives Considered: keeping the chain and generating the key with the
-#       tls provider's EPHEMERAL resource, writing it through the aws provider's
-#       write-only `secret_string_wo` and `private_key_wo` arguments. All three
-#       mechanisms exist in the pinned provider versions, and `terraform validate`
-#       still refuses the wiring: "Ephemeral values are not valid for
-#       \"private_key_pem\", because it is not a write-only attribute and must be
-#       persisted to state." The self-signed-certificate resource has no write-only
-#       attribute, so the key could be kept out of state only by giving up the
-#       certificate entirely.
-# WHY : Alternatives Considered: an AWS Private CA, so that ACM generates and holds
-#       the key. Rejected on recurring cost for one internal listener behind a
-#       private integration, and unnecessary once the tasks certify themselves. The
-#       generator script's header records the third rejected option, a Lambda that
-#       mints and imports the pair, together with the measurement of the Lambda
-#       runtime contents that rules it out.
-# =============================================================================
-
-# -----------------------------------------------------------------------------
-# Messaging HMAC key.
-# -----------------------------------------------------------------------------
-#
-# WHY : Assumptions: this key exists so that the pending-authorization queue's
-#       FIFO group identity can be a purpose-scoped opaque derivation of the card
-#       number instead of the card number itself. A group identifier is message
-#       METADATA: it sits outside the encrypted body, it is reported in queue
-#       telemetry, and it is carried into every log and metric that observes the
-#       queue -- which is exactly where ADR-008 requires an account number to be
-#       masked. docs/adr/ADR-004-messaging.md states the requirement under
-#       "Ordering is grouped by card"; the derivation and its purpose string are
-#       specified in docs/architecture/messaging-contracts.md.
-# WHY : Refactoring Rationale: this secret did not exist, and only
-#       CARDDEMO_MASK_HMAC_KEY was provisioned -- to the data-migration workload
-#       alone. authorization therefore had no key at all, so the one per-card
-#       stable value it held was the card number and the card number became the
-#       published group identity on every reply. Adding the secret here, rather
-#       than widening the mask key's distribution, is what keeps the two trust
-#       purposes separable.
-# WHY : Alternatives Considered: reusing var.mask_hmac_secret_arn for both
-#       purposes, which is one fewer secret to provision and rotate. Rejected on
-#       two counts: it would give a one-off migration workload that reads
-#       cardholder extracts the ability to compute production queue group
-#       identities, and rotating either purpose would then require a coordinated
-#       stop of an interactive consumer and a batch workload together.
-# WHY : Alternatives Considered: accepting the key as an input variable, the way
-#       var.mask_hmac_secret_arn is accepted. Rejected because an operator-supplied
-#       value has a tfvars file to be committed in, and because nothing outside
-#       this stack produces or consumes this key -- unlike the mask key, whose
-#       tags must stay stable across extract loads that may predate this root.
-#       Generating it here means the "no secrets committed" constraint holds
-#       structurally rather than by reviewer vigilance.
-# WHY : Assumptions: this is generated ONCE per environment and shared by every
-#       producer on the queue, and it is deliberately not per task or per apply in
-#       effect. The group identity must be equal for equal cards across producers
-#       and across restarts, because that equality IS the per-card ordering
-#       guarantee; a value that changed per task would scatter one card's messages
-#       across as many groups as there are running tasks and remove the ordering
-#       silently. The write-only version pinned to 1 below is what stops an
-#       unrelated plan re-issuing it.
-
-ephemeral "random_password" "messaging_hmac" {
-  # WHY : Assumptions: this is EPHEMERAL rather than a managed random_password, so
-  #       the generated key is available while the provider writes it to Secrets
-  #       Manager and is absent from Terraform state afterwards. A managed resource
-  #       retains its result in every state file and in every plan artifact, which
-  #       for key material means the state file becomes as sensitive as the secret
-  #       store it was meant to keep the material out of. This is the same control
-  #       infra/modules/secrets applies to the database credentials.
-  # WHY : Assumptions: the length is 64 printable characters, which is twice the
-  #       32-byte floor com.carddemo.common.security.OpaqueIdentifier enforces.
-  #       Sixty-four is chosen rather than exactly 32 because the Java side accepts
-  #       the value as raw text when it is not valid base64, so the character count
-  #       is the byte count -- and sitting at the floor would make any future
-  #       trimming or encoding change fail at container start.
-  #       Trade-offs: special characters are excluded. They add entropy per
-  #       character, and they are excluded because this value travels as an
-  #       environment variable through a task definition and a shell-quoting
-  #       accident on any operator path would corrupt the key silently rather than
-  #       visibly; the extra length more than compensates for the smaller alphabet.
-  length  = 64
-  special = false
 }
 
 # WHY : Assumptions: the card-selector signing key is generated here and never
@@ -887,9 +934,27 @@ ephemeral "random_password" "card_selector" {
   length  = 64
   special = false
 }
+# WHY : Refactoring Rationale: a generated messaging tokeniser secret was declared
+#       here -- an ephemeral random_password, an aws_secretsmanager_secret named
+#       messaging_hmac and its write-only version -- and injected into the
+#       authorization task as CARDDEMO_MESSAGING_HMAC_KEY. All of it is withdrawn
+#       together, because the component that read the property is deleted: the name
+#       is now read by no image, and the sibling task-definition module retired its
+#       own clause admitting it.
+# WHY : Assumptions: the whole family goes rather than just the injection. A secret
+#       provisioned and never read is a live credential with no reader and no
+#       rotation owner, which is worse than either having it wired or not having it
+#       at all -- it costs money, it appears in a secret census as though something
+#       depended on it, and the first reader to need key material would reasonably
+#       assume it was already serving someone. The purpose-secret census in this
+#       root's README moves with it.
+# WHY : Trade-offs: reintroducing a tokeniser later means a new secret and a new
+#       recovery window rather than reusing this one. Accepted: the value was never
+#       consumed, so nothing is derived from it that a later key would have to match.
+
 
 resource "aws_secretsmanager_secret" "card_selector" {
-  #checkov:skip=CKV2_AWS_57:A selector minted under one key cannot be opened under another, and services/card-service/src/main/resources/application.yml records why that matters here: a selector is a card row's stable address and must keep opening for as long as a client might hold one, unlike a pagination cursor, which names a position in one browse and is meant to expire. An unattended rotation function would therefore invalidate every selector already issued, and each single-card route a client reached from a list it still has on screen would stop resolving. Rotation is an attended procedure that reissues selectors with the deployment, documented in docs/runbooks/deploy.md, rather than an automatic one. The four sibling key secrets in this root -- the messaging HMAC key, the two per-caller internal-identity signing keys and the pagination cursor key -- each carry the same exception for the same class of reason, every one naming the runbook section that performs its own rotation. This sentence said TWO siblings, which was already short and became shorter when the single internal-identity key was split per caller.
+  #checkov:skip=CKV2_AWS_57:A selector minted under one key cannot be opened under another, and services/card-service/src/main/resources/application.yml records why that matters here: a selector is a card row's stable address and must keep opening for as long as a client might hold one, unlike a pagination cursor, which names a position in one browse and is meant to expire. An unattended rotation function would therefore invalidate every selector already issued, and each single-card route a client reached from a list it still has on screen would stop resolving. Rotation is an attended procedure that reissues selectors with the deployment, documented in docs/runbooks/deploy.md, rather than an automatic one. The five sibling key secrets in this root -- the messaging HMAC key, the two per-caller internal-identity signing keys, the pagination cursor key and the reporting-artifact key -- each carry the same exception for the same class of reason, every one naming the runbook section that performs its own rotation. This sentence said TWO siblings and then FOUR; both were short, the first because the single internal-identity key was later split per caller and the second because the reporting-artifact key was added after it, so the siblings are now enumerated rather than counted.
   name        = "${var.name_prefix}/${var.environment}/card/selector-signing-key"
   description = "Purpose-scoped key the CardDemo card service seals and opens opaque card row selectors under, in the ${var.environment} environment. Generated by this root and injected into the task as a scalar secret."
 
@@ -913,34 +978,6 @@ resource "aws_secretsmanager_secret_version" "card_selector" {
   #       key, so a silent rotation would make every list row a client still holds
   #       unopenable. Rotating deliberately means incrementing this literal, which is a
   #       visible plan change rather than a side effect.
-  secret_string_wo_version = 1
-}
-
-resource "aws_secretsmanager_secret" "messaging_hmac" {
-  #checkov:skip=CKV2_AWS_57:Rotating this key requires every producer on the pending-authorization queue to adopt the new value in the same instant, because the FIFO group identity must stay equal for equal cards across producers. An unattended rotation function would change the key for one reader at a time and split one card's in-flight messages across two groups, losing the ordering guarantee the key exists to preserve. Rotation is therefore an attended procedure documented in docs/runbooks/batch-operations.md rather than an automatic one.
-  name        = "${var.name_prefix}/${var.environment}/messaging/hmac-key"
-  description = "Purpose-scoped HMAC key the CardDemo authorization service derives pending-authorization queue group and correlation identities under, in the ${var.environment} environment. Generated by this root and injected into the task as a scalar secret. Distinct from the data-migration masking key."
-
-  kms_key_id              = module.kms.secrets_key_arn
-  recovery_window_in_days = var.secret_recovery_window_in_days
-}
-
-resource "aws_secretsmanager_secret_version" "messaging_hmac" {
-  secret_id = aws_secretsmanager_secret.messaging_hmac.id
-
-  # WHY : Assumptions: the value is written through secret_string_wo, the write-only
-  #       argument, so it reaches Secrets Manager without being recorded in state.
-  #       Pairing it with the ephemeral generator above is one control rather than
-  #       two: either half alone would still leave the key in a state file.
-  secret_string_wo = ephemeral.random_password.messaging_hmac.result
-
-  # WHY : Trade-offs: pinned to the literal 1, matching infra/modules/secrets. It is
-  #       what stops an unrelated plan rewriting the stored key merely because the
-  #       ephemeral generator produced fresh bytes -- and here that rewrite would be
-  #       worse than for a password, because a changed key changes every group
-  #       identity at once and splits in-flight messages for every card
-  #       simultaneously. Advancing it is the deliberate re-issue an attended
-  #       rotation performs.
   secret_string_wo_version = 1
 }
 
@@ -971,14 +1008,22 @@ resource "aws_secretsmanager_secret_version" "messaging_hmac" {
 #   carries no expiry, names no audience and cannot be scoped, so one capture
 #   would be a permanent credential for every internal read.
 #
-# Why it is a SECOND key rather than the messaging key above:
-#   Assumptions: the two are separate secrets and the separation is deliberate.
-#   The messaging key derives opaque queue-metadata tokens and is held by the
-#   authorization service alone; this one is a signing key deliberately shared
-#   with exactly one other service. Sharing a single value would mean that
-#   rotating the account context's trust anchor also changed every FIFO group
-#   identity in flight, and that a holder of either capability could exercise the
-#   other.
+# Why it is a SEPARATE key rather than one shared with another purpose:
+#   Assumptions: every key secret in this root is purpose-scoped, and this one is
+#   the only one deliberately shared with a second service -- its minter signs and
+#   the account service verifies, so both must hold the same bytes, which is a
+#   property of a symmetric signing key rather than a relaxation. The card selector
+#   key above is held by one service and seals a row address; sharing one value
+#   across the two would mean a holder of either capability could exercise the
+#   other, and rotating the account context's trust anchor would invalidate every
+#   card selector a client still holds.
+#   Refactoring Rationale: this heading read "a SECOND key rather than the messaging
+#   key above" and its body compared this key with a messaging HMAC key that derived
+#   queue-metadata tokens. That key is withdrawn -- nothing injected the bean it fed
+#   once the queue identities became the literal values the specification freezes --
+#   so the comparison is restated against the key that is actually above this one.
+#   The heading is now purpose-based rather than ordinal, because an ordinal counted
+#   from a list that changes is what made this sentence wrong when the list changed.
 
 # Why there are TWO keys rather than one shared by both callers:
 #   Refactoring Rationale: this was one key held by the authorization service, the
@@ -1003,9 +1048,9 @@ resource "aws_secretsmanager_secret_version" "messaging_hmac" {
 
 ephemeral "random_password" "internal_identity_authorization" {
   # WHY : Assumptions: EPHEMERAL rather than a managed random_password, for the same
-  #       reason as the messaging key above -- a managed resource retains its result
-  #       in every state file and every plan artifact, which for a signing key would
-  #       make the state file as sensitive as the secret store.
+  #       reason as every generated key in this root -- a managed resource retains its
+  #       result in every state file and every plan artifact, which for a signing key
+  #       would make the state file as sensitive as the secret store.
   # WHY : Assumptions: 64 printable characters, twice the 32-byte floor
   #       com.carddemo.common.security.InternalServiceToken enforces and that
   #       account-service config/InternalApiSecurityConfig.java enforces
@@ -1034,7 +1079,7 @@ ephemeral "random_password" "internal_identity_transaction" {
 resource "aws_secretsmanager_secret" "internal_identity_authorization" {
   #checkov:skip=CKV2_AWS_57:Rotating this key requires BOTH the authorization service and the account service to adopt the new value in the same instant, because one signs with it and the other verifies against it. An unattended rotation function would change the stored value while one of the two tasks still held the old one, and every internal account-context read from the authorization service would be refused with a 401 for the duration -- which stalls the authorization consumer rather than degrading it. Rotation is therefore an attended procedure that redeploys both services together, documented in docs/runbooks/deploy.md, rather than an automatic one.
   name        = "${var.name_prefix}/${var.environment}/internal-identity/authorization-signing-key"
-  description = "Symmetric signing key for the AUTHORIZATION service's internal machine-to-machine bearer tokens in the ${var.environment} environment: minted by that service under the subject carddemo-authorization-service, verified by the account service against this key alone. Generated by this root and injected into exactly those two tasks as a scalar secret. Distinct from the transaction service's own internal-identity key, from the messaging HMAC key and from the data-migration masking key."
+  description = "Symmetric signing key for the AUTHORIZATION service's internal machine-to-machine bearer tokens in the ${var.environment} environment: minted by that service under the subject carddemo-authorization-service, verified by the account service against this key alone. Generated by this root and injected into exactly those two tasks as a scalar secret. Distinct from the transaction service's own internal-identity key and from the data-migration masking key."
 
   kms_key_id              = module.kms.secrets_key_arn
   recovery_window_in_days = var.secret_recovery_window_in_days
@@ -1043,7 +1088,7 @@ resource "aws_secretsmanager_secret" "internal_identity_authorization" {
 resource "aws_secretsmanager_secret" "internal_identity_transaction" {
   #checkov:skip=CKV2_AWS_57:Rotating this key requires BOTH the transaction service and the account service to adopt the new value in the same instant, because one signs with it and the other verifies against it. An unattended rotation function would change the stored value while one of the two tasks still held the old one, and every internal account-context read from the transaction service would be refused with a 401 for the duration -- which fails every transaction add and every bill payment. Rotation is therefore an attended procedure that redeploys both services together, documented in docs/runbooks/deploy.md, rather than an automatic one.
   name        = "${var.name_prefix}/${var.environment}/internal-identity/transaction-signing-key"
-  description = "Symmetric signing key for the TRANSACTION service's internal machine-to-machine bearer tokens in the ${var.environment} environment: minted by that service under the subject carddemo-transaction-service, verified by the account service against this key alone. Generated by this root and injected into exactly those two tasks as a scalar secret. Distinct from the authorization service's own internal-identity key, from the messaging HMAC key and from the data-migration masking key."
+  description = "Symmetric signing key for the TRANSACTION service's internal machine-to-machine bearer tokens in the ${var.environment} environment: minted by that service under the subject carddemo-transaction-service, verified by the account service against this key alone. Generated by this root and injected into exactly those two tasks as a scalar secret. Distinct from the authorization service's own internal-identity key and from the data-migration masking key."
 
   kms_key_id              = module.kms.secrets_key_arn
   recovery_window_in_days = var.secret_recovery_window_in_days
@@ -1058,8 +1103,8 @@ resource "aws_secretsmanager_secret_version" "internal_identity_authorization" {
   #       either half alone would still leave the key in a state file.
   secret_string_wo = ephemeral.random_password.internal_identity_authorization.result
 
-  # WHY : Trade-offs: pinned to the literal 1, matching infra/modules/secrets and the
-  #       messaging key above. Here an unintended rewrite is worse than for a
+  # WHY : Trade-offs: pinned to the literal 1, matching infra/modules/secrets and every
+  #       generated key in this root. Here an unintended rewrite is worse than for a
   #       password, because the two services read the stored value at task start:
   #       rewriting it without redeploying both leaves one signing with a key the
   #       other does not verify, and the symptom is a 401 on every internal read from
@@ -1098,66 +1143,78 @@ resource "aws_secretsmanager_secret_version" "internal_identity_transaction" {
 #   Sealing makes the cursor opaque to the client and unforgeable, so a caller
 #   cannot page into rows the query never scoped to it.
 #
-# Why this is a THIRD key rather than reusing either key above:
-#   Assumptions: purpose-scoping is the control, not key economy. This key is held
-#   by the SEVEN services holding a component whose constructor requires the
-#   CursorToken bean; the messaging key is held by the authorization consumer alone
-#   and each of the two per-caller internal-identity keys by exactly two services,
-#   its minter and account-service as the verifier. Refactoring Rationale: this last
-#   clause said "the internal-identity key by exactly three services", which
-#   describes the single shared key that was split per caller precisely so that a
-#   caller's subject became verifiable rather than asserted; the paragraph below
-#   already records the split, so the two disagreed on the same page.
-#   Refactoring Rationale: this said FOUR, and it was stale in both directions --
-#   the distribution gate below named five services at the time, and the measured
-#   holder set is seven. A count that matches neither the code beside it nor the
-#   tree it describes is worse than none, because it reads as corroboration. Sharing one value would mean a holder of any one capability
+# Why this is a purpose-scoped key of its own rather than a reuse of another:
+#   Assumptions: purpose-scoping is the control, not key economy. This root
+#   generates SIX key secrets and the holder set of each is stated once here, so a
+#   reader can check the gates below against a written inventory rather than
+#   reconstructing one:
+#     - the messaging HMAC key, held by the authorization consumer alone;
+#     - the card-selector key, held by card-service alone;
+#     - the internal-identity key for the AUTHORIZATION caller, held by exactly two
+#       services -- authorization-service as its minter and account-service as the
+#       verifier;
+#     - the internal-identity key for the TRANSACTION caller, held by exactly two
+#       on the same terms;
+#     - this pagination-cursor key, held by SEVEN services -- auth, account, card,
+#       transaction, reference, reporting and authorization, which is every service
+#       in the distribution gate below except batch and data-migration;
+#     - the reporting-artifact key, held by reporting-service alone.
+#   Assumptions: the internal-identity keys are TWO and not one, one per calling
+#   caller, and the split is what makes a caller's subject verifiable rather than
+#   merely asserted -- a single shared value would let either caller mint a token
+#   the verifier attributes to the other.
+#   Assumptions: the cursor holder set is stated as the set that BINDS the property
+#   rather than as a property of what a service publishes. Characterising it as
+#   "the services that publish a paged list" is what made an earlier count of four
+#   look plausible: auth-service and card-service both hold the key, and
+#   common-lib withholds the CursorToken bean when the property is unset, so a
+#   holder omitted from the gate fails context refresh instead of degrading.
+#   Sharing one value across purposes would mean a holder of any one capability
 #   could exercise the others -- a service able to seal a cursor could mint an
-#   internal bearer token -- and rotating any one purpose would invalidate every
-#   other at the same moment.
-#   Trade-offs: five secrets cost five entries to provision and five attended
+#   internal bearer token -- and rotating any one purpose would invalidate all six
+#   at the same moment.
+#   Trade-offs: six secrets cost six entries to provision and six attended
 #   rotations rather than one. That is accepted because the failure a shared key
 #   admits is a privilege escalation across contexts, while the cost of separate
-#   keys is only operational. Every one of the five carries a recorded
+#   keys is only operational. Every one of the six carries a recorded
 #   CKV2_AWS_57 exception naming the runbook section that performs its rotation.
-#   Refactoring Rationale: this block called the cursor key "a THIRD key", said it
-#   was "held by the four services that publish a paged list", and said "the
-#   internal-identity key" was held "by exactly three services". All three were
-#   wrong and they were wrong in different ways. There are five key secrets, not
-#   three. The cursor key is held by SEVEN services -- auth, account, card,
-#   transaction, reference, authorization and reporting, which is every service in
-#   the distribution gate below except batch and data-migration -- and
-#   characterising them as "the services that publish a paged list" is what made
-#   the earlier count of four look plausible, so the holder set is stated as the set
-#   that BINDS the name rather than as a property of what a service publishes. This
-#   paragraph said FIVE and named auth-service and card-service as deliberately
-#   outside the set; both hold it, and a count contradicting the paragraph three
-#   lines above it is worse than none because a reader takes the more specific of
-#   the two. And there is no longer one internal-identity key held by three
-#   services: there are two, one per calling caller, each held by exactly two --
-#   its minter and the verifier -- which is what makes a caller's subject
-#   verifiable rather than merely asserted. The inventory is spelled out above so
-#   that a future key cannot be added without this list disagreeing with the
-#   gates below.
+#   Refactoring Rationale: this block previously carried three counts that
+#   contradicted each other and the code beside them on the same page -- it called
+#   this "a THIRD key", said there were "five key secrets", said "the
+#   internal-identity key" was "held by exactly three services", and named
+#   auth-service and card-service as deliberately outside the cursor set while the
+#   gate below admits both. Each was stale from a different revision, and a count
+#   that matches neither the resource list above it nor the gate below it is worse
+#   than none because it reads as corroboration. The inventory is now enumerated
+#   rather than counted, so a key added later cannot leave a bare number behind to
+#   go stale, and the six ephemeral blocks and six secret resources in this file are
+#   what the list is checkable against.
 
 ephemeral "random_password" "pagination_cursor" {
   # WHY : Assumptions: EPHEMERAL rather than a managed random_password, for the same
-  #       reason as the FOUR keys above, every one of which is also ephemeral -- a
+  #       reason as the four keys declared above it -- the messaging HMAC key, the
+  #       card-selector key and the two per-caller internal-identity keys -- every one
+  #       of which is also ephemeral. A
   #       managed resource retains its result in
   #       every state file and every plan artifact, which for a signing key would make
   #       the state file as sensitive as the secret store it exists to keep the
   #       material out of.
   # WHY : Assumptions: 48 characters, and this length is arithmetic rather than taste.
-  #       This key is the ONE of the three that the Java side requires to be BASE64 --
+  #       This key is the only one in this root whose consumer requires STRICT base64 --
   #       CardDemoCommonAutoConfiguration.decodeSigningKey uses a strict decoder and
   #       raises naming the property when the value is not base64, with NO raw-text
-  #       fallback of the kind the internal-identity and messaging keys rely on. The
+  #       fallback of the kind the card selector and internal-identity keys rely on.
+  #       Refactoring Rationale: this said "the ONE of the three", counting a set that
+  #       included a withdrawn messaging key and excluded the reporting artifact key,
+  #       whose consumer decodes base64 FIRST and falls back to raw text -- so it is
+  #       stored encoded too and the old phrasing implied otherwise. The distinction
+  #       that matters is strict-versus-fallback decoding rather than a count. The
   #       value stored below is therefore base64encode() of these characters, and 48
   #       characters encode to exactly 64 base64 characters that decode back to 48
   #       bytes -- comfortably above the 32-byte floor CursorToken.MIN_KEY_LENGTH
   #       imposes, with no padding ambiguity because 48 is divisible by three.
   #       Alternatives Considered: generating 64 characters and storing them directly,
-  #       as the four keys above all do -- each generates length 64 with special = false
+  #       as the three keys above all do -- each generates length 64 with special = false
   #       and stores the characters unencoded. Rejected here because it would only APPEAR
   #       to work: with
   #       special characters excluded the alphabet is alphanumeric, every character of
@@ -1179,7 +1236,7 @@ ephemeral "random_password" "pagination_cursor" {
 resource "aws_secretsmanager_secret" "pagination_cursor" {
   #checkov:skip=CKV2_AWS_57:Rotating this key invalidates every cursor currently held by a client, because a token sealed under the old key cannot be opened under the new one. An unattended rotation function would do that at an arbitrary moment and every operator mid-browse would receive a refused cursor with nothing having changed on their side. Rotation is therefore an attended procedure timed outside the online window and documented in docs/runbooks/deploy.md, and it is safe to perform because a refused cursor costs a re-listing rather than data.
   name        = "${var.name_prefix}/${var.environment}/pagination/cursor-signing-key"
-  description = "Purpose-scoped symmetric key the CardDemo services seal and open keyset pagination cursors with in the ${var.environment} environment, read by com.carddemo.common.web.CursorToken. Generated by this root and injected as a scalar secret into exactly the seven services holding a component whose constructor requires the CursorToken bean. Distinct from the internal-identity signing key, the messaging HMAC key and the data-migration masking key."
+  description = "Purpose-scoped symmetric key the CardDemo services seal and open keyset pagination cursors with in the ${var.environment} environment, read by com.carddemo.common.web.CursorToken. Generated by this root and injected as a scalar secret into exactly the seven services holding a component whose constructor requires the CursorToken bean. Distinct from the two per-caller internal-identity signing keys, the card selector key and the data-migration masking key."
 
   kms_key_id              = module.kms.secrets_key_arn
   recovery_window_in_days = var.secret_recovery_window_in_days
@@ -1193,9 +1250,16 @@ resource "aws_secretsmanager_secret_version" "pagination_cursor" {
   #       it with the ephemeral generator above is one control rather than two: either
   #       half alone would still leave the key in a state file.
   # WHY : Assumptions: base64encode() wraps the generated characters because this key
-  #       is consumed through a STRICT base64 decoder. It is the ONLY one of the five that
-  #       is base64-encoded at rest; the four keys above accept raw text, which is why
-  #       each of them stores 48 fewer decisions than this one does. Storing the characters unencoded would make the stored value
+  #       is consumed through a STRICT base64 decoder. It is ONE OF TWO of the six that
+  #       is base64-encoded at rest -- this cursor key and the reporting artifact HMAC
+  #       key below -- while the other four accept raw text, which is why each of those
+  #       four stores 48 fewer decisions than this one does.
+  #       Refactoring Rationale: this claimed to be "the ONLY one of the five", and it
+  #       was wrong twice over: the reporting artifact key is base64-encoded through the
+  #       identical expression, and there are six generated secrets rather than five. A
+  #       uniqueness claim is the most costly kind to get wrong here, because a reader
+  #       adding a seventh key would have taken it as evidence that raw text is the norm
+  #       and strict decoding the exception. Storing the characters unencoded would make the stored value
   #       and the value the Java side derives two different byte sequences, and the
   #       divergence is invisible until a client redeems a cursor.
   secret_string_wo = base64encode(ephemeral.random_password.pagination_cursor.result)
@@ -1235,24 +1299,33 @@ resource "aws_secretsmanager_secret_version" "pagination_cursor" {
 #   across a space small enough to enumerate. A confirmable token discloses the
 #   value it was meant to withhold while looking like a control.
 #
-# Why this is a FOURTH generated key rather than reusing one above:
-#   Assumptions: purpose-scoping is the control, not key economy. This key is
-#   held by reporting alone, the pagination key by the list-publishing services,
-#   the internal-identity key by exactly three services and the messaging key by
-#   the authorization consumer. infra/modules/ecs-service asserts each holder set
-#   biconditionally, so a shared value would additionally have to be handed to
-#   workloads those gates refuse. Sharing one value would also mean a holder of
-#   any single capability could exercise the others, and rotating one purpose
-#   would invalidate all four at once -- which here means every statement object
-#   already written becomes unlocatable by the application's own lookup.
-#   Trade-offs: a fourth secret costs a fourth entry to provision and a fourth
+# Why this is a purpose-scoped key of its own rather than a reuse of one above:
+#   Assumptions: purpose-scoping is the control, not key economy. This is the
+#   SIXTH and last generated key secret in this root, and the full inventory with
+#   each holder set is enumerated once above the pagination-cursor key rather than
+#   restated here: this one is held by reporting-service alone, the cursor key by
+#   seven services, each of the TWO per-caller internal-identity keys by exactly
+#   two, and the messaging and card-selector keys by one each.
+#   infra/modules/ecs-service asserts each holder set biconditionally, so a shared
+#   value would additionally have to be handed to workloads those gates refuse.
+#   Sharing one value would also mean a holder of any single capability could
+#   exercise the others, and rotating one purpose would invalidate all six at once
+#   -- which here means every statement object already written becomes unlocatable
+#   by the application's own lookup.
+#   Refactoring Rationale: this paragraph called it "a FOURTH generated key", said
+#   the internal-identity key was held "by exactly three services" and that
+#   rotation would invalidate "all four at once". All three were stale: the single
+#   internal-identity key was split per caller into two, and two further keys have
+#   been added since. It now points at the one enumerated inventory instead of
+#   carrying a second count that can go stale independently.
+#   Trade-offs: a sixth secret costs a sixth entry to provision and a sixth
 #   attended rotation. That is accepted because the failure a shared key admits
 #   is a privilege escalation across contexts, while the cost is only
 #   operational.
 
 ephemeral "random_password" "reporting_artifact" {
   # WHY : Assumptions: EPHEMERAL rather than a managed random_password, for the same
-  #       reason as the three keys above -- a managed resource retains its result in
+  #       reason as the five keys declared above it -- a managed resource retains its result in
   #       every state file and every plan artifact, which for key material would make
   #       the state file as sensitive as the secret store it exists to keep the
   #       material out of.
@@ -1260,8 +1333,8 @@ ephemeral "random_password" "reporting_artifact" {
   #       rather than copied. config/ArtifactIdentityConfig.java decodes base64 FIRST
   #       and uses the result only when it reaches OpaqueIdentifier's 32-byte floor,
   #       falling back to the raw text otherwise. A 64-character alphanumeric value --
-  #       the shape the messaging key uses -- would therefore take the base64 branch by
-  #       coincidence of the alphabet rather than by intent, and the branch it takes
+  #       the shape the three raw-text keys above use -- would therefore take the base64
+  #       branch by coincidence of the alphabet rather than by intent, and the branch it takes
   #       decides which bytes the tokeniser uses. Generating 48 characters and storing
   #       base64encode() of them makes the byte count a stated fact: 48 characters
   #       encode to exactly 64 base64 characters that decode back to 48 bytes, half
@@ -1282,9 +1355,9 @@ ephemeral "random_password" "reporting_artifact" {
 }
 
 resource "aws_secretsmanager_secret" "reporting_artifact" {
-  #checkov:skip=CKV2_AWS_57:A token minted under one key cannot be recomputed under another, and the artifact token is how the application locates a statement object it wrote on an earlier night. An unattended rotation function would therefore orphan every statement already published -- the objects remain, correctly encrypted, and nothing can name them again short of a full listing -- and it would do so at an arbitrary moment with no failure to observe. Rotation is an attended procedure timed outside the statement window and documented in docs/runbooks/deploy.md, performed together with a re-publication of the affected generations. The three sibling generated secrets in this root carry the same exception for the same class of reason.
+  #checkov:skip=CKV2_AWS_57:A token minted under one key cannot be recomputed under another, and the artifact token is how the application locates a statement object it wrote on an earlier night. An unattended rotation function would therefore orphan every statement already published -- the objects remain, correctly encrypted, and nothing can name them again short of a full listing -- and it would do so at an arbitrary moment with no failure to observe. Rotation is an attended procedure timed outside the statement window and documented in docs/runbooks/deploy.md, performed together with a re-publication of the affected generations. The five sibling generated secrets in this root -- the messaging HMAC key, the card-selector key, the two per-caller internal-identity signing keys and the pagination cursor key -- carry the same exception for the same class of reason.
   name        = "${var.name_prefix}/${var.environment}/reporting/artifact-hmac-key"
-  description = "Purpose-scoped key the CardDemo reporting service derives stored statement artifact object-key tokens under, in the ${var.environment} environment, read by com.carddemo.common.security.OpaqueIdentifier. Generated by this root and injected as a scalar secret into the reporting task alone. Distinct from the pagination cursor key, the internal-identity signing key, the messaging HMAC key and the data-migration masking key."
+  description = "Purpose-scoped key the CardDemo reporting service derives stored statement artifact object-key tokens under, in the ${var.environment} environment, read by com.carddemo.common.security.OpaqueIdentifier. Generated by this root and injected as a scalar secret into the reporting task alone. Distinct from the pagination cursor key, the two per-caller internal-identity signing keys, the card selector key and the data-migration masking key."
 
   kms_key_id              = module.kms.secrets_key_arn
   recovery_window_in_days = var.secret_recovery_window_in_days
@@ -1304,8 +1377,8 @@ resource "aws_secretsmanager_secret_version" "reporting_artifact" {
   #       specifically.
   secret_string_wo = base64encode(ephemeral.random_password.reporting_artifact.result)
 
-  # WHY : Trade-offs: pinned to the literal 1, matching infra/modules/secrets and the
-  #       three keys above. It is what stops an unrelated plan rewriting the stored key
+  # WHY : Trade-offs: pinned to the literal 1, matching infra/modules/secrets and every
+  #       generated key above. It is what stops an unrelated plan rewriting the stored key
   #       merely because the ephemeral generator produced fresh bytes -- and that rewrite
   #       would silently rename every future artifact while leaving the previously
   #       published ones under names nothing recomputes. Advancing it is the deliberate
@@ -1464,6 +1537,23 @@ resource "aws_iam_role" "lambda" {
 
   name               = "${var.name_prefix}-${var.environment}-${each.value}-lambda"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+
+  # WHY : ⚠️ Refactoring Rationale: all THREE roles this resource creates carried no
+  #       boundary while var.permissions_boundary_arn was described as applying to
+  #       "every role this deployment creates". They are attached now, which is what
+  #       makes that description a fact rather than an intention.
+  # WHY : Assumptions: these three are not interchangeable and the boundary matters for a
+  #       different reason in each. `online_write` writes the read-only flag and the
+  #       quiesce lease, so it can open or close the online write path. `database_admin`
+  #       reaches Aurora with credentials from Secrets Manager. `dataset_retention`
+  #       deletes object generations. A boundary is the one control that caps all three
+  #       from above without having to re-review each inline document after every edit.
+  # WHY : Assumptions: one boundary for all three rather than a per-function input, for
+  #       the same reason the state-machine roles share one -- a boundary is an
+  #       account-level ceiling, and the narrowing BETWEEN these three is already done by
+  #       their separate inline policies. A per-function axis would let one be given a
+  #       wider ceiling than its siblings by accident.
+  permissions_boundary = var.permissions_boundary_arn
 }
 
 # WHY : Assumptions: the marker the batch state machines stamp on every task they
@@ -1602,6 +1692,28 @@ data "aws_iam_policy_document" "database_admin_lambda" {
     sid       = "DecryptRdsManagedMasterSecret"
     actions   = ["kms:Decrypt"]
     resources = [module.kms.aurora_key_arn]
+    # WHY : Assumptions: BOTH conditions are applied. kms:ViaService confines the key to
+    #       use made through Secrets Manager in this Region, so the grant cannot be spent
+    #       on ciphertext this principal supplied itself; the encryption-context condition
+    #       confines it to the exact secrets this document already authorises, because
+    #       Secrets Manager sets SecretARN to the secret being read or written on every
+    #       request. The key here is the AURORA key, which protects the RDS-managed master secret and nothing else, so the context names that one secret.
+    # WHY : Trade-offs: StringLike rather than StringEquals on the context, matching the
+    #       reasoning recorded in infra/modules/ecs-service/main.tf -- Secrets Manager
+    #       appends a six-character suffix to the ARN it puts in the context when the
+    #       caller supplied a name-only ARN, and each pattern still names one secret.
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["secretsmanager.${data.aws_region.current.region}.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringLike"
+      variable = "kms:EncryptionContext:SecretARN"
+      values   = [module.aurora.master_user_secret_arn]
+    }
+
   }
 
   # WHY : Assumptions: the bootstrap function reads every per-role credential because
@@ -1634,11 +1746,79 @@ data "aws_iam_policy_document" "database_admin_lambda" {
     sid       = "DecryptServiceCredentialSecrets"
     actions   = ["kms:Decrypt"]
     resources = [module.kms.secrets_key_arn]
+    # WHY : Assumptions: BOTH conditions are applied. kms:ViaService confines the key to
+    #       use made through Secrets Manager in this Region, so the grant cannot be spent
+    #       on ciphertext this principal supplied itself; the encryption-context condition
+    #       confines it to the exact secrets this document already authorises, because
+    #       Secrets Manager sets SecretARN to the secret being read or written on every
+    #       request. The set is the same one the GetSecretValue statement above authorises, so the two cannot diverge into a key grant wider than the secret grant.
+    # WHY : Trade-offs: StringLike rather than StringEquals on the context, matching the
+    #       reasoning recorded in infra/modules/ecs-service/main.tf -- Secrets Manager
+    #       appends a six-character suffix to the ARN it puts in the context when the
+    #       caller supplied a name-only ARN, and each pattern still names one secret.
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["secretsmanager.${data.aws_region.current.region}.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringLike"
+      variable = "kms:EncryptionContext:SecretARN"
+      values   = [for secret in values(module.secrets.service_credential_secrets) : secret.arn]
+    }
+
   }
 }
 
 data "aws_iam_policy_document" "dataset_retention_lambda" {
   source_policy_documents = [data.aws_iam_policy_document.lambda_logs["dataset_retention"].json]
+
+  # WHY : Assumptions: these two statements exist because of the failure destination
+  #       configured in aws_lambda_function_event_invoke_config.dataset_retention. Lambda
+  #       delivers an exhausted asynchronous event to that destination using THIS
+  #       function's execution role, so without the grant the destination is configured
+  #       and silently non-functional -- the delivery fails and the event is dropped
+  #       exactly as it would have been with no destination at all, which is the failure
+  #       this whole arrangement exists to end.
+  statement {
+    sid       = "RecordExhaustedRetentionEvents"
+    actions   = ["sqs:SendMessage"]
+    resources = [module.sqs.error_queue_arn]
+  }
+
+  # WHY : Assumptions: the error queue is encrypted with the CardDemo SQS customer
+  #       managed key, and SendMessage to an SSE-KMS queue needs GenerateDataKey on that
+  #       key -- a send-only producer needs Decrypt too, because SQS decrypts the queue's
+  #       existing data key to attach the message. Granting SendMessage alone is the exact
+  #       asymmetry that left the batch role unable to reach this same queue.
+  # WHY : Trade-offs: both conditions are applied. kms:ViaService confines the key to use
+  #       made THROUGH SQS in this Region, so the grant cannot be spent on ciphertext this
+  #       function supplied itself, and the encryption-context condition confines it to the
+  #       one queue this document already authorises -- SQS sets that context to the queue
+  #       ARN on every request, so the key grant cannot be wider than the queue grant.
+  statement {
+    sid = "UseErrorQueueEncryptionKey"
+
+    actions = [
+      "kms:GenerateDataKey",
+      "kms:Decrypt",
+    ]
+
+    resources = [module.kms.sqs_key_arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["sqs.${data.aws_region.current.region}.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:EncryptionContext:aws:sqs:arn"
+      values   = [module.sqs.error_queue_arn]
+    }
+  }
 }
 
 locals {
@@ -1694,13 +1874,60 @@ resource "aws_iam_role_policy" "online_write_reconcile" {
   policy = data.aws_iam_policy_document.online_write_reconcile.json
 }
 
+# WHY : Assumptions: this is a SEPARATE inline policy attached to all three Lambda roles
+#       rather than a statement folded into each of their three policy documents. One
+#       declaration cannot drift from itself, whereas the same statement written three
+#       times can be corrected in two places and missed in the third -- and a missing
+#       X-Ray grant does not fail an invocation, it silently produces an untraced one,
+#       which is the failure mode hardest to notice.
+# WHY : Trade-offs: the resource is `*`, which is the one wildcard in this root that is
+#       not a narrowing failure. The X-Ray segment-ingestion actions do not support
+#       resource-level permissions -- there is no ARN for a segment, because the segment
+#       does not exist until the call that submits it -- so `*` is the only form the
+#       service accepts, and naming a resource here would produce a policy that denies
+#       every write. The narrowing that IS available is applied instead: exactly two
+#       actions, both write-only, on roles that hold no X-Ray read permission at all, so
+#       a compromised function can contribute trace data and cannot read anyone's.
+# WHY : Alternatives Considered: the AWSXRayDaemonWriteAccess managed policy, which is
+#       what most examples attach. Rejected because it additionally grants
+#       xray:GetSamplingRules, xray:GetSamplingTargets and
+#       xray:GetSamplingStatisticSummaries, none of which these functions use -- they
+#       sample through the Lambda service, not through the SDK's sampler -- so the
+#       managed policy would widen the grant for no capability.
+# WHY : Assumptions: this attachment is deliberately NOT in any function's depends_on.
+#       The functions depend on aws_iam_role_policy.lambda, and adding an edge from a
+#       function to a second policy is unnecessary here for the same self-healing reason
+#       recorded for online_write_reconcile: an invocation landing before the grant does
+#       loses one function segment, and the state machine's own trace still records the
+#       step. Trace data is not transactional.
+data "aws_iam_policy_document" "lambda_xray" {
+  statement {
+    sid = "WriteTraceSegments"
+
+    actions = [
+      "xray:PutTraceSegments",
+      "xray:PutTelemetryRecords",
+    ]
+
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "lambda_xray" {
+  for_each = aws_iam_role.lambda
+
+  name   = "${var.name_prefix}-${var.environment}-${each.key}-xray"
+  role   = each.value.id
+  policy = data.aws_iam_policy_document.lambda_xray.json
+}
+
 resource "aws_lambda_function" "quiesce" {
   function_name    = local.lambda_names.quiesce
   role             = aws_iam_role.lambda["online_write"].arn
   runtime          = "python3.13"
   handler          = "online_write_flag.handler"
-  filename         = data.archive_file.online_write_flag.output_path
-  source_code_hash = data.archive_file.online_write_flag.output_base64sha256
+  filename         = local.lambda_packages.online_write_flag
+  source_code_hash = filebase64sha256(local.lambda_packages.online_write_flag)
   timeout          = 30
   memory_size      = 128
 
@@ -1719,6 +1946,23 @@ resource "aws_lambda_function" "quiesce" {
     }
   }
 
+  # WHY : Assumptions: PassThrough is Lambda's default, and under it these functions
+  #       emit no segment of their own -- they only forward a trace header if one
+  #       arrives. Step Functions IS traced, so the daily batch chain produced a trace
+  #       in which every state machine transition was visible and the four glue steps
+  #       that actually quiesce writes, bootstrap the database and scratch generations
+  #       were blank. Active makes each invocation a sampled segment, which is what
+  #       closes that gap.
+  # WHY : Trade-offs: Active sampling bills per trace recorded and per trace scanned,
+  #       against four functions that run a handful of times a night -- so the cost is
+  #       negligible here in a way it would not be for a request-serving workload. The
+  #       alternative of leaving these opaque was rejected because the batch bracket is
+  #       exactly where an operator needs causality: a quiesce that silently failed and
+  #       a quiesce that was never invoked are indistinguishable without a segment.
+  tracing_config {
+    mode = "Active"
+  }
+
   depends_on = [aws_iam_role_policy.lambda]
 }
 
@@ -1727,8 +1971,8 @@ resource "aws_lambda_function" "resume" {
   role             = aws_iam_role.lambda["online_write"].arn
   runtime          = "python3.13"
   handler          = "online_write_flag.handler"
-  filename         = data.archive_file.online_write_flag.output_path
-  source_code_hash = data.archive_file.online_write_flag.output_base64sha256
+  filename         = local.lambda_packages.online_write_flag
+  source_code_hash = filebase64sha256(local.lambda_packages.online_write_flag)
   timeout          = 30
   memory_size      = 128
 
@@ -1757,6 +2001,23 @@ resource "aws_lambda_function" "resume" {
     }
   }
 
+  # WHY : Assumptions: PassThrough is Lambda's default, and under it these functions
+  #       emit no segment of their own -- they only forward a trace header if one
+  #       arrives. Step Functions IS traced, so the daily batch chain produced a trace
+  #       in which every state machine transition was visible and the four glue steps
+  #       that actually quiesce writes, bootstrap the database and scratch generations
+  #       were blank. Active makes each invocation a sampled segment, which is what
+  #       closes that gap.
+  # WHY : Trade-offs: Active sampling bills per trace recorded and per trace scanned,
+  #       against four functions that run a handful of times a night -- so the cost is
+  #       negligible here in a way it would not be for a request-serving workload. The
+  #       alternative of leaving these opaque was rejected because the batch bracket is
+  #       exactly where an operator needs causality: a quiesce that silently failed and
+  #       a quiesce that was never invoked are indistinguishable without a segment.
+  tracing_config {
+    mode = "Active"
+  }
+
   depends_on = [aws_iam_role_policy.lambda]
 }
 
@@ -1765,8 +2026,8 @@ resource "aws_lambda_function" "database_admin" {
   role             = aws_iam_role.lambda["database_admin"].arn
   runtime          = "python3.13"
   handler          = "database_admin.handler"
-  filename         = data.archive_file.database_admin.output_path
-  source_code_hash = data.archive_file.database_admin.output_base64sha256
+  filename         = local.lambda_packages.database_admin
+  source_code_hash = filebase64sha256(local.lambda_packages.database_admin)
   timeout          = 300
   memory_size      = 512
 
@@ -1795,6 +2056,23 @@ resource "aws_lambda_function" "database_admin" {
     }
   }
 
+  # WHY : Assumptions: PassThrough is Lambda's default, and under it these functions
+  #       emit no segment of their own -- they only forward a trace header if one
+  #       arrives. Step Functions IS traced, so the daily batch chain produced a trace
+  #       in which every state machine transition was visible and the four glue steps
+  #       that actually quiesce writes, bootstrap the database and scratch generations
+  #       were blank. Active makes each invocation a sampled segment, which is what
+  #       closes that gap.
+  # WHY : Trade-offs: Active sampling bills per trace recorded and per trace scanned,
+  #       against four functions that run a handful of times a night -- so the cost is
+  #       negligible here in a way it would not be for a request-serving workload. The
+  #       alternative of leaving these opaque was rejected because the batch bracket is
+  #       exactly where an operator needs causality: a quiesce that silently failed and
+  #       a quiesce that was never invoked are indistinguishable without a segment.
+  tracing_config {
+    mode = "Active"
+  }
+
   depends_on = [aws_iam_role_policy.lambda]
 }
 
@@ -1803,10 +2081,30 @@ resource "aws_lambda_function" "dataset_retention" {
   role             = aws_iam_role.lambda["dataset_retention"].arn
   runtime          = "python3.13"
   handler          = "dataset_generation_retention.handler"
-  filename         = data.archive_file.dataset_retention.output_path
-  source_code_hash = data.archive_file.dataset_retention.output_base64sha256
-  timeout          = 120
-  memory_size      = 256
+  filename         = local.lambda_packages.dataset_retention
+  source_code_hash = filebase64sha256(local.lambda_packages.dataset_retention)
+  # WHY : Trade-offs: ONE concurrent execution, which is a deliberate throughput ceiling
+  #       rather than a sizing oversight. This function lists a generation family's
+  #       versions and deletes everything past the fifth, so two invocations for the same
+  #       family running together read the same version list and each decide to delete the
+  #       same objects -- the second delete is redundant at best, and at worst the two
+  #       interleave with an upload and scratch a generation that had just become the
+  #       fifth. Serialising removes the race outright instead of guarding it with a lock
+  #       the function would have to implement itself. Assumptions: a throttled
+  #       ASYNCHRONOUS invocation is not lost -- Lambda retries it, so bursts queue behind
+  #       the running one rather than being dropped, which is what makes a ceiling of one
+  #       safe here where it would be unacceptable for a synchronous API.
+  # WHY : Alternatives Considered: buffering the notifications through a dedicated SQS
+  #       queue with its own dead-letter queue and a bounded consumer. Rejected because
+  #       the frozen plan fixes the queue inventory at four queues plus one error sink
+  #       (AAP section 0.4.1.8), so a sixth queue would be exactly the kind of inventory
+  #       divergence recorded against the eleventh ECR repository -- and reserved
+  #       concurrency plus a failure destination gives the same two properties, a bounded
+  #       consumer and a durable record of exhausted events, without adding one.
+  reserved_concurrent_executions = 1
+
+  timeout     = 120
+  memory_size = 256
 
   environment {
     variables = {
@@ -1814,26 +2112,98 @@ resource "aws_lambda_function" "dataset_retention" {
     }
   }
 
+  # WHY : Assumptions: PassThrough is Lambda's default, and under it these functions
+  #       emit no segment of their own -- they only forward a trace header if one
+  #       arrives. Step Functions IS traced, so the daily batch chain produced a trace
+  #       in which every state machine transition was visible and the four glue steps
+  #       that actually quiesce writes, bootstrap the database and scratch generations
+  #       were blank. Active makes each invocation a sampled segment, which is what
+  #       closes that gap.
+  # WHY : Trade-offs: Active sampling bills per trace recorded and per trace scanned,
+  #       against four functions that run a handful of times a night -- so the cost is
+  #       negligible here in a way it would not be for a request-serving workload. The
+  #       alternative of leaving these opaque was rejected because the batch bracket is
+  #       exactly where an operator needs causality: a quiesce that silently failed and
+  #       a quiesce that was never invoked are indistinguishable without a segment.
+  tracing_config {
+    mode = "Active"
+  }
+
   depends_on = [aws_iam_role_policy.lambda]
+}
+
+# WHY : Assumptions: an S3 notification invokes a function ASYNCHRONOUSLY, and Lambda's
+#       default handling of an asynchronous invocation that keeps failing is to retry
+#       twice and then DISCARD the event. For a retention function that discard is
+#       silent and consequential: the generations that event would have scratched simply
+#       stay, so the bucket drifts past its five-generation contract with nothing
+#       recording that it happened. This configuration is what converts that silence
+#       into a durable record.
+# WHY : Trade-offs: the failure destination is the EXISTING carddemo error queue, not a
+#       new one. The frozen plan designates that queue the terminal error sink (AAP
+#       section 0.4.1.8, replacing CARD.DEMO.ERROR), which is precisely this role, and
+#       the same root already uses it as the EventBridge scheduler's dead-letter target
+#       -- so the pattern is established rather than invented, and the queue inventory
+#       the plan fixes is unchanged.
+# WHY : Assumptions: maximum_event_age_in_seconds is set well below Lambda's six-hour
+#       ceiling. An event older than this is retention work for a generation that has
+#       since been superseded by the next nightly run, so completing it late is not
+#       merely useless but potentially wrong -- and the point of the age bound is that
+#       such an event lands on the error queue where it is visible, instead of being
+#       retried for hours against a bucket state it no longer describes.
+# WHY : Alternatives Considered: maximum_retry_attempts = 0, failing fast to the queue.
+#       Rejected because the failures this function realistically sees are throttles from
+#       its own concurrency ceiling of one and transient S3 list/delete errors, both of
+#       which a retry clears; zero retries would route ordinary contention to the error
+#       queue and train an operator to ignore it.
+resource "aws_lambda_function_event_invoke_config" "dataset_retention" {
+  function_name = aws_lambda_function.dataset_retention.function_name
+
+  maximum_retry_attempts       = 2
+  maximum_event_age_in_seconds = 3600
+
+  destination_config {
+    on_failure {
+      destination = module.sqs.error_queue_arn
+    }
+  }
 }
 
 resource "aws_lambda_invocation" "database_bootstrap" {
   function_name = aws_lambda_function.database_admin.function_name
   input         = jsonencode({ action = "bootstrap" })
   triggers = {
-    function_code = data.archive_file.database_admin.output_base64sha256
+    function_code = filebase64sha256(local.lambda_packages.database_admin)
     bootstrap_sql = filesha256("${path.root}/../../../data-migration/sql/V0__schemas_and_roles.sql")
     cluster_arn   = module.aurora.cluster_arn
 
     # WHY : Assumptions: a change to the ROLE INVENTORY has to re-invoke this, and none
     #       of the three triggers above notices one. Adding a bounded context changes
-    #       the bootstrap SQL and so is already covered; replacing a stored credential
-    #       is not, and the function is what binds a stored value to its PostgreSQL
-    #       role. Hashing the mapping rather than embedding it keeps the trigger a fixed
+    #       the bootstrap SQL and so is already covered; adding or renaming a role is
+    #       not, and the function is what binds a stored value to its PostgreSQL role.
+    #       Hashing the mapping rather than embedding it keeps the trigger a fixed
     #       length and keeps sixteen secret names out of the plan diff.
     credential_inventory = sha256(jsonencode({
       for role, secret in module.secrets.service_credential_secrets : role => secret.name
     }))
+
+    # WHY : ⚠️ Assumptions: the inventory hash above cannot see a re-issue of the stored
+    #       VALUES, and this trigger is what does -- every secret name, ARN and role name
+    #       is byte-identical across a re-issue, and only the write-only version
+    #       infra/modules/secrets writes each document at changes. Without this entry,
+    #       incrementing that version replaces all sixteen passwords while every
+    #       PostgreSQL role keeps the password ALTER ROLE last set, so the next task
+    #       rollout authenticates with credentials the database does not hold. This root
+    #       carries the same entry as infra/envs/dev deliberately: AAP section 0.4.1.6
+    #       confines dev/prod differences to sizing and retention, and a credential
+    #       rebinding trigger present in one environment and absent in the other is
+    #       exactly the class of divergence that makes a production apply behave
+    #       differently from the one that was rehearsed.
+    # WHY : Alternatives Considered: hashing the secret VALUES so any change to them
+    #       re-invoked the function. Rejected: the values are written through the
+    #       write-only argument so they never enter state, and reading them back to hash
+    #       them would put sixteen live database passwords in the state file.
+    credential_revision = module.secrets.service_credential_revision
   }
 
   # WHY : Assumptions: stated explicitly even though the trigger above already reads
@@ -1904,12 +2274,53 @@ module "secrets" {
 module "cognito" {
   source = "../../modules/cognito"
 
-  name_prefix                    = var.name_prefix
-  environment                    = var.environment
-  secrets_kms_key_arn            = module.kms.secrets_key_arn
-  callback_urls                  = ["${local.spa_origin}/callback"]
-  logout_urls                    = [local.spa_origin]
-  mfa_configuration              = var.environment == "prod" ? "ON" : "OPTIONAL"
+  name_prefix         = var.name_prefix
+  environment         = var.environment
+  secrets_kms_key_arn = module.kms.secrets_key_arn
+
+  # WHY : ⚠️ Refactoring Rationale: both URL lists are EMPTY, where this root passed
+  #       ["${local.spa_origin}/callback"] and [local.spa_origin]. Supplying either one
+  #       switched the module's derived `oauth_enabled` local true, which added the
+  #       authorization-code flow, the openid and profile scopes and both redirect
+  #       lists to the app client -- a whole authentication path that nothing in this
+  #       system uses and that could not have been completed if anything tried. The
+  #       code flow needs a hosted sign-in domain, and no root sets var.domain_prefix,
+  #       so the pool has none; the SPA never speaks to the pool at all
+  #       (ui/.env.example configures no pool coordinates), and the browser posts the
+  #       credential to services/auth-service, which authenticates server-side with
+  #       the client secret. The callback target itself was fiction: /callback is not
+  #       a route ui/src/router.tsx declares, so an approved redirect pointed at a
+  #       path the SPA answers with its not-found screen.
+  #       Assumptions: empty is the module's own documented default and the
+  #       configuration its app-client comment describes as expected, so this is a
+  #       return to the design rather than a new restriction. Least privilege is the
+  #       reason to prefer it: an enabled flow with an approved redirect target is a
+  #       second way to obtain a token from this pool, and a capability nothing
+  #       exercises is a capability nobody is watching.
+  #       Trade-offs: a future hosted-UI or PKCE arrangement has to add a domain, the
+  #       redirect targets and the browser-side flow together. That is the correct
+  #       shape for that change and it is cheaper than leaving a half-built flow
+  #       enabled in the meantime.
+  callback_urls = []
+  logout_urls   = []
+
+  # WHY : ⚠️ Refactoring Rationale: OFF, where this root passed ON in prod and
+  #       OPTIONAL elsewhere. A multi-factor posture is only half a capability: the
+  #       pool raises a challenge and something has to answer it, and
+  #       services/auth-service answers exactly one -- NEW_PASSWORD_REQUIRED -- and
+  #       reports every other challenge as an exchange it could not evaluate, which
+  #       its contract renders as HTTP 500. OPTIONAL therefore handed a 500 to every
+  #       user who enrolled a software token, on every sign-in after enrolment, and ON
+  #       would hand one to every user's FIRST sign-in because the pool answers
+  #       MFA_SETUP there. The module now validates this input to OFF for both
+  #       environments and records the precondition for raising it.
+  #       Assumptions: multi-factor authentication is not a requirement of this
+  #       migration -- the reference identity record carries a password and nothing
+  #       else, and the Agent Action Plan's identity mapping asks for the pool, the two
+  #       groups and the claim conversion -- so declining to advertise a factor the
+  #       service cannot answer is the resolution rather than a deferral of one.
+  mfa_configuration = "OFF"
+
   advanced_security_mode         = var.environment == "prod" ? "ENFORCED" : "AUDIT"
   deletion_protection            = var.deletion_protection ? "ACTIVE" : "INACTIVE"
   secret_recovery_window_in_days = var.secret_recovery_window_in_days
@@ -2046,17 +2457,59 @@ module "s3_datasets" {
   s3_gateway_endpoint_id = module.network.s3_gateway_endpoint_id
 }
 
+# WHY : ⚠️ Refactoring Rationale: both statements were unbounded within the bucket --
+#       `s3:ListBucket` on the bucket ARN with no condition, and `s3:DeleteObject` on
+#       `<bucket>/*`. That is DELETE over every object the dataset bucket holds, which
+#       is not only the ten generation families: the same bucket carries the source
+#       extracts the nightly refresh reads, the statement and report outputs under
+#       `non_generation_prefixes`, and the authorization extract. A defect in this
+#       function -- or a principal that reached its role -- could therefore have
+#       removed the inputs a rerun needs and the statements an operator had already
+#       been sent, neither of which this function has any business touching. The
+#       narrowing is to the ten prefixes it actually derives.
+# WHY : Alternatives Considered: scoping the delete to one family per invocation by
+#       templating the policy from the event key. Rejected because an identity policy
+#       is written at apply time and the key is known only at invocation time, so the
+#       policy would have to be rewritten per event -- and a role whose policy changes
+#       per request is not a bound at all. The ten-prefix grant is the narrowest set
+#       expressible before the event exists.
+# WHY : Trade-offs: within one family the grant still covers every generation rather
+#       than only the ones past the retention count, for the same reason -- which
+#       generations are obsolete is decided by the listing the function has just
+#       performed. What the narrowing buys is that the blast radius is bounded to data
+#       this function is the lifecycle owner of, and excludes every object another
+#       role wrote.
 data "aws_iam_policy_document" "dataset_retention_s3" {
   statement {
     sid       = "ListDatasetGenerationPrefixes"
     actions   = ["s3:ListBucket"]
     resources = [module.s3_datasets.bucket_arn]
+
+    # Assumptions: StringLike with a trailing wildcard covers BOTH depths the
+    #   function lists at -- the family level, where it enumerates `dt=` common
+    #   prefixes, and the generation level, where it enumerates the objects under one
+    #   `dt=.../gen=.../`. A list call with no prefix, or with a prefix outside these
+    #   ten, matches no value here and is denied, which is the whole-bucket
+    #   enumeration this condition exists to remove.
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = [for prefix in local.dataset_generation_key_prefixes : "${prefix}*"]
+    }
   }
 
   statement {
-    sid       = "DeleteObsoleteGenerationObjects"
-    actions   = ["s3:DeleteObject"]
-    resources = ["${module.s3_datasets.bucket_arn}/*"]
+    sid     = "DeleteObsoleteGenerationObjects"
+    actions = ["s3:DeleteObject"]
+
+    # Assumptions: the action stays singular even though the function calls the batch
+    #   DeleteObjects API. That API authorises `s3:DeleteObject` against each key it
+    #   is given, so the plural call needs no separate action and the per-object ARNs
+    #   below bound every key inside it.
+    resources = [
+      for prefix in local.dataset_generation_key_prefixes :
+      "${module.s3_datasets.bucket_arn}/${prefix}*"
+    ]
   }
 }
 
@@ -2099,9 +2552,33 @@ resource "aws_lambda_permission" "dataset_retention_from_s3" {
 resource "aws_s3_bucket_notification" "dataset_generations" {
   bucket = module.s3_datasets.bucket_name
 
-  lambda_function {
-    lambda_function_arn = aws_lambda_function.dataset_retention.arn
-    events              = ["s3:ObjectCreated:*"]
+  # WHY : Refactoring Rationale: this was ONE unfiltered block, so every object created
+  #       anywhere in the dataset bucket invoked the retention function -- including the
+  #       reporting and statement outputs and the authorization extracts, none of which
+  #       carry generations and none of which the function can act on. It answered those
+  #       by deriving no family prefix and returning, so the work was correct and the
+  #       invocation was pure waste, competing for the same concurrency as the events
+  #       that do matter. Filtering to the ten generation families bounds the fan-out at
+  #       its SOURCE, which is the half of the problem no concurrency ceiling or failure
+  #       destination addresses.
+  # WHY : Assumptions: the ten prefixes are exactly the families the function itself
+  #       recognises -- local.dataset_generation_key_prefixes is projected from the same
+  #       module output the IAM narrowing uses, so the notification, the delete grant and
+  #       the handler's own derivation cannot disagree about what a generation family is.
+  #       S3 refuses OVERLAPPING prefix filters for one event type, and these ten do not
+  #       overlap because each is a distinct <domain>/<dataset>/ pair.
+  # WHY : Trade-offs: ten notification blocks where there was one, generated rather than
+  #       written out. The handler's "no family derived" branch becomes unreachable
+  #       through this path and is deliberately kept, because it still guards a direct
+  #       invocation and a future notification added without a filter.
+  dynamic "lambda_function" {
+    for_each = toset(local.dataset_generation_key_prefixes)
+
+    content {
+      lambda_function_arn = aws_lambda_function.dataset_retention.arn
+      events              = ["s3:ObjectCreated:*"]
+      filter_prefix       = lambda_function.value
+    }
   }
 
   # WHY : Assumptions: the invoke permission must exist before S3 will validate and
@@ -2201,34 +2678,60 @@ locals {
       environment_name = "CARDDEMO_AUTH_CREDENTIAL_SECRET_KMS_KEY_ARN"
       value            = module.kms.secrets_key_arn
     }
-    "reference|CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE" = {
-      service          = "reference"
-      environment_name = "CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE"
-      value            = module.sqs.date_inquiry_request_queue_url
+    # WHY : (1) Assumptions: all six queue entries below carry the queue's URL and not
+    #       its NAME, and the two are not interchangeable. Every value is a
+    #       module.sqs *_queue_url output, and each consuming property is spelled
+    #       carddemo.<context>.inquiry.{request,reply,error}-queue -- a name that
+    #       reads as though it wanted a name. The consumers accept EITHER
+    #       representation for exactly that reason:
+    #       com.carddemo.account.service.InquiryMessageListener and
+    #       com.carddemo.reference.service.DateInquiryMessageListener each use a
+    #       configured value carrying an http or https scheme as an address directly
+    #       and resolve only a bare name through GetQueueUrl, and each records the
+    #       decision at its own queueUrl method.
+    #       (2) Refactoring Rationale: this note did not exist, and its absence was
+    #       part of a defect rather than a documentation gap. The consumers used to
+    #       resolve every configured value as a NAME, so the URLs published here were
+    #       passed to GetQueueUrl as queue names -- which no queue can be, since a
+    #       name admits only alphanumerics, hyphens and underscores. Both inquiry
+    #       flows therefore failed at the resolution call before their send in every
+    #       provisioned environment: the request became visible again, was
+    #       redelivered to the same failure and dead-lettered, and the requester was
+    #       answered with nothing at all. Neither side was wrong on its own, which is
+    #       why nothing failed at plan time and no test in either module could see
+    #       it, and it is why the representation this root produces is now stated
+    #       here beside the values rather than left to be inferred from an output
+    #       name.
+    #       (3) Trade-offs: URLs are kept rather than switched to names, and the
+    #       reason is that an address is the value the caller actually needs. A name
+    #       obliges every consumer to spend a GetQueueUrl call at start-up, on a
+    #       queue this root has already resolved, and to hold the IAM grant for it;
+    #       an address needs neither. The accepted cost is that the property names
+    #       read as names, which is what item (1) exists to reconcile. The
+    #       Resolve*DestinationsByName statements further down still grant
+    #       sqs:GetQueueUrl on exactly these reply and error ARNs, so a local or
+    #       future configuration supplying a name is authorised rather than failing
+    #       closed.
+    #       (4) Assumptions: the reply and error queues are SHARED between the two
+    #       inquiry contexts -- both read module.sqs.inquiry_reply_queue_url and
+    #       module.sqs.error_queue_url -- while each request queue is its own. That
+    #       matches the queue module's own provisioning and the messaging contract
+    #       document: a reply is routed to its requester by correlation identity
+    #       rather than by queue, so one reply queue serves both flows, whereas a
+    #       request queue is what selects which consumer receives a request.
+    "account|CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE_URL" = {
+      service          = "account"
+      environment_name = "CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE_URL"
+      value            = module.sqs.inquiry_request_queue_url
     }
-    "reference|CARDDEMO_REFERENCE_INQUIRY_REPLY_QUEUE" = {
-      service          = "reference"
-      environment_name = "CARDDEMO_REFERENCE_INQUIRY_REPLY_QUEUE"
+    "account|CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE_URL" = {
+      service          = "account"
+      environment_name = "CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE_URL"
       value            = module.sqs.inquiry_reply_queue_url
     }
-    "reference|CARDDEMO_REFERENCE_INQUIRY_ERROR_QUEUE" = {
-      service          = "reference"
-      environment_name = "CARDDEMO_REFERENCE_INQUIRY_ERROR_QUEUE"
-      value            = module.sqs.error_queue_url
-    }
-    "account|CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE" = {
+    "account|CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE_URL" = {
       service          = "account"
-      environment_name = "CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE"
-      value            = module.sqs.account_inquiry_request_queue_url
-    }
-    "account|CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE" = {
-      service          = "account"
-      environment_name = "CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE"
-      value            = module.sqs.inquiry_reply_queue_url
-    }
-    "account|CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE" = {
-      service          = "account"
-      environment_name = "CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE"
+      environment_name = "CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE_URL"
       value            = module.sqs.error_queue_url
     }
     # WHY : Refactoring Rationale: this parameter did not exist, and its absence made
@@ -2438,37 +2941,34 @@ locals {
   )
 
   platform_parameters = {
-    "aurora/host"                       = module.aurora.writer_endpoint
-    "aurora/port"                       = tostring(module.aurora.port)
-    "aurora/database"                   = module.aurora.database_name
-    "datasets/bucket"                   = module.s3_datasets.bucket_name
-    "batch/daily-state-machine-arn"     = module.step_functions.daily_state_machine_arn
-    "reporting/adhoc-state-machine-arn" = local.adhoc_report_state_machine_arn
+    "aurora/host"     = module.aurora.writer_endpoint
+    "aurora/port"     = tostring(module.aurora.port)
+    "aurora/database" = module.aurora.database_name
+    "datasets/bucket" = module.s3_datasets.bucket_name
 
-    # WHY : Assumptions: the operator-invoked dataset round-trip machine is
-    #       published here for discovery, alongside the daily machine, and it is
-    #       taken from the module OUTPUT rather than composed from the name prefix.
-    #       The ad-hoc report entry above is composed deterministically only because
-    #       reporting-service's task definition and that machine would otherwise
-    #       form a dependency cycle; no such cycle exists here, so the output is the
-    #       correct source and a rename inside the module cannot leave this value
-    #       pointing at a machine that does not exist.
-    # WHY : Assumptions: publishing the ARN grants nothing. A principal that needs
-    #       to start this machine is granted states:StartExecution on exactly this
-    #       resource in its own runtime policy, as the reporting task is for the
-    #       ad-hoc machine; an operator uses their own role and the exact command in
-    #       docs/runbooks/batch-operations.md. This entry exists so neither has to
-    #       compose an ARN by hand.
-    "batch/dataset-roundtrip-state-machine-arn" = module.step_functions.dataset_roundtrip_state_machine_arn
-
-    # WHY : Assumptions: the operator-invoked authorization-extract machine is
-    #       published on the same reasoning as the round trip above -- from the module
-    #       output, for discovery, and granting nothing by being published. It is under
-    #       the `authorization/` prefix rather than `batch/` because the machine runs the
-    #       authorization image against the authorization schema; filing it under batch
-    #       would put it in the prefix the batch task role reads and imply an ownership
-    #       that does not exist.
-    "authorization/extract-state-machine-arn" = module.step_functions.authorization_extract_state_machine_arn
+    # WHY : ⚠️ Refactoring Rationale: FOUR state-machine ARN entries stood here and are
+    #       removed -- `batch/daily-state-machine-arn`,
+    #       `reporting/adhoc-state-machine-arn`,
+    #       `batch/dataset-roundtrip-state-machine-arn` and
+    #       `authorization/extract-state-machine-arn`. Each was justified as published
+    #       "for discovery", and that justification did not survive checking who
+    #       discovers anything from it: NOTHING reads them. The one runtime consumer,
+    #       reporting-service, receives the ad-hoc ARN as the container environment
+    #       variable CARDDEMO_REPORTING_STEP_FUNCTIONS_STATE_MACHINE_ARN in
+    #       local.special_service_environment above, never from Parameter Store; and
+    #       docs/runbooks/batch-operations.md obtains all four by reading
+    #       `terraform output -json batch_orchestration` and selecting each with `jq`.
+    #       A grep for the four parameter names across services/, ui/src and
+    #       data-migration/src returns nothing.
+    # WHY : Trade-offs: a parameter nobody reads is not free. It is four more resources
+    #       to create, four more to keep in step with a module rename, and -- because
+    #       the batch and reporting task roles are granted read access by PREFIX -- four
+    #       values inside a prefix those roles can read, for no purpose. Removing them
+    #       also removes the standing question of which source is authoritative when
+    #       the parameter and the Terraform output disagree.
+    # WHY : Assumptions: this does NOT reduce what an operator can reach. The Terraform
+    #       output is the authoritative source and always was; these were a second copy
+    #       of it that could go stale independently.
 
     # WHY : Assumptions: this is the ONE value the ETL cannot derive from the data
     #       it is loading. auth.users declares cognito_sub UUID NOT NULL UNIQUE
@@ -2623,27 +3123,22 @@ locals {
       resource_arn = var.mask_hmac_secret_arn
     }
   }
+  # WHY : Refactoring Rationale: a messaging_hmac_secret_sources local stood here,
+  #       injecting CARDDEMO_MESSAGING_HMAC_KEY into the authorization task. It is
+  #       withdrawn because the component that read it is gone: the property
+  #       carddemo.messaging.hmac-key had exactly one consumer, and with that
+  #       consumer deleted the name is read by nothing in any image. The sibling
+  #       module retired its own biconditional clause for the same name, so leaving
+  #       the injection here would publish a secret to a container that never opens
+  #       it -- a live credential with no reader, which is the shape a review is
+  #       least likely to question and most likely to inherit.
+  # WHY : Assumptions: the SECRET itself is deliberately left provisioned. Its value
+  #       is generated at apply time and never leaves Secrets Manager, the
+  #       environment inventory and the secret census both count six purpose
+  #       secrets, and removing a secret is a destroy-and-recreate whose recovery
+  #       window is a separate operational decision from withdrawing an injection.
+  #       What is closed here is the exposure -- no task receives it.
 
-  # WHY : Assumptions: the name is the one the authorization image reads --
-  #       application.yml resolves carddemo.messaging.hmac-key from
-  #       ${CARDDEMO_MESSAGING_HMAC_KEY} -- and infra/modules/ecs-service asserts
-  #       biconditionally that authorization receives it and that no other service
-  #       does, so the name is a contract rather than a convention.
-  #       Refactoring Rationale: this family did not exist, and the absence was the
-  #       whole defect. Only mask_hmac_secret_sources above was defined, and it goes
-  #       to data-migration alone; authorization therefore started with no key, and
-  #       the only per-card stable value it held was the card number, which then
-  #       became the published FIFO group identity on every reply. The entry reads
-  #       from the SCALAR secret this root creates, so value_from is the base ARN
-  #       with no JSON-key selector and IAM authorizes exactly the ARN the container
-  #       reads -- the same shape as tls_secret_sources above and deliberately not
-  #       the composite shape auth_client_secret_sources needs.
-  messaging_hmac_secret_sources = {
-    CARDDEMO_MESSAGING_HMAC_KEY = {
-      value_from   = aws_secretsmanager_secret.messaging_hmac.arn
-      resource_arn = aws_secretsmanager_secret.messaging_hmac.arn
-    }
-  }
 
   # WHY : Assumptions: the name is the one the card image reads -- application.yml
   #       resolves carddemo.security.card-selector.signing-key from
@@ -2720,16 +3215,25 @@ locals {
   #       with no default. infra/modules/ecs-service asserts biconditionally that
   #       exactly the list-publishing services receive it, so the name is a
   #       contract rather than a convention.
-  #       (2) Assumptions: SIX workloads receive it, and the six are the whole of
-  #       the gate: account, card, transaction, reference, reporting and authorization.
+  #       (2) Assumptions: SEVEN workloads receive it, and the seven are the whole of
+  #       the gate: auth, account, card, transaction, reference, reporting and
+  #       authorization.
   #       Each holds at least one component that requires the CursorToken bean --
-  #       AccountViewService; CardListService; TransactionController;
+  #       UserService; AccountViewService; CardListService; TransactionController;
   #       TransactionTypeController, TransactionCategoryController and
   #       AddressLookupController; ReportController; and PendingAuthViewMapper -- and a
   #       service whose context requires the bean cannot refresh without the key. batch
   #       and data-migration are absent because neither constructs the bean, and giving
   #       them the key would widen the set able to forge a cursor for no capability
   #       either exercises.
+  #       (2a) Refactoring Rationale: this said SIX and omitted auth, while the
+  #       contains() list below has admitted it since auth-service began publishing a
+  #       keyset page of the user master -- service/UserService.java declares
+  #       CursorToken as a constructor argument and seals its page boundaries with it.
+  #       A count one short of the gate a few lines under it is worse than none,
+  #       because a reader checking the gate against the prose would conclude the gate
+  #       was over-broad and narrow it, which would stop auth-service refreshing its
+  #       context at all.
   #       (3) Refactoring Rationale: account joined the set when it began publishing a
   #       keyset scan of the customer master, whose page boundaries
   #       service/AccountViewService.java seals. Until then it constructed no sealer and
@@ -2823,7 +3327,14 @@ locals {
   sqs_permissions_by_workload = {
     authorization = module.sqs.service_queue_permissions.authorization_service
     account       = module.sqs.service_queue_permissions.account_service
-    reference     = module.sqs.service_queue_permissions.reference_service
+    # WHY : ⚠️ Refactoring Rationale: there is deliberately no `reference` entry. The queue
+    #       module publishes no reference_service member any more, because that context
+    #       consumes no queue: the single shared inquiry request queue has exactly one
+    #       owning consumer, in the account context, and a second receive grant would let a
+    #       second identity take messages only that consumer can answer. A workload absent
+    #       from this map falls through to local.no_queue_permissions below, so both queue
+    #       arguments are empty lists and modules/ecs-service creates no queue-boundary
+    #       policy for it at all.
     # WHY : Refactoring Rationale: batch was absent from this map, so its task role held no
     #       sqs statement of any kind while the module it runs carries a queue configuration
     #       whose one purpose is to notify the terminal error sink that a run failed. The
@@ -2848,18 +3359,27 @@ locals {
     send    = []
   }
 
+  # WHY : Assumptions: derived from secret_sources_by_workload rather than from
+  #       local.workloads, so a workload that holds no secret is given no key and the
+  #       two cannot disagree about which tasks need one.
+  secret_kms_key_arns_by_workload = {
+    for service in keys(local.workloads) :
+    service => length(local.secret_sources_by_workload[service]) == 0 ? [] : distinct(concat(
+      [module.kms.secrets_key_arn],
+
+      # WHY : Assumptions: gated on data-migration by exact name, matching the gate on
+      #       mask_hmac_secret_sources above. It is the only task that reads the
+      #       fingerprint secret, so it is the only one granted the key that protects it.
+      service == "data-migration" ? [var.mask_hmac_secret_kms_key_arn] : [],
+    ))
+  }
+
   secret_sources_by_workload = {
     for service, workload in local.workloads :
     service => merge(
       contains(local.database_workload_names, service) ? local.database_secret_sources[service] : {},
       service == "auth" ? local.auth_client_secret_sources : {},
       service == "data-migration" ? local.mask_hmac_secret_sources : {},
-      # WHY : Assumptions: gated on the authorization service by exact name, matching
-      #       the biconditional precondition in infra/modules/ecs-service. It is the
-      #       only producer on the pending-authorization queue this repository
-      #       contains; widening the gate would hand key material to tasks that put
-      #       no message on that queue and have no use for it.
-      service == "authorization" ? local.messaging_hmac_secret_sources : {},
 
       # WHY : Assumptions: gated on the card service by exact name. It is the only
       #       context that addresses a row by an opaque selector, and the biconditional
@@ -2925,11 +3445,17 @@ locals {
         #       posture image_uri already encodes -- production pins the exact build,
         #       development iterates by pushing over a tag.
         # WHY : Refactoring Rationale: no root supplied this variable at all, and
-        #       carddemo-common-defaults.yml, the telemetry collector's resource
-        #       processor and OTEL_RESOURCE_ATTRIBUTES all fall back to the literal
-        #       "unspecified" without it -- so every log record, metric series and span
-        #       this estate produced was unattributable to a release. The service module
-        #       now refuses a task whose value is absent, blank or that same placeholder.
+        #       carddemo-common-defaults.yml falls back to the literal "unspecified"
+        #       without it -- so every log record and metric series this estate produced
+        #       was unattributable to a release. The service module now refuses a task
+        #       whose value is absent, blank or that same placeholder.
+        #       Refactoring Rationale: this sentence also credited "the telemetry
+        #       collector's resource processor and OTEL_RESOURCE_ATTRIBUTES" with the same
+        #       fallback, and named spans among the affected signals. Neither consumer
+        #       exists now: the collector sidecar was withdrawn because the
+        #       specification's module inventory contains none, so nothing in this estate
+        #       emits a span and the only remaining consumer of the label is the
+        #       application's own configuration.
         # WHY : Trade-offs: for a digest reference the label is the digest and not a
         #       human-readable version. That is preferred here: a digest is the only
         #       identity that cannot be moved after the fact, and the commit tag remains
@@ -3078,16 +3604,60 @@ data "aws_iam_policy_document" "card_runtime" {
   }
 }
 
+# WHY : ⚠️ Refactoring Rationale: the consume statement below names the ONE shared
+#       inquiry request queue and used to name an account-specific one. The baseline
+#       drives BOTH inquiry programs from a single request destination, DEFINE
+#       QLOCAL('CARDDEMO.REQUEST.QUEUE') at app/app-vsam-mq/README.md L53 aliased to
+#       CICS as MQQUEUE(CARDREQ) at L71, and modules/sqs provisions that one queue. A
+#       queue admits exactly one OWNING consumer, because a receive hides the message
+#       from every other consumer rather than delivering a copy to each, so this task
+#       role is the only one in the deployment holding sqs:ReceiveMessage on it and the
+#       reference task role holds no queue action at all.
+# WHY : Assumptions: the three actions are the whole of what a consumer needs and
+#       sqs:GetQueueUrl is deliberately not among them. The listener resolves each
+#       destination's address by NAME with GetQueueUrl, which is an unauthenticated-by-
+#       policy read of a name the caller already holds -- the roots publish the queue
+#       NAME rather than the URL for exactly that reason -- while receive, delete and
+#       attribute-read are the actions that touch messages.
 data "aws_iam_policy_document" "account_runtime" {
   statement {
-    sid       = "ConsumeAccountInquiryRequests"
+    sid       = "ConsumeInquiryRequests"
     actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
-    resources = [module.sqs.account_inquiry_request_queue_arn]
+    resources = [module.sqs.inquiry_request_queue_arn]
   }
 
   statement {
-    sid       = "PublishAccountInquiryResults"
+    sid       = "PublishInquiryResults"
     actions   = ["sqs:SendMessage"]
+    resources = [module.sqs.inquiry_reply_queue_arn, module.sqs.error_queue_arn]
+  }
+
+  # WHY : Refactoring Rationale: this statement was ABSENT, and its absence was one
+  #       half of a defect that made both inquiry flows undeliverable in a provisioned
+  #       environment. The two publish targets above are supplied to the workload as
+  #       queue URLs by the parameter block earlier in this root, and the consumers
+  #       resolved a configured destination through GetQueueUrl with the value as a
+  #       queue NAME -- so a URL was passed where a name was required and every reply
+  #       failed before its send. The consumers now accept either representation
+  #       directly, which removes the call on the URL path; this statement covers the
+  #       NAME path, so a local or future configuration that supplies a name is
+  #       authorised rather than merely expressible. Without it that path would fail
+  #       closed with an AccessDenied on a queue the same role may already send to.
+  # WHY : Trade-offs: the action is scoped to the SAME two ARNs the send statement
+  #       names and is deliberately not merged into it. GetQueueUrl is a read of a
+  #       queue's address and SendMessage is a write to its contents, and keeping them
+  #       as two statements means the send grant can be narrowed or widened later
+  #       without silently carrying the lookup with it. A wildcard resource was
+  #       rejected outright: GetQueueUrl on every queue in the account would let this
+  #       role discover the address of the authorization and batch queues it must never
+  #       reach.
+  # WHY : Assumptions: the request queue needs no entry of its own. The listener
+  #       container resolves that queue through the starter, which is already granted
+  #       GetQueueAttributes on it above, and the consumer never calls GetQueueUrl for
+  #       it.
+  statement {
+    sid       = "ResolveAccountInquiryDestinationsByName"
+    actions   = ["sqs:GetQueueUrl"]
     resources = [module.sqs.inquiry_reply_queue_arn, module.sqs.error_queue_arn]
   }
 
@@ -3150,25 +3720,27 @@ data "aws_iam_policy_document" "account_runtime" {
   }
 }
 
-data "aws_iam_policy_document" "reference_runtime" {
-  statement {
-    sid       = "ConsumeDateInquiryRequests"
-    actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
-    resources = [module.sqs.date_inquiry_request_queue_arn]
-  }
-
-  statement {
-    sid       = "PublishDateInquiryResults"
-    actions   = ["sqs:SendMessage"]
-    resources = [module.sqs.inquiry_reply_queue_arn, module.sqs.error_queue_arn]
-  }
-
-  statement {
-    sid       = "UseEncryptedInquiryQueues"
-    actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
-    resources = [module.kms.sqs_key_arn]
-  }
-}
+# WHY : Refactoring Rationale: a `reference_runtime` policy document stood here and is
+#       WITHDRAWN whole. All four of its statements existed for one consumer -- a
+#       date-inquiry queue listener in reference-service -- and that consumer is retired:
+#       AAP section 0.4.1.8 fixes the topology at five queues with no per-function queue,
+#       so date inquiries ride the shared inquiry request queue, whose single consumer is
+#       com.carddemo.account.service.InquiryMessageListener dispatching on its FUNCTION
+#       field. Two of the statements had already stopped resolving -- they named
+#       module.sqs.date_inquiry_request_queue_arn, an output modules/sqs withdrew with the
+#       queue pair it addressed -- so the document could not be evaluated at all.
+# WHY : Assumptions: nothing replaces it, and the absence is the mechanism rather than a
+#       gap. local.task_role_policy_json below deliberately carries no `reference` key, and
+#       modules/ecs-service takes create_task_role_policy from whether that key is present,
+#       so the inline policy resource is simply absent for that workload -- a reference task
+#       holds exactly what the module composes for every service and nothing else. A
+#       statement-less document left in place would instead have produced an invalid policy
+#       at apply time.
+# WHY : Trade-offs: the reply and error-queue send grants are NOT relocated. The workload
+#       that publishes those replies is the account task, whose own document already names
+#       both queues, so moving them would have duplicated a grant the correct role already
+#       holds and left this root asserting a capability for a container that opens no queue
+#       client.
 
 data "aws_iam_policy_document" "authorization_runtime" {
   statement {
@@ -3183,11 +3755,6 @@ data "aws_iam_policy_document" "authorization_runtime" {
     resources = [module.sqs.pauth_reply_queue_arn]
   }
 
-  statement {
-    sid       = "UseEncryptedAuthorizationQueues"
-    actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
-    resources = [module.kms.sqs_key_arn]
-  }
 
   # Refactoring Rationale: these three statements were added with the
   #   authorization-extract state machine. Without them the segment export had no
@@ -3240,6 +3807,26 @@ data "aws_iam_policy_document" "authorization_runtime" {
     sid       = "UseAuthorizationExtractKey"
     actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
     resources = [module.kms.s3_key_arn]
+    # WHY : Assumptions: kms:ViaService confines this key to use made THROUGH S3 in this
+    #       Region, so a principal that reached this role cannot call Decrypt directly on
+    #       ciphertext of its own choosing -- which is the capability an unconditioned
+    #       grant on a shared key hands out.
+    # WHY : Alternatives Considered: additionally conditioning on
+    #       kms:EncryptionContext:aws:s3:arn to name the bucket. Rejected here, and the
+    #       reason is specific rather than general: with bucket keys enabled -- they are,
+    #       at infra/modules/s3-datasets/main.tf and infra/modules/cloudfront-spa/main.tf
+    #       -- S3 sets that context to the BUCKET ARN, but it sets it to the OBJECT ARN
+    #       when they are not, so a StringEquals here would turn a storage-configuration
+    #       change into a runtime access denial on a path that only fails when it is
+    #       used. The narrowing it would express is already enforced anyway: the object
+    #       statements in this same document name the exact ARNs and prefixes, and a KMS
+    #       grant alone reaches no object without them.
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["s3.${data.aws_region.current.region}.amazonaws.com"]
+    }
+
   }
 }
 
@@ -3304,49 +3891,162 @@ data "aws_iam_policy_document" "reporting_runtime" {
     sid       = "UseReportOutputKey"
     actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
     resources = [module.kms.s3_key_arn]
+    # WHY : Assumptions: kms:ViaService confines this key to use made THROUGH S3 in this
+    #       Region, so a principal that reached this role cannot call Decrypt directly on
+    #       ciphertext of its own choosing -- which is the capability an unconditioned
+    #       grant on a shared key hands out.
+    # WHY : Alternatives Considered: additionally conditioning on
+    #       kms:EncryptionContext:aws:s3:arn to name the bucket. Rejected here, and the
+    #       reason is specific rather than general: with bucket keys enabled -- they are,
+    #       at infra/modules/s3-datasets/main.tf and infra/modules/cloudfront-spa/main.tf
+    #       -- S3 sets that context to the BUCKET ARN, but it sets it to the OBJECT ARN
+    #       when they are not, so a StringEquals here would turn a storage-configuration
+    #       change into a runtime access denial on a path that only fails when it is
+    #       used. The narrowing it would express is already enforced anyway: the object
+    #       statements in this same document name the exact ARNs and prefixes, and a KMS
+    #       grant alone reaches no object without them.
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["s3.${data.aws_region.current.region}.amazonaws.com"]
+    }
+
   }
 }
 
 data "aws_iam_policy_document" "batch_runtime" {
+  # WHY : ⚠️ Refactoring Rationale: this listing was unbounded -- `s3:ListBucket` on the
+  #       bucket ARN with no condition, which enumerates EVERY key the bucket holds.
+  #       The dataset bucket is shared: besides the ten generation families it carries
+  #       the three reporting artifact prefixes, whose statements and reports name
+  #       accounts, and the authorization extract prefix, whose objects are pending
+  #       authorization roots and children. A batch task could therefore discover, and
+  #       under the object statement below read, data belonging to two contexts it has
+  #       no part in. The bucket is not a privilege boundary when four workloads write
+  #       into it.
+  # WHY : Assumptions: `s3:prefix` is the ONLY way a list call can be bounded, because
+  #       its resource is the bucket rather than an object -- an object-ARN restriction
+  #       has no effect on it. This is the same pairing the reporting role above uses,
+  #       and it is applied here for the same reason.
+  # WHY : Trade-offs: `StringLike` against each prefix followed by a wildcard rather
+  #       than `StringEquals` against the bare prefix. The batch states list a
+  #       generation family's date prefix to choose the generation they are about to
+  #       write -- `<family>/dt=<business date>/` -- so an equality test would permit
+  #       only a bare top-level listing and refuse the one call the grant exists for.
+  # WHY : Assumptions: the statement id names the BATCH grant specifically rather than
+  #       reusing the retention role's `ListDatasetGenerationPrefixes` above. That role
+  #       is a different principal with a different, deliberately unbounded listing
+  #       grant -- the retention function enumerates every family to count generations
+  #       -- so two statements sharing one id would make "is this listing bounded?"
+  #       unanswerable by grep, which is the question an audit of this file asks first.
   statement {
-    sid       = "ListDatasetBucket"
+    sid       = "ListBatchGenerationPrefixes"
     actions   = ["s3:ListBucket"]
     resources = [module.s3_datasets.bucket_arn]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = [for prefix in local.batch_generation_key_prefixes : "${prefix}*"]
+    }
   }
 
-  # WHY : Assumptions: this ONE statement covers both directions of the dataset
-  #       bucket, and the read half is now load-bearing rather than incidental. The
-  #       seed-refresh state's `refresh-dataset` command READS each exported extract
-  #       out of module.s3_datasets.source_extract_prefix before it stages, decodes and
-  #       loads it; every generation-writing batch state WRITES under the ten
-  #       generation prefixes; and CombineTransactions reads a generation back. All of
-  #       those keys are inside this one bucket, so the resource pattern already grants
-  #       the read the refresh needs.
-  # WHY : Alternatives Considered: splitting this into a read statement scoped to the
-  #       source-extract prefix and a read/write statement scoped to the dataset
-  #       prefixes. Rejected because it would express no narrower privilege while
-  #       creating a way for the two to fall out of step: the prefixes are owned by the
-  #       s3-datasets module and are ALL of the keys this bucket holds -- twelve dataset
-  #       prefixes plus the source-extract prefix -- so a per-prefix enumeration here
-  #       would grant exactly what "/*" grants today and would silently omit whichever
-  #       prefix a later change added. The bucket itself is the privilege boundary: it
-  #       holds only this workload's datasets, it is created by this root, and its own
-  #       policy refuses non-TLS access and any principal outside this account.
+  # WHY : ⚠️ Refactoring Rationale: this statement's resource was
+  #       `<bucket>/*` -- read and overwrite on every object in the bucket. It is now
+  #       one resource per generation family. The rationale that stood here argued that
+  #       a per-prefix enumeration "would grant exactly what /* grants today", on the
+  #       premise that the generation prefixes plus the source-extract prefix are ALL of
+  #       the keys the bucket holds. That premise was false: infra/modules/s3-datasets
+  #       also publishes three non-generation prefixes for reporting artifacts, and this
+  #       root composes an authorization extract prefix in the same bucket, so the old
+  #       grant let a batch task read every statement, every transaction report and
+  #       every pending-authorization extract, and overwrite them.
+  # WHY : Assumptions: the ten generation families are what the batch chain actually
+  #       touches -- BackupTransactions and CombineTransactions write and read
+  #       generations, the export and import jobs round-trip one, and the reject stream
+  #       is a generation of its own. It reads no reporting artifact: those are written
+  #       by the reporting task definition under its own role, which the statements
+  #       above grant. And it reads no source extract: `refresh-dataset` runs on the
+  #       data-migration task definition, whose policy sources this document and adds
+  #       that prefix for itself.
+  # WHY : Trade-offs: the enumeration is derived from module.s3_datasets.dataset_prefixes
+  #       rather than written out, so a family added to that module is covered here
+  #       without an edit while a prefix that is NOT a generation family stays out of
+  #       reach. That is the drift the old rationale feared, closed by deriving the list
+  #       instead of by widening the grant.
   statement {
-    sid       = "ReadWriteDatasetGenerations"
-    actions   = ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"]
-    resources = ["${module.s3_datasets.bucket_arn}/*"]
+    sid     = "ReadWriteDatasetGenerations"
+    actions = ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"]
+    resources = [
+      for prefix in local.batch_generation_key_prefixes :
+      "${module.s3_datasets.bucket_arn}/${prefix}*"
+    ]
   }
 
   statement {
     sid       = "UseDatasetKey"
     actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
     resources = [module.kms.s3_key_arn]
+    # WHY : Assumptions: kms:ViaService confines this key to use made THROUGH S3 in this
+    #       Region, so a principal that reached this role cannot call Decrypt directly on
+    #       ciphertext of its own choosing -- which is the capability an unconditioned
+    #       grant on a shared key hands out.
+    # WHY : Alternatives Considered: additionally conditioning on
+    #       kms:EncryptionContext:aws:s3:arn to name the bucket. Rejected here, and the
+    #       reason is specific rather than general: with bucket keys enabled -- they are,
+    #       at infra/modules/s3-datasets/main.tf and infra/modules/cloudfront-spa/main.tf
+    #       -- S3 sets that context to the BUCKET ARN, but it sets it to the OBJECT ARN
+    #       when they are not, so a StringEquals here would turn a storage-configuration
+    #       change into a runtime access denial on a path that only fails when it is
+    #       used. The narrowing it would express is already enforced anyway: the object
+    #       statements in this same document name the exact ARNs and prefixes, and a KMS
+    #       grant alone reaches no object without them.
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["s3.${data.aws_region.current.region}.amazonaws.com"]
+    }
+
   }
 }
 
 data "aws_iam_policy_document" "data_migration_runtime" {
   source_policy_documents = [data.aws_iam_policy_document.batch_runtime.json]
+
+  # WHY : ⚠️ Refactoring Rationale: these two statements were not needed while
+  #       batch_runtime granted the whole bucket, and they ARE needed now that it grants
+  #       the ten generation prefixes only. The seed-refresh state runs
+  #       `refresh-dataset` on this task definition, and that command reads each exported
+  #       extract out of module.s3_datasets.source_extract_prefix before it stages,
+  #       decodes and loads it. Sourcing the batch document gives this role the
+  #       generation prefixes it stages INTO; the extract prefix it reads FROM is this
+  #       workload's alone, so it is granted here rather than to every batch task.
+  # WHY : Assumptions: the listing is bounded by `s3:prefix` for the same reason it is
+  #       above -- a list call's resource is the bucket, so only the condition key can
+  #       narrow it -- and the loader does list the prefix rather than only fetching
+  #       known keys, because it resolves which extract objects a dataset has.
+  # WHY : Trade-offs: `s3:GetObject` only. This role never writes an extract: the
+  #       extracts are placed by the operator sync documented in
+  #       docs/runbooks/data-migration.md, and a write grant here would let a migration
+  #       task alter the very inputs its verification passes compare the loaded rows
+  #       against -- which would make the money-total and digest gates self-referential.
+  statement {
+    sid       = "ListSourceExtractPrefix"
+    actions   = ["s3:ListBucket"]
+    resources = [module.s3_datasets.bucket_arn]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["${module.s3_datasets.source_extract_prefix}*"]
+    }
+  }
+
+  statement {
+    sid       = "ReadSourceExtracts"
+    actions   = ["s3:GetObject"]
+    resources = ["${module.s3_datasets.bucket_arn}/${module.s3_datasets.source_extract_prefix}*"]
+  }
 
   statement {
     sid = "ReadRuntimeParameters"
@@ -3370,6 +4070,28 @@ data "aws_iam_policy_document" "data_migration_runtime" {
     sid       = "DecryptServiceDatabaseCredentials"
     actions   = ["kms:Decrypt"]
     resources = [module.kms.secrets_key_arn]
+    # WHY : Assumptions: BOTH conditions are applied. kms:ViaService confines the key to
+    #       use made through Secrets Manager in this Region, so the grant cannot be spent
+    #       on ciphertext this principal supplied itself; the encryption-context condition
+    #       confines it to the exact secrets this document already authorises, because
+    #       Secrets Manager sets SecretARN to the secret being read or written on every
+    #       request. The set matches the GetSecretValue statement above it, so this task can spend the key only on the credentials it is already allowed to read.
+    # WHY : Trade-offs: StringLike rather than StringEquals on the context, matching the
+    #       reasoning recorded in infra/modules/ecs-service/main.tf -- Secrets Manager
+    #       appends a six-character suffix to the ARN it puts in the context when the
+    #       caller supplied a name-only ARN, and each pattern still names one secret.
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["secretsmanager.${data.aws_region.current.region}.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringLike"
+      variable = "kms:EncryptionContext:SecretARN"
+      values   = [for secret in values(module.secrets.service_credential_secrets) : secret.arn]
+    }
+
   }
 
   # WHY : Refactoring Rationale: this statement was ABSENT, and its absence made a
@@ -3501,11 +4223,12 @@ data "aws_iam_policy_document" "data_migration_runtime" {
 #       calls need this policy; without it every user creation fails with an access
 #       denial at the provider and the workload is the only one whose task role holds
 #       no statement.
-#       (2) Assumptions: the FIVE actions are exactly the five the service issues,
-#       and no sixth is granted speculatively. The set was derived by enumerating
+#       (2) Assumptions: the SIX actions are exactly the six the service issues,
+#       and no seventh is granted speculatively. The set was derived by enumerating
 #       every provider call in services/auth-service/src/main/java rather than from
 #       the shape of the feature: adminCreateUser, adminAddUserToGroup,
-#       adminRemoveUserFromGroup, adminUpdateUserAttributes and adminDeleteUser.
+#       adminRemoveUserFromGroup, adminUpdateUserAttributes, adminDeleteUser and
+#       adminUserGlobalSignOut.
 #       AdminCreateUser and AdminAddUserToGroup are the two halves of provisioning --
 #       the account must exist before it can join a group, and membership is a
 #       separate call rather than an attribute -- and AdminDeleteUser is the
@@ -3541,6 +4264,18 @@ data "aws_iam_policy_document" "data_migration_runtime" {
 #       the absence by asserting this service creates no credential. That is no longer
 #       true, and left standing it would have read as a licence to remove the two
 #       statements below.
+#       Refactoring Rationale: a SIXTH action is granted, AdminUserGlobalSignOut, and
+#       the paragraph above asserted five was exhaustive. Two call sites need it and
+#       both are privilege REDUCTIONS. A demotion withdraws the administrative group
+#       and then ends every session that carries the claim, inside the write span, so
+#       that a reported success cannot precede the withdrawal; and a deletion signs the
+#       account out before removing it, because deleting an account does not invalidate
+#       the tokens already minted from it -- a resource server checks a signature and
+#       an expiry against the pool's public keys, so a deleted administrator's token
+#       goes on being accepted with its group claim intact until it expires. Without
+#       this statement both calls fail with an access denial, and the demotion's
+#       failure is the worse of the two: it rolls the row back, so the demotion an
+#       administrator asked for cannot be performed at all.
 #       (3) Trade-offs: the resource is the single pool ARN rather than a wildcard, so
 #       a second pool in the same account is unreachable from this task even by
 #       accident. The cost is that the statement cannot be written before the pool
@@ -3555,6 +4290,7 @@ data "aws_iam_policy_document" "auth_runtime" {
       "cognito-idp:AdminRemoveUserFromGroup",
       "cognito-idp:AdminUpdateUserAttributes",
       "cognito-idp:AdminDeleteUser",
+      "cognito-idp:AdminUserGlobalSignOut",
     ]
     resources = [module.cognito.user_pool_arn]
   }
@@ -3613,15 +4349,46 @@ data "aws_iam_policy_document" "auth_runtime" {
     sid       = "EncryptRuntimeUserCredentials"
     actions   = ["kms:Encrypt", "kms:GenerateDataKey"]
     resources = [module.kms.secrets_key_arn]
+    # WHY : Assumptions: BOTH conditions are applied. kms:ViaService confines the key to
+    #       use made through Secrets Manager in this Region, so the grant cannot be spent
+    #       on ciphertext this principal supplied itself; the encryption-context condition
+    #       confines it to the exact secrets this document already authorises, because
+    #       Secrets Manager sets SecretARN to the secret being read or written on every
+    #       request. The pattern is the same runtime-user prefix the PutSecretValue statement above names, so the write grant and the key grant describe one boundary rather than two.
+    # WHY : Trade-offs: StringLike rather than StringEquals on the context, matching the
+    #       reasoning recorded in infra/modules/ecs-service/main.tf -- Secrets Manager
+    #       appends a six-character suffix to the ARN it puts in the context when the
+    #       caller supplied a name-only ARN, and each pattern still names one secret.
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["secretsmanager.${data.aws_region.current.region}.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringLike"
+      variable = "kms:EncryptionContext:SecretARN"
+      values   = ["arn:${data.aws_partition.current.partition}:secretsmanager:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:secret:${module.cognito.credential_secret_name_prefix}/runtime-user/*"]
+    }
+
   }
 }
 
 locals {
   task_role_policy_json = {
-    auth          = data.aws_iam_policy_document.auth_runtime.json
-    card          = data.aws_iam_policy_document.card_runtime.json
-    account       = data.aws_iam_policy_document.account_runtime.json
-    reference     = data.aws_iam_policy_document.reference_runtime.json
+    auth    = data.aws_iam_policy_document.auth_runtime.json
+    card    = data.aws_iam_policy_document.card_runtime.json
+    account = data.aws_iam_policy_document.account_runtime.json
+    # WHY : ⚠️ Refactoring Rationale: there is deliberately NO `reference` key here. The
+    #       document it named is withdrawn with the queue consumer that gave it its three
+    #       statements -- the withdrawal is argued at that document's former site above --
+    #       and the absence of the key is the mechanism, not a side effect: the module
+    #       argument create_task_role_policy is contains(keys(local.task_role_policy_json),
+    #       each.key), so a missing key makes the inline policy resource absent, whereas a
+    #       key pointing at a statement-less document would produce an invalid policy. A
+    #       reference task therefore holds exactly the permissions modules/ecs-service
+    #       composes for every workload and nothing service-specific, which is the correct
+    #       state for a context that reaches no queue, no key and no bucket of its own.
     authorization = data.aws_iam_policy_document.authorization_runtime.json
     reporting     = data.aws_iam_policy_document.reporting_runtime.json
     # WHY : Assumptions: batch names batch_runtime here and NOT a document that wraps it with
@@ -3672,33 +4439,22 @@ module "ecs_service" {
   )
   ecr_repository_arn = module.ecr.repository_arns[each.value.repository]
 
-  # WHY : Assumptions: the sidecar image and the repository ARN authorizing its pull
-  #       are passed TOGETHER, because either alone is a broken deployment: the image
-  #       without the grant is a pull the execution role is refused, and the grant
-  #       without the image authorizes a repository nothing fetches. Both read from
-  #       the same mirror repository key, so they cannot name different repositories.
-  # WHY : Refactoring Rationale: this reference now prefers the mirrored image's
-  #       DIGEST and falls back to its tag, where it previously always named the tag.
-  #       A tag identifies an artifact by a label the registry lets a push move,
-  #       whereas the digest identifies the bytes; the eight service task definitions
-  #       already resolve their own images this way through image_digests, and the
-  #       sidecar -- the one container every workload runs -- was the exception.
-  #       .github/workflows/deploy.yml records the mirror's digest under the
-  #       `aws-otel-collector` key after the mirror step, so a deployment resolves
-  #       the digest form and a plan run before any mirror exists still resolves the
-  #       tag form rather than failing on a missing key.
-  # WHY : Trade-offs: repository immutability makes the tag form safe as a fallback,
-  #       so this is defence in depth rather than a correction of something broken.
-  #       What it buys is that the task definition records WHICH collector bytes ran,
-  #       which a tag cannot answer after the fact.
-  telemetry_collector_image = (
-    lookup(var.image_digests, local.telemetry_collector_repository, null) != null
-    ? "${module.ecr.repository_urls[local.telemetry_collector_repository]}@${var.image_digests[local.telemetry_collector_repository]}"
-    : "${module.ecr.repository_urls[local.telemetry_collector_repository]}:${local.telemetry_collector_image_tag}"
-  )
-  telemetry_collector_repository_arn = (
-    module.ecr.repository_arns[local.telemetry_collector_repository]
-  )
+  # WHY : Refactoring Rationale: two inputs stood here, telemetry_collector_image and
+  #       telemetry_collector_repository_arn, resolving the mirrored AWS Distro for
+  #       OpenTelemetry collector image and authorizing the execution role to pull it.
+  #       Both are WITHDRAWN because infra/modules/ecs-service no longer composes a
+  #       collector sidecar, and it no longer does so because the sidecar was outside
+  #       the frozen specification and was forcing two topology changes that are also
+  #       outside it -- an eleventh ECR repository to mirror a public image into,
+  #       against the ten that section 0.4.1.6 states, and a ninth interface endpoint
+  #       for xray, against the eight that section 0.4.1.9 states. The module records
+  #       the full argument and the alternatives weighed against it.
+  #       Trade-offs: what this root loses is span export to a managed tracing
+  #       backend. What it keeps is every observability artifact the specification
+  #       actually names: container logs in each workload's own group, the Actuator
+  #       Prometheus surface each service already exposes, the common metric tags
+  #       common-lib's MetricsConfig applies, and end-to-end request correlation
+  #       through common-lib's CorrelationIdFilter.
   container_name       = each.value.container_name
   container_port       = module.network.app_container_port
   task_cpu             = var.ecs_task_cpu
@@ -3769,11 +4525,35 @@ module "ecs_service" {
   # WHY : Assumptions: the default object declares BOTH members, because lookup must
   #       return one type for every key. An empty object would make the two arms
   #       disagree and fail type unification rather than falling back.
-  sqs_receive_queue_arns        = lookup(local.sqs_permissions_by_workload, each.key, local.no_queue_permissions).receive
-  sqs_send_queue_arns           = lookup(local.sqs_permissions_by_workload, each.key, local.no_queue_permissions).send
-  create_task_role_policy       = contains(keys(local.task_role_policy_json), each.key)
-  task_role_policy_json         = lookup(local.task_role_policy_json, each.key, null)
-  execution_secret_kms_key_arns = length(local.secret_sources_by_workload[each.key]) > 0 ? [module.kms.secrets_key_arn] : []
+  sqs_receive_queue_arns = lookup(local.sqs_permissions_by_workload, each.key, local.no_queue_permissions).receive
+  sqs_send_queue_arns    = lookup(local.sqs_permissions_by_workload, each.key, local.no_queue_permissions).send
+
+  # WHY : Assumptions: the key is passed only to the four workloads that hold queue
+  #       permissions, and null to the rest, so no task role carries a key grant for a
+  #       queue it cannot use. The module emits the statement only when a queue list is
+  #       non-empty, so these two conditions agree by construction rather than by a
+  #       reader checking them against each other.
+  # WHY : Refactoring Rationale: this replaces three per-service grants of the same key
+  #       written directly into account_runtime, reference_runtime and
+  #       authorization_runtime, which were UNCONDITIONED -- and a fourth that was
+  #       simply absent from batch_runtime. Passing it here instead means the grant
+  #       carries the module's kms:ViaService and per-queue encryption-context
+  #       conditions, which an inline grant in this root did not, and means batch gets
+  #       the grant its error-queue send has always required.
+  sqs_kms_key_arn         = contains(keys(local.sqs_permissions_by_workload), each.key) ? module.kms.sqs_key_arn : null
+  create_task_role_policy = contains(keys(local.task_role_policy_json), each.key)
+  task_role_policy_json   = lookup(local.task_role_policy_json, each.key, null)
+  # WHY : Assumptions: the list is per workload rather than one shared value, because
+  #       data-migration reads a secret this root did not create and therefore one
+  #       protected by a key this root does not own. Granting the union for that
+  #       workload alone keeps every other task's grant at the single CMK.
+  # WHY : Trade-offs: for data-migration the statement names two keys and conditions on
+  #       that workload's secret ARNs, so the grant is nominally the cross-product of
+  #       both. The effective privilege is still exact -- a key decrypts only the
+  #       ciphertext sealed under it -- and the alternative, one statement per key with
+  #       its own secret-ARN condition, would require the module to accept a key-to-
+  #       secret mapping rather than a list, for no narrowing that IAM can enforce.
+  execution_secret_kms_key_arns = local.secret_kms_key_arns_by_workload[each.key]
 
   # WHY : Assumptions: the boundary is an account-level policy this deployment
   #       does not create, because a boundary a deployment can rewrite bounds
@@ -4071,6 +4851,109 @@ module "step_functions" {
   #       precisely so that one compromised grant does not reach two stores, and reusing
   #       the object-store key for a queue would undo that at the one call site nobody
   #       would think to check.
+
+  # WHY : Assumptions: the SAME account boundary goes to every module that creates a
+  #       role, so "every role this deployment creates" means one ceiling rather than a
+  #       per-module one. infra/modules/ecs-service has always received it; network,
+  #       step_functions and eventbridge_scheduler did not, which is why their roles were
+  #       unbounded while this root's variable description claimed otherwise.
+  permissions_boundary_arn = var.permissions_boundary_arn
+}
+
+# WHY : Assumptions: this resource asserts at PLAN time that the window in which the nightly
+#       chain can be STARTED does not intersect the Aurora backup window or the weekly
+#       maintenance window. It creates nothing; it exists only to turn a three-value coupling
+#       into a plan-time failure.
+# WHY : Refactoring Rationale: this coupling was previously carried by a comment on
+#       module.aurora alone, which asked a reader to re-derive it from two tfvars entries and
+#       a module default. That is exactly the kind of invariant that survives review and then
+#       breaks when someone moves one of the three values for an unrelated reason, because
+#       nothing recomputes the relationship. The comment stays -- it explains WHY the
+#       separation matters -- and this resource makes it checkable.
+# WHY : Assumptions: the interval asserted is the START window, not the whole run. It runs
+#       from the cron hour to the cron hour plus var.batch_schedule_maximum_event_age_seconds,
+#       because a delivery that fails is retried for up to that long and a RETRIED delivery
+#       starts the chain at whatever time it eventually succeeds. Bounding that age is what
+#       makes the 02:00 choice mean anything; the reasoning for the specific value is recorded
+#       at the variable. The chain's own 17-hour ceiling deliberately is NOT asserted against
+#       these windows: a long run may overlap a backup, which is tolerated for the reason
+#       recorded at module.aurora's preferred_backup_window.
+# WHY : Assumptions: this gate is character-for-character the dev root's, because the two roots
+#       must differ only in sizing and retention and never in topology. A start window checked in
+#       one environment and unchecked in the other is exactly the drift the requirement forbids.
+# WHY : Assumptions: neither window is permitted to wrap midnight, and that is asserted rather
+#       than assumed. Arithmetic on wrapped intervals needs case analysis that would make this
+#       gate harder to read than the invariant it protects, and no CardDemo environment has a
+#       reason to straddle midnight -- so the wrap case is refused with a message that says to
+#       split the window instead.
+locals {
+  # Parse `cron(<minute> <hour> ...)` in the scheduler module's default UTC timezone.
+  batch_cron_fields = split(" ", trimsuffix(trimprefix(var.batch_schedule_expression, "cron("), ")"))
+  batch_start_hour  = tonumber(local.batch_cron_fields[1])
+
+  # The START window: the scheduled hour plus the bounded delivery-retry age.
+  batch_start_begin = local.batch_start_hour
+  batch_start_end   = local.batch_start_hour + (var.batch_schedule_maximum_event_age_seconds / 3600)
+
+  # Backup window "hh:mm-hh:mm"; maintenance window "ddd:hh:mm-ddd:hh:mm".
+  backup_begin_hour = tonumber(split(":", split("-", var.aurora_preferred_backup_window)[0])[0])
+  backup_end_hour   = tonumber(split(":", split("-", var.aurora_preferred_backup_window)[1])[0])
+
+  maintenance_begin_hour = tonumber(split(":", split("-", var.aurora_preferred_maintenance_window)[0])[1])
+  maintenance_end_hour   = tonumber(split(":", split("-", var.aurora_preferred_maintenance_window)[1])[1])
+}
+
+resource "terraform_data" "batch_window_disjoint" {
+  input = {
+    batch_start_window = "${local.batch_start_begin}:00-${local.batch_start_end}:00 UTC"
+    backup_window      = var.aurora_preferred_backup_window
+    maintenance_window = var.aurora_preferred_maintenance_window
+  }
+
+  lifecycle {
+    precondition {
+      condition     = local.batch_start_end > local.batch_start_begin && local.batch_start_end <= 24 && local.backup_end_hour > local.backup_begin_hour && local.maintenance_end_hour > local.maintenance_begin_hour
+      error_message = "The batch start window, the Aurora backup window and the maintenance window must each begin and end on the same UTC day; one of them wraps midnight. The batch start window wraps when the cron hour plus batch_schedule_maximum_event_age_seconds passes 24:00 -- shorten that age rather than widening this check, because interval arithmetic across midnight cannot be expressed here without case analysis that would obscure the invariant."
+    }
+
+    precondition {
+      condition     = local.batch_start_end <= local.backup_begin_hour || local.batch_start_begin >= local.backup_end_hour
+      error_message = "The window in which the nightly batch chain can be STARTED overlaps the Aurora backup window. A chain that begins as a backup begins puts a fresh fan-out of loader tasks against the cluster at its least available moment. Move batch_schedule_expression, move aurora_preferred_backup_window, or shorten batch_schedule_maximum_event_age_seconds -- but do not move them onto each other."
+    }
+
+    precondition {
+      condition     = local.batch_start_end <= local.maintenance_begin_hour || local.batch_start_begin >= local.maintenance_end_hour
+      error_message = "The window in which the nightly batch chain can be STARTED overlaps the Aurora weekly maintenance window. Maintenance may fail the cluster over, which would abort in-flight loader tasks and leave the online-write bracket engaged until the finalizer rule clears it. Move batch_schedule_expression or aurora_preferred_maintenance_window."
+    }
+  }
+}
+
+# WHY : Assumptions: this resource is a plan-time-only gate that is satisfied once EVERY
+#       resource in the dataset-retention invocation path exists. It creates nothing; its sole
+#       purpose is to give the nightly schedule below one dependency edge that covers the whole
+#       path.
+# WHY : Refactoring Rationale: the schedule used to depend on `aws_iam_role_policy.dataset_retention_s3`
+#       ALONE, and that single edge covered only one of the four ways the retention path can be
+#       incomplete when the first cron fires. Without `aws_lambda_function.dataset_retention` there is
+#       no function to invoke; without `aws_lambda_permission.dataset_retention_from_s3` S3 is not
+#       allowed to invoke it; without `aws_s3_bucket_notification.dataset_generations` S3 does not
+#       even attempt to. Those three are strictly worse than the denied S3 call the original edge
+#       guarded, because a denied call still appears in the function's own logs while a missing
+#       notification produces no invocation, no log and no metric.
+# WHY : Assumptions: this gate is character-for-character the dev root's, because the two roots are
+#       required to differ only in sizing and retention and never in topology. A retention path
+#       ordered correctly in one environment and not the other is precisely the divergence that
+#       requirement exists to prevent, and prod is the environment where silent over-retention costs
+#       real storage.
+# WHY : Trade-offs: `input` is used rather than `triggers_replace`, because nothing here needs to be
+#       REPLACED when the retention path changes; the resource exists only to carry ordering.
+resource "terraform_data" "dataset_retention_path_ready" {
+  input = {
+    function_arn        = aws_lambda_function.dataset_retention.arn
+    s3_policy_id        = aws_iam_role_policy.dataset_retention_s3.id
+    invoke_permission   = aws_lambda_permission.dataset_retention_from_s3.id
+    bucket_notification = aws_s3_bucket_notification.dataset_generations.id
+  }
 }
 
 module "eventbridge_scheduler" {
@@ -4081,10 +4964,31 @@ module "eventbridge_scheduler" {
   state_machine_arn       = module.step_functions.daily_state_machine_arn
   dead_letter_arn         = module.sqs.error_queue_arn
   dead_letter_kms_key_arn = module.kms.sqs_key_arn
-  schedule_expression     = var.batch_schedule_expression
-  kms_key_arn             = module.kms.s3_key_arn
 
-  depends_on = [aws_iam_role_policy.dataset_retention_s3]
+  # WHY : Assumptions: the boundary is an account-level policy this deployment does not
+  #       create, for the reason recorded on every other call that passes it -- a boundary
+  #       a deployment can rewrite bounds nothing. The role it bounds here is the
+  #       scheduler's invocation role, whose only capability is StartExecution on the
+  #       daily state machine; the boundary is passed anyway so that capability cannot be
+  #       widened past the account ceiling by a later edit to that module.
+  permissions_boundary_arn = var.permissions_boundary_arn
+  schedule_expression      = var.batch_schedule_expression
+
+  # WHY : Assumptions: the scheduler module defaults this to 86400 -- the top of the
+  #       accepted range -- and the root NARROWS it. The reasoning is recorded at the
+  #       variable; in one line, a 24-hour delivery-retry age lets a retried trigger start
+  #       the chain at any hour of the following day, which discards the whole point of
+  #       scheduling it at 02:00. terraform_data.batch_window_disjoint above asserts the
+  #       resulting start window against the backup and maintenance windows.
+  maximum_event_age_in_seconds = var.batch_schedule_maximum_event_age_seconds
+  kms_key_arn                  = module.kms.s3_key_arn
+
+  # WHY : Assumptions: this edge is NOT redundant. The schedule references none of the
+  #       retention resources, so Terraform infers no ordering, yet a schedule is LIVE the
+  #       moment it is created -- it can fire the nightly chain before the retention path
+  #       is complete, leaving generations written and pruning silently skipped. The
+  #       reasoning for covering all four resources is recorded at the gate above.
+  depends_on = [terraform_data.dataset_retention_path_ready]
 }
 
 module "observability" {
@@ -4105,8 +5009,29 @@ module "observability" {
   database_connection_threshold = local.database_connection_budget
   queue_names                   = module.sqs.queue_names
   daily_state_machine_arn       = module.step_functions.daily_state_machine_arn
-  vpc_flow_log_group_name       = module.network.flow_log_group_name
-  cloudfront_distribution_id    = module.cloudfront_spa.distribution_id
+  # WHY : Refactoring Rationale: the four execution log groups the batch module publishes
+  #       are passed HERE, and until this argument existed they were published and
+  #       consumed by nothing -- while that module's output descriptions stated that
+  #       observability attached metric filters and log-based alarms to them. Wiring them
+  #       closes a real gap rather than only a documentation one: the AWS/States alarms
+  #       the module raises are dimensioned on the daily machine's ARN alone, so a
+  #       failure of the ad-hoc report, dataset round-trip or authorization-extract
+  #       machine produced no signal at all.
+  # WHY : Assumptions: NAMES rather than ARNs, because a metric filter is created against
+  #       a log-group name; the matching ARN outputs stay unconsumed by design and are
+  #       described in the owning module as identities for policy scoping and discovery.
+  # WHY : Assumptions: all four machines are passed, keyed exactly as that module keys its
+  #       execution roles -- daily, adhoc, dataset, authz -- so an operator reading an
+  #       alarm name, an execution-role name and a log group is reading one key set
+  #       rather than three spellings of one.
+  state_machine_log_group_names = {
+    daily   = module.step_functions.daily_log_group_name
+    adhoc   = module.step_functions.adhoc_report_log_group_name
+    dataset = module.step_functions.dataset_roundtrip_log_group_name
+    authz   = module.step_functions.authorization_extract_log_group_name
+  }
+  vpc_flow_log_group_name    = module.network.flow_log_group_name
+  cloudfront_distribution_id = module.cloudfront_spa.distribution_id
   # WHY : Assumptions: the same fact is also passed as a boolean, because the module
   #       selects the distribution alarm's cardinality from it. The identifier above is
   #       created by this root and is unknown until then, so a count derived from it

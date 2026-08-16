@@ -46,17 +46,16 @@ VSAM datasets and sequential inputs that `batch-service` was migrated from. They
 the *data-in* side of parity verification, and they serve it in **two distinct ways**
 that section 1.5 separates file by file. In the first, a test loads a scenario's records,
 exercises the migrated Spring Batch job, and compares the result against the expectation
-that the scenario's own `README.md` states. In the second, the records are a **mirror**
-of a corpus the parity run reads elsewhere, held to their declared geometry and to the
-discriminating values their scenario README states, so that an edit here is still
-detected even though no job in this module consumes them.
+that the scenario's own `README.md` states. In the second, a record file is not opened by any
+job in this module and is instead held to its declared geometry and to the discriminating
+values its scenario README states, so that an edit to it is still detected.
 
-Assumptions: the distinction is stated because reading the first sentence as universal is
-the specific mistake it invites. Of the **51** record files in this tree, **five** are
-opened as job input by a test in this module; the rest are mirrors. Presenting all of them
-as driven would make every scenario README's expected-outcome section read as an assertion
-some test performs, and for twelve of the sixteen scenarios it is instead a statement of
-what the reference produces and what the migrated rule is asserted to produce elsewhere.
+Assumptions: the distinction is stated because reading the second case as the common one is the
+specific mistake it invites. Of the **62** record files in this tree, **53** are opened as job
+input by a test in this module and **nine** are not; section 1.5 names all nine. Presenting the
+whole tree as unread would make every scenario README's expected-outcome section read as a
+statement about what the reference produces, when for thirteen of the sixteen scenarios it is an
+assertion a test in this module performs over these exact bytes.
 
 Every record file in this tree is **derived**: it is a copy or a subset of an ASCII seed
 dataset under `app/data/ASCII/`, reshaped in non-identity business-rule fields for the
@@ -90,7 +89,7 @@ bytes, and this document is that carrier for the whole tree.
 
 Assumptions: nothing in this directory is machine-scanned for documentation.
 `config/checkstyle/checkstyle.xml` sets `fileExtensions` to `java` at `Checker` level
-(line 209), so a `.md` or `.txt` file here is outside the audit set before any
+(line 202), so a `.md` or `.txt` file here is outside the audit set before any
 suppression is consulted; and the fixtures entry in
 `config/checkstyle/suppressions.xml` (lines 188-189) is defensive belt-and-braces for the
 narrow case of a `.java` file generated into this directory, not a load-bearing exemption.
@@ -158,30 +157,42 @@ documentation **or** the decision rationale fails review. Line 43 is conjunctive
 states the obligation as a requirement; line 29's softer phrasing is not the operative
 wording and is not cited here.
 
-### 1.5 Which scenarios drive a job in this module, and which are mirrors
+### 1.5 Which files this module opens as job input, and which it only holds to geometry
 
-Measured from the consuming classes rather than asserted:
+Measured from the consuming classes rather than asserted, by reading the resource root each
+one declares and the file names it passes under it:
 
-| Scenario | Files this module opens as job input | Consumer |
+| Scenario family | Files this module opens as job input | Consumer |
 |---|---|---|
-| `preflight/happy_path` | `dailytran.txt` | `PreflightDailyTransactionsJobTest`, which seeds the feed from these bytes and seeds a cross-reference row resolving the card to an account that exists |
+| `posting/*` -- all **nine** scenarios | `dailytran.txt`, `acctdata.txt`, `cardxref.txt`, `tcatbal.txt` | `PostTransactionsJobTest`, whose `FIXTURE_POSTING_ROOT` is the classpath prefix `fixtures/posting/`, and `PostTransactionsJobParityIT`, whose `FIXTURE_ROOT` is `/fixtures/posting/` |
+| `interest/*` -- all **three** scenarios | `acctdata.txt`, `cardxref.txt`, `discgrp.txt`, `tcatbal.txt` | `CalculateInterestJobTest`, whose `FIXTURE_INTEREST_ROOT` is the classpath prefix `fixtures/interest/` and whose `DRIVING_FIXTURES` names those four files |
+| `preflight/happy_path` | `dailytran.txt` | `PreflightDailyTransactionsJobTest`, whose `FIXTURE_ROOT` is the classpath prefix `fixtures/preflight/`; it seeds the feed from these bytes and seeds a cross-reference row resolving the card to an account that exists |
 | `preflight/unmatched_account` | `dailytran.txt` | the same class, seeding the card to an account it deliberately does not create |
 | `preflight/unmatched_card` | `dailytran.txt`, `acctdata.txt` | the same class, seeding **no** cross-reference row, and seeding the account through the production record mapper |
 | `export/happy_path` | `acctdata.txt` | `ExportJobTest`, for the account phase of the export record |
-| every other scenario | **none** | -- |
 
-The two domains that are **not** driven from this tree are driven elsewhere, and the
-elsewhere is specific:
+**53 of the 62 record files in this tree are therefore opened as job input by a test in this
+module.** The nine that are not are `preflight/happy_path/{acctdata,cardxref}.txt`,
+`preflight/unmatched_account/{acctdata,cardxref}.txt`, `preflight/unmatched_card/cardxref.txt`
+and `export/happy_path/{carddata,cardxref,custdata,trandata}.txt`. Each of the nine is still
+held to its declared geometry and to its scenario's discriminating values by
+`BatchFixtureContractTest`, and each scenario README says at its own end which of the two
+applies to the files beside it.
 
-- **`interest/*`** -- `CalculateInterestJobTest` resolves its fixtures under the repository
-  root as `tests/fixtures/interest/<scenario>/<file>` and asserts each is a regular file, so
-  it reads the **reference** tree and never this one. The three scenario directories here
-  mirror it.
-- **`posting/*`** -- the rule is asserted by `PostingValidationServiceTest` and
-  `CategoryBalanceServiceTest` against values declared inside those classes, which cite
-  `tests/fixtures/posting/...` in their documentation. The driven nine-scenario corpus with
-  its own contract test lives in the sibling module at
-  `services/transaction-service/src/test/resources/fixtures/`.
+Refactoring Rationale: this section previously stated the opposite of the measurement above --
+that **five** files were opened and the rest were mirrors, that `interest/*` was read from the
+repository-root `tests/fixtures/interest/` tree and "never this one", and that the driven
+nine-scenario posting corpus lived in `services/transaction-service`. All three are wrong, and
+the way they were wrong is the specific hazard this section exists to prevent: a reader told a
+byte was inert would edit it freely, and the edit would land in a live job input. The
+misreading is easy to reproduce, which is why the resource roots are quoted above rather than
+summarised. `CalculateInterestJobTest` and `PostTransactionsJobTest` both DISCUSS
+`tests/fixtures/...` in their prose -- the reference oracle is what their scenarios were derived
+from, and one of them additionally compares this tree against it byte for byte to detect drift
+-- but neither READS from it: each resolves its inputs through
+`getClassLoader().getResourceAsStream(...)` under a `fixtures/<domain>/` prefix, which is this
+module's own `src/test/resources/fixtures/` tree and nothing else. A path appearing in a
+docstring is not a path being opened, and the two were conflated.
 
 **Every file in this tree nonetheless has an executable consumer**, and it is
 `services/batch-service/src/test/java/com/carddemo/batch/fixtures/BatchFixtureContractTest.java`.
@@ -189,13 +200,23 @@ That class asserts the scenario census as a closed set in both directions, the p
 README section 10 mandates for each, whole-record geometry against the layout each file name maps
 to, LF-only line endings, the one-trailing-newline rule and its two exemptions, a successful decode
 of every record under its declared layout -- which is what proves the sign-overpunch rule of section
-3.3 across the corpus without restating the overpunch alphabet -- and the discriminating value or
-relationship each scenario turns on.
+3.3 across the corpus without restating the overpunch alphabet -- the discriminating value or
+relationship each scenario turns on, and **the SHA-256 of every one of the 62 files** against the
+committed manifest section 11.5 describes.
+
+Assumptions: the digest check exists because the structural checks above have a residue they cannot
+reach. Each of them pins something a scenario turns on, so a same-width edit to a field no scenario
+turns on -- a customer name, a merchant description, an unasserted `FILLER` byte -- satisfies every
+one of them; and for the nine supporting images no job run would notice either. The manifest closes
+that residue as a closed set in both directions, so an added, deleted or altered file each fail under
+their own message. Section 11.5 states the regeneration step a deliberate edit needs.
 
 Assumptions: the contract test deliberately does **not** re-run the jobs over these bytes.
-Duplicating the two driven domains' runs would assert those jobs twice while leaving the
-mirrored files exactly as unread as before, so what it asserts instead is the corpus: its
-census, its geometry, its governance rules and the values the scenario documents state.
+Duplicating the four driven domains' runs would assert those jobs twice while leaving the nine
+unopened files exactly as unread as before, so what it asserts instead is the corpus: its
+census, its geometry, its governance rules and the values the scenario documents state. That
+division is also why the nine are worth committing at all -- the contract test is their consumer,
+and without it they would be bytes no process reads.
 
 ---
 
@@ -207,6 +228,7 @@ input record type, plus the mandated scenario README:
 ```text
 services/batch-service/src/test/resources/fixtures/
   README.md                       <- this document (the tree-level contract)
+  FIXTURE_DIGESTS.txt             <- the byte-identity manifest (section 11.5)
   <domain>/<scenario>/README.md   <- the scenario-level contract (section 10)
   <domain>/<scenario>/<dataset>.txt
 ```
@@ -232,8 +254,16 @@ two apart -- they are the same width and differ only in which copybook prefixes 
 field names (section 5.1). A scenario that needs a second file of one type must extend the
 base name rather than reuse a sibling's, and must say so in its own README.
 
-This tree deliberately holds **no `.gitignore`** and no generated artifact. Every byte
-here is authored and reviewed.
+Assumptions: `FIXTURE_DIGESTS.txt` sits at the tree ROOT and is deliberately named in
+uppercase, so the lowercase-dataset-base rule above cannot read it as a record file and the
+contract test's per-scenario file listing needs no second exclusion beyond `README.md`. Its
+`.txt` suffix is kept rather than `.sha256` so that Rule 1's audited suffix set governs it and
+its header block is checked like any other authored artifact.
+
+This tree deliberately holds **no `.gitignore`**. Every byte here is authored and reviewed,
+including the digest manifest -- which is *derived* from the record files by a stated command
+(section 11.5) but is committed and diffed rather than produced at build time, because a value
+recomputed at the moment of comparison would agree with any corpus at all.
 
 ---
 
@@ -1357,20 +1387,32 @@ five sections the mandate does not ask for: what must NOT happen and why it cann
 blank timestamp means for determinism, which target-side contracts the scenario agrees with,
 where the scenario's boundaries lie, and what drives the corpus and what reads it.
 
-⚠️ Assumptions: that last section is the ONE thing carried out of a superseded draft rather than
+Assumptions: that last section is the ONE thing carried out of a superseded draft rather than
 discarded with it, because the surviving text had no equivalent and a reader cannot otherwise tell
 whether editing these bytes changes what a run asserts. It is carried CORRECTED, not copied: the
-draft stated uniformly that no test in this module opens the folders, and that is now true of
-`preflight/**` and `interest/**` only. `PostTransactionsJobParityIT` declares `/fixtures/posting/`
-as its seed root and compares against `tests/golden/posting/<scenario>`, so the posting family is a
-driven input and each of its READMEs says so, while the other two say the opposite and each states
-the other case so the split cannot read as an oversight. The supersession was decided by MEASUREMENT rather
+draft stated uniformly that no test in this module opens the folders, and that is now true of no
+family at all. Each of the four declares a seed root in a class in this module --
+`/fixtures/posting/` in `PostTransactionsJobParityIT`, which compares against
+`tests/golden/posting/<scenario>`; `fixtures/interest/` in `CalculateInterestJobTest`;
+`fixtures/preflight/` in `PreflightDailyTransactionsJobTest`; and one account image in
+`ExportJobTest` -- so every scenario README says "driven input" and none says the opposite.
+Assumptions: an intermediate revision of this paragraph said the draft's claim held for
+`preflight/**` and `interest/**` "only", which was true when the posting family alone had acquired
+a consumer and stopped being true when the interest job's inputs moved onto this module's classpath.
+Section 1.5 is the measured inventory and this paragraph defers to it rather than restating a split,
+because a two-way split written in prose is what went stale twice. The supersession was decided by MEASUREMENT rather
 than by length: every code span the shorter draft cited appears in the surviving one, in that
 spelling or a finer one -- its `:229-230` grade citation inside a `:227-230` report-and-grade
 row, its `:562` write citation inside the `:442` performing site that reaches it, and its seed
 row key inside a per-file seed-row table that also states the one-byte difference and its
 offset. Keeping both was rejected because two contracts for one directory is the condition
 section 1.3 exists to prevent: a reader would have to decide which one governs.
+
+Assumptions: this rationale is labelled plainly rather than with the warning sign that prefixed it.
+Section 12's own runnable check below greps this file for a byte outside `[\x00-\x7F]` and prints
+FAIL on a hit, and the prefix was the single hit -- so the file asserted itself pure ASCII while its
+own verification block reported otherwise. The emphasis the sign carried is not lost: the paragraph
+begins by naming what it is about, which is what the literal search finds anyway.
 
 Two checks are worth running before proposing a fixture. In the first, `FIXTURE` and `WIDTH`
 are parameters to substitute. Assumptions: the illustrative path is `posting/happy_path`,
@@ -1469,3 +1511,52 @@ When a scenario README refers to baseline scale, the figures are: **31** COBOL p
 trees, and exactly **30** copybooks under `app/cpy`. Assumptions: the three figures count
 different things and are easy to merge into one wrong number, so each is stated with the tree
 it counts.
+
+### 11.5 The byte-identity manifest
+
+`FIXTURE_DIGESTS.txt` at this tree's root commits one SHA-256 per record file, keyed by the
+file's path relative to this directory, in ascending path order.
+`BatchFixtureContractTest.everyRecordFileMatchesItsCommittedDigest` asserts it as a **closed set
+in both directions**: a file added, a file deleted and a file altered each fail, and each under
+its own message so the reader is not left deducing which happened.
+
+Assumptions: this exists because every other check in the contract test pins something a
+scenario *turns on*, and therefore none of them can pin a field no scenario turns on. A
+same-width edit to a customer name, a merchant description or an unasserted `FILLER` byte
+passes the geometry check, the LF check, the trailing-newline check and the decode check alike;
+and for the nine supporting images of section 1.5 no job run reads the file either. The measured
+consequence is that such an edit was previously undetectable anywhere in this repository.
+
+Alternatives Considered: leaving the residue documented rather than closed was rejected, because
+section 1.1 promises a reader that "an edit is still detected" and a promise a maintainer acts on
+has to be true rather than hedged. Declaring the 62 digests as constants inside the Java class
+was rejected -- they would be 62 literals a reviewer cannot diff against the files they describe,
+whereas a committed manifest in `sha256sum(1)` line format is checkable without the suite at all.
+A per-scenario manifest was rejected because the closed-set check needs one authority over the
+whole tree to notice a file that appeared or vanished.
+
+Trade-offs: a deliberate fixture edit now needs one extra step. That step is the point -- it is
+where the author records that the byte change was intended, instead of a later reader having to
+work out whether it was. Regenerate from **this directory** with:
+
+```bash
+# WHAT: rewrites FIXTURE_DIGESTS.txt, preserving its header block and re-hashing every record file.
+# WHY : the header is preserved by extraction rather than re-authored, so the rationale it carries
+#       cannot be silently dropped by a regeneration; and the record files are enumerated by find
+#       rather than listed, so a file added to the tree enters the manifest without anyone
+#       remembering to name it.
+grep '^#' FIXTURE_DIGESTS.txt > /tmp/h && \
+  find . -name '*.txt' -not -name 'FIXTURE_DIGESTS.txt' | sed 's#^\./##' | \
+  LC_ALL=C sort | xargs sha256sum > /tmp/b && \
+  cat /tmp/h /tmp/b > FIXTURE_DIGESTS.txt
+```
+
+Verify it independently of the Java suite, also from this directory:
+
+```bash
+# WHAT: checks every committed digest against the file on disk using coreutils alone.
+# WHY : an independent path to the same answer is what makes the manifest reviewable; a check
+#       that only the test it guards can perform is indistinguishable from the test asserting
+#       its own input.
+grep -v '^#' FIXTURE_DIGESTS.txt | sha256sum -c -
+```

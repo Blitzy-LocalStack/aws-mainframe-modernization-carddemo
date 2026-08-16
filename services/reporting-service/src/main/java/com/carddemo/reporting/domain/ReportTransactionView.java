@@ -88,7 +88,7 @@ import org.hibernate.annotations.Immutable;
  * at L21 is inapplicable throughout: no method declared in this file raises anything, and the
  * one place where a raise would be conceivable is argued where it arises. The written convention
  * this file conforms to is stated once at {@code docs/CODE_DOCUMENTATION_STANDARD.md}, cited by
- * path and owned elsewhere, and the type-mapping rules shared by the seven projections in this
+ * path and owned elsewhere, and the type-mapping rules shared by the eight projections in this
  * package are stated once in this package's own {@code package-info.java} rather than repeated
  * here.
  */

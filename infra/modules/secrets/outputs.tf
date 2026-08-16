@@ -4,11 +4,12 @@
 # Purpose:
 #   The COMPLETE public contract of the `secrets` module. Everything a caller is
 #   able to learn about the credentials created in
-#   infra/modules/secrets/main.tf, it learns from the single output below.
+#   infra/modules/secrets/main.tf, it learns from the two outputs below.
 #
-#   Every member of it is an IDENTIFIER -- a secret ARN, a secret name, or an
-#   ECS field selector built from one. Not one is, or is derived from, a
-#   credential. A consumer that needs an
+#   Every member of the first is an IDENTIFIER -- a secret ARN, a secret name, or
+#   an ECS field selector built from one -- and the second is a plain integer
+#   revision counter naming which GENERATION of values is stored. Not one is, or
+#   is derived from, a credential. A consumer that needs an
 #   actual credential reads it from Secrets Manager at run time, using the ARN or
 #   the name published here and holding an IAM grant scoped to that entry; the
 #   value itself never travels through a Terraform output, never appears in a
@@ -60,13 +61,20 @@
 #   service_credential_secrets ...... role name -> { arn, name,
 #                                     username_reference, password_reference },
 #                                     one per role
+#   service_credential_revision ..... the write-only version number every stored
+#                                     credential document was authored at. A
+#                                     non-secret integer, and the ONLY observable
+#                                     thing that changes when the stored values
+#                                     change -- names and ARNs stay identical
+#                                     across a re-issue.
 #
 #   Deliberately absent, so that a later editor does not add any of them back
 #   believing it was overlooked:
 #     - Any output carrying a credential VALUE, for the reason given above.
-#     - The version identifier of the secret version resource. See the note
-#       at the foot of this file; it is omitted for a stronger reason than
-#       having no consumer.
+#     - The version identifier (`version_id`) of the secret version resource,
+#       which is a different fact from the authored revision published above.
+#       See the note at the foot of this file; it is omitted for a stronger
+#       reason than having no consumer.
 #     - Any rotation-function identifier. This module creates no rotation
 #       function; a schedule is attached only from an ARN the calling ROOT
 #       supplies, so the root already holds every identifier it could publish and
@@ -77,7 +85,7 @@
 #       owns both the material it generates and the entries it writes it to.
 #
 # Errors / Exceptions:
-#   The output below declares no `precondition`, so it cannot fail a plan on
+#   Neither output below declares a `precondition`, so neither can fail a plan on
 #   its own -- an output is an expression over resources this module already
 #   created, and every failure worth naming belongs to main.tf (an unacceptable
 #   generated value, or a name still reserved by an earlier deletion) or to the
@@ -98,9 +106,9 @@
 #     the two failure modes that were reproduced against the pinned CLI, is on
 #     the first output; it is placed there rather than here because that is the
 #     first line a reader will question.
-#   - Alternatives Considered: publishing fewer outputs -- just the two ARNs --
-#     and letting each caller compose the names itself from the prefix and the
-#     environment. Rejected. The composition rule lives in main.tf's `locals`,
+#   - Alternatives Considered: publishing a narrower map -- each entry's `arn`
+#     only -- and letting each caller compose the names itself from the prefix and
+#     the environment. Rejected. The composition rule lives in main.tf's `locals`,
 #     and a caller that rebuilt a name would be a second copy of it that nothing
 #     compares against; the ETL helper is already an independent derivation of
 #     the same rule, and one independent copy is the most this design should
@@ -237,3 +245,32 @@ output "service_credential_secrets" {
 #   less than the absence of one, so it is absent, and the absence is recorded
 #   here so it reads as a decision rather than a gap.
 # =============================================================================
+
+# -----------------------------------------------------------------------------
+# The revision every stored credential was written at
+# -----------------------------------------------------------------------------
+
+# WHY : Assumptions: this publishes the write-only VERSION main.tf wrote each
+#       initial credential document at, and it is a non-secret integer -- it names
+#       which generation of values is stored, never a value. It exists because that
+#       number is the ONLY observable thing that changes when the stored passwords
+#       change: an increment rewrites all sixteen documents while every secret name,
+#       ARN and role name stays byte-identical, so a consumer hashing names cannot
+#       see a re-issue at all.
+# WHY : Assumptions: the consumer this exists for is the environment root's database
+#       bootstrap, which is what binds each stored password to its PostgreSQL LOGIN
+#       role with ALTER ROLE. Without this revision in that invocation's trigger, a
+#       re-issue lands new values in Secrets Manager, the roles keep the old
+#       passwords, and the next task rollout authenticates with credentials the
+#       database does not hold -- a total outage produced by a plan that reported
+#       nothing but a secret-version change.
+# WHY : Alternatives Considered: publishing `aws_secretsmanager_secret_version.service`'s
+#       `version_id` instead. Rejected for the reason recorded at the bottom of this
+#       file: where a root supplies a rotation function, AWSCURRENT moves to a version
+#       this module never created, so that identifier becomes wrong precisely when it
+#       matters. The authored revision describes what THIS configuration wrote, which
+#       is exactly the fact a rebinding trigger needs.
+output "service_credential_revision" {
+  description = "Write-only version number every per-role credential document in this module was written at. Non-secret: it identifies the generation of stored values, never a value. A consumer that binds these credentials to database roles must include it in whatever triggers that binding, because a change to this number replaces all sixteen stored passwords while leaving every name and ARN unchanged."
+  value       = local.service_credential_revision
+}

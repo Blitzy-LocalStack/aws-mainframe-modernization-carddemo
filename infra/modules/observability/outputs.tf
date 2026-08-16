@@ -31,22 +31,54 @@
 #   label moves with the block it names and is greppable, which a line number is
 #   not.
 #
+#   The other SIX outputs have NO consumer, and saying so is the point of this
+#   paragraph. Three consumed and nine published is not an oversight: a reader who
+#   sees nine outputs beside a claim that renaming one "breaks both environment
+#   roots" would reasonably infer that all nine are wired, and only three are.
+#   `notification_topic_name`, `access_log_bucket_arn`, `managed_log_group_names`,
+#   `dashboard_name`, `dashboard_arn` and `alarm_arns` are published as
+#   OPERATOR AND DISCOVERY contracts: their audience is a human running
+#   `terraform output` or a runbook step, not another Terraform block. That is why
+#   `docs/runbooks/batch-operations.md` can name a dashboard and a log group
+#   without hard-coding either, and why an incident responder can list every alarm
+#   this environment created without reading main.tf.
+#
+#   Trade-offs: the six could be deleted, which would make the output set exactly
+#   the wiring surface and let `terraform_unused_declarations` speak for the whole
+#   file. They are kept because a module whose alarms and dashboard are
+#   unnameable from outside forces every runbook to hard-code a constructed name,
+#   and a hard-coded name drifts silently when the naming convention changes,
+#   whereas an output that no longer resolves fails the plan. The cost of keeping
+#   them is exactly this paragraph: without it the six read as wiring, and a
+#   maintainer looking for their callers finds none and cannot tell whether that
+#   is the design or a regression. Their `description` text carries the same
+#   statement, so the generated table in README.md says it too.
+#
 # Parameters:
-#   None. An `output` block accepts no input. The module's thirty-one inputs
+#   None. An `output` block accepts no input. The module's THIRTY-TWO inputs
 #   are declared in variables.tf, which carries the type, the description and
 #   the domain validation of each; every value published below is read from a
 #   resource attribute in main.tf rather than from one of those inputs.
+#
+#   WHY the count is stated as a measured number: this header said thirty-one
+#   while variables.tf declared thirty-two, so the one number in this file a
+#   reader could check against another file was the one that was wrong. It is
+#   recounted from `grep -c '^variable "' variables.tf` rather than adjusted by
+#   one, because an off-by-one corrected by another off-by-one stays wrong.
 #
 # Return values:
 #   Nine outputs. Six are a single string -- the topic ARN and name, the bucket
 #   name and ARN, and the dashboard name and ARN. Three are maps: two carry the
 #   managed log groups' names and ARNs keyed by the same producer key main.tf
 #   iterated, and one carries every alarm ARN keyed by alarm family and
-#   instance. Each `description` states which identifier form it is and what a
-#   caller does with it, because infra/.terraform-docs.yml sets its
-#   `read-comments` key to false, so a `description` is the ONLY text that
-#   reaches the generated table in README.md -- a rationale written in a
-#   comment beside an output never appears there.
+#   instance. Three of the nine are read by an environment root and six are
+#   operator-facing only, as the section above sets out. Each `description`
+#   states which identifier form it is, what a caller does with it, and -- for
+#   the six -- that no Terraform block reads it, because
+#   infra/.terraform-docs.yml sets its `read-comments` key to false, so a
+#   `description` is the ONLY text that reaches the generated table in
+#   README.md -- a rationale written in a comment beside an output never
+#   appears there.
 #
 # Exceptions or errors:
 #   * An `output` block raises no error of its own. Its value is either
@@ -226,7 +258,7 @@ output "notification_topic_arn" {
 }
 
 output "notification_topic_name" {
-  description = "Bare name of the notification topic, carrying neither the account nor the region part of an ARN. CloudWatch dimensions the AWS/SNS metric family on TopicName, so this is the value a caller needs to place this topic's own delivery counts on a board or to alarm on its failed deliveries -- the signal that reports a failure in the alerting path itself, which no alarm publishing THROUGH that path can report. An ARN is not accepted as that dimension."
+  description = "Bare name of the notification topic, carrying neither the account nor the region part of an ARN. CloudWatch dimensions the AWS/SNS metric family on TopicName, so this is the value a caller needs to place this topic's own delivery counts on a board or to alarm on its failed deliveries -- the signal that reports a failure in the alerting path itself, which no alarm publishing THROUGH that path can report. An ARN is not accepted as that dimension. No Terraform block in this repository reads this output: it is an operator and board-author contract, published so the topic can be named from `terraform output` rather than reconstructed from a naming convention."
   value       = aws_sns_topic.alerts.name
 }
 
@@ -247,7 +279,7 @@ output "access_log_bucket_name" {
 }
 
 output "access_log_bucket_arn" {
-  description = "ARN of that same access-log destination, for an IAM policy Resource element -- granting an operator or a log-analysis task read access to the delivered records without granting it across every bucket in the account. The two producer modules take the bucket name output instead, because an IAM Resource element does not accept a bare bucket name and an S3 destination argument does not accept an ARN."
+  description = "ARN of that same access-log destination, for an IAM policy Resource element -- granting an operator or a log-analysis task read access to the delivered records without granting it across every bucket in the account. The two producer modules take the bucket name output instead, because an IAM Resource element does not accept a bare bucket name and an S3 destination argument does not accept an ARN. No Terraform block in this repository reads this output: it is published for the operator or log-analysis grant described above, which is written outside this repository."
   value       = aws_s3_bucket.access_logs.arn
 }
 
@@ -280,7 +312,7 @@ output "access_log_bucket_arn" {
 # -----------------------------------------------------------------------------
 
 output "managed_log_group_names" {
-  description = "Map of producer key to the exact CloudWatch log-group name for the groups this module creates, keyed as var.log_group_names is keyed. A caller uses a name wherever an ARN is not accepted: a container log-driver awslogs-group option, a Logs Insights SOURCE clause, and the LogGroupName metric dimension. Each value is read from the created group rather than re-derived from a path convention, so it is the destination the producer actually writes to."
+  description = "Map of producer key to the exact CloudWatch log-group name for the groups this module creates, keyed as var.log_group_names is keyed. A caller uses a name wherever an ARN is not accepted: a container log-driver awslogs-group option, a Logs Insights SOURCE clause, and the LogGroupName metric dimension. Each value is read from the created group rather than re-derived from a path convention, so it is the destination the producer actually writes to. No Terraform block in this repository reads this output -- the roots wire the ARN map instead, for an IAM Resource element -- so this one is a discovery contract for a Logs Insights query or a console link."
   value = {
     for key, group in aws_cloudwatch_log_group.managed : key => group.name
   }
@@ -290,6 +322,31 @@ output "managed_log_group_arns" {
   description = "Map of the same producer keys to log-group ARNs, published without the all-streams :* suffix so a caller appends it unconditionally. Both environment roots index this map inside their lambda_logs IAM policy document to scope logs:CreateLogStream and logs:PutLogEvents to one group per function role rather than to every group in the account, which is what makes least privilege reachable at log-group granularity instead of by wildcard. Keys match managed_log_group_names exactly, so the two maps are indexed with one key set."
   value = {
     for key, group in aws_cloudwatch_log_group.managed : key => trimsuffix(group.arn, ":*")
+  }
+}
+
+# -----------------------------------------------------------------------------
+# State-machine execution-failure controls.
+#
+# WHY : Assumptions: these two maps exist so that the consumption this module now
+#       performs is VISIBLE from outside it. infra/modules/step-functions-batch
+#       publishes each machine's execution log-group name and states that this
+#       module attaches a metric filter and a log-based alarm to it; publishing
+#       what was actually created lets a root, a runbook or a reviewer confirm the
+#       pairing without reading either module's resource blocks.
+# -----------------------------------------------------------------------------
+
+output "state_machine_metric_filter_names" {
+  description = "Map of state-machine key to the name of the metric filter this module created over that machine's execution log group. Empty when the caller passed no state_machine_log_group_names. Each filter counts terminal ExecutionFailed and ExecutionTimedOut events -- an abort is excluded, as it is for the service-level metric -- into the CardDemo namespace under state_machine_execution_failures_<key>."
+  value = {
+    for key, filter in aws_cloudwatch_log_metric_filter.state_machine_execution_failure : key => filter.name
+  }
+}
+
+output "state_machine_execution_failure_alarm_names" {
+  description = "Map of state-machine key to the name of the alarm this module created on that machine's execution-failure metric, notifying the module's own topic. Empty when the caller passed no state_machine_log_group_names. An operator scoping a composite alarm or an escalation reads this map rather than composing an alarm name from a convention."
+  value = {
+    for key, alarm in aws_cloudwatch_metric_alarm.state_machine_execution_failure : key => alarm.alarm_name
   }
 }
 
@@ -304,12 +361,12 @@ output "managed_log_group_arns" {
 # -----------------------------------------------------------------------------
 
 output "dashboard_name" {
-  description = "Name of the operations dashboard main.tf composes, which is the argument both a console deep-link and the CloudWatch GetDashboard call take. It is the identifier a deploy or batch-operations procedure uses to send a reader to the board, because a console URL would carry an account identifier and a region and neither may be committed to this repository."
+  description = "Name of the operations dashboard main.tf composes, which is the argument both a console deep-link and the CloudWatch GetDashboard call take. It is the identifier a deploy or batch-operations procedure uses to send a reader to the board, because a console URL would carry an account identifier and a region and neither may be committed to this repository. No Terraform block reads this output; the runbook step that needs the board is its consumer, which is exactly why the name is published rather than left to be constructed."
   value       = aws_cloudwatch_dashboard.operations.dashboard_name
 }
 
 output "dashboard_arn" {
-  description = "ARN of that dashboard, for an IAM policy Resource element granting a read-only operator access to this board alone rather than to every dashboard in the account. A deep-link and an API call both take the name output instead, so neither form makes the other redundant."
+  description = "ARN of that dashboard, for an IAM policy Resource element granting a read-only operator access to this board alone rather than to every dashboard in the account. A deep-link and an API call both take the name output instead, so neither form makes the other redundant. No Terraform block reads this output: the read-only grant it exists for is authored outside this repository, so it is an operator contract rather than wiring."
   value       = aws_cloudwatch_dashboard.operations.dashboard_arn
 }
 
@@ -326,16 +383,16 @@ output "dashboard_arn" {
 #       a lost alarm that nothing reports. reply_queue_age and work_queue_age
 #       have the same property in weaker form -- both compose the same alarm
 #       name suffix from disjoint subsets of var.queue_names -- so one grammar
-#       is applied to all eight iterated families rather than only where a
+#       is applied to all nine iterated families rather than only where a
 #       collision exists today.
-# WHY : Trade-offs: one map over all THIRTEEN families rather than one output per
-#       family. Thirteen outputs would let each carry its own description into
+# WHY : Trade-offs: one map over all FOURTEEN families rather than one output per
+#       family. Fourteen outputs would let each carry its own description into
 #       the generated README, which is what the deliberate-absence section
-#       argues for elsewhere; it is declined here because eight of the thirteen
+#       argues for elsewhere; it is declined here because nine of the fourteen
 #       are caller-sized, so their instance count is unknown to this file and
 #       only a map can express them at all. Two more are count-gated, so an
 #       output per family would additionally have to publish a null for each
-#       closed gate. The accepted cost is that the thirteen families share one
+#       closed gate. The accepted cost is that the fourteen families share one
 #       description, and the key grammar above is what keeps the map
 #       self-describing in its place.
 # WHY : Assumptions: this map must list every alarm family main.tf declares. An
@@ -347,7 +404,7 @@ output "dashboard_arn" {
 # -----------------------------------------------------------------------------
 
 output "alarm_arns" {
-  description = "Map of alarm ARNs covering all THIRTEEN alarm families this module creates, keyed <family>/<instance> for the eight families iterated per service, per queue, per rotation function or per terminal batch outcome, and by bare family name for the five single-instance alarms. Three of those five are unconditional (api_5xx, aurora_cpu, aurora_capacity); the remaining two are present only when their gate is open -- aurora_connections when database_connection_threshold is set, and cloudfront_5xx when a distribution id is supplied and the region is us-east-1 -- so their keys are absent rather than null when they are not created. A caller composes a composite alarm over a chosen subset of families, attaches an action beyond this module's notification topic, or scopes an IAM Resource element to these alarms -- each of which needs the ARN and none of which then has to rediscover an alarm by its composed name."
+  description = "Map of alarm ARNs covering all THIRTEEN alarm families this module creates, keyed <family>/<instance> for the eight families iterated per service, per queue, per rotation function or per terminal batch outcome, and by bare family name for the five single-instance alarms. Three of those five are unconditional (api_5xx, aurora_cpu, aurora_capacity); the remaining two are present only when their gate is open -- aurora_connections when database_connection_threshold is set, and cloudfront_5xx when a distribution id is supplied and the region is us-east-1 -- so their keys are absent rather than null when they are not created. A caller composes a composite alarm over a chosen subset of families, attaches an action beyond this module's notification topic, or scopes an IAM Resource element to these alarms -- each of which needs the ARN and none of which then has to rediscover an alarm by its composed name. No Terraform block in this repository reads this output today -- every alarm here already routes to this module's own notification topic, so no root has needed to attach a second action -- which makes it a discovery contract: it is how an incident responder enumerates what this environment actually alarms on without reading main.tf."
   value = merge(
     {
       for service, alarm in aws_cloudwatch_metric_alarm.service_unhealthy :
@@ -381,6 +438,17 @@ output "alarm_arns" {
       for outcome, alarm in aws_cloudwatch_metric_alarm.batch_failure :
       "batch_failure/${outcome}" => alarm.arn
     },
+
+    # WHY : Assumptions: the per-machine execution-failure family is merged here for
+    #       the same reason the two families below it are -- this output promises EVERY
+    #       alarm, and a family created by main.tf but absent from this map is an alarm
+    #       a caller composing a composite alarm or an IAM Resource element silently
+    #       does not cover. It is caller-sized, keyed by the state-machine key the root
+    #       supplied, and empty when a root composes no state machine.
+    {
+      for machine, alarm in aws_cloudwatch_metric_alarm.state_machine_execution_failure :
+      "state_machine_execution_failure/${machine}" => alarm.arn
+    },
     {
       api_5xx         = aws_cloudwatch_metric_alarm.api_5xx.arn
       aurora_cpu      = aws_cloudwatch_metric_alarm.aurora_cpu.arn
@@ -388,8 +456,8 @@ output "alarm_arns" {
     },
 
     # WHY : Refactoring Rationale: these two families were MISSING from this map while
-    #       main.tf created them, so the module built thirteen alarms and published
-    #       eleven. The omission is worse than a documentation gap, because the stated
+    #       main.tf created them, so two of the families the module built were absent
+    #       from what it published. The omission is worse than a documentation gap, because the stated
     #       purpose of this output is to let a caller compose a composite alarm or scope
     #       an IAM Resource element over "all" alarms: a caller doing either got a set
     #       that silently excluded database connection exhaustion and CloudFront error

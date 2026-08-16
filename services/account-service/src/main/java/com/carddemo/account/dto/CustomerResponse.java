@@ -23,7 +23,7 @@ package com.carddemo.account.dto;
  * mapping framework to populate it. Both were rejected, on two separate grounds. An
  * accessor-generating annotation processor emits members that carry no documentation of their own,
  * and {@code config/checkstyle/checkstyle.xml} sets {@code allowMissingPropertyJavadoc} to
- * {@code false} at L365 with {@code scope} set to {@code private} at L364, so those members would
+ * {@code false} at L358 with {@code scope} set to {@code private} at L357, so those members would
  * fail a gate that runs before this file is compiled. A generated mapping framework fails for an
  * unrelated reason: the translation into this record is not mechanical. It drops a {@code FILLER}, it
  * masks two identifiers, and it carries one component whose name deliberately disagrees with the

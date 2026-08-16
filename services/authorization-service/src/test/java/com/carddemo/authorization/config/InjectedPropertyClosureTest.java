@@ -24,14 +24,12 @@ import java.util.regex.Pattern;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.AutoConfigurations;
-import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.yaml.snakeyaml.Yaml;
 
 /**
  * Asserts that every property this service injects into Java is a property its own configuration declares,
- * and that exactly one keyed messaging tokeniser bean is declared anywhere in the configuration package.
+ * and that no keyed tokeniser bean is declared anywhere in the configuration package.
  *
  * <h2>Purpose</h2>
  *
@@ -242,12 +240,22 @@ class InjectedPropertyClosureTest {
      * <p>Assumptions: this guard exists because every closure assertion below passes trivially on an empty
      * scan. A change that broke the reflection -- a renamed package, a build that produced no classes --
      * would otherwise turn this class green while it verified nothing at all.</p>
+     *
+     * <p>Refactoring Rationale: the name asserted here was {@code carddemo.messaging.hmac-key}, and it is
+     * replaced rather than merely removed. That property is withdrawn along with the bean that injected
+     * it, so an assertion naming it would fail for the correct tree; deleting the assertion outright would
+     * have left the vacuity guard with nothing to guard. The two substitutes are chosen for opposite
+     * reasons, which is what keeps the guard sensitive to both halves of the scan: one is UNDEFAULTED, so
+     * it is the shape the closure below actually polices, and one is DEFAULTED, so a filter change that
+     * silently dropped defaulted placeholders would be caught here rather than turning
+     * {@link #everyOperationalBoundIsDeclared()} vacuous.</p>
      */
     @Test
     @DisplayName("the scan finds the injected properties it is meant to police")
     void theScanFindsTheInjectedProperties() {
         assertThat(injectedProperties()).extracting(InjectedProperty::key)
-                .contains("carddemo.messaging.hmac-key");
+                .contains("carddemo.internal-identity.authorization-signing-key",
+                        "carddemo.messaging.outbox-batch-size");
     }
 
     /**
@@ -361,27 +369,46 @@ class InjectedPropertyClosureTest {
     @DisplayName("the withdrawn masking key is injected nowhere in this service")
     void theWithdrawnMaskingKeyIsInjectedNowhere() {
         assertThat(injectedProperties()).extracting(InjectedProperty::key)
-                .as("%s is withdrawn; this context's derived identities are keyed from"
-                        + " carddemo.messaging.hmac-key", WITHDRAWN_KEY)
-                .doesNotContain(WITHDRAWN_KEY);
+                .as("%s is withdrawn, and so is the messaging key that succeeded it, so this context"
+                        + " injects no tokeniser key at all", WITHDRAWN_KEY)
+                .doesNotContain(WITHDRAWN_KEY)
+                .doesNotContain("carddemo.messaging.hmac-key");
     }
 
     /**
-     * Verifies exactly one bean method in the configuration package supplies a keyed tokeniser.
+     * Verifies NO bean method in the configuration package supplies a keyed tokeniser.
      *
      * <p>Assumptions: the assertion is over declared bean METHODS rather than over beans in a running
-     * context, because the defect was a second configuration class that a context could not even be built
-     * with. Counting methods sees the duplicate whether or not the context it would have produced can
-     * start, and it names the class that declares the extra one.</p>
+     * context, because the original defect was a second configuration class that a context could not even
+     * be built with. Counting methods sees such a class whether or not the context it would have produced
+     * can start, and it names the class that declares it.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this case asserted exactly ONE supplier and now asserts NONE, and the
+     * inversion is the point rather than a relaxation. The one remaining supplier,
+     * {@code MessagingIdentityConfig#messagingOpaqueIdentifier}, is withdrawn: after specification
+     * &sect;0.4.1.8 fixed the queue group and deduplication identities as literal values, no component of
+     * this context injected the bean, and its own documentation said so while arguing that the bean should
+     * stay because the deployment already provisioned its key -- a key provisioned only because the bean
+     * declared it. An empty expectation is a stronger assertion here than a count of one, because the
+     * failure it now catches is a keyed tokeniser bean reappearing in this package WITHOUT a consumer,
+     * which is precisely the state that produced a live secret nothing read. A context that genuinely needs
+     * one adds the bean, the consumer and the provisioned secret in a single change, and updates this case
+     * with them.</p>
+     *
+     * <p>Alternatives Considered: deleting the case along with the class. Rejected because the assertion
+     * that survives the deletion is the valuable one -- it is the only mechanical statement in this module
+     * that a secret-keyed bean may not exist here unaccompanied, and it costs one scan to keep.</p>
      */
     @Test
-    @DisplayName("exactly one bean method in the configuration package supplies a keyed tokeniser")
-    void exactlyOneBeanMethodSuppliesAKeyedTokeniser() {
+    @DisplayName("no bean method in the configuration package supplies a keyed tokeniser")
+    void noBeanMethodSuppliesAKeyedTokeniser() {
         JavaClasses configuration = new ClassFileImporter().importPackages(CONFIG_PACKAGE);
 
         List<String> suppliers = new ArrayList<>();
+        int scanned = 0;
         for (JavaClass javaClass : configuration) {
             for (Method method : javaClass.reflect().getDeclaredMethods()) {
+                scanned++;
                 if (method.isAnnotationPresent(Bean.class)
                         && OpaqueIdentifier.class.equals(method.getReturnType())) {
                     suppliers.add(javaClass.getSimpleName() + "#" + method.getName());
@@ -389,46 +416,17 @@ class InjectedPropertyClosureTest {
             }
         }
 
+        // WHY : Assumptions: an EMPTY expectation passes trivially when the scan finds nothing, so the
+        //   method count is asserted first. Without it a renamed package or a build that produced no
+        //   classes would report the withdrawal as verified while having examined no class at all -- the
+        //   same vacuity the guard above exists for, in the one case where the expected result is empty.
+        assertThat(scanned)
+                .as("the configuration package scan examined no declared method, so an empty supplier"
+                        + " list proves nothing about this package")
+                .isGreaterThan(0);
         assertThat(suppliers)
-                .as("a second tokeniser bean is injected by nobody and keyed differently, so replies "
-                        + "published through it would fall into a different ordering group for the same "
-                        + "card")
-                .containsExactly("MessagingIdentityConfig#messagingOpaqueIdentifier");
-    }
-
-    /**
-     * Verifies a context built on the tokeniser configuration holds exactly one, under its qualified name.
-     *
-     * <p>Assumptions: the runner carries no auto-configuration, so the only beans present are the ones the
-     * configuration under test declares. That is what makes a count of one meaningful: with
-     * auto-configuration active the count would depend on what else the classpath happened to contribute.</p>
-     */
-    @Test
-    @DisplayName("a context on the tokeniser configuration holds exactly one, under its qualified name")
-    void aContextHoldsExactlyOneTokeniserUnderItsQualifiedName() {
-        new ApplicationContextRunner()
-                .withConfiguration(AutoConfigurations.of())
-                .withUserConfiguration(MessagingIdentityConfig.class)
-                .withPropertyValues("carddemo.messaging.hmac-key=" + "0123456789abcdef".repeat(2))
-                .run(context -> {
-                    assertThat(context).hasNotFailed();
-                    assertThat(context.getBeansOfType(OpaqueIdentifier.class))
-                            .containsOnlyKeys(MessagingIdentityConfig.MESSAGING_TOKENISER);
-                });
-    }
-
-    /**
-     * Verifies the tokeniser configuration refuses to start with no key rather than defaulting one.
-     *
-     * <p>Assumptions: failing start-up is the required behaviour and not merely the observed one. A default
-     * would key every environment's derived identities from a value computable out of the source tree, so a
-     * value that looks opaque would reverse by enumeration, and it would do so silently.</p>
-     */
-    @Test
-    @DisplayName("the tokeniser configuration refuses to start with no key rather than defaulting one")
-    void theTokeniserConfigurationRefusesToStartWithNoKey() {
-        new ApplicationContextRunner()
-                .withUserConfiguration(MessagingIdentityConfig.class)
-                .run(context -> assertThat(context).hasFailed());
+                .as("a keyed tokeniser bean declared here has no consumer in this context, so it would"
+                        + " require a provisioned secret that nothing reads")
+                .isEmpty();
     }
 }

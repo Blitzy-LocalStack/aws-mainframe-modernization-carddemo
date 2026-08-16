@@ -30,7 +30,7 @@ import org.springframework.mock.env.MockEnvironment;
  *
  * <p>Refactoring Rationale: the sentence above read "the overlay and the starter were therefore withdrawn
  * together", and the second half of that was wrong in a way that inverted the module's design.
- * {@code pom.xml} declares {@code io.awspring.cloud:spring-cloud-aws-starter-parameter-store} at L297-300
+ * {@code pom.xml} declares {@code io.awspring.cloud:spring-cloud-aws-starter-parameter-store} at L288-291
  * and the comment above it argues at length for KEEPING it: the resolver arrives from
  * {@code spring-cloud-aws-autoconfigure} whether or not anything wants it, so withdrawing the client
  * would leave the resolver registered and unaccompanied, turning the most likely future edit -- someone

@@ -651,7 +651,7 @@ public record TransactionAddRequest(
     //       application.yml, the wrong one of the two would be refused outright.
     @Size(max = CONFIRM_WIDTH)
     @Pattern(regexp = CONFIRM_VALUES, message = CONFIRM_INVALID_VALUE)
-    String confirmation) {
+    String confirmation) implements TransactionKeySelection {
 
   /**
    * The declared width of the account identifier, from {@code ACTIDINI PIC X(11)} at line 60 of
@@ -1233,13 +1233,20 @@ public record TransactionAddRequest(
   /**
    * Enforces {@link AtLeastOneKey} and attributes its violation to the two key components.
    *
-   * <p>Assumptions: the validator is declared here beside the request it validates rather than in a
-   * package of its own, because the rule is a property of this one payload and of no other. It holds
+   * <p>Assumptions: the validator is declared here beside the request that first needed it, and it holds
    * no state and reads nothing outside the value handed to it, so a single instance is safe for the
    * framework to share across requests.
+   *
+   * <p>⚠️ Refactoring Rationale: it is declared over {@link TransactionKeySelection} and no longer over
+   * this record, and the note it replaces said the rule was "a property of this one payload and of no
+   * other". That stopped being true when the copy-last operation was given a request shape of its own:
+   * the rule is {@code VALIDATE-INPUT-KEY-FIELDS} at {@code app/cbl/COTRN02C.cbl} lines 193 to 230, which
+   * BOTH of the screen's arms perform -- the Enter arm at lines 133 and 134 and the copy arm at line 473.
+   * Bean Validation resolves a validator by assignability, so widening the type parameter to the interface
+   * both records implement serves both operations from one decision instead of two that could drift.
    */
   public static final class KeySelectionValidator
-      implements ConstraintValidator<AtLeastOneKey, TransactionAddRequest> {
+      implements ConstraintValidator<AtLeastOneKey, TransactionKeySelection> {
 
     /**
      * Reports whether at least one of the two key alternatives was supplied.
@@ -1251,7 +1258,7 @@ public record TransactionAddRequest(
      *     including when both do, and {@code false} only when neither was supplied
      */
     @Override
-    public boolean isValid(TransactionAddRequest request, ConstraintValidatorContext context) {
+    public boolean isValid(TransactionKeySelection request, ConstraintValidatorContext context) {
       // WHY : Assumptions: an absent request is reported valid here rather than false, because the
       //       absence of a body is a different failure with its own diagnostic and reporting a key
       //       error for it would name two fields the client never sent.

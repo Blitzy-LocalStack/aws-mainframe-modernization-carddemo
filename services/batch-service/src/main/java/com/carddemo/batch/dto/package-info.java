@@ -474,7 +474,7 @@
  *
  * <p>Assumptions: the second ground is an external contract that makes the
  * first one build-fatal, and it is a deliberate pair of checks rather than one.
- * {@code config/checkstyle/checkstyle.xml} declares at its line 245, at file-set
+ * {@code config/checkstyle/checkstyle.xml} declares at its line 238, at file-set
  * level, the check that a directory holding processed compilation units must
  * contain a {@code package-info.java} at all; and it declares at its line 378,
  * inside the syntax-tree walker, the companion check that such a file must

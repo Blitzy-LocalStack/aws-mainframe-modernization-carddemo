@@ -137,7 +137,11 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * at L19 of {@code app/cpy/COCOM01Y.cpy} running to L44, whose declared field widths sum to 160 bytes.
  * It does not travel in the target: identity arrives as claims on a validated token, the values
  * {@code 'A'} and {@code 'U'} at L27 and L28 of that copybook becoming the {@code carddemo-admin} and
- * {@code carddemo-user} groups, and selection context arrives on the request path. The reference asserts
+ * {@code carddemo-user} groups, and selection context arrives in the request BODY -- registered as
+ * {@code D-ACCOUNT-SELECTION-IN-BODY} in
+ * {@code docs/architecture/cobol-to-service-traceability.md} §7.4, and stated correctly here because a
+ * reader of this class is being told what replaced the structure, not merely that something did. The
+ * reference asserts
  * its own statelessness independently, {@code app/csd/CARDDEMO.CSD} giving {@code TWASIZE(0)} to
  * {@code COACTUPC} at L308 and to {@code COACTVWC} at L318, so this layer holds no conversational state
  * and a case may build a context and discard it freely.</p>

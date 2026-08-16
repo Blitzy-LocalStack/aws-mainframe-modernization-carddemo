@@ -63,10 +63,29 @@ import org.junit.jupiter.params.provider.MethodSource;
  *
  * <p>One of the fixtures is shaped exactly like a customer master and carries names, street
  * addresses, telephone numbers, a national identifier, a government-issued identifier and a date of
- * birth in every row. Its README attests that all of it is fabricated. Three structural markers make
- * that attestation checkable -- an unissued national-identifier area range, a reserved fictional
- * telephone range and a literal government-identifier prefix -- and each is asserted below, so a row
- * added later from a real source fails this suite rather than passing quietly.</p>
+ * birth in every row. Its README attests that every one of those values is fabricated and that the
+ * only values anywhere in the directory shared with the repository's own public sample extracts are
+ * six KEYS -- two account identifiers, two customer identifiers and two card numbers -- shared on
+ * purpose so a join resolves. Three structural markers make the fabricated half checkable -- an
+ * unissued national-identifier area range, a reserved fictional telephone range and a literal
+ * government-identifier prefix -- and each is asserted below, so a row added later from a real source
+ * fails this suite rather than passing quietly.</p>
+ *
+ * <p>Refactoring Rationale: that read "its README attests that all of it is fabricated", which
+ * overstated an attestation the README itself has since narrowed. Two of the four customer
+ * identifiers in this very file ARE in {@code app/data/ASCII/custdata.txt}, deliberately, and section
+ * 3 of the README gives the reason. The sentence is restated to the claim the markers below actually
+ * check, because a preamble that promises more than its assertions deliver is the reason a reader
+ * stops trusting the assertions.</p>
+ *
+ * <p>Assumptions: this directory carries synthetic primary account numbers and synthetic card
+ * verification values, and neither is what the three markers below cover. {@code carddata.txt} holds
+ * {@code CARD-NUM} at offset 0 and {@code CARD-CVV-CD} at offset 27; {@code cardxref.txt} holds
+ * {@code XREF-CARD-NUM} at offset 0. The evidence that those are synthetic is structural in a
+ * different way -- the five verification values are {@code 901} through {@code 905}, a counter no
+ * issuer could compute -- and section 1.1 of the README carries it together with the handling
+ * guidance. It is restated here because a reader of this class should not have to open the README to
+ * learn that two of its bound fixtures carry those columns at all.</p>
  */
 @DisplayName("Reporting fixtures: inventory, decoding, mapper consumption and provenance markers")
 class ReportingFixtureContractTest {
@@ -75,6 +94,76 @@ class ReportingFixtureContractTest {
      * Classpath directory holding every fixture this service ships.
      */
     private static final String FIXTURE_DIRECTORY = "fixtures";
+
+    /**
+     * The two card numbers this directory takes verbatim from the published demonstration extract.
+     *
+     * <p>Assumptions: these two, and only these two, are exempt from the two unroutability rules
+     * {@link #noCommittedCardNumberIsAPlausibleCredential()} applies, because their provenance is
+     * stronger than either rule. Both appear in {@code app/data/ASCII/carddata.txt}, the Apache-2.0
+     * demonstration extract this repository publishes and that roughly sixty other fixtures across
+     * the service tree already key on, so replacing them with synthetic values here would isolate
+     * this directory from the rest of the corpus for no gain in safety. The exemption is not taken on
+     * trust: that case reads the extract and asserts both are in it, so naming a value here cannot
+     * exempt it.</p>
+     *
+     * <p>Assumptions: every field of these two rows OTHER than the card number is authored for this
+     * directory -- the expiry dates are future-dated and the verification value is the placeholder
+     * below -- so neither row is a copy of an extract record. Only the key is shared, which is the
+     * same discipline the account and customer fixtures follow and which the directory's README
+     * records under its key-domain section.</p>
+     */
+    private static final List<String> PUBLISHED_EXTRACT_CARDS =
+            List.of("0500024453765740", "4859452612877065");
+
+    /**
+     * Leading digits every synthetic card number in this directory must carry.
+     *
+     * <p>Assumptions: {@code 9} is the ISO/IEC 7812 major industry identifier reserved for national
+     * assignment, so no payment scheme issues in it and a number beginning here cannot be routed. The
+     * prefix is four digits rather than one so that the value is visibly constructed at a glance
+     * rather than only on inspection of its first character.</p>
+     *
+     * <p>Refactoring Rationale: the three synthetic rows previously carried {@code 0500024453765741},
+     * {@code 1010000000000001} and {@code 3714496353984312}. The third is the well-known American
+     * Express test number {@code 371449635398431} with a digit appended, so it read as a recognised
+     * provider test range without being one; the first is a published extract number with its last
+     * digit changed, so it read as a real card in an allocated range. Neither had any stated
+     * provenance. Both hazards are the same one -- a committed value that looks like a credential --
+     * and the prefix plus the deliberate Luhn failure removes it from all three.</p>
+     */
+    private static final String SYNTHETIC_CARD_PREFIX = "9900";
+
+    /**
+     * The verification value every row of the card fixture carries.
+     *
+     * <p>Assumptions: one repeated placeholder rather than a distinct value per row. The column is
+     * declared {@code PIC 9(03)} so it can be neither blank nor shortened without breaking the
+     * 150-byte geometry, and nothing in this module distinguishes the rows by it, so a per-row value
+     * would carry no information and would only make the committed bytes resemble a verification
+     * value. Masking it instead was rejected: masking is a mapper decision and applying it inside a
+     * fixture would break the byte-identical round trip asserted above.</p>
+     */
+    private static final String PLACEHOLDER_VERIFICATION_VALUE = "000";
+
+    /**
+     * The account whose single card is deliberately absent from the cross-reference.
+     *
+     * <p>Assumptions: named as a constant so the identity of the unresolvable-lookup case is asserted
+     * and not merely its count. A case that only counted one missing card would pass after an editor
+     * moved the gap onto the two-card account, which would silently make the missing row recoverable
+     * from the sibling row on the same account and destroy the case.</p>
+     */
+    private static final String UNREFERENCED_CARD_ACCOUNT = "00000000101";
+
+    /**
+     * The card number that must appear in no fixture in this directory.
+     *
+     * <p>Assumptions: this is the orphan the statement path points at, so its ABSENCE is the contract.
+     * It is stated as a constant because a negative assertion needs something to name, and because an
+     * editor adding it to "fix" the orphan would otherwise face no failure.</p>
+     */
+    private static final String SENTINEL_ABSENT_CARD = "9999999999999999";
 
     /**
      * The complete set of resources this directory may contain, in alphabetical order.
@@ -101,9 +190,12 @@ class ReportingFixtureContractTest {
      * summing to 91 bytes and a trailing {@code FILLER PIC X(59)} at line 11, giving the 150-byte
      * length its header comment at line 2 states and {@link CopybookLayout} registers as
      * {@code CARD}. Its {@code CARD-CVV-CD} at line 7 occupies zero-based offset 27 for three bytes
-     * and is registered SENSITIVE, so the fixture carries the clear synthetic digits the copybook
-     * declares and nothing masks them here; masking and suppression are mapper decisions, and
-     * applying either in a fixture would break the byte-identical round trip asserted below.
+     * and is registered SENSITIVE, so the fixture carries the three digits the copybook declares and
+     * nothing masks them here; masking and suppression are mapper decisions, and applying either in a
+     * fixture would break the byte-identical round trip asserted below. What the fixture does instead
+     * is write the SAME non-discriminating placeholder on every row -- see
+     * {@link #PLACEHOLDER_VERIFICATION_VALUE} -- so the column decodes without any row carrying a
+     * value that could be read as a verification value.
      * {@code CARD-EXPIRAION-DATE} at line 9 carries the second of the three baseline misspellings and
      * is written at its declared offset under its declared name, because the correction to
      * {@code cards.expiration_date} belongs to the entity and the mapper rather than to the data.</p>
@@ -122,18 +214,25 @@ class ReportingFixtureContractTest {
      * with no record behind it is a claim rather than a check. The file makes that binding a
      * decodable exemplar that the three structural cases below actually exercise.</p>
      *
-     * <p>Alternatively the record could have carried all eighty-eight card numbers the sibling
-     * cross-reference and statement extracts mention. Rejected because nothing in this module joins
-     * against them, so eighty-four further rows would add no coverage and eighty-four chances to
-     * drift out of agreement with the account fixture. Five rows are carried instead, and they are
-     * chosen to make three properties checkable: two of them share account {@code 00000000050} so
-     * that the card-keyed control break of {@code app/cbl/CBTRN03C.cbl} line 181 -- whose band line
-     * 183 labels "Account Total" while keying on {@code WS-CURR-CARD-NUM} at line 137 -- is
-     * distinguishable from an implementation grouped by account; exactly one carries {@code 'N'} in
-     * {@code CARD-ACTIVE-STATUS}, without which column 91 would be indistinguishable from padding,
-     * since all fifty rows of the reference extract are {@code 'Y'}; and every
-     * {@code CARD-ACCT-ID} resolves in {@code acctfile.txt} with every {@code CARD-EMBOSSED-NAME}
-     * agreeing with the matching customer in {@code custfile.txt}.</p>
+     * <p>Alternatively the record could have carried the fifty card numbers of the published extract.
+     * Rejected because nothing in this module joins against them, so forty-five further rows would add
+     * no coverage and forty-five chances to drift out of agreement with the account fixture. Five rows
+     * are carried instead, and they are chosen to make three properties checkable: two of them share
+     * account {@code 00000000050} so that the card-keyed control break of
+     * {@code app/cbl/CBTRN03C.cbl} line 181 -- whose band line 183 labels "Account Total" while keying
+     * on {@code WS-CURR-CARD-NUM} at line 137 -- is distinguishable from an implementation grouped by
+     * account; exactly one carries {@code 'N'} in {@code CARD-ACTIVE-STATUS}, without which column 91
+     * would be indistinguishable from padding, since all fifty rows of the reference extract are
+     * {@code 'Y'}; and every {@code CARD-ACCT-ID} resolves in {@code acctfile.txt} with every
+     * {@code CARD-EMBOSSED-NAME} agreeing with the matching customer in {@code custfile.txt}.</p>
+     *
+     * <p>Refactoring Rationale: all three of those properties, and the three the cross-reference entry
+     * below states, were prose only. {@link #everyFixture()} asserts a name, a descriptor, a record
+     * length and a row count, and the pad case asserts the trailing bytes, so an edit that preserved
+     * all of those while pointing both card rows at different accounts -- or flipping the single
+     * {@code 'N'} to {@code 'Y'} -- would have passed the entire suite while deleting the reason these
+     * rows exist. {@link #theCardFixturesCarryEveryStatedRelationship()} now asserts every one of the
+     * six, each read independently out of the two files rather than from a shared constant.</p>
      *
      * <p>Assumptions: {@code cardxref.txt} is the third such admission, and unlike the card master it
      * is a file the report path genuinely reads. It is the card cross-reference of
@@ -163,17 +262,24 @@ class ReportingFixtureContractTest {
      * while the break key is {@code WS-CURR-CARD-NUM} at line 137, so those two rows emit two bands
      * printing one account id where a {@code GROUP BY account_id} emits one band.</p>
      *
-     * <p>Alternatives Considered: carrying the eighty-eight card numbers the statement extract
-     * mentions, or adding an eighty-fifth row for card {@code 9999999999999999}. Both were rejected,
-     * and the second is the load-bearing one. That card is deliberately ABSENT so that it is the
-     * unresolvable-lookup case the transaction fixture can point at: the {@code INVALID KEY} path of
-     * {@code app/cbl/CBTRN03C.cbl} at lines 486 to 490 ABENDS rather than warning and continuing, and
-     * because the lookup fires only inside the control break at lines 181 to 188 a missing row makes
-     * the report print the account id left resident from the PREVIOUS card rather than a blank. Adding
-     * the row to "fix" the orphan would delete that case, and the eighty-four
-     * {@code 1010000000000001} through {@code 1010000000000084} overflow cards belong to the statement
-     * path's superset, where rows this module never joins against cannot drift out of agreement with
-     * the account fixture.</p>
+     * <p>Alternatives Considered: adding a fifth cross-reference row for the card master's third card,
+     * or adding a row for card {@code 9999999999999999}. Both were rejected, and each carries its own
+     * case. The card master's third card is deliberately UNREFERENCED so that this pair of files holds
+     * an unresolvable lookup: the {@code INVALID KEY} path of {@code app/cbl/CBTRN03C.cbl} at lines
+     * 486 to 490 ABENDS rather than warning and continuing, and because the lookup fires only inside
+     * the control break at lines 181 to 188 a missing row makes the report print the account id left
+     * resident from the PREVIOUS card rather than a blank. The sentinel {@code 9999999999999999} is
+     * absent for a different reason -- it is the value the statement path points at as its orphan, so
+     * it must exist in no fixture here. Both properties are asserted rather than described, by
+     * {@link #theCardFixturesCarryEveryStatedRelationship()}, so adding either row to "tidy up" the
+     * files fails rather than quietly deleting a case.</p>
+     *
+     * <p>Refactoring Rationale: this paragraph previously described the unreferenced card as one of
+     * "the eighty-four {@code 1010000000000001} through {@code 1010000000000084} overflow cards" of a
+     * statement-path superset. No such series exists anywhere in this repository -- that string
+     * occurred only in this directory's own three files -- so the sentence attributed the row's
+     * provenance to a corpus that does not exist. The row's real purpose, being the one card absent
+     * from the cross-reference, is stated above and is now asserted.</p>
      */
     private static final List<String> EXPECTED_RESOURCES =
             List.of("README.md", "acctfile.txt", "carddata.txt", "cardxref.txt", "custfile.txt",
@@ -385,18 +491,29 @@ class ReportingFixtureContractTest {
                 //       The FILLER span at columns 92 to 150 of app/data/ASCII/carddata.txt holds
                 //       exactly one distinct character across all fifty of its records, and that
                 //       character is a blank, so this row follows the account and customer extracts
-                //       rather than the three zero-padded ones. The fixture reaches the same byte by
-                //       a second, independent route: it omits the FILLER key entirely and lets
-                //       FixedWidthCodec rebuild the pad, which makes the value a codec fact.
+                //       rather than the three zero-padded ones.
+                // WHY : Refactoring Rationale: this entry and the one below claimed the fixture
+                //       "omits the FILLER key entirely and lets FixedWidthCodec rebuild the pad,
+                //       which makes the value a codec fact". There is no key to omit. Both files are
+                //       hand-authored fixed-width text and carry no field map at all, so the
+                //       sentence described an encode path nothing here took and credited the pad
+                //       byte to a mechanism that never ran. The independent route is now REAL rather
+                //       than described, and it is narrower than the withdrawn claim:
+                //       everyFixturePadIsSuppliedByTheCodecOnlyWhenItIsBlank below decodes each row,
+                //       removes the FILLER entry from the decoded map, re-encodes, and asserts the
+                //       committed bytes come back -- but only for the four BLANK-padded fixtures.
+                //       The codec's rule is content-based, so a zero pad is content it carries
+                //       rather than padding it derives, and the three zero-padded fixtures are
+                //       asserted NOT to be reproducible from the descriptor. That asymmetry is why
+                //       this argument source has to measure the character from the extract at all.
                 // WHY : Assumptions: the cross-reference is the one record whose pad CANNOT be
                 //       measured from its extract, because app/data/ASCII/cardxref.txt stores only the
                 //       36 declared bytes and pads nothing at all -- it truncates where the account
                 //       and card extracts pad. Two independent sources settle it as a BLANK instead,
                 //       and they agree: the live house fixture at
                 //       tests/fixtures/posting/happy_path/cardxref.txt writes those 36 bytes followed
-                //       by 14 blanks, and this fixture reaches the same byte by omitting the FILLER
-                //       key so FixedWidthCodec rebuilds the pad, which makes the value a codec fact
-                //       rather than a typed-in one.
+                //       by 14 blanks, and the codec-rebuild case named above reaches the same 14
+                //       bytes from the descriptor alone.
                 //       Trade-offs: a zero pad was available and would have matched the three
                 //       zero-padded reference records, but it would have contradicted the only
                 //       committed cardxref fixture in the repository for a record type whose own
@@ -580,6 +697,25 @@ class ReportingFixtureContractTest {
                     .contains(marker);
         }
     }
+
+    /*
+     * WHY : Refactoring Rationale: a test named everyCardRowCarriesAFabricatedVerificationValue
+     *       stood here, asserting that each card row's CARD-CVV-CD began with {@code 9} so the
+     *       value fell in a "fabricated 900 block" that no issuing authority uses. It is
+     *       WITHDRAWN because the fixture no longer works that way, and the replacement is
+     *       strictly stronger rather than merely different: every row now carries the SAME
+     *       PLACEHOLDER_VERIFICATION_VALUE, so the column decodes at its declared width without
+     *       any row carrying bytes that could be read as a verification value at all. A
+     *       per-row value in the 900 block still LOOKS like a verification value, which is the
+     *       property the placeholder removes.
+     *       Assumptions: the coverage is not lost. The surviving case --
+     *       "no committed card number is a plausible credential and no verification value is
+     *       real" -- asserts the whole CARD-CVV-CD column equals that placeholder, which subsumes
+     *       a per-row leading-digit check and additionally rejects a row that varied its value.
+     *       Trade-offs: the withdrawn assertion admitted new rows with any 9xx value, so it was
+     *       the more permissive of the two for a fixture that is meant to be uniform; the
+     *       replacement makes adding a row with a distinct value a failure, which is the intent.
+     */
 
     /**
      * Measures how many characters of each row's description field are occupied by text.
@@ -772,6 +908,399 @@ class ReportingFixtureContractTest {
         //       from the one production reads it with, and nothing else in this class would notice.
         assertThat(CopybookLayout.names()).contains(descriptorName);
         assertThat(CopybookLayout.layout(descriptorName).name()).isEqualTo(descriptorName);
+    }
+
+    /**
+     * Reads one declared field from every row of a fixture, as trimmed text in file order.
+     *
+     * <p>Assumptions: the value is read from the RAW substring at the descriptor's declared offset
+     * rather than from a decoded map, and the difference matters for the numeric keys. A decode
+     * renders {@code CARD-ACCT-ID PIC 9(11)} as a number, which drops the leading zeros that are
+     * part of the eleven-byte key, so two rows keyed {@code 00000000050} and {@code 50} would
+     * compare equal. Reading the bytes keeps the key at its declared width, which is what the
+     * cross-file joins below have to compare on.</p>
+     *
+     * @param fileName the fixture to read
+     * @param descriptorName the registered layout the fixture is written against
+     * @param fieldName the copybook field name to extract
+     * @return that field's text for every row, in file order, each trimmed of its padding
+     * @throws IllegalArgumentException if the descriptor declares no field of that name, which is a
+     *     mistake in the caller rather than a fixture fault
+     */
+    private static List<String> column(String fileName, String descriptorName, String fieldName) {
+        CopybookLayout.FieldSpec field = CopybookLayout.layout(descriptorName).fields().stream()
+                .filter(candidate -> fieldName.equals(candidate.name()))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException(
+                        descriptorName + " declares no field named " + fieldName));
+        return records(fileName).stream()
+                .map(row -> row.substring(field.start(), field.end()).trim())
+                .toList();
+    }
+
+    /**
+     * Asserts every relationship the card and cross-reference fixtures were authored to carry.
+     *
+     * <p>Purpose: the charter above states six discriminating properties of these two files -- two
+     * card rows sharing one account, exactly one inactive card, every account resolving in the
+     * account fixture, every embossed name agreeing with the matching customer, two of the four
+     * cross-reference rows sharing that same account, and one card deliberately absent from the
+     * cross-reference. This case asserts all six.</p>
+     *
+     * <p>Refactoring Rationale: those six properties were prose only. The registrations in
+     * {@link #everyFixture()} assert a name, a descriptor, a record length and a row count, and the
+     * pad case asserts the trailing bytes, so an edit that preserved width, count and padding while
+     * destroying every relationship the rows exist for would have passed the whole suite. That is
+     * the specific failure this case closes: pointing both card rows at different accounts, or
+     * flipping the one {@code 'N'} status to {@code 'Y'}, would leave five 150-byte rows and five
+     * blank pads and would silently delete the control-break discriminator the charter argues for.</p>
+     *
+     * <p>Assumptions: each relationship is asserted from the two files INDEPENDENTLY rather than from
+     * a shared constant. A constant naming the shared account would be satisfied by a fixture that no
+     * longer contained it; reading the account column out of each file and comparing the two is what
+     * makes the assertion about the committed bytes.</p>
+     */
+    @Test
+    @DisplayName("the card and cross-reference fixtures carry every relationship their charter states")
+    void theCardFixturesCarryEveryStatedRelationship() {
+        List<String> cardNumbers = column("carddata.txt", "CARD", "CARD-NUM");
+        List<String> cardAccounts = column("carddata.txt", "CARD", "CARD-ACCT-ID");
+        List<String> cardNames = column("carddata.txt", "CARD", "CARD-EMBOSSED-NAME");
+        List<String> cardStatuses = column("carddata.txt", "CARD", "CARD-ACTIVE-STATUS");
+
+        List<String> xrefCards = column("cardxref.txt", "XREF", "XREF-CARD-NUM");
+        List<String> xrefCustomers = column("cardxref.txt", "XREF", "XREF-CUST-ID");
+        List<String> xrefAccounts = column("cardxref.txt", "XREF", "XREF-ACCT-ID");
+
+        List<String> accountKeys = column("acctfile.txt", "ACCOUNT", "ACCT-ID");
+        List<String> customerKeys = column("custfile.txt", "CUSTOMER", "CUST-ID");
+        List<String> customerFirstNames = column("custfile.txt", "CUSTOMER", "CUST-FIRST-NAME");
+        List<String> customerLastNames = column("custfile.txt", "CUSTOMER", "CUST-LAST-NAME");
+
+        // WHY : Assumptions: the card key domain is asserted to be a SET rather than merely counted,
+        //       because two identical card numbers would still be five rows of 150 bytes and the
+        //       cross-reference join below would then resolve one of them twice.
+        assertThat(cardNumbers).as("card numbers are distinct").doesNotHaveDuplicates();
+        assertThat(xrefCards).as("cross-referenced card numbers are distinct").doesNotHaveDuplicates();
+
+        // WHY : Assumptions: the shared account is DERIVED from the file rather than named as a
+        //       literal, so the assertion is about whichever account the rows actually share. The
+        //       property under test is that exactly one account carries two cards, which is what makes
+        //       the card-keyed control break of app/cbl/CBTRN03C.cbl line 181 distinguishable from an
+        //       implementation grouped by account -- two cards on one account emit two bands printing
+        //       one account id, where a GROUP BY account_id emits one.
+        Map<String, Long> cardsPerAccount = cardAccounts.stream()
+                .collect(java.util.stream.Collectors.groupingBy(account -> account,
+                        java.util.stream.Collectors.counting()));
+        List<String> accountsWithTwoCards = cardsPerAccount.entrySet().stream()
+                .filter(entry -> entry.getValue() == 2L)
+                .map(Map.Entry::getKey)
+                .toList();
+        assertThat(accountsWithTwoCards)
+                .as("exactly one account must carry two cards, so the card-keyed break is provable")
+                .hasSize(1);
+        String sharedAccount = accountsWithTwoCards.get(0);
+        assertThat(cardsPerAccount.values().stream().filter(count -> count > 2L).toList())
+                .as("no account may carry more than two cards in this fixture")
+                .isEmpty();
+
+        // WHY : Assumptions: the SAME account has to be the one the cross-reference doubles up on,
+        //       measured from the second file rather than assumed to follow from the first. If the two
+        //       files disagreed, the account-keyed secondary index idx_card_xref_account_id would be
+        //       exercised over a different account than the control break, and neither file would fail.
+        assertThat(xrefAccounts.stream().filter(sharedAccount::equals).count())
+                .as("the cross-reference must double up on the same account the card master does: %s",
+                        sharedAccount)
+                .isEqualTo(2L);
+
+        // WHY : Assumptions: exactly one row carries 'N'. Without it, column 91 would be
+        //       indistinguishable from padding, because all fifty rows of app/data/ASCII/carddata.txt
+        //       are 'Y' and a fixture that copied that would never exercise the inactive branch.
+        assertThat(cardStatuses.stream().filter("N"::equals).count())
+                .as("exactly one card must be inactive, so CARD-ACTIVE-STATUS is not padding")
+                .isEqualTo(1L);
+        assertThat(cardStatuses).as("no status may be anything but Y or N").containsOnly("Y", "N");
+
+        // WHY : Assumptions: every card's account resolves in the account fixture, and every
+        //       cross-reference row's account and customer resolve in theirs. This is the referential
+        //       closure the charter claims, and it is the property that makes the fixture loadable
+        //       against real foreign keys -- which the sibling ReportingCardIntegrationIT then does.
+        assertThat(accountKeys).as("every card's account must resolve").containsAll(cardAccounts);
+        assertThat(accountKeys).as("every cross-referenced account must resolve")
+                .containsAll(xrefAccounts);
+        assertThat(customerKeys).as("every cross-referenced customer must resolve")
+                .containsAll(xrefCustomers);
+
+        // WHY : Assumptions: the embossed name is compared against the CUSTOMER row reached through
+        //       the account rather than against a literal, so the two files are held to each other.
+        //       The comparison is on the first and last name joined by one blank, which is the form
+        //       CARD-EMBOSSED-NAME carries; the middle name is deliberately not part of it, because
+        //       an embossed name is what fits the card face.
+        for (int row = 0; row < cardNumbers.size(); row++) {
+            String account = cardAccounts.get(row);
+            int accountRow = accountKeys.indexOf(account);
+            assertThat(accountRow)
+                    .as("card %s names account %s, which must exist in acctfile.txt",
+                            cardNumbers.get(row), account)
+                    .isNotNegative();
+            String customer = customerKeys.get(accountRow);
+            String embossed = customerFirstNames.get(accountRow) + " "
+                    + customerLastNames.get(accountRow);
+            assertThat(cardNames.get(row))
+                    .as("card %s must be embossed with customer %s's name", cardNumbers.get(row),
+                            customer)
+                    .isEqualTo(embossed);
+        }
+
+        // WHY : Assumptions: exactly one card of the five is ABSENT from the cross-reference, and its
+        //       identity is asserted rather than only its count. It is the unresolvable-lookup case the
+        //       transaction fixture can point at: the INVALID KEY path of app/cbl/CBTRN03C.cbl at lines
+        //       486 to 490 abends rather than warning, and because the lookup fires only inside the
+        //       control break at lines 181 to 188, a missing row makes the report print the account id
+        //       left resident from the PREVIOUS card rather than a blank.
+        List<String> unreferenced = cardNumbers.stream()
+                .filter(card -> !xrefCards.contains(card))
+                .toList();
+        assertThat(unreferenced)
+                .as("exactly one card must be absent from the cross-reference")
+                .hasSize(1);
+        assertThat(cardAccounts.get(cardNumbers.indexOf(unreferenced.get(0))))
+                .as("the unreferenced card must be the one on the account that carries no other card")
+                .isEqualTo(UNREFERENCED_CARD_ACCOUNT);
+
+        // WHY : Assumptions: the sentinel card is asserted ABSENT from both files. It is the value the
+        //       statement path's orphan case names, so a well-meaning editor adding it to "fix" the
+        //       orphan would delete that case; a negative assertion is what makes the deletion fail.
+        assertThat(cardNumbers).as("the sentinel card must not be in the card master")
+                .doesNotContain(SENTINEL_ABSENT_CARD);
+        assertThat(xrefCards).as("the sentinel card must not be in the cross-reference")
+                .doesNotContain(SENTINEL_ABSENT_CARD);
+
+        // WHY : Assumptions: every cross-reference row also exists in the card master, so the two
+        //       files are closed against each other in BOTH directions. Only the card master may carry
+        //       an extra row, and only the one named above.
+        assertThat(cardNumbers).as("every cross-referenced card must exist in the card master")
+                .containsAll(xrefCards);
+    }
+
+    /**
+     * Asserts that no committed card number is a plausible payment credential.
+     *
+     * <p>Purpose: the fixture directory attests its own provenance, and for the two files that carry a
+     * primary account number the attestation has two halves -- which numbers came from the published
+     * extract in this repository, and that every other one is deliberately unroutable. This case
+     * asserts both halves against the bytes.</p>
+     *
+     * <p>Assumptions: "unroutable" is asserted as two independent properties, because either alone is
+     * weak. A Luhn-invalid number in an allocated range still names a real issuer; a number in the
+     * major-industry-identifier 9 range that happened to satisfy Luhn would still look like a
+     * credential. Requiring both of every synthetic value is what leaves no committed number that
+     * could be mistaken for one, and it is what a fixed-width fixture can offer in place of masking --
+     * masking is a mapper decision and applying it here would break the byte-identical round trip.</p>
+     *
+     * <p>Assumptions: the verification value is asserted to be the same non-discriminating placeholder
+     * on every row rather than a distinct value per row. {@code CARD-CVV-CD} is declared
+     * {@code PIC 9(03)}, so it can be neither blank nor shortened without breaking the 150-byte
+     * geometry, and no case in this module distinguishes the rows by it -- the mapper suppresses it
+     * from every response. One repeated placeholder is therefore all the fixture needs, and it is what
+     * keeps the committed bytes from resembling a verification value at all.</p>
+     */
+    @Test
+    @DisplayName("no committed card number is a plausible credential and no verification value is real")
+    void noCommittedCardNumberIsAPlausibleCredential() {
+        List<String> cardNumbers = column("carddata.txt", "CARD", "CARD-NUM");
+        List<String> xrefCards = column("cardxref.txt", "XREF", "XREF-CARD-NUM");
+
+        for (String card : cardNumbers) {
+            assertThat(card).as("every card number is exactly sixteen digits").hasSize(16)
+                    .containsOnlyDigits();
+            if (PUBLISHED_EXTRACT_CARDS.contains(card)) {
+                continue;
+            }
+            assertThat(card)
+                    .as("card %s is not from the published extract, so it must sit in the"
+                            + " national-assignment major-industry range", card)
+                    .startsWith(SYNTHETIC_CARD_PREFIX);
+            assertThat(satisfiesLuhn(card))
+                    .as("card %s is synthetic, so it must deliberately fail the Luhn check", card)
+                    .isFalse();
+        }
+
+        // WHY : Assumptions: the published-extract members are asserted to BE in the extract rather
+        //       than trusted from the constant, by reading app/data/ASCII/carddata.txt. That file is
+        //       REFERENCE-only and is read here and never written. Without this read the constant would
+        //       be a way to exempt any value from the two rules above simply by naming it.
+        List<String> published = publishedExtractCardNumbers();
+        assertThat(published).as("the published extract must contain every card the constant exempts")
+                .containsAll(PUBLISHED_EXTRACT_CARDS);
+        assertThat(cardNumbers).as("every exempted card must actually be used by this fixture")
+                .containsAll(PUBLISHED_EXTRACT_CARDS);
+
+        assertThat(xrefCards)
+                .as("the cross-reference may name no card the master does not carry, so its numbers"
+                        + " inherit the same two guarantees")
+                .allSatisfy(card -> assertThat(cardNumbers).contains(card));
+
+        assertThat(column("carddata.txt", "CARD", "CARD-CVV-CD"))
+                .as("every verification value is the same non-discriminating placeholder")
+                .containsOnly(PLACEHOLDER_VERIFICATION_VALUE);
+    }
+
+    /**
+     * Reports whether a card number satisfies the Luhn check digit.
+     *
+     * <p>Assumptions: implemented here rather than taken from a library, because no production class
+     * in this migration validates a card number -- the reference application does not either -- and
+     * introducing a dependency so a test could reject its own fixtures would put a check-digit rule
+     * into the shipped image for no runtime purpose.</p>
+     *
+     * @param cardNumber the digits to test; must be non-empty and contain digits only
+     * @return {@code true} when the doubled-alternate-digit sum is a multiple of ten
+     */
+    private static boolean satisfiesLuhn(String cardNumber) {
+        int sum = 0;
+        for (int position = 0; position < cardNumber.length(); position++) {
+            int digit = cardNumber.charAt(cardNumber.length() - 1 - position) - '0';
+            if (position % 2 == 1) {
+                digit *= 2;
+                if (digit > 9) {
+                    digit -= 9;
+                }
+            }
+            sum += digit;
+        }
+        return sum % 10 == 0;
+    }
+
+    /**
+     * Reads every card number from the published demonstration extract in this repository.
+     *
+     * @return the sixteen-byte card numbers of {@code app/data/ASCII/carddata.txt}, in file order
+     * @throws UncheckedIOException if the extract cannot be read, which means the checkout is
+     *     incomplete rather than that a fixture is wrong
+     */
+    private static List<String> publishedExtractCardNumbers() {
+        Path extract = repositoryRoot().resolve("app/data/ASCII/carddata.txt");
+        try {
+            return Files.readAllLines(extract, StandardCharsets.ISO_8859_1).stream()
+                    .filter(row -> !row.isBlank())
+                    .map(row -> row.substring(0, 16))
+                    .toList();
+        } catch (IOException cause) {
+            throw new UncheckedIOException("cannot read the published extract " + extract, cause);
+        }
+    }
+
+    /**
+     * Resolves the repository root by walking up from the working directory.
+     *
+     * <p>Assumptions: located by the presence of {@code services/pom.xml} rather than by a fixed
+     * number of parent steps, so the suite runs identically from the reactor root and from the module
+     * directory. A relative path would resolve differently between those two invocations.</p>
+     *
+     * @return the repository root
+     * @throws IllegalStateException if no ancestor carries the reactor descriptor
+     */
+    private static Path repositoryRoot() {
+        Path candidate = Path.of("").toAbsolutePath();
+        while (candidate != null) {
+            if (Files.isRegularFile(candidate.resolve("services/pom.xml"))) {
+                return candidate;
+            }
+            candidate = candidate.getParent();
+        }
+        throw new IllegalStateException(
+                "no ancestor of the working directory carries services/pom.xml");
+    }
+
+    /**
+     * Asserts which fixtures' trailing pads the codec supplies and which ones carry theirs as content.
+     *
+     * <p>Purpose: settle, per record type, whether the committed pad byte is something the codec
+     * derives from the descriptor or something the file states. The codec's rule is content-based and
+     * measured here rather than assumed: a BLANK padding field is dropped on decode and restored on
+     * encode, while a NONBLANK one stays content and is carried through. So the four blank-padded
+     * fixtures do get their pad from the codec, and the three zero-padded ones do not -- their zeroes
+     * are data the file supplies, which is exactly why
+     * {@link #everyFixturePadsWithItsExtractsCharacter} has to measure the character from the
+     * extract instead of deriving it.</p>
+     *
+     * <p>Refactoring Rationale: two entries of {@link #everyFixturePad()} claimed the card and
+     * cross-reference fixtures reached their pad by "omitting the FILLER key entirely" so the codec
+     * rebuilt it. Nothing did that: both files are hand-authored text with no field map, and
+     * {@link #everyFixturePadsWithItsExtractsCharacter} compares a raw substring against a repeated
+     * character, which is the same typed-in byte read back. Neither could
+     * {@link #everyRowRoundTripsByteForByte} stand in for it -- that case passes the original bytes to
+     * the sign-preserving encoder as a template, so the pad it reproduces comes from the template and
+     * not from the descriptor. This case is the witness the prose described, made real and made
+     * two-sided, so the asymmetry between the blank and zero pads is asserted rather than papered
+     * over.</p>
+     *
+     * <p>Assumptions: only the PAD SPAN of the from-scratch encode is compared, not the whole record.
+     * A from-scratch encode re-renders every field from its decoded value, so a numeric or sign
+     * rendering difference elsewhere would fail a whole-record comparison for a reason that is not a
+     * pad fault. Narrowing the comparison to the span keeps the case about the one byte it names.</p>
+     *
+     * @param fileName the fixture under test
+     * @param descriptorName the registered layout the fixture is written against
+     * @param padCharacter the character the pad must consist of, which decides which half of the
+     *     codec's content-based rule this fixture exercises
+     */
+    @ParameterizedTest(name = "{0} pad provenance")
+    @MethodSource("everyFixturePad")
+    @DisplayName("a blank pad is supplied by the codec and a zero pad is carried as content")
+    void everyFixturePadIsSuppliedByTheCodecOnlyWhenItIsBlank(String fileName,
+            String descriptorName, char padCharacter) {
+        CopybookLayout.RecordSpec spec = CopybookLayout.layout(descriptorName);
+        List<CopybookLayout.FieldSpec> declared = spec.fields();
+        CopybookLayout.FieldSpec pad = declared.get(declared.size() - 1);
+        String padName = pad.name();
+        String committedPad = String.valueOf(padCharacter).repeat(pad.length());
+        String blankPad = " ".repeat(pad.length());
+
+        for (String row : records(fileName)) {
+            byte[] original = row.getBytes(StandardCharsets.UTF_8);
+            Map<String, Object> decoded =
+                    new java.util.LinkedHashMap<>(FixedWidthCodec.decodeRecord(original, spec));
+
+            if (padCharacter == ' ') {
+                assertThat(decoded)
+                        .as("%s: a blank %s is padding, so the codec drops it on decode rather than"
+                                + " handing 59 or 178 meaningless blanks to a consumer", fileName,
+                                padName)
+                        .doesNotContainKey(padName);
+            } else {
+                assertThat(decoded)
+                        .as("%s: a nonblank %s is CONTENT, so the codec keeps it", fileName, padName)
+                        .containsKey(padName);
+                assertThat(String.valueOf(decoded.remove(padName)))
+                        .as("%s: the content the codec kept must be the committed pad", fileName)
+                        .isEqualTo(committedPad);
+            }
+
+            String rebuiltPad = new String(FixedWidthCodec.encodeRecord(decoded, spec),
+                    StandardCharsets.UTF_8).substring(pad.start(), pad.end());
+
+            // WHY : Assumptions: the codec's restored pad is always BLANK, whatever the record type,
+            //       and that single fact is what makes the two branches above meaningful. For the four
+            //       blank-padded fixtures it equals the committed bytes, so the pad is a codec fact and
+            //       a descriptor whose FILLER span disagreed with the file would fail here. For the
+            //       three zero-padded ones it deliberately does NOT equal them, which is the positive
+            //       evidence that their pad character cannot be derived and has to be measured from the
+            //       extract -- the claim everyFixturePadsWithItsExtractsCharacter rests on.
+            assertThat(rebuiltPad)
+                    .as("%s: the codec restores a dropped pad with blanks", fileName)
+                    .isEqualTo(blankPad);
+            if (padCharacter == ' ') {
+                assertThat(rebuiltPad)
+                        .as("%s: the codec's pad must equal the committed pad", fileName)
+                        .isEqualTo(committedPad);
+            } else {
+                assertThat(rebuiltPad)
+                        .as("%s: the codec cannot derive a zero pad, so it must differ", fileName)
+                        .isNotEqualTo(committedPad);
+            }
+        }
     }
 
     /**

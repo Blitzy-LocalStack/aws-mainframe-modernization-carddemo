@@ -1394,8 +1394,21 @@ available unchanged — the migration adds a path, it does not remove one.
 - Every screen composes the shared shell in full — screen header, message band and
   key bar with the key-binding hook — so the function-key contract in
   [The function-key contract](#the-function-key-contract) is reachable from every
-  route and not merely authored beside it. All four authored screens satisfy this
+  route and not merely authored beside it. All ten authored screens satisfy this
   today; the obligation attaches to each remaining route as it lands.
+  Refactoring Rationale: this said "all four authored screens" and the figure has
+  moved to ten. The obligation has also been refined by a delivered mechanism rather
+  than weakened: `ui/src/layout/AppShell.tsx` is now mounted as the layout element of
+  the authenticated branch of the route tree, and a screen may DELEGATE its title
+  band to that frame instead of composing one — which `accountView` and `authSummary`
+  do, and which is how their six header fields reach the screen at all. The frame
+  renders a zone only for a screen that delegates it, so the eight screens composing
+  their own bands are unaffected. What the frame does **not** do is bind a function
+  key: `RETIRED_SHELL_FUNCTION_KEY` records that it used to bind F12 for sign-off and
+  why it stopped — the key-binding hook installs a listener per call site with no
+  ownership registry, and the three update screens bind F12 as cancel, so one
+  keypress would have discarded an edit and ended the session. Sign-off is a visible
+  control in the frame instead, labelled from the message catalogue.
   Assumptions: a screen's bindings are the attention identifiers **its own program
   accepts**, and its legend labels are split from **its own mapset's** legend
   literal — the uniform set in

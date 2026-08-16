@@ -253,7 +253,7 @@ public class TransactionType {
     //       docs/architecture/cobol-to-service-traceability.md.
     // WHY : Refactoring Rationale: the JDBC type code is declared HERE and an earlier revision of this
     //       file omitted it, which made this the one key in the package bound differently from the
-    //       column it maps. V1__reference.sql L106 declares type_cd CHAR(2), and without this
+    //       column it maps. V1__reference.sql L99 declares type_cd CHAR(2), and without this
     //       annotation the provider binds a String parameter as VARCHAR; PostgreSQL then compares a
     //       blank-padded CHAR column against an unpadded VARCHAR parameter, which is a comparison
     //       across two types rather than within one. The three sibling keys of this package all carry
@@ -266,7 +266,7 @@ public class TransactionType {
     //       the index on a CHAR column be used without an implicit cast.
     // WHY : Assumptions: the column is declared NOT UPDATABLE. The identifier of a seeded reference
     //       row is its identity rather than one of its attributes: the two-character code is what a
-    //       category's foreign key at V1__reference.sql L267 points at, so changing it in place would
+    //       category's foreign key at V1__reference.sql L256 points at, so changing it in place would
     //       silently break every child row that references it. The provider is told not to write the
     //       column on an update, which turns an attempt to reassign an identity into a no-op at the
     //       database boundary rather than a corrupted relationship.

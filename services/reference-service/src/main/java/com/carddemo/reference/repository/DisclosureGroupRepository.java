@@ -84,7 +84,7 @@ import org.springframework.stereotype.Repository;
  *
  * <p>Alternatives Considered: declaring the column {@code VARCHAR(10)} and reconciling the two spellings
  * by removing padding on both sides of the comparison. Rejected on two counts. The authoritative column
- * contract, this module's {@code src/main/resources/db/migration/V1__reference.sql} at line 311, states
+ * contract, this module's {@code src/main/resources/db/migration/V1__reference.sql} at line 300, states
  * {@code acct_group_id CHAR(10) NOT NULL}; and admitting a padded and an unpadded form of one logical
  * key would leave a class of lookups that fail only for the two padded group values. The failure mode is
  * what settles it: because a miss on this read falls back rather than raising, a probe that matched
@@ -94,7 +94,7 @@ import org.springframework.stereotype.Repository;
  * <h2>The rate is an exact scaled decimal, and no arithmetic happens here</h2>
  *
  * <p>Assumptions: the rate is exact base-ten throughout -- {@code interest_rate NUMERIC(6,2) NOT NULL}
- * at {@code V1__reference.sql} line 337, and {@code java.math.BigDecimal} on the entity member. The
+ * at {@code V1__reference.sql} line 326, and {@code java.math.BigDecimal} on the entity member. The
  * baseline field is {@code DIS-INT-RATE PIC S9(04)V99} at {@code app/cpy/CVTRA02Y.cpy} line 9, a zoned
  * decimal carrying its sign as an overpunch in the trailing byte, which is itself an exact base-ten
  * encoding: the seed stores a rate of 15.00 as the six bytes <code>00150&#123;</code>, whose trailing
@@ -151,7 +151,7 @@ import org.springframework.stereotype.Repository;
  * {@code PIC X(4)}, character and not numeric; and {@code app/data/ASCII/discgrp.txt} stores the codes
  * zero-padded, its distinct values being {@code 0001} through {@code 0004}. An integer would hold
  * {@code 0001} as 1, and a key built from that value would compare against rows it cannot match. The
- * authoritative contract follows the character reading at {@code V1__reference.sql} line 319.</p>
+ * authoritative contract follows the character reading at {@code V1__reference.sql} line 308.</p>
  *
  * <p>Assumptions: the one {@code FILLER} of this record is dropped, and the drop is recorded here
  * because the migration's copybook rule requires it to be recorded per record.

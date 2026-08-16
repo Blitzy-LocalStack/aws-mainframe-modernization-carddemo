@@ -447,7 +447,7 @@ than a description of it.
 |---|---|---|---|
 | `GET` | `/api/v1/transactions` | `COTRN00C` | 200, 400, 401, 403, 500 |
 | `POST` | `/api/v1/transactions` | `COTRN02C` | 200, 201, 400, 401, 403, 404, **409**, 500, 503 |
-| `POST` | `/api/v1/transactions/copy-last` | the backward read of `COTRN02C` that pre-fills the form from the last stored transaction | 200, 201, 400, 401, 403, 404, **409**, 500, 503 |
+| `POST` | `/api/v1/transactions/copy-last` | the backward read of `COTRN02C` that pre-fills the form from the last stored transaction; takes a key and a confirmation only, and answers 200 with the ten copied columns as `copiedDraft` — a client confirms by sending that draft to `POST /api/v1/transactions`, never by calling this operation twice | 200, 201, 400, 401, 403, 404, **409**, 500, 503 |
 | `GET` | `/api/v1/transactions/{transactionId}` | `COTRN01C` | 200, 400, 401, 403, 404, 500 |
 | `POST` | `/api/v1/billpay` | `COBIL00C` | 200, 201, 400, 401, 403, 404, **409**, 500, 503 |
 
@@ -663,9 +663,9 @@ weaken the documentation gate.
 
 ### 9.3 Test topology
 
-<!-- test-inventory: 27 tests + 7 integration tests -->
-**34** test classes across nine subpackages: **27** matching `*Test`, run by
-Surefire, and **7** matching `*IT`, run by Failsafe. The `*RepositoryIT` naming
+<!-- test-inventory: 28 tests + 8 integration tests -->
+**36** test classes across nine subpackages: **28** matching `*Test`, run by
+Surefire, and **8** matching `*IT`, run by Failsafe. The `*RepositoryIT` naming
 already matches Failsafe's default include pattern, so neither plugin needs an
 include list. That census is machine-checked — `ServiceReadmeInventoryTest` in
 `common-lib` parses the marker comment above and re-measures both figures against
@@ -681,7 +681,7 @@ a reader.
 | `domain` | `MoneyColumnInvariantTest`, `FixedWidthMappingTest`, `FeedRowIdentityTest`, `OccurrenceIdentityTest` |
 | `architecture` | `TransactionLayeringRulesTest`, `MoneyPathGateProofTest`, `KeysetPaginationGateProofTest` |
 | `dto` | `TransactionApiContractTest`, `TransactionAddRequestTest` |
-| `config` | `SecurityConfigTest`, `SecurityChainDispatchTest`, `OpenApiConfigTest` |
+| `config` | `SecurityConfigTest`, `SecurityChainDispatchTest`, `OpenApiConfigTest`, `DevProfileContractTest`, `DevProfileStartupIT` |
 | `fixtures` | `TransactionFixtureContractTest` |
 
 What the tiers assert:

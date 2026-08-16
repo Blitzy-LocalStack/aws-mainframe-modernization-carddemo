@@ -261,9 +261,9 @@ variable "environment" {
 # arithmetic that proves they do. This root supplies the block and does not
 # restate that rule -- one owner for one rule.
 variable "vpc_cidr" {
-  description = "IPv4 address space this environment's VPC is created with, and the block the network module carves all nine subnets from -- three public, three private-application and three isolated-data. The network module additionally requires a prefix length between /16 and /20 inclusive, the range in which nine usably sized subnets fit."
+  description = "IPv4 address space this environment's VPC is created with, and the block the network module carves all nine subnets from -- three public, three private-application and three isolated-data. It is deliberately the SAME value production uses: an address space is topology, and specification section 0.4.1.6 permits the two roots to differ only on a closed set of sizing and retention axes that does not include it. The network module additionally requires a prefix length between /16 and /20 inclusive, the range in which nine usably sized subnets fit; this root narrows that to exactly /16 for the reason its second validation records."
   type        = string
-  default     = "10.0.0.0/16"
+  default     = "10.1.0.0/16"
 
   validation {
     # Trade-offs: this checks only that the value IS a CIDR block, and
@@ -294,9 +294,15 @@ variable "vpc_cidr" {
   #       manipulation -- the third octet of a /20 is a bounded range, not a free
   #       wildcard -- and a subtle error there fails OPEN, silently trusting more
   #       than intended, which is the same failure mode by a longer route.
-  #       Assumptions: both environments already use a /16 (dev 10.0.0.0/16, prod
-  #       10.1.0.0/16), so this refuses nothing either root does today and refuses
-  #       only the configurations under which the derived pattern would over-match.
+  #       Assumptions: both environments use the SAME /16, so this refuses nothing
+  #       either root does today and refuses only the configurations under which the
+  #       derived pattern would over-match.
+  #       ⚠️ Refactoring Rationale: this note read "dev 10.0.0.0/16, prod 10.1.0.0/16"
+  #       and cited that difference approvingly. The difference WAS the defect: an
+  #       address space is topology, not sizing, and the closed axis set in
+  #       specification section 0.4.1.6 does not contain it, so the two roots were
+  #       diverging on an axis they are required not to. Both now carry 10.1.0.0/16
+  #       and therefore derive the identical trusted-proxy pattern.
   validation {
     condition     = can(regex("/16$", var.vpc_cidr))
     error_message = "vpc_cidr must use a /16 prefix in this environment root. The reporting service's trusted-proxy pattern is derived from the first two octets of this block, which is exact only for a /16; with any longer prefix that pattern would trust the whole containing /16 rather than this VPC alone."
@@ -448,19 +454,26 @@ variable "aurora_seconds_until_auto_pause" {
 }
 
 variable "aurora_backup_retention_period" {
-  description = "Days of automated backups the cluster retains, forwarded to the database module. Aurora does not permit automated backups to be switched off, so the module accepts 1 to 35 and there is no value here meaning `none`."
+  description = "Days of automated backups the cluster retains, forwarded to the database module. Aurora does not permit automated backups to be switched off, so the module accepts 1 to 35 and there is no value here meaning `none`. Set to the same value production uses: specification section 0.4.1.6's only retention axis is log retention days, so backup retention is not an axis the two roots may differ on."
   type        = number
-  default     = 7
+  default     = 35
 
   # Assumptions: the service has no off switch for automated backups, so one day
   # is the floor rather than a token retention choice.
-  # Trade-offs: this environment's data is
-  # reproducible by rerunning the ETL against the reference seed datasets under
-  # app/data, so backups here protect nothing that cannot be regenerated, and
-  # every retained day is storage that bills. Production keeps far more, because
-  # there the cluster's contents are not reproducible from anything in this
-  # repository. This is a retention value, so the two roots are explicitly
-  # permitted to differ on it without changing the stack's shape.
+  #
+  # ⚠️ Refactoring Rationale: this said "This is a retention value, so the two roots
+  # are explicitly permitted to differ on it without changing the stack's shape", and
+  # that permission does not exist. Specification section 0.4.1.6 enumerates a CLOSED
+  # set of axes and its only retention entry is log retention days; reading the phrase
+  # "sizing and retention" as an open licence is what let this value drift to 1
+  # against production's 35. The value now matches production.
+  # Trade-offs: the argument for a shorter window here was real and is simply
+  # outweighed -- this environment's data IS reproducible by rerunning the ETL against
+  # the reference seed datasets under app/data, so 34 of the 35 days protect nothing
+  # that could not be regenerated, and every retained day is storage that bills. It is
+  # accepted because a closed axis set is only closed if it is not reopened for
+  # whichever value has a plausible local argument, and because the cost is backup
+  # storage on a cluster whose capacity floor is zero.
   validation {
     condition     = var.aurora_backup_retention_period >= 1 && var.aurora_backup_retention_period <= 35
     error_message = "aurora_backup_retention_period must be between 1 and 35 days; Aurora does not allow automated backups to be disabled, so 0 is not an option."
@@ -652,13 +665,26 @@ variable "cloudfront_price_class" {
 }
 
 # -----------------------------------------------------------------------------
-# TLS identities and imported internal-service material
+# TLS identities
 #
-# Four non-secret values identify the certificates and DNS names that ALB,
-# API Gateway and CloudFront must agree on. Two sensitive values carry the
-# internal Spring Boot listeners' certificate chain and private key into the
-# secrets module, which stores each as a scalar Secrets Manager value for ECS
-# injection.
+# FOUR non-secret values, and nothing else: `alb_certificate_arn`,
+# `internal_service_domain_name`, `cloudfront_acm_certificate_arn` and
+# `cloudfront_aliases`. Between them they identify the certificates and DNS names
+# that the ALB, API Gateway and CloudFront must agree on. Every one is an ARN or a
+# DNS name -- an identifier for something that holds a credential, never the
+# credential itself.
+#
+# ⚠️ Refactoring Rationale: this heading read "TLS identities and imported
+# internal-service material" and went on to describe "Two sensitive values [that]
+# carry the internal Spring Boot listeners' certificate chain and private key into
+# the secrets module". Those two inputs -- `service_tls_certificate` and
+# `service_tls_private_key` -- were removed, and no secret for listener material is
+# created by either root. The sentence outlived the feature, so a reader following
+# it looked for two inputs and a stored secret that do not exist. What replaced
+# them is recorded in full at the withdrawal note further down this file: each task
+# mints its own listener key pair and self-signed certificate before the JVM starts,
+# so there is no shared listener key anywhere -- not in a variable, not in state and
+# not in a task definition.
 # -----------------------------------------------------------------------------
 
 # WHY : Assumptions: an ACM certificate ARN identifies the listener credential
@@ -782,6 +808,44 @@ variable "batch_schedule_expression" {
   }
 }
 
+# WHY : Refactoring Rationale: this input exists so the root can NARROW the scheduler
+#       module's delivery-age default, which is 86400 -- the top of the accepted range.
+#       That default is well argued in the module: it keeps maximum_retry_attempts, and
+#       not the age bound, as the setting that governs how many delivery attempts are
+#       made. But it also means a delivery that keeps failing may succeed at any point in
+#       the following TWENTY-FOUR HOURS, and a retried delivery starts the chain whenever
+#       it lands. That silently discards the entire reason 02:00 was chosen: the chain
+#       could begin inside the backup window, or inside the Sunday maintenance window, on
+#       exactly the nights when something is already wrong.
+# WHY : Assumptions: 3600 is chosen to preserve the module's five attempts while keeping
+#       the start bounded. EventBridge Scheduler's retries are exponentially backed off in
+#       the seconds-to-minutes range, so five attempts complete far inside an hour; the age
+#       bound therefore still does not govern the attempt count, which is the property the
+#       module's default was protecting. What changes is only the worst-case START time,
+#       from 02:00-plus-24h to 02:00-plus-1h -- which terraform_data.batch_window_disjoint
+#       in main.tf then asserts against both windows.
+# WHY : Trade-offs: a delivery failure lasting longer than an hour now goes to the
+#       dead-letter queue instead of continuing to retry into the next day. That is the
+#       better outcome and not a loss of coverage: the queue is monitored, whereas a
+#       chain that starts at 09:00 because delivery recovered late looks like a successful
+#       run while colliding with maintenance. Missing one night loudly beats running it at
+#       the wrong hour quietly.
+variable "batch_schedule_maximum_event_age_seconds" {
+  description = "Outer bound, in seconds, on how long a failed delivery of the nightly batch trigger may keep being retried before it is sent to the dead-letter queue. Narrows the scheduler module's 86400 default so that a retried delivery cannot start the chain outside its intended window; must keep the start window clear of aurora_preferred_backup_window and aurora_preferred_maintenance_window, which terraform_data.batch_window_disjoint asserts."
+  type        = number
+  default     = 3600
+
+  validation {
+    # Assumptions: the 60-86400 range is the pinned provider's, and it is restated here
+    #   rather than deferred to the module so a bad value fails naming THIS variable, in
+    #   the file an operator edited. The whole-hour requirement is this root's own: the
+    #   window gate in main.tf reasons in whole hours, so a value that is not a whole
+    #   number of hours would make its arithmetic silently approximate.
+    condition     = var.batch_schedule_maximum_event_age_seconds >= 60 && var.batch_schedule_maximum_event_age_seconds <= 86400 && var.batch_schedule_maximum_event_age_seconds % 3600 == 0
+    error_message = "batch_schedule_maximum_event_age_seconds must be a whole number of hours in seconds, from 3600 to 86400 inclusive, because the batch start-window check in main.tf reasons in whole hours."
+  }
+}
+
 # -----------------------------------------------------------------------------
 # Teardown posture -- the two flags deciding whether this environment can be
 # destroyed cleanly
@@ -825,7 +889,7 @@ variable "skip_final_snapshot" {
 # -----------------------------------------------------------------------------
 
 variable "image_tag" {
-  description = "Immutable image tag applied to all eleven ECR repositories for this deployment, normally the source commit SHA supplied by the OIDC deployment workflow."
+  description = "Immutable image tag applied to all ten ECR repositories for this deployment, normally the source commit SHA supplied by the OIDC deployment workflow."
   type        = string
   nullable    = false
 
@@ -872,10 +936,35 @@ variable "aurora_preferred_maintenance_window" {
   default     = "sun:09:00-sun:10:00"
 }
 
+# WHY : Assumptions: this one window governs EVERY secret the deployment generates, and
+#       the inventory is stated because "generated credentials" is too vague to check.
+#       It reaches the six purpose secrets this root creates directly -- the card
+#       selector key, the messaging HMAC key, the TWO pairwise internal-identity keys
+#       (authorization and transaction), the pagination-cursor key and the
+#       reporting-artifact key -- plus the per-service database credentials the secrets
+#       module creates and the Cognito seed-user secrets.
+# WHY : ⚠️ Refactoring Rationale: this description named "database, TLS and Cognito
+#       credentials". There is NO TLS secret: the service-certificate feature it referred
+#       to is withdrawn, and neither root creates a secret for listener material. The
+#       word survived the feature, which is the kind of leftover that has a reader
+#       looking for a resource that does not exist.
 variable "secret_recovery_window_in_days" {
-  description = "Secrets Manager recovery window for generated database, TLS and Cognito credentials. Development uses immediate deletion so destroy/recreate remains repeatable."
+  description = "Secrets Manager recovery window, in days, applied to every secret this deployment generates: the six purpose secrets this root creates -- card-selector, messaging HMAC, the two pairwise internal-identity keys, pagination-cursor and reporting-artifact -- plus the per-service database credentials from the secrets module and the Cognito seed-user secrets. Set to the same value production uses, because a recovery window is not one of the axes specification section 0.4.1.6 permits the two roots to differ on."
   type        = number
-  default     = 0
+  default     = 30
+
+  # WHY : ⚠️ Refactoring Rationale: this defaulted to 0 -- immediate, unrecoverable
+  #       deletion -- against production's 30. Of the three off-axis divergences this
+  #       root carried it was the most destructive: at 0, `terraform destroy` erased
+  #       every generated credential with no window in which to undo it. What 0 bought
+  #       was a repeatable destroy/recreate cycle, because a secret scheduled for
+  #       deletion holds its name until the window elapses.
+  #       Trade-offs: recreating this environment under the same names now needs
+  #       `aws secretsmanager delete-secret --force-delete-without-recovery` on the
+  #       secrets above as a deliberate operator step. Accepted: one explicit command
+  #       when an operator actually intends an irreversible delete is better than a
+  #       standing setting that removed the recovery window from every secret, every
+  #       apply, whether or not anyone intended it.
 
   validation {
     condition     = var.secret_recovery_window_in_days == 0 || (var.secret_recovery_window_in_days >= 7 && var.secret_recovery_window_in_days <= 30)
@@ -991,8 +1080,30 @@ variable "cloudfront_api_connect_src_origins" {
 #       apply, which is one more prerequisite. Accepted because the alternative is
 #       roles whose maximum permissions are whatever the inline documents in this
 #       root happen to say, with nothing above them.
+# WHY : ⚠️ Refactoring Rationale: this description said the boundary applied to "every
+#       role this deployment creates" while SEVEN role resources -- ten effective role
+#       instances per environment -- received no boundary at all. Only
+#       infra/modules/ecs-service attached one. The description was not corrected to
+#       match the narrower reality; the reality was corrected to match the description,
+#       because a documented ceiling that is not attached is worse than an absent one:
+#       an auditor reading this variable would record the control as present. The
+#       measured inventory is now nine role RESOURCES, all nine carrying
+#       `permissions_boundary`, and it is reproducible -- every `aws_iam_role` block
+#       under infra/ has the argument.
+# WHY : Assumptions: the ten effective instances per environment are: this root's
+#       `spa_publication` (1) and `lambda` (3 -- online-write, database-admin,
+#       dataset-retention); `modules/network` flow-log delivery (1);
+#       `modules/eventbridge-scheduler` invocation (1); and
+#       `modules/step-functions-batch` execution (4 -- one per machine in
+#       `local.machines`: daily, adhoc, dataset, authz). The `modules/ecs-service`
+#       execution and task roles are additional and were already bounded.
+# WHY : Assumptions: the three modules that create roles now take this same value as
+#       their own `permissions_boundary_arn` input, and each asserts the ARN names THIS
+#       account in a `lifecycle` precondition. A cross-account boundary ARN is accepted
+#       by IAM and then bounds nothing, because the policy it names does not resolve --
+#       so without that check the control could be silently inert even once attached.
 variable "permissions_boundary_arn" {
-  description = "ARN of the same-account customer-managed IAM policy used as the permissions boundary on every role this deployment creates. Supplied by the operator or the deploy workflow; never created here."
+  description = "ARN of the same-account customer-managed IAM policy used as the permissions boundary on every role this deployment creates -- all nine aws_iam_role resources under infra/, which is ten effective role instances per environment plus the two per ECS service. Passed into every module that creates a role, each of which asserts the ARN belongs to this account. Supplied by the operator or the deploy workflow; never created here."
   type        = string
 
   validation {
@@ -1019,6 +1130,55 @@ variable "mask_hmac_secret_arn" {
   validation {
     condition     = can(regex("^arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+-[A-Za-z0-9]{6}$", var.mask_hmac_secret_arn))
     error_message = "mask_hmac_secret_arn must be an anchored Secrets Manager secret ARN including its six-character suffix, for example arn:aws:secretsmanager:eu-west-1:111122223333:secret:carddemo/dev/mask-hmac-AbCdEf."
+  }
+}
+
+# -----------------------------------------------------------------------------
+# The key that encrypts the fingerprint secret
+# -----------------------------------------------------------------------------
+# WHY : ⚠️ Refactoring Rationale: this input did not exist, and its absence made the
+#       secret above unprovable. The runbook's creation command named no key, so the
+#       secret landed on the account's AWS-MANAGED secretsmanager key -- whose policy
+#       admits any principal in the account that holds the matching Secrets Manager
+#       permission, which is a far wider set than the one task that reads it. The
+#       root additionally granted decrypt on the CardDemo Secrets CMK only, so it
+#       could neither prove which key protected the secret nor grant the one that
+#       actually did: the decrypt succeeded through the managed key's own policy
+#       rather than through anything written here.
+# WHY : Assumptions: the ARN is SUPPLIED rather than defaulted to the CMK this root
+#       creates, because the secret it protects is created out of band and may
+#       legitimately predate this deployment. Naming the key explicitly is what lets
+#       the root grant exactly it, and what lets a reviewer see which key holds the
+#       fingerprint material without reading the secret's metadata.
+# WHY : Alternatives Considered: creating the secret here under module.kms's secrets
+#       key, which would remove the input entirely. Rejected for the reason recorded
+#       on mask_hmac_secret_arn above -- a key this configuration could rewrite would
+#       invalidate every fingerprint the previous apply produced, and keeping the
+#       material outside this configuration keeps it outside this state file.
+# WHY : Trade-offs: one more prerequisite, and a customer-managed key costs more than
+#       the managed one. Accepted because the managed key cannot be granted narrowly,
+#       cannot be given a rotation schedule this deployment states, and leaves no
+#       record in this configuration of what protects the material.
+variable "mask_hmac_secret_kms_key_arn" {
+  description = "ARN of the customer-managed KMS key that encrypts mask_hmac_secret_arn. Supplied by the operator alongside the secret; never created here. The data-migration task role is granted kms:Decrypt on exactly this key, through Secrets Manager, so a secret protected by a different key fails to decrypt rather than succeeding through a wider key policy."
+  type        = string
+
+  validation {
+    condition     = can(regex("^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/[a-f0-9-]+$", var.mask_hmac_secret_kms_key_arn))
+    error_message = "mask_hmac_secret_kms_key_arn must be an anchored customer-managed KMS key ARN, for example arn:aws:kms:eu-west-1:111122223333:key/<key-id>. The AWS-managed alias alias/aws/secretsmanager is deliberately not accepted: it cannot be granted to one principal."
+  }
+
+  # WHY : Assumptions: a key in another account or another Region cannot decrypt a
+  #       secret Secrets Manager holds here, so the two ARNs are compared rather than
+  #       each being validated in isolation. The mismatch is the realistic operator
+  #       error -- copying a key ARN from a different environment -- and it would
+  #       otherwise present at run time as an access denial on the batch path.
+  validation {
+    condition = (
+      split(":", var.mask_hmac_secret_kms_key_arn)[3] == split(":", var.mask_hmac_secret_arn)[3] &&
+      split(":", var.mask_hmac_secret_kms_key_arn)[4] == split(":", var.mask_hmac_secret_arn)[4]
+    )
+    error_message = "mask_hmac_secret_kms_key_arn must name a key in the same Region and account as mask_hmac_secret_arn."
   }
 }
 
@@ -1057,18 +1217,18 @@ variable "image_digests" {
         "authorization-service",
         "reporting-service",
         "data-migration",
-        "aws-otel-collector",
       ], artifact)
     ])
-    error_message = "Every image_digests key must name one of the ten ECR artifacts this deployment publishes: the eight services and data-migration, which it builds, plus aws-otel-collector, which it mirrors. A key that names no repository would be silently ignored."
+    error_message = "Every image_digests key must name one of the nine ECR artifacts this deployment runs as a task: the eight services and data-migration. A key that names no repository would be silently ignored."
   }
 
-  # WHY : Refactoring Rationale: `aws-otel-collector` was added to the admissible
-  #       keys, and it is the one entry this deployment does not BUILD. The mirror
-  #       step in .github/workflows/deploy.yml records the digest it pushed, and
-  #       main.tf prefers that digest for the telemetry sidecar exactly as it does
-  #       for the eight services -- so without this key the value would be rejected
-  #       by the check above and the sidecar would stay on its tag alone. `ui` is
-  #       still absent on purpose: the browser bundle is published to S3 and its
-  #       image runs no ECS task, so a digest for it would configure nothing.
+  # WHY : Refactoring Rationale: `aws-otel-collector` was an admissible key, and it is
+  #       WITHDRAWN. It named a mirror of a pinned third-party telemetry image, pushed
+  #       rather than built, whose digest this root resolved for a collector sidecar
+  #       that infra/modules/ecs-service no longer composes -- so the key now names no
+  #       repository, and specification section 0.4.1.6 states ten repositories rather
+  #       than the eleven the mirror made. `ui` is absent for a different and unchanged
+  #       reason: the browser bundle is published to S3 and its image runs no ECS task,
+  #       so a digest for it would configure nothing. That leaves nine admissible keys
+  #       against ten repositories, and the two numbers differ for that one reason.
 }

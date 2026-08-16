@@ -481,9 +481,10 @@ target-version = "py313"
 #   pinned dependency, and adding a CI-only lint script was rejected because the
 #   published gate already runs this package's pytest suite fail-closed. The gap
 #   is therefore closed by `tests/test_docstring_gate.py`, which walks the same
-#   two trees with the standard library's `ast` and asserts a non-blank docstring
-#   on every module, class and function at every visibility and every nesting
-#   depth. It self-tests its own walk against a fixture covering each declaration
+#   two trees -- and, since a nested helper in the repository-wide Rule 1 gate
+#   shipped undocumented past every wired Python gate, `config/rule1` as a third
+#   root -- with the standard library's `ast`, asserting a non-blank docstring on
+#   every module, class and function at every visibility and every nesting depth. It self-tests its own walk against a fixture covering each declaration
 #   shape, so a walker narrowed back to what ruff already sees fails loudly
 #   instead of reporting nothing missing. The two gates are complementary and
 #   BOTH are load-bearing: ruff owns docstring shape everywhere and presence on

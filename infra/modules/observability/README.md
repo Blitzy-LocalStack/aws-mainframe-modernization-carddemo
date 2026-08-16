@@ -202,7 +202,8 @@ notification to a named recipient; it was addressed to a TSO user id.
 - Assumptions: **no contact detail appears anywhere in this repository.** The
   `alarm_email_endpoints` input defaults to empty, and subscriptions are
   supplied at apply time. The same discipline covers every generated name: the
-  topic, the dashboard, the log groups and all thirteen alarms are composed from a
+  topic, the dashboard, the log groups, the metric filters and all fourteen alarms are
+  composed from a
   prefix and an environment, so no account identifier, endpoint or hostname
   appears in a name this module creates.
 
@@ -285,7 +286,7 @@ definitions and the programs are untouched and remain runnable.
 
 ## 5. Alarms: condition, question, action
 
-`main.tf` authors **thirteen** `aws_cloudwatch_metric_alarm` resources. Each row
+`main.tf` authors **fourteen** `aws_cloudwatch_metric_alarm` resources. Each row
 below states the condition, the question the condition answers and the action it
 enables. Every alarm publishes both its `ALARM` and its `OK` transition to this
 module's topic.
@@ -309,15 +310,17 @@ no service-level objectives and this module invents none — see
 | 11 | `aurora_capacity` | Serverless capacity against `aurora_max_capacity` | Is the cluster at the ceiling the environment root itself configured | Review the workload before raising the maximum |
 | 12 | `aurora_connections` | Cluster connection count against the total every configured pool could open at full autoscale | Is the cluster running out of **connections** before it runs out of **capacity** | Reduce a service's pool size or bound its maximum task count — both compute-side configuration |
 | 13 | `cloudfront_5xx` | Server-error **rate** at the distribution | Is the static delivery path failing, as distinct from the API path row 4 watches | Compare the origin bucket's access log before redeploying the built assets |
+| 14 | `state_machine_execution_failure` | A terminal `ExecutionFailed` or `ExecutionTimedOut` event in a state machine's own execution log group, one alarm per machine | Did an execution of THIS machine end without doing its work — including the three operator-invoked machines row 9 cannot see, and the in-graph failures a caught state never reports to `ExecutionsFailed` | Read that machine's execution history in the log group the alarm description names, correct the cause and redrive |
 
 Four points about that table are decisions rather than mechanics.
 
-- Assumptions: **rows 1, 2, 3, 4, 5, 8 and 9 are structural — the condition is a
-  failure by definition, not by comparison with a chosen number.** A target the
+- Assumptions: **rows 1, 2, 3, 4, 5, 8, 9 and 14 are structural — the condition is
+  a failure by definition, not by comparison with a chosen number.** A target the
   load balancer has already classified unhealthy is unhealthy on the load
   balancer's own authority; a 5xx is a server-side error by definition; a
   rotation error is a discrete reported event; a failed execution is a failure
-  the state machine itself declared. This matters because it is what makes those
+  the state machine itself declared, whether it declared it as a service metric
+  (row 9) or as a terminal history event in its own log (row 14). This matters because it is what makes those
   rows defensible without an objective to compare against.
 - Refactoring Rationale: **row 5's threshold is derived, not chosen, and it is
   the template for the rest.** A message reaches a dead-letter queue only after
@@ -349,14 +352,19 @@ Four points about that table are decisions rather than mechanics.
   reason.
 
 Two conditions worth watching have **no alarm resource**, and their absence is a
-decision. A state entering its `Catch` path is not itself a CloudWatch metric, so
-alarming on it requires a metric filter or an explicitly published metric; pool
-**acquisition** failure inside a task needs an application meter that reaches a
-namespace before it can be alarmed on. Both are recorded in
+decision. A single state entering its `Catch` path is not itself a CloudWatch
+metric, and the metric filter row 14 adds deliberately does not reach for it: a
+caught state is normally a step the graph then retried, so a filter on
+`TaskFailed` would report every transient retry the chain recovered from. What row
+14 does reach is the TERMINAL outcome of the execution that state belonged to,
+which is the event an operator has to act on. Pool **acquisition** failure inside
+a task needs an application meter that reaches a namespace before it can be
+alarmed on. Both are recorded in
 [`docs/architecture/observability.md`](../../../docs/architecture/observability.md)
-rather than silently omitted. `ExecutionsAborted` is also deliberately not
-watched: an abort is ordinarily somebody's deliberate act, so alarming on it
-would notify whoever just performed the stop.
+rather than silently omitted. An abort is also deliberately not watched, in either
+form — neither the `ExecutionsAborted` service metric nor the `ExecutionAborted`
+history event is matched — because an abort is ordinarily somebody's deliberate
+act, so alarming on it would notify whoever just performed the stop.
 
 Refactoring Rationale: **that second omission used to be stated more broadly than
 it holds, and row 12 is the difference.** "Connection-pool exhaustion" names two
@@ -536,6 +544,7 @@ a variable, an output, a version constraint or a resource — the command is in
 |------|------|
 | [aws_cloudwatch_dashboard.operations](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_dashboard) | resource |
 | [aws_cloudwatch_log_group.managed](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_group) | resource |
+| [aws_cloudwatch_log_metric_filter.state_machine_execution_failure](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_metric_filter) | resource |
 | [aws_cloudwatch_metric_alarm.api_5xx](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
 | [aws_cloudwatch_metric_alarm.aurora_capacity](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
 | [aws_cloudwatch_metric_alarm.aurora_connections](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
@@ -548,6 +557,7 @@ a variable, an output, a version constraint or a resource — the command is in
 | [aws_cloudwatch_metric_alarm.service_5xx](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
 | [aws_cloudwatch_metric_alarm.service_no_healthy_targets](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
 | [aws_cloudwatch_metric_alarm.service_unhealthy](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
+| [aws_cloudwatch_metric_alarm.state_machine_execution_failure](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
 | [aws_cloudwatch_metric_alarm.work_queue_age](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_metric_alarm) | resource |
 | [aws_s3_bucket.access_logs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket) | resource |
 | [aws_s3_bucket_lifecycle_configuration.access_logs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_lifecycle_configuration) | resource |
@@ -599,6 +609,7 @@ a variable, an output, a version constraint or a resource — the command is in
 | <a name="input_reply_queue_age_threshold_seconds"></a> [reply\_queue\_age\_threshold\_seconds](#input\_reply\_queue\_age\_threshold\_seconds) | Oldest-message age that raises a reply-queue alarm. Five seconds is derived from the baseline request/reply expiry contract rather than an invented service objective; the consumer still enforces expiresAt because SQS has no per-message expiry. | `number` | `5` | no |
 | <a name="input_rotation_lambda_function_names"></a> [rotation\_lambda\_function\_names](#input\_rotation\_lambda\_function\_names) | Set of Secrets Manager rotation Lambda function names that receive a non-zero Errors alarm. Empty creates no rotation alarm and is appropriate only when rotation is not provisioned in the composed root. | `set(string)` | `[]` | no |
 | <a name="input_service_error_count_threshold"></a> [service\_error\_count\_threshold](#input\_service\_error\_count\_threshold) | Count of server-error responses within one evaluation period that raises the per-service alarm. This is an absolute Sum of the load balancer's own 5xx count and not a proportion of requests, so it fires for a service that is failing requests regardless of whether the service itself is still logging. | `number` | `5` | no |
+| <a name="input_state_machine_log_group_names"></a> [state\_machine\_log\_group\_names](#input\_state\_machine\_log\_group\_names) | Map of state-machine key (daily, adhoc, dataset, authz) to the exact CloudWatch log-group name that machine writes its execution history to, as published by infra/modules/step-functions-batch. Each entry receives one metric filter over terminal failure events and one alarm on that metric. Empty creates neither, which is the correct value for a root that composes no state machine. | `map(string)` | `{}` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Tags merged onto the resources this module creates, layered on top of the common tag set the calling root already applies through its provider's `default_tags`; defaults to none, because the baseline tags arrive from the root rather than from this module. | `map(string)` | `{}` | no |
 | <a name="input_work_queue_age_threshold_seconds"></a> [work\_queue\_age\_threshold\_seconds](#input\_work\_queue\_age\_threshold\_seconds) | Oldest-message age that raises a primary work-queue alarm, covering the request queues and the error queue. This is a detection default equal to one full evaluation period, not a latency objective; the repository defines none. | `number` | `300` | no |
 
@@ -606,15 +617,17 @@ a variable, an output, a version constraint or a resource — the command is in
 
 | Name | Description |
 |------|-------------|
-| <a name="output_access_log_bucket_arn"></a> [access\_log\_bucket\_arn](#output\_access\_log\_bucket\_arn) | ARN of that same access-log destination, for an IAM policy Resource element -- granting an operator or a log-analysis task read access to the delivered records without granting it across every bucket in the account. The two producer modules take the bucket name output instead, because an IAM Resource element does not accept a bare bucket name and an S3 destination argument does not accept an ARN. |
+| <a name="output_access_log_bucket_arn"></a> [access\_log\_bucket\_arn](#output\_access\_log\_bucket\_arn) | ARN of that same access-log destination, for an IAM policy Resource element -- granting an operator or a log-analysis task read access to the delivered records without granting it across every bucket in the account. The two producer modules take the bucket name output instead, because an IAM Resource element does not accept a bare bucket name and an S3 destination argument does not accept an ARN. No Terraform block in this repository reads this output: it is published for the operator or log-analysis grant described above, which is written outside this repository. |
 | <a name="output_access_log_bucket_name"></a> [access\_log\_bucket\_name](#output\_access\_log\_bucket\_name) | Name of the shared terminal access-log destination this module owns. A calling root passes it into the alb module's access\_logs\_bucket input and the s3-datasets module's access\_log\_bucket\_name input, so both delivery services write into one destination whose public-access block, encryption, versioning, lifecycle rules and exact-source bucket policy are reviewed together. Both of those arguments take a bucket name and reject an ARN. |
-| <a name="output_alarm_arns"></a> [alarm\_arns](#output\_alarm\_arns) | Map of alarm ARNs covering all THIRTEEN alarm families this module creates, keyed <family>/<instance> for the eight families iterated per service, per queue, per rotation function or per terminal batch outcome, and by bare family name for the five single-instance alarms. Three of those five are unconditional (api\_5xx, aurora\_cpu, aurora\_capacity); the remaining two are present only when their gate is open -- aurora\_connections when database\_connection\_threshold is set, and cloudfront\_5xx when a distribution id is supplied and the region is us-east-1 -- so their keys are absent rather than null when they are not created. A caller composes a composite alarm over a chosen subset of families, attaches an action beyond this module's notification topic, or scopes an IAM Resource element to these alarms -- each of which needs the ARN and none of which then has to rediscover an alarm by its composed name. |
-| <a name="output_dashboard_arn"></a> [dashboard\_arn](#output\_dashboard\_arn) | ARN of that dashboard, for an IAM policy Resource element granting a read-only operator access to this board alone rather than to every dashboard in the account. A deep-link and an API call both take the name output instead, so neither form makes the other redundant. |
-| <a name="output_dashboard_name"></a> [dashboard\_name](#output\_dashboard\_name) | Name of the operations dashboard main.tf composes, which is the argument both a console deep-link and the CloudWatch GetDashboard call take. It is the identifier a deploy or batch-operations procedure uses to send a reader to the board, because a console URL would carry an account identifier and a region and neither may be committed to this repository. |
+| <a name="output_alarm_arns"></a> [alarm\_arns](#output\_alarm\_arns) | Map of alarm ARNs covering all THIRTEEN alarm families this module creates, keyed <family>/<instance> for the eight families iterated per service, per queue, per rotation function or per terminal batch outcome, and by bare family name for the five single-instance alarms. Three of those five are unconditional (api\_5xx, aurora\_cpu, aurora\_capacity); the remaining two are present only when their gate is open -- aurora\_connections when database\_connection\_threshold is set, and cloudfront\_5xx when a distribution id is supplied and the region is us-east-1 -- so their keys are absent rather than null when they are not created. A caller composes a composite alarm over a chosen subset of families, attaches an action beyond this module's notification topic, or scopes an IAM Resource element to these alarms -- each of which needs the ARN and none of which then has to rediscover an alarm by its composed name. No Terraform block in this repository reads this output today -- every alarm here already routes to this module's own notification topic, so no root has needed to attach a second action -- which makes it a discovery contract: it is how an incident responder enumerates what this environment actually alarms on without reading main.tf. |
+| <a name="output_dashboard_arn"></a> [dashboard\_arn](#output\_dashboard\_arn) | ARN of that dashboard, for an IAM policy Resource element granting a read-only operator access to this board alone rather than to every dashboard in the account. A deep-link and an API call both take the name output instead, so neither form makes the other redundant. No Terraform block reads this output: the read-only grant it exists for is authored outside this repository, so it is an operator contract rather than wiring. |
+| <a name="output_dashboard_name"></a> [dashboard\_name](#output\_dashboard\_name) | Name of the operations dashboard main.tf composes, which is the argument both a console deep-link and the CloudWatch GetDashboard call take. It is the identifier a deploy or batch-operations procedure uses to send a reader to the board, because a console URL would carry an account identifier and a region and neither may be committed to this repository. No Terraform block reads this output; the runbook step that needs the board is its consumer, which is exactly why the name is published rather than left to be constructed. |
 | <a name="output_managed_log_group_arns"></a> [managed\_log\_group\_arns](#output\_managed\_log\_group\_arns) | Map of the same producer keys to log-group ARNs, published without the all-streams :* suffix so a caller appends it unconditionally. Both environment roots index this map inside their lambda\_logs IAM policy document to scope logs:CreateLogStream and logs:PutLogEvents to one group per function role rather than to every group in the account, which is what makes least privilege reachable at log-group granularity instead of by wildcard. Keys match managed\_log\_group\_names exactly, so the two maps are indexed with one key set. |
-| <a name="output_managed_log_group_names"></a> [managed\_log\_group\_names](#output\_managed\_log\_group\_names) | Map of producer key to the exact CloudWatch log-group name for the groups this module creates, keyed as var.log\_group\_names is keyed. A caller uses a name wherever an ARN is not accepted: a container log-driver awslogs-group option, a Logs Insights SOURCE clause, and the LogGroupName metric dimension. Each value is read from the created group rather than re-derived from a path convention, so it is the destination the producer actually writes to. |
+| <a name="output_managed_log_group_names"></a> [managed\_log\_group\_names](#output\_managed\_log\_group\_names) | Map of producer key to the exact CloudWatch log-group name for the groups this module creates, keyed as var.log\_group\_names is keyed. A caller uses a name wherever an ARN is not accepted: a container log-driver awslogs-group option, a Logs Insights SOURCE clause, and the LogGroupName metric dimension. Each value is read from the created group rather than re-derived from a path convention, so it is the destination the producer actually writes to. No Terraform block in this repository reads this output -- the roots wire the ARN map instead, for an IAM Resource element -- so this one is a discovery contract for a Logs Insights query or a console link. |
 | <a name="output_notification_topic_arn"></a> [notification\_topic\_arn](#output\_notification\_topic\_arn) | ARN of the single per-environment notification topic that every alarm in this module already publishes both its ALARM and its OK transition to. A calling root passes this value into the step-functions-batch module's notification\_topic\_arn input, where it becomes the target the nightly chain's Catch path publishes a failure to, and uses it as the alarm\_actions target of any alarm authored outside this module. Because one topic serves the whole environment, muting or redirecting that environment's alerting is a change to this topic's subscriptions rather than to every alarm. |
-| <a name="output_notification_topic_name"></a> [notification\_topic\_name](#output\_notification\_topic\_name) | Bare name of the notification topic, carrying neither the account nor the region part of an ARN. CloudWatch dimensions the AWS/SNS metric family on TopicName, so this is the value a caller needs to place this topic's own delivery counts on a board or to alarm on its failed deliveries -- the signal that reports a failure in the alerting path itself, which no alarm publishing THROUGH that path can report. An ARN is not accepted as that dimension. |
+| <a name="output_notification_topic_name"></a> [notification\_topic\_name](#output\_notification\_topic\_name) | Bare name of the notification topic, carrying neither the account nor the region part of an ARN. CloudWatch dimensions the AWS/SNS metric family on TopicName, so this is the value a caller needs to place this topic's own delivery counts on a board or to alarm on its failed deliveries -- the signal that reports a failure in the alerting path itself, which no alarm publishing THROUGH that path can report. An ARN is not accepted as that dimension. No Terraform block in this repository reads this output: it is an operator and board-author contract, published so the topic can be named from `terraform output` rather than reconstructed from a naming convention. |
+| <a name="output_state_machine_execution_failure_alarm_names"></a> [state\_machine\_execution\_failure\_alarm\_names](#output\_state\_machine\_execution\_failure\_alarm\_names) | Map of state-machine key to the name of the alarm this module created on that machine's execution-failure metric, notifying the module's own topic. Empty when the caller passed no state\_machine\_log\_group\_names. An operator scoping a composite alarm or an escalation reads this map rather than composing an alarm name from a convention. |
+| <a name="output_state_machine_metric_filter_names"></a> [state\_machine\_metric\_filter\_names](#output\_state\_machine\_metric\_filter\_names) | Map of state-machine key to the name of the metric filter this module created over that machine's execution log group. Empty when the caller passed no state\_machine\_log\_group\_names. Each filter counts terminal ExecutionFailed and ExecutionTimedOut events -- an abort is excluded, as it is for the service-level metric -- into the CardDemo namespace under state\_machine\_execution\_failures\_<key>. |
 <!-- END_TF_DOCS -->
 
 ---
@@ -663,21 +676,43 @@ flag. Four of them need a paragraph the table has no room for.
 
 ## 9. Outputs and their consumers
 
-Rule 1 asks what a module returns and what the caller does with it. All nine
-outputs have a named consumer; an output with no consumer would be contract
-surface nobody needs.
+Rule 1 asks what a module returns and what the caller does with it. Of the nine
+outputs, **three are read by an environment root and six are not** — and the split
+is stated first because it is the thing a reader most easily gets wrong. Nine
+outputs beside a warning that renaming one breaks both roots invites the
+inference that all nine are wired. Only `notification_topic_arn`,
+`access_log_bucket_name` and `managed_log_group_arns` are; the other six are
+**operator and discovery contracts** whose audience is a human running
+`terraform output`, a runbook step, or an IAM policy authored outside this
+repository.
 
-| Output | Consumer, and why that form |
-|---|---|
-| `notification_topic_arn` | `step-functions-batch` as its `notification_topic_arn` input, where it becomes the target the nightly chain's `Catch` path publishes to; and the `alarm_actions` target of any alarm authored outside this module. **Not** the scheduler's dead-letter target — that input takes an SQS queue ARN and both roots supply the error queue |
-| `notification_topic_name` | A dashboard widget or an alarm on the topic's **own** delivery failures — CloudWatch dimensions `AWS/SNS` on `TopicName`, which no ARN satisfies. This is the one signal that reports a failure *in* the alerting path, which nothing publishing *through* that path can report |
-| `managed_log_group_names` | A task definition's `awslogs-group` option, a log-query `SOURCE` clause, and the `LogGroupName` metric dimension — each of which takes a name and rejects an ARN |
-| `managed_log_group_arns` | An IAM policy `Resource` element, so a producer's role is scoped to its own group instead of to every group in the account. Published without the all-streams suffix so a caller appends it unconditionally; keys match `managed_log_group_names` exactly, so one key set indexes both |
-| `dashboard_name` | The identifier a deploy or batch-operations procedure uses to send a reader to the board, and the argument the dashboard-read API takes. A console URL is deliberately not published, because one would embed an account identifier and a region |
-| `dashboard_arn` | An IAM policy `Resource` element granting a read-only operator this board alone rather than every dashboard in the account |
-| `alarm_arns` | A composite alarm over a chosen subset of families, an additional action beyond this module's topic, or an IAM `Resource` element scoped to these alarms — none of which should have to rediscover an alarm by reconstructing its composed name |
-| `access_log_bucket_name` | Passed by the root into the `alb` module's access-log bucket argument and the `s3-datasets` module's equivalent, so both delivery services write to one destination whose encryption, versioning, lifecycle and exact-source policy are reviewed together. Both arguments take a name and reject an ARN |
-| `access_log_bucket_arn` | An IAM policy `Resource` element granting read access to the delivered records without granting it across every bucket in the account |
+The counts below are measured, not asserted: `grep -c '^output "'
+outputs.tf` gives nine, and `grep -rn 'module\.observability\.' --include=*.tf
+infra/` gives four call sites across the two roots — `access_log_bucket_name`
+twice in each root, `notification_topic_arn` and `managed_log_group_arns` once
+each.
+
+| Output | Read by a root? | Audience, and why that form |
+|---|---|---|
+| `notification_topic_arn` | **Yes** — `module "step_functions"` in both roots | `step-functions-batch` as its `notification_topic_arn` input, where it becomes the target the nightly chain's `Catch` path publishes to; and the `alarm_actions` target of any alarm authored outside this module. **Not** the scheduler's dead-letter target — that input takes an SQS queue ARN and both roots supply the error queue |
+| `access_log_bucket_name` | **Yes** — `module "s3_datasets"` and `module "alb"` in both roots | Passed by the root into the `alb` module's access-log bucket argument and the `s3-datasets` module's equivalent, so both delivery services write to one destination whose encryption, versioning, lifecycle and exact-source policy are reviewed together. Both arguments take a name and reject an ARN |
+| `managed_log_group_arns` | **Yes** — `data "aws_iam_policy_document" "lambda_logs"` in both roots | An IAM policy `Resource` element, so a producer's role is scoped to its own group instead of to every group in the account. Published without the all-streams suffix so a caller appends it unconditionally; keys match `managed_log_group_names` exactly, so one key set indexes both |
+| `notification_topic_name` | No | A dashboard widget or an alarm on the topic's **own** delivery failures — CloudWatch dimensions `AWS/SNS` on `TopicName`, which no ARN satisfies. This is the one signal that reports a failure *in* the alerting path, which nothing publishing *through* that path can report |
+| `managed_log_group_names` | No — the roots wire the ARN map instead | A task definition's `awslogs-group` option, a log-query `SOURCE` clause, and the `LogGroupName` metric dimension — each of which takes a name and rejects an ARN |
+| `dashboard_name` | No | The identifier a deploy or batch-operations procedure uses to send a reader to the board, and the argument the dashboard-read API takes. A console URL is deliberately not published, because one would embed an account identifier and a region |
+| `dashboard_arn` | No | An IAM policy `Resource` element granting a read-only operator this board alone rather than every dashboard in the account |
+| `alarm_arns` | No — every alarm already routes to this module's own topic, so no root has needed a second action | A composite alarm over a chosen subset of families, an additional action beyond this module's topic, or an IAM `Resource` element scoped to these alarms — none of which should have to rediscover an alarm by reconstructing its composed name. It is also how an incident responder enumerates what this environment actually alarms on without reading main.tf |
+| `access_log_bucket_arn` | No | An IAM policy `Resource` element granting read access to the delivered records without granting it across every bucket in the account |
+
+- Trade-offs: **the six unwired outputs are kept deliberately.** Deleting them
+  would make the output set exactly the wiring surface, which is tidier and would
+  let an unused-declaration check speak for the whole file. They stay because a
+  module whose dashboard and alarms cannot be named from outside forces every
+  runbook to hard-code a constructed name — and a hard-coded name drifts silently
+  when the naming convention changes, whereas an output that stops resolving fails
+  the plan. The cost is that the split has to be documented here and in each
+  `description`, because without it a maintainer who greps for their callers finds
+  none and cannot tell whether that is the design or a regression.
 
 - Assumptions: **the name-and-ARN pairs are not duplication.** An IAM `Resource`
   element does not accept a bare bucket or group name, and a log-driver option, a
@@ -847,7 +882,7 @@ read in one place. Each carries one of Rule 1's four category names.
 - Alternatives Considered: **no invented service-level objective** — an invented
   figure is indistinguishable in form from a derived one.
   [§11](#11-what-this-module-deliberately-does-not-create)
-- Assumptions: **seven of the thirteen alarms are structural** — the condition is a
+- Assumptions: **eight of the fourteen alarms are structural** — the condition is a
   failure by definition rather than by comparison with a chosen number.
   [§5](#5-alarms-condition-question-action)
 - Assumptions: **the dead-letter threshold is derived from `maxReceiveCount` =

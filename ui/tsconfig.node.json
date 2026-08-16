@@ -107,8 +107,12 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
 
-    // Trade-offs: dependency declarations are trusted so the check stays
-    // focused on the two local configuration files.
+    // Trade-offs: dependency declarations are trusted so the check stays focused on
+    // this project's own three members -- the two build configurations and the
+    // package-root documentation-gate suite. Refactoring Rationale: this said "the two
+    // local configuration files", which the include list below outgrew when
+    // documentationGate.test.ts joined it; that entry is a TEST rather than a
+    // configuration file, so the correction is to the count and to the description.
     "skipLibCheck": true,
 
     // Assumptions: CommonJS packages in the toolchain require default-import
@@ -123,8 +127,9 @@
     // metadata and should receive its actual inferred shape.
     "resolveJsonModule": true,
 
-    // Assumptions: both members are modules even if a future edit removes their
-    // last explicit import or export.
+    // Assumptions: all three members are modules even if a future edit removes the
+    // last explicit import or export from one of them. Refactoring Rationale: this read
+    // "both members", from when the include list held two.
     "moduleDetection": "force"
   },
 

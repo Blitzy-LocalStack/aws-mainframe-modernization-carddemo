@@ -171,7 +171,7 @@ check would catch.
 | What is absent | Outcome |
 |---|---|
 | **No transport message on the request queue.** The queue is quiet; nothing is delivered. | The receive returns no-message-available, the loop ends, **no reply is produced** and no error is raised. |
-| **A transport message whose payload is zero bytes** — which is what these bytes are, and what the test sends. | The message IS delivered, so it **is answered**: `DateInquiryMessageListenerTest.theEmptyFixtureIsAnswered` sends this fixture as the payload and asserts a reply is published to the configured reply queue. |
+| **A transport message whose payload is zero bytes** — which is what these bytes are, and what the test sends. | The message IS delivered, so it **is answered**: `InquiryMessageListenerTest.anEmptyPayloadIsAnsweredWithTheRefusal` drives an empty payload and asserts a reply is published. The answer is the refusal sentence `INVALID REQUEST PARAMETERS`, not a date — the shared codec pads a short payload to the declared length, so the four-character function field arrives blank, and a blank field names neither of the two function codes the merged consumer dispatches on. |
 
 Refactoring Rationale: this section read "**Zero records decoded, no reply produced, no
 error raised**" without that distinction, and section 7 repeated it as "a further reason
@@ -180,9 +180,23 @@ That was false against the module's own test, which sends a zero-length payload 
 asserts a reply — so the document told a maintainer the opposite of what the suite
 enforces, and a maintainer trusting it would have "fixed" the test. The two absences are
 now stated separately because only one of them is a quiet queue: a delivered message with
-an empty body is a message, and this flow answers **every** message on its queue for the
-reason section 5.3 establishes — no field of the request drives the reply, so there is
-nothing an empty payload can fail to supply.
+an empty body is a message, and this flow answers **every** message on its queue.
+
+Refactoring Rationale: the sentence above previously closed with "for the reason section
+5.3 establishes — no field of the request drives the reply, so there is nothing an empty
+payload can fail to supply". Section 5.3 measures `CODATE01`, and it remains exactly right
+about `CODATE01`: that program reads no field of its request. It is no longer right about
+the target. The whole inquiry exchange is now answered by ONE consumer,
+`services/account-service/src/main/java/com/carddemo/account/service/InquiryMessageListener.java`,
+which dispatches on the four-character function code because that field is the only thing
+distinguishing the two flows that shared the baseline's single request queue. So a field of
+the request DOES drive the reply in the target, and an empty payload supplies a blank one.
+What survives unchanged is the property this row asserts — the message is answered rather
+than dropped or dead-lettered — and only the answer's identity moved. The divergence is
+registered as `D-INQUIRY-UNRECOGNISED-FUNCTION` in
+`docs/architecture/cobol-to-service-traceability.md`; it is recorded here too because a
+maintainer reading this fixture would otherwise reach section 5.3 and conclude the target
+ignores the bytes at offset 0.
 
 ### 5.1 Why no input is an ordinary terminal condition, not an error
 
@@ -221,13 +235,29 @@ Both are present in this module and resolve this file from the **test classpath*
   **offsets 0 / 4 / 15 with widths 4 / 11 / 985**, matching sec 4 exactly.
 
 The queue-side consumer of this record shape is
-`DateInquiryMessageListener.onRequest(...)` — the **only** `@SqsListener` bound to the
-inquiry request queue, which `ReferenceQueueConsumerContractTest` asserts. It decodes the
-payload through `com.carddemo.common.codec.InquiryRequestCodec` and answers through
-`DateInquiryReplyMapper`, and `DateInquiryMessageListenerTest.theEmptyFixtureIsAnswered`
-sends **these** bytes as the payload and asserts a reply. **The bytes are the contract**:
-where a consumer's expectation and these bytes disagree, the bytes are read rather than
-edited.
+`InquiryMessageListener.onRequest(...)` in **`account-service`** — the only consumer bound
+to the shared inquiry request queue. It decodes the payload through
+`com.carddemo.common.codec.InquiryRequestCodec` and renders the date answer through
+`com.carddemo.common.codec.DateInquiryReplyCodec`, and
+`InquiryMessageListenerTest.anEmptyPayloadIsAnsweredWithTheRefusal` drives an empty payload
+and asserts a reply. **The bytes are the contract**: where a consumer's expectation and
+these bytes disagree, the bytes are read rather than edited.
+
+Refactoring Rationale: this paragraph previously named `DateInquiryMessageListener` in THIS
+module as the only `@SqsListener` on the request queue, with
+`ReferenceQueueConsumerContractTest` cited as the assertion. Both are gone. The technical
+specification provisions ONE request queue for the whole inquiry exchange
+(`app/app-vsam-mq/README.md` line 53 declares a single `CARDDEMO.REQUEST.QUEUE`, aliased at
+line 71), and two consumers polling one queue would have made the answer depend on which
+container received a given delivery — a competing-consumer hazard closed by giving the
+queue one owner rather than by adding a filter. The reply RENDERER moved with it, into the
+shared kernel, because it is a clock read against a fixed layout with no domain rule in it
+and both halves of the layout now sit beside each other. This module keeps the date
+EVALUATION rules and answers them on its synchronous route;
+`ReferenceServiceStructureTest.noMethodInThisPackageBindsAQueueListener` asserts no
+consumer remains here. These bytes still belong in this module because
+`ReferenceFixtureContractTest` and `ReferenceFixtureTest` assert their geometry — that is
+what the fixture is for, and the geometry is unchanged.
 
 Refactoring Rationale: this paragraph named
 `DateConversionMessageListener.onDateConversionRequest(...)` as the queue-side consumer
@@ -240,7 +270,7 @@ lives on `DateConversionService` and is called only by `DateConversionController
 two routes answer different questions: the queue route emits the current system date and
 time, the HTTP route judges a date a caller submits.
 
-### 5.3 No field of the request drives the reply
+### 5.3 No field of the request drives `CODATE01`'s reply
 
 Measured across all 524 lines, `WS-FUNC`, `WS-KEY` and `WS-FILLER` are referenced
 **only** at their declarations at L110 to L112, plus the numeric re-initialisation at
@@ -324,10 +354,12 @@ them.
 
 Refactoring Rationale: this paragraph closed by giving the clock read as "a further
 reason this scenario asserts that no reply is produced rather than asserting a reply's
-content". It does assert a reply's content — with an injected clock, which is the whole
-point of `DateInquiryMessageListener` taking a `Clock` at construction rather than
-reading one. Determinism is a property the injected clock supplies, not a reason to
-assert nothing.
+content". It does assert a reply's content. For THIS fixture the content is the refusal
+sentence, which reads no clock at all, so its bytes are deterministic outright; for the
+`DATE` fixture next door the content is a clock read, and the merged consumer takes a
+`java.time.Clock` at construction precisely so a test can fix it. Determinism is a property
+the fixture's own bytes and the injected clock supply between them, not a reason to assert
+nothing.
 
 ### 7.1 Failure modes these bytes can produce
 

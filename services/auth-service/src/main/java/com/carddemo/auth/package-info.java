@@ -24,8 +24,8 @@
  * tree.</p>
  *
  * <p>Alternatives Considered: widening the scan to {@code com.carddemo} so that shared components
- * were discovered automatically. Rejected on a counted basis. {@code services/pom.xml} L200 to
- * L208 declares nine modules, one shared kernel and eight bounded contexts, so that wider root
+ * were discovered automatically. Rejected on a counted basis. {@code services/pom.xml} L191 to
+ * L199 declares nine modules, one shared kernel and eight bounded contexts, so that wider root
  * would also enclose the types of the seven peer contexts and would turn independently deployable
  * services into one service started several ways. That is precisely the coupling
  * {@code LayeringRulesTest} forbids, so the widened scan would be rejected by a test even if it

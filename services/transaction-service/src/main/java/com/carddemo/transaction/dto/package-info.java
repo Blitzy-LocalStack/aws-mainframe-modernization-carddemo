@@ -44,11 +44,11 @@
  * ruleset audits at-clause bodies for emptiness, so a fabricated tag would be
  * either discarded or reported.
  *
- * <h2>The closed inventory: twelve files</h2>
+ * <h2>The closed inventory: fourteen files</h2>
  *
- * <p>Twelve {@code .java} files constitute this package and no more. Nine are
+ * <p>Fourteen {@code .java} files constitute this package and no more. Eleven are
  * records; two are the sealed alternatives that pair the two response shapes of each
- * write operation; the twelfth is this charter. All twelve are landed, so this
+ * write operation; the fourteenth is this charter. All fourteen are landed, so this
  * inventory is also a measurement of the directory and every entry below reads in the
  * present tense. Each record is named with the reference program and symbolic map it
  * derives from, because that provenance is the only authority for its component set.
@@ -151,27 +151,43 @@
  *       the one type here that is not a record, and it declares only the three members both shapes
  *       already declare -- deliberately not the money member, whose meaning differs between
  *       them.</li>
- *   <li>{@code BillPaymentPreview} -- the payment result on any of the three turns
- *       that pay nothing, from the same two files. Four components, matching the published
- *       preview member for member: the account identifier, the balance a confirmed request
- *       would pay, a {@code paid} discriminator fixed false and the return message. Its
- *       money member is named for what it is -- a balance that WOULD be paid -- and
- *       deliberately not for the balance-before-payment the posted shape reports, because
- *       the reference fills one screen field on both turns and a reader of that position
- *       cannot tell which figure it holds. The three turns are distinguished only by the
- *       sentence: the confirm prompt at lines 237 and 238, the nothing-to-pay advisory at
- *       lines 201 and 202, and no sentence at all for the declined turn at lines 178 to
- *       181, which moves none.</li>
- *   <li>{@code BillPaymentOutcome} -- the sealed alternative of the payment pair, which is
- *       what the payment service returns and what its adapter switches over.</li>
+ *   <li>{@code TransactionCopyRequest} -- the copy-last payload, from
+ *       {@code app/cbl/COTRN02C.cbl} line 471 and {@code app/cpy-bms/COTRN02.CPY}. Three
+ *       components, and only three: the two key alternatives and the confirmation. That is the
+ *       whole of what {@code COPY-LAST-TRAN-DATA} reads, because line 473 performs
+ *       {@code VALIDATE-INPUT-KEY-FIELDS} and nothing else before lines 480 to 493 overwrite the
+ *       eleven data fields. Refactoring Rationale: it is new, and before it existed the copy
+ *       operation took {@code TransactionAddRequest}, whose eleven data members are each
+ *       {@code @NotBlank} -- so a copy could only be requested from a screen the operator had
+ *       already filled in completely, and pressing the copy key on an empty screen, which is the
+ *       ordinary way to use it, was refused by bean validation before the service ran.</li>
+ *   <li>{@code TransactionCopiedDraftResponse} -- the ten non-monetary columns lines 482 to 492
+ *       move onto the terminal, published as a nested member of {@code TransactionAddPreview} and
+ *       under the wire name {@code TransactionCopiedDraft}. The eleventh copied column is the
+ *       amount, which the enclosing preview already carries in the normalised form line 481
+ *       renders it in, so it is deliberately not a member here. Refactoring Rationale: it is new,
+ *       and before it existed the copy answered the amount alone -- so a client could neither
+ *       render the copied row nor re-send it, and its only means of confirming was to invoke the
+ *       copy operation a second time, which re-reads whichever row is latest and therefore writes
+ *       whatever a concurrent insert has since made it.</li>
  * </ul>
+ *
+ * <p>Refactoring Rationale: the count moved from twelve to fourteen when the copy-last
+ * operation gained its own request shape and its own draft. Both are recorded in the roster
+ * above with the defect each closes; neither adds a capability. Assumptions: the roster is
+ * re-measured against the directory rather than incremented, and this revision is the reason
+ * that matters -- the enumeration carried {@code BillPaymentPreview} and
+ * {@code BillPaymentOutcome} TWICE, in two differently worded entries, so it listed fourteen
+ * members for a directory of twelve files while the headline count was right. The duplicates are
+ * removed here rather than left standing beside the new entries, because a roster that agrees
+ * with the directory by coincidence is exactly what this charter exists not to be.
  *
  * <p>Assumptions: two counts that were both eight met in this module and must still
  * not be conflated. The root charter of this module records that the module holds
- * eight Java packages and therefore exactly eight package charter files. The twelve
+ * eight Java packages and therefore exactly eight package charter files. The fourteen
  * above is a different quantity entirely: it is the file count of this one package.
- * The two figures are independent -- which is now visible, because this one moved to
- * twelve while the package count did not move at all. A reader reconciling one against
+ * The two figures are independent -- which is now visible, because this one moved twice
+ * while the package count did not move at all. A reader reconciling one against
  * the other would previously have concluded that seven charters were missing.
  *
  * <p>Trade-offs: the inventory is closed rather than open-ended, so a shape
@@ -707,7 +723,7 @@
  * <p>Trade-offs: this file holds one Javadoc block and one package declaration
  * and nothing else -- no type, no annotation, no import and no line comment. A
  * package declaration needs no import, and anything that would require one
- * belongs in one of the seven records instead. The inline-comment obligation is
+ * belongs in one of the eleven records instead. The inline-comment obligation is
  * discharged inside the block, by labelled paragraphs opening the rationale
  * they introduce, because a compilation unit holding one declaration and no
  * statements has nothing to annotate adjacently.

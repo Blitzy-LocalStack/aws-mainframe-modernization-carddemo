@@ -11,8 +11,8 @@
 //      copybook field gained no column, and that the primary key refuses a second
 //      row for a token already loaded.
 //
-// WHY (non-obvious design decisions):
-//  - Refactoring Rationale: this class is named for the seeded DOMAIN of
+// Rationale for the non-obvious decisions in this file:
+//  - Assumptions: this class is named for the seeded DOMAIN of
 //      reference.us_state_zip_prefixes rather than for a repository interface,
 //      which departs from the naming ruling in package-info.java that a class
 //      here takes the name of the interface it covers with IT appended. That
@@ -20,10 +20,10 @@
 //      not one: every read below goes through UsStateZipPrefixRepository, whose
 //      walk contracts -- cardinality, ordering and the strictness of both bounds
 //      -- are covered by UsStateZipPrefixRepositoryIT, and the two classes share
-//      no assertion. Naming both here restores what the naming rule buys, that a
-//      reader can derive the subject and its neighbours without opening the file.
-//      The departure is recorded at the file it is about rather than in that
-//      charter, which is the convention the charter itself sets.
+//      no assertion. Naming both here is what the naming rule buys, that a reader
+//      can derive the subject and its neighbours without opening the file. The
+//      departure is recorded at the file it is about rather than in that charter,
+//      which is the convention the charter itself sets.
 //  - Alternatives Considered: a real PostgreSQL engine rather than an in-memory
 //      substitute. Two properties below are the engine's own and no substitute
 //      can answer them -- the collation a declared-width character column is
@@ -98,7 +98,7 @@ import org.springframework.transaction.support.TransactionTemplate;
  *
  * <p>Assumptions: {@code V1__reference.sql} is the sole source of this table's column names, because
  * no baseline table exists for it at all -- a condition name declares values and no columns, so a
- * column name inferred from anywhere else would be invented. Its L455 to L464 declare exactly one
+ * column name inferred from anywhere else would be invented. Its L444 to L453 declare exactly one
  * column, {@code state_zip_cd CHAR(4) NOT NULL}, under the primary key
  * {@code pk_us_state_zip_prefixes}. {@code package-info.java} rules the same at its L328 to L331.</p>
  *
@@ -133,14 +133,14 @@ class StateZipPrefixRepositoryIT extends ReferencePersistenceBase {
     /** The lexically last token of the baseline list, its final literal at L1313. */
     private static final String LEXICAL_LAST_TOKEN = "WY83";
 
-    // WHY : Alternatives Considered: the two probes below are assembled from the halves of the two
-    //       tokens named above rather than invented, and that is what makes them evidence. AA83 takes
-    //       the state half of AA34 and the postal half of WY83; WY34 takes the state half of WY83 and
-    //       the postal half of AA34. Each half demonstrably occurs in the seeded data -- AA in AA34,
-    //       83 in ID83, NJ83, VI83 and WY83, WY in WY82 and WY83, 34 in AA34 and FL34 -- while
-    //       neither recombination appears anywhere in the baseline list. A probe built from halves
-    //       that did not both occur would prove nothing, because its absence would be explained by
-    //       the missing half rather than by the combination.
+    // Alternatives Considered: the two probes below are assembled from the halves of the two
+    // tokens named above rather than invented, and that is what makes them evidence. AA83 takes
+    // the state half of AA34 and the postal half of WY83; WY34 takes the state half of WY83 and
+    // the postal half of AA34. Each half demonstrably occurs in the seeded data -- AA in AA34,
+    // 83 in ID83, NJ83, VI83 and WY83, WY in WY82 and WY83, 34 in AA34 and FL34 -- while
+    // neither recombination appears anywhere in the baseline list. A probe built from halves
+    // that did not both occur would prove nothing, because its absence would be explained by
+    // the missing half rather than by the combination.
     /** A recombination of the two named tokens' halves that the baseline list does not contain. */
     private static final String UNLISTED_RECOMBINATION_LOW = "AA83";
 
@@ -160,25 +160,25 @@ class StateZipPrefixRepositoryIT extends ReferencePersistenceBase {
     @Autowired
     private UsStateZipPrefixRepository prefixes;
 
-    // WHY : Alternatives Considered: the provider is reached directly for two narrow purposes -- to
-    //       read the mapping the provider actually built, and to issue the one INSERT this class
-    //       needs -- and no repository member can serve either. The mapping is not visible through a
-    //       repository at all, and the reason the INSERT cannot be a save is recorded at the case
-    //       that performs it. This is the provider's own unit-of-work insert rather than a bulk or
-    //       derived modifying statement, so package-info.java's ruling at its L332 to L335 that a
-    //       write is carried out by the provider and not bypassed is honoured rather than sidestepped.
+    // Alternatives Considered: the provider is reached directly for two narrow purposes -- to
+    // read the mapping the provider actually built, and to issue the one INSERT this class
+    // needs -- and no repository member can serve either. The mapping is not visible through a
+    // repository at all, and the reason the INSERT cannot be a save is recorded at the case
+    // that performs it. This is the provider's own unit-of-work insert rather than a bulk or
+    // derived modifying statement, so package-info.java's ruling at its L332 to L335 that a
+    // write is carried out by the provider and not bypassed is honoured rather than sidestepped.
     /** The persistence context, through which the built mapping is read and one insert issued. */
     @PersistenceContext
     private EntityManager entityManager;
 
-    // WHY : Alternatives Considered: annotating the writing case so the framework rolls it back,
-    //       which is what two sibling classes here do. Rejected for the reason TransactionTypeRepositoryIT
-    //       records at its L192 to L197: a unique constraint is evaluated when its statement executes,
-    //       and an ambient transaction spanning the whole case makes the point at which a refusal
-    //       arrives depend on when the context happens to flush. Running the write in its own
-    //       transaction, with the flush taken explicitly inside it, makes the refusal attributable to
-    //       the statement that caused it and leaves nothing behind either way, since a refused
-    //       statement rolls its own transaction back.
+    // Alternatives Considered: annotating the writing case so the framework rolls it back,
+    // which is what two sibling classes here do. Rejected for the reason TransactionTypeRepositoryIT
+    // records at its L192 to L197: a unique constraint is evaluated when its statement executes,
+    // and an ambient transaction spanning the whole case makes the point at which a refusal
+    // arrives depend on when the context happens to flush. Running the write in its own
+    // transaction, with the flush taken explicitly inside it, makes the refusal attributable to
+    // the statement that caused it and leaves nothing behind either way, since a refused
+    // statement rolls its own transaction back.
     /** Supplies the transaction the one write in this class runs inside. */
     @Autowired
     private TransactionTemplate commit;
@@ -199,39 +199,37 @@ class StateZipPrefixRepositoryIT extends ReferencePersistenceBase {
      * transcribed the copybook completely and not merely that the migration ran, which is the reading
      * {@code package-info.java} gives it at its L431 to L437.</p>
      *
-     * <p>Refactoring Rationale: the count is pinned at this level because a DIFFERENT bounded context
+     * <p>Assumptions: the count is pinned at this level because a DIFFERENT bounded context
      * consumes this table and owns no part of it. {@code account-service}'s
      * {@code AddressValidationService} queries the lookup tables during account maintenance, so a
      * combination missing from this seed does not surface here at all -- it surfaces there as an
      * address refused, in a service with no defect of its own and with nothing in the refusal to name
      * the seed that caused it. Asserting the figure where the data is owned is what makes that
      * failure attributable to its cause.</p>
-     *
-     * <p>It takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the seed transcribes all 240 combinations including both range endpoints")
     void theSeedTranscribesTheClosedDomainCompletely() {
-        // WHY : Assumptions: this counts rows to audit a seed and is NOT a total taken to size a
-        //       window. package-info.java rules at its L456 to L462 that a further-page answer comes
-        //       from reading one row beyond the window and never from a count, and nothing here reads
-        //       a window at all -- the subject is how many combinations exist, which is a property of
-        //       the seed rather than of any browse.
+        // Assumptions: this counts rows to audit a seed and is NOT a total taken to size a
+        // window. package-info.java rules at its L456 to L462 that a further-page answer comes
+        // from reading one row beyond the window and never from a count, and nothing here reads
+        // a window at all -- the subject is how many combinations exist, which is a property of
+        // the seed rather than of any browse.
         assertThat(this.prefixes.count())
                 .as("the literal count of app/cpy/CSLKPCDY.cpy L1073, taken over L1073 to L1313")
                 .isEqualTo(SEEDED_COMBINATIONS);
 
-        // WHY : Alternatives Considered: asserting the count alone and leaving membership to the
-        //       cardinality. Rejected on arithmetic: a count constrains HOW MANY combinations were
-        //       loaded and says nothing about WHICH. A transcription that substituted one literal --
-        //       AA43 for AA34, two adjacent characters transposed -- loads 240 rows, all distinct, and
-        //       passes a count assertion while describing a domain the copybook does not hold.
-        //       The seed statement's ON CONFLICT DO NOTHING at V2__seed_reference.sql L676 does not
-        //       help here either: it disposes of a REPEATED literal by landing no row for it, which a
-        //       count would catch as a shortfall, and a substituted literal is not repeated. Naming the
-        //       two endpoints is what closes the gap, and they are the two most worth naming because
-        //       they are the only combinations whose loss also moves the range that every keyed walk
-        //       over this table is bounded by, which is the property the case below states.
+        // Alternatives Considered: asserting the count alone and leaving membership to the
+        // cardinality. Rejected on arithmetic: a count constrains HOW MANY combinations were
+        // loaded and says nothing about WHICH. A transcription that substituted one literal --
+        // AA43 for AA34, two adjacent characters transposed -- loads 240 rows, all distinct, and
+        // passes a count assertion while describing a domain the copybook does not hold.
+        // The seed statement's ON CONFLICT DO NOTHING at V2__seed_reference.sql L676 does not
+        // help here either: it disposes of a REPEATED literal by landing no row for it, which a
+        // count would catch as a shortfall, and a substituted literal is not repeated. Naming the
+        // two endpoints is what closes the gap, and they are the two most worth naming because
+        // they are the only combinations whose loss also moves the range that every keyed walk
+        // over this table is bounded by, which is the property the case below states.
         assertThat(this.prefixes.findByStateZipCd(LEXICAL_FIRST_TOKEN))
                 .as("the first literal of the baseline list, at app/cpy/CSLKPCDY.cpy L1074")
                 .isPresent();
@@ -257,8 +255,6 @@ class StateZipPrefixRepositoryIT extends ReferencePersistenceBase {
      * sibling class covering this interface's walks establishes in general. What is new here is the
      * subject: those reads are taken AT the domain's ends, so an empty answer is a statement about
      * the domain rather than about the walk.</p>
-     *
-     * <p>It takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("nothing in the table sorts before AA34 or after WY83")
@@ -304,8 +300,6 @@ class StateZipPrefixRepositoryIT extends ReferencePersistenceBase {
      * string is what states the width; the equality beside it states the content. Every one of the 240
      * literals is exactly four characters, so no padding arises in the stored data and the two claims
      * do not compete.</p>
-     *
-     * <p>It takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the token round-trips as one four-character value and its halves do not recombine")
@@ -339,7 +333,7 @@ class StateZipPrefixRepositoryIT extends ReferencePersistenceBase {
      *
      * <p>Assumptions: the mapping is read from the provider's own model rather than from the
      * annotations on the source, so what is asserted is what the running context resolved.
-     * {@code V1__reference.sql} L455 to L464 declares the one column and the profile in
+     * {@code V1__reference.sql} L444 to L453 declares the one column and the profile in
      * {@code src/test/resources/application-test.yml} validates the mapping against it at startup, so
      * an attribute mapped to a column the migration does not declare would already have aborted the
      * context; this case covers the opposite direction, a column the migration does declare being
@@ -351,8 +345,6 @@ class StateZipPrefixRepositoryIT extends ReferencePersistenceBase {
      * would then keep passing if a column were added under any other spelling. Counting the
      * attributes states the closed shape instead, which is the property the absence is an instance
      * of.</p>
-     *
-     * <p>It takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the mapped type declares one attribute, so the trailing copybook field has no column")
@@ -372,7 +364,7 @@ class StateZipPrefixRepositoryIT extends ReferencePersistenceBase {
      * Confirms the primary key refuses a second row for a combination the seed already loaded.
      *
      * <p>Purpose: the closed domain is only closed if the key holds, and the key is
-     * {@code pk_us_state_zip_prefixes} at {@code V1__reference.sql} L463. What is asserted is that the
+     * {@code pk_us_state_zip_prefixes} at {@code V1__reference.sql} L452. What is asserted is that the
      * ENGINE refuses the duplicate and that it reports the state a caller would branch on, so the
      * guarantee belongs to every writer of the schema rather than only to callers arriving through
      * this application.</p>
@@ -407,8 +399,6 @@ class StateZipPrefixRepositoryIT extends ReferencePersistenceBase {
      * {@code theSeedTranscribesTheClosedDomainCompletely} is what states it: it asserts that this
      * combination is present, so a seed that stopped supplying it fails there rather than quietly
      * turning this case into a committing write.</p>
-     *
-     * <p>It takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the primary key refuses a duplicate combination and reports SQLSTATE 23505")

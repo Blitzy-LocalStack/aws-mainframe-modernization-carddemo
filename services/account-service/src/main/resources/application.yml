@@ -48,8 +48,8 @@
 #     - openapi/account-api.yaml, the hand-authored OpenAPI 3.1 contract of
 #       record, and the three controllers under api/ that answer its operations.
 #     - service/InquiryMessageListener.java, the SQS consumer that replaces
-#       COACCT01's MQGET/MQPUT pair. It binds request-queue through its
-#       @SqsListener annotation and reply-queue and error-queue through
+#       COACCT01's MQGET/MQPUT pair. It binds request-queue-url through its
+#       @SqsListener annotation and reply-queue-url and error-queue-url through
 #       constructor @Value parameters that carry no default and refuse a blank.
 #     - service/AddressValidationService.java, which reads no property at all -
 #       its allow-lists come from app/cpy/CSLKPCDY.cpy by way of
@@ -77,7 +77,7 @@
 #   Assumptions or Trade-offs, as the project's single user-specified rule
 #   requires. Assumptions: no linter in this project reads this file --
 #   config/checkstyle/checkstyle.xml narrows itself to fileExtensions="java" at
-#   its L216, and that standard records the same limit for YAML -- so the
+#   its L209, and that standard records the same limit for YAML -- so the
 #   obligation rests on the written standard and on review. No comment in this
 #   file claims a gate enforces something it does not.
 #
@@ -142,9 +142,9 @@
 #   CARDDEMO_ENVIRONMENT
 #     String. The environment label. Consumed by the shared defaults document
 #     this file imports, and by the Parameter Store prefix both profiles build.
-#   CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE
-#   CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE
-#   CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE
+#   CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE_URL
+#   CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE_URL
+#   CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE_URL
 #     Strings. The three SQS queue names replacing COACCT01's queue triple.
 #   SERVER_PORT
 #     Integer. Overrides the listen port. The value declared below is the
@@ -501,6 +501,21 @@ spring:
         #   looks like an idle system rather than a misconfigured one.
         queue-not-found-strategy: fail
 
+        # Refactoring Rationale: this block is the SINGLE authority for the three
+        #   polling bounds, and it was not always in force. The listener's
+        #   @SqsListener annotation previously also carried maxConcurrentMessages,
+        #   maxMessagesPerPoll and pollTimeoutSeconds. A non-null annotation
+        #   attribute is applied OVER the container factory the listener would
+        #   otherwise inherit from, so the per-profile numbers written here - and
+        #   application-dev.yml's deliberately smaller pair in particular - were
+        #   read, logged by nothing, and then overridden by the annotation's own
+        #   values. The dev profile's concurrency ceiling of 2, sized against a
+        #   four-connection pool, was silently a ceiling of 10.
+        #
+        # Trade-offs: declaring the bounds only here costs the ability to size two
+        #   listeners in one service differently; this service has one. It buys a
+        #   sizing an operator can read from the profile actually in force, which is
+        #   the property the previous arrangement lacked.
         listener:
 
           # Assumptions: five seconds is transcribed from the baseline, not
@@ -1414,8 +1429,8 @@ carddemo:
 
   account:
     inquiry:
-      # WHY : (1) Assumptions: all three names arrive from the environment and none
-      #       is written here, and the reason is drawn from the baseline rather than
+      # WHY : (1) Assumptions: all three destinations arrive from the environment and
+      #       none is written here, and the reason is drawn from the baseline rather than
       #       from a general preference. app/app-vsam-mq/cbl/COACCT01.cbl declares
       #       01 QUEUE-INFO. at physical line 92, holding four PIC X(48) queue-name
       #       fields at physical lines 93 to 96, and every one of them is
@@ -1430,12 +1445,37 @@ carddemo:
       #       carddemo-inquiry-reply-<env> and carddemo-error-<env>, they carry an
       #       environment suffix this file cannot know, and the renaming is recorded
       #       in docs/architecture/messaging-contracts.md.
+      #       (2a) Assumptions: each value is a queue NAME and never a queue URL, and
+      #       the distinction is load-bearing rather than stylistic. @SqsListener
+      #       binds a name, and the reply and error paths resolve an address from a
+      #       name with GetQueueUrl(QueueName=...), so a root that published
+      #       infra/modules/sqs's *_queue_url outputs into these variables would
+      #       start the context, pass every placeholder check, and then fail on the
+      #       first reply with a name-not-found error naming a "queue" whose name
+      #       contained a scheme and a host. The calling roots therefore publish the
+      #       module's *_queue_name outputs; that pairing is asserted by the
+      #       runtime-configuration contract test rather than left to review.
+      #       (2b) Refactoring Rationale: request-queue names the ONE shared inquiry
+      #       request queue, not a per-consumer queue. app/app-vsam-mq/README.md
+      #       defines a single request destination at physical line 53,
+      #       DEFINE QLOCAL('CARDDEMO.REQUEST.QUEUE'), aliased to CICS as
+      #       MQQUEUE(CARDREQ) at physical line 71, and both inquiry transactions -
+      #       COACCT01 and CODATE01 - are driven from it. The migrated topology keeps
+      #       that shape: infra/modules/sqs provisions one carddemo-inquiry-request
+      #       queue, this service is its only consumer, and
+      #       service/InquiryMessageListener.java dispatches on the request's own
+      #       four-character function code - 'INQA' to the account route, 'DATE' to
+      #       the shared date renderer in common-lib, anything else to COACCT01's
+      #       invalid-parameters reply. A second consumer elsewhere is not a second
+      #       reader of the same work but a thief of it, because a receive hides the
+      #       message from every other consumer, so the reference context holds no
+      #       receive grant on this queue and binds no listener to it.
       #       (3) Alternatives Considered: FIFO queues, as the authorization flow
       #       uses. Rejected because account inquiry has no ordering requirement -
       #       each inquiry is independent and its reply is routed by correlation
-      #       rather than by position. The authorization flow needs FIFO with a
-      #       message group derived from the card number because authorizations for
-      #       one card must be applied in order; imposing the same here would
+      #       rather than by position. The authorization flow needs FIFO with the card
+      #       number itself as the message group, per specification 0.4.1.8, because
+      #       authorizations for one card must be applied in order; imposing the same here would
       #       serialise independent inquiries behind one another and cap throughput
       #       to no purpose. These three are standard queues, each with a
       #       dead-letter queue at a maxReceiveCount of 5 and SSE-KMS, provisioned
@@ -1472,26 +1512,78 @@ carddemo:
       #       this read-only exchange does not need, and a claim guarantees a reply is
       #       not sent twice, which it does.
       #       (5) Assumptions: all three keys ARE bound, and by one bean --
-      #       service/InquiryMessageListener.java. It binds request-queue through its
-      #       @SqsListener annotation, and reply-queue and error-queue through
-      #       constructor @Value parameters carrying no defaults. That binding site is
-      #       named because it is what makes item (6) below true: a reader who took
-      #       these keys for unbound configuration would size the deployment's
+      #       service/InquiryMessageListener.java. It binds request-queue-url through
+      #       its @SqsListener annotation, and reply-queue-url and error-queue-url
+      #       through constructor @Value parameters carrying no defaults. That binding
+      #       site is named because it is what makes item (6) below true: a reader who
+      #       took these keys for unbound configuration would size the deployment's
       #       required-variable list short by three.
       #       (6) Assumptions: all three are consequently STARTUP-CRITICAL. A
       #       placeholder read through @Value is resolved with
       #       resolveRequiredPlaceholders and raises, so a deployment missing any of
       #       them aborts context refresh instead of starting and silently consuming
-      #       nothing. The listener additionally refuses a BLANK reply or error queue
-      #       name in its constructor, naming the property, because a consumer able to
-      #       take requests off the request queue but unable to address its reply
-      #       queue would acknowledge requests it never answered.
+      #       nothing. The listener additionally refuses a reply or error destination
+      #       that is not a fully-qualified queue URL in its constructor, naming the
+      #       property, because a consumer able to take requests off the request queue
+      #       but unable to address its reply queue would acknowledge requests it
+      #       never answered.
       #       (7) Assumptions: infra/modules/ecs-service therefore lists all three in
       #       required_parameter_environment_names.account, so a root that omits one
       #       fails at plan rather than at container start.
-      request-queue: ${CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE}
-      reply-queue: ${CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE}
-      error-queue: ${CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE}
+      #       (8) Refactoring Rationale: all three properties are named "-queue-url"
+      #       and all three variables "..._QUEUE_URL", because all three values ARE
+      #       addresses. infra/envs/dev/main.tf and infra/envs/prod/main.tf set each
+      #       from a module.sqs.*_queue_url output, so the deployment has always
+      #       supplied an address; the properties were nonetheless named for a queue
+      #       NAME, and the listener read them that way and asked the queue service to
+      #       look up a queue whose name was a URL. That could only fail, and it
+      #       failed on the reply and diagnostic paths alone -- here reached only
+      #       AFTER the request's ledger claim had been committed -- so requests were
+      #       consumed, recorded as claimed and never answered while start-up and
+      #       health both reported a working service. The names now state the
+      #       contract, and com.carddemo.common.messaging.QueueDestination validates
+      #       the shape at construction so a bare name stops start-up instead of
+      #       stopping replies. This follows the naming
+      #       CARDDEMO_MESSAGING_ERROR_QUEUE_URL already established in the same
+      #       roots for the same reason.
+      request-queue-url: ${CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE_URL}
+      reply-queue-url: ${CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE_URL}
+      error-queue-url: ${CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE_URL}
+
+      # WHY : (1) Refactoring Rationale: these three are declared HERE, as ordinary
+      #       properties of this flow, because the @SqsListener attributes that read
+      #       them no longer carry an inline default. They previously fell back to ten
+      #       concurrent messages, ten per poll and a five-second wait written into
+      #       the annotation itself. An annotation attribute takes precedence over the
+      #       container factory's setting, so those fallbacks silently overrode
+      #       application-dev.yml's deliberately smaller pair: the profile lowered
+      #       spring.cloud.aws.sqs.listener.max-concurrent-messages and
+      #       max-messages-per-poll to two, recorded a careful argument about
+      #       oversubscribing the connection pool, and had no effect at all.
+      #       Declaring the properties makes them mandatory, so an undeclared limit
+      #       stops start-up rather than reinstating a value no file states, and it
+      #       puts the number a profile has to override in the same place the
+      #       annotation reads it from.
+      #       (2) Assumptions: the base values MATCH the container-factory defaults
+      #       above -- spring.cloud.aws.sqs.listener max-concurrent-messages and
+      #       max-messages-per-poll are both ten and poll-timeout is 5s -- so this
+      #       change alters no deployed behaviour by itself. It only makes the values
+      #       reachable by a profile.
+      #       (3) Assumptions: the pair must be lowered TOGETHER by any profile that
+      #       lowers either. Spring Cloud AWS validates that max-messages-per-poll is
+      #       less than or equal to max-concurrent-messages and refuses to start the
+      #       container otherwise, so halving concurrency alone would not produce a
+      #       smaller consumer -- it would produce a task that never starts.
+      #       (4) Assumptions: the long-poll wait is expressed in whole SECONDS here
+      #       because the annotation attribute is a second count, whereas
+      #       spring.cloud.aws.sqs.listener.poll-timeout above is a duration. The two
+      #       therefore cannot be aliased, and the value is written twice with this
+      #       note rather than derived, because the number itself comes from the
+      #       baseline's bounded get wait. It is the one number in this block no
+      #       profile may vary.
+      max-concurrent-messages: 10
+      max-messages-per-poll: 10
+      poll-timeout-seconds: 5
 
   internal-identity:
     # WHY : (1) Assumptions: these are KEY MATERIAL, not names or identifiers. Each is

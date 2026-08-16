@@ -47,28 +47,15 @@
 # =============================================================================
 
 terraform {
-  # Refactoring Rationale: `~> 1.15.0` replaces an open `>= 1.15.0` floor. That
-  # earlier floor was chosen on the reasoning that nothing here uses a language
-  # feature a newer 1.x release removes, and that reasoning is
-  # about the CONFIGURATION when the risk is in the TOOLCHAIN. A Terraform minor
-  # release is where language behaviour, validation semantics and state-format
-  # handling change, so an open floor let this root -- the one that creates the
-  # state bucket and lock table every other root depends on -- be applied by a
-  # CLI no reviewed plan was ever produced under. The pessimistic operator on the
-  # patch component accepts 1.15.0 through 1.15.x, which is the
-  # supported-major/minor policy this package is reviewed under, and refuses
-  # 1.16.0 as well as 2.x.
-  # Trade-offs: not an exact `= 1.15.8`, even though that is the build this is
-  # validated on. This root is run by operators and by CI against whatever
-  # Terraform their image provides, and a patch release cannot change what this
-  # file means, so an exact pin would break every runner the moment its toolchain
-  # moved forward within the series. Moving to a new minor stays a deliberate edit
-  # to this one line.
-  # Assumptions: the constraint and .terraform.lock.hcl beside this file are one
-  # mechanism, and neither suffices alone -- the lock records which provider
-  # version and checksums were selected, and a CLI from an unvalidated minor could
-  # re-resolve or re-format it.
-  required_version = "~> 1.15.0"
+  # ⚠️ Refactoring Rationale: this read `~> 1.15.0`, whose pessimistic patch
+  # component accepts 1.15.0 through 1.15.x and refuses 1.16.0 as well as 2.x. AAP
+  # section 0.6.1.4 states the CLI constraint as `>= 1.15.0`, so the ceiling narrowed a
+  # frozen plan and is withdrawn along with the paragraphs that argued for it. The
+  # reviewed toolchain is still exactly one release, because CI installs a
+  # checksum-pinned Terraform; a constraint here could only refuse a CLI the operator
+  # had already installed. All three roots -- this one and both environment roots --
+  # now state the AAP floor.
+  required_version = ">= 1.15.0"
 
   required_providers {
     # Trade-offs: the pessimistic operator on the minor accepts 6.56 and any

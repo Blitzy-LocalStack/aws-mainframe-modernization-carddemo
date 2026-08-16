@@ -68,7 +68,7 @@ import org.springframework.stereotype.Component;
  * <p>Alternatives Considered: generating the accessors of the collaborating types with Lombok. Rejected
  * because a member produced during annotation processing has no source declaration on which a docstring
  * could sit, while {@code config/checkstyle/checkstyle.xml} declares {@code MissingJavadocMethod} at
- * L363 with {@code scope} set to private, {@code allowMissingPropertyJavadoc} set false and
+ * L356 with {@code scope} set to private, {@code allowMissingPropertyJavadoc} set false and
  * {@code allowedAnnotations} explicitly cleared. A generated accessor would therefore be a violation
  * rather than a tolerated omission, so generation could only be made viable by weakening the gate, which
  * is the trade the gate exists to refuse.</p>

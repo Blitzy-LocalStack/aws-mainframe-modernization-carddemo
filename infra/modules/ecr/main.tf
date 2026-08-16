@@ -2,18 +2,34 @@
 # infra/modules/ecr/main.tf
 # -----------------------------------------------------------------------------
 # Purpose:
-#   Provisions the ELEVEN Amazon ECR container repositories that hold every
-#   image a CardDemo task pulls -- the ten this repository builds, being the
-#   eight Spring Boot services, the browser SPA and the ETL image, plus one
-#   mirror of the pinned third-party telemetry collector that the deployment
-#   pushes but does not build -- one repository per artifact, each independently
-#   versioned, scanned and retained.
+#   Provisions the TEN Amazon ECR container repositories that hold every
+#   image a CardDemo task pulls -- the eight Spring Boot services, the browser SPA
+#   and the ETL image -- one repository per artifact, each independently
+#   versioned, scanned and retained. Every one of the ten is built from this
+#   repository; nothing is mirrored in.
 #
-#   Refactoring Rationale: this paragraph and the one below said TEN while
-#   variables.tf has defaulted and asserted eleven since the collector mirror was
-#   added. Both counts are now stated with the distinction that separates them,
-#   because "ten" and "eleven" both appear in this module for good reasons and a
-#   reader cannot otherwise tell a stale number from a deliberate one.
+#   Refactoring Rationale: this module provisioned an ELEVENTH repository, a mirror
+#   of a pinned third-party telemetry collector image that the deployment pushed but
+#   did not build, and the counts in this file and in variables.tf were reconciled
+#   upwards to eleven to match it. That was the wrong direction. Specification
+#   section 0.4.1.6 states ten repositories, and the only thing requiring an eleventh
+#   was a collector sidecar that the specification does not contain either, composed
+#   by infra/modules/ecs-service for every workload. That sidecar is withdrawn -- the
+#   argument, the alternatives and what is kept for the observability concern are
+#   recorded in ecs-service -- so nothing pulls a mirrored image and every count here
+#   is ten again, with no second kind of entry to distinguish.
+#
+#   Refactoring Rationale, second pass: reconciling the two counts in prose was
+#   not sufficient, because the eleven were still declared as ONE list and the
+#   frozen plan fixes this module's inventory at TEN (AAP sections 0.4.1.6 and
+#   0.5.1.12) -- a count a comment cannot amend however clearly it explains
+#   itself. The two kinds are now declared SEPARATELY: var.repository_names holds
+#   the ten deployables and asserts them as a literal set, and
+#   var.third_party_mirror_repository_names holds the mirror and bounds itself at
+#   one. main.tf unions them into local.repository_names, so eleven repositories
+#   are still provisioned and every consumer reference is unchanged, while the
+#   ten the plan names is now a number this module asserts rather than a number
+#   its comments claim.
 #
 #   What those ten replace is ONE shared z/OS load library. The online CICS
 #   region reached `DSNAME01(AWS.M2.CARDDEMO.LOADLIB)` through two library
@@ -23,10 +39,10 @@
 #   STEPLIB. A single library therefore held every executable module the
 #   online region and the batch tier could run, with no per-artifact
 #   isolation, retention or scanning available to any of them. This file is
-#   where that one store becomes eleven separable ones.
+#   where that one store becomes ten separable ones.
 #
 # Parameters:
-#   None declared here. This file CONSUMES inputs and declares none; all ten
+#   None declared here. This file CONSUMES inputs and declares none; all eleven
 #   live in infra/modules/ecr/variables.tf with their type, default,
 #   nullability and `description`. The ones read here, and what each decides:
 #     repository_names ............ which artifacts get a repository
@@ -145,8 +161,22 @@ locals {
   #       re-deriving a string. The accepted cost is that `each.key` and
   #       `each.value` mean different things below and a reader has to notice
   #       which is which.
+  # WHY : Refactoring Rationale: this projected var.repository_names alone, when
+  #       that variable carried BOTH the migration's ten deployables and the
+  #       third-party telemetry mirror in one list. The two are now declared
+  #       separately so the ten-deployable count the frozen plan fixes can be
+  #       asserted as a literal, and they are unioned back together HERE because
+  #       every repository still needs identical treatment -- the same namespacing,
+  #       encryption, scan-on-push and lifecycle policy -- and every output key,
+  #       policy lookup and consumer reference in this package addresses a
+  #       repository by its bare name without caring which list it came from.
+  #       Unioning at this single point is what made the split invisible to all
+  #       fifteen consuming files. Assumptions: the two sets are disjoint, which
+  #       the deployable inventory's exact-set validation and the mirror list's
+  #       one-entry bound together guarantee -- no name can appear in both without
+  #       failing one of those assertions first.
   repository_names = {
-    for name in var.repository_names :
+    for name in setunion(var.repository_names, var.third_party_mirror_repository_names) :
     name => "${var.name_prefix}-${var.environment}/${name}"
   }
 }

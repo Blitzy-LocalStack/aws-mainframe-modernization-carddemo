@@ -503,34 +503,46 @@ class AccountViewServiceTest {
     }
 
     /**
-     * A customer-master miss is refused with the sentence declared at L134.
+     * A customer-master miss is ANSWERED with the account half and the sentence declared at L134.
      *
-     * <p>Trade-offs: this arm is reported at all only because the target diverges from the reference
-     * here. The reference's gate at L713 tests the condition declared at L133, and no statement anywhere
-     * in the program sets it -- the assignment that would is commented out at L842 -- while the arm that
-     * reaches the gate sets a validation flag at L841 instead. The same holds one read earlier, at L704
-     * against L131 and L792 with its flag at L791. What the target gives up is literal correspondence
-     * with two gates that cannot fire; what it keeps is that a request naming an account whose customer
-     * is absent is told so. The baseline leaves both gates unreachable; the Java reports both misses; the
-     * divergence is registered in the traceability matrix.</p>
+     * <p>⚠️ Refactoring Rationale: this case asserted a raised {@code NoSuchElementException} and now
+     * asserts a returned composition, because the entry point stopped raising on this arm. The reference
+     * PAINTS it: {@code app/cbl/COACTVWC.cbl} guards its account region on the disjunction at L471 and
+     * L472, which a located account already satisfies through the read flag set at L788, and guards its
+     * customer region on {@code FOUND-CUST-IN-MASTER} alone at L493 -- so an account whose customer row
+     * is absent is shown with its ten account fields and the sentence naming the miss. Raising discarded
+     * the composition the chain had already built and reported an account that exists as HTTP 404, so the
+     * partial state was unreachable end to end however faithfully the internal chain composed it.</p>
      *
-     * <p>Assumptions: this is the one arm on which the composition still maps the account half, because
-     * the reference populates its account region under the disjunction at L471 and L472 that a located
-     * account already satisfies through the read flag it sets at L788. The entry point nevertheless
-     * refuses, because a caller cannot tell a half-populated view from a complete one, so what is
-     * observable here is the sentence rather than the partial body.</p>
+     * <p>Assumptions: what a caller can tell apart is now carried by the CONTRACT rather than by refusing
+     * to answer. {@code account-api.yaml} publishes the customer member as nullable on this operation, so
+     * a half-populated body is a declared shape rather than one indistinguishable from a complete one --
+     * which is what the earlier rationale was protecting -- and no revision accompanies it, because a
+     * precondition cannot be formed from rows that were not both read.</p>
+     *
+     * <p>Trade-offs: the SENTENCE this arm carries is still a divergence, and it is the reference's gate
+     * rather than its wording that cannot be reproduced. The gate at L713 tests the condition declared at
+     * L133 and nothing sets it -- the assignment that would is commented out at L842 -- while the arm
+     * reaching the gate sets a validation flag at L841 instead. The baseline leaves the gate unreachable;
+     * the Java latches the declared sentence; the divergence is registered in the traceability
+     * matrix.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("a customer-master miss carries the L134 sentence, a gate the reference cannot reach")
-    void aCustomerMasterMissCarriesTheDeclaredCustomerSentence() {
+    @DisplayName("a customer-master miss answers the account half with the L134 sentence and no revision")
+    void aCustomerMasterMissAnswersTheAccountHalfWithTheDeclaredCustomerSentence() {
         stubComposition(this.account, null);
 
-        assertThatThrownBy(() -> this.reads.readAccountView(this.account.getAccountId()))
-                .isInstanceOf(NoSuchElementException.class)
-                .hasMessage(NOT_FOUND_IN_CUSTOMER_MASTER)
-                .hasMessageNotContaining("REAS");
+        AccountViewService.RevisionedAccountView composed =
+                this.reads.readAccountView(this.account.getAccountId());
+
+        assertThat(composed.view().account()).isNotNull();
+        assertThat(composed.view().customer()).isNull();
+        assertThat(composed.view().returnMessage())
+                .isEqualTo(NOT_FOUND_IN_CUSTOMER_MASTER)
+                .doesNotContain("REAS");
+        assertThat(composed.revision()).isNull();
     }
 
     /**
@@ -566,8 +578,10 @@ class AccountViewServiceTest {
         assertThat(this.reads.readAccountView(accountKey).view().account()).isNotNull();
 
         stubComposition(this.account, null);
-        assertThatThrownBy(() -> this.reads.readAccountView(accountKey))
-                .isInstanceOf(NoSuchElementException.class);
+        // WHY : Assumptions: this arm ANSWERS rather than raising, because the reference paints an
+        //       account whose customer row is absent; what the case measures here is unchanged, being
+        //       that the outcome still costs ONE composing read and no follow-on read.
+        assertThat(this.reads.readAccountView(accountKey).view().customer()).isNull();
 
         stubComposition(null, null);
         assertThatThrownBy(() -> this.reads.readAccountView(accountKey))

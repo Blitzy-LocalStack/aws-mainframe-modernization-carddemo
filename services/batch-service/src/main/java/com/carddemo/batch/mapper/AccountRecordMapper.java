@@ -100,13 +100,13 @@ public final class AccountRecordMapper {
      */
     private static final String RECORD_NAME = "ACCOUNT";
 
-    // WHY : Assumptions: the descriptor is resolved from the registry by name rather than built here,
-    //       and the dependency is stronger than style. FixedWidthCodec recognises a trailing pad only
-    //       when the descriptor it was handed is the REGISTERED instance -- its padding test compares
-    //       CopybookLayout.layout(name) against the supplied spec by identity. A locally constructed
-    //       spec with identical contents therefore fails that test, and encode would then reject the
-    //       twelve-field map with a missing-required-field failure for FILLER instead of blank-filling
-    //       it. Holding the registered instance in one constant makes that impossible to get wrong.
+    // Assumptions: the descriptor is resolved from the registry by name rather than built here,
+    // and the dependency is stronger than style. FixedWidthCodec recognises a trailing pad only
+    // when the descriptor it was handed is the REGISTERED instance -- its padding test compares
+    // CopybookLayout.layout(name) against the supplied spec by identity. A locally constructed
+    // spec with identical contents therefore fails that test, and encode would then reject the
+    // twelve-field map with a missing-required-field failure for FILLER instead of blank-filling
+    // it. Holding the registered instance in one constant makes that impossible to get wrong.
     /**
      * The registered account master descriptor, transcribed from {@code app/cpy/CVACT01Y.cpy}.
      */
@@ -123,15 +123,15 @@ public final class AccountRecordMapper {
      */
     private static final String FIELD_ACTIVE_STATUS = "ACCT-ACTIVE-STATUS";
 
-    // WHY : Assumptions: each of the five money fields below occupies TWELVE bytes and not thirteen.
-    //       PIC S9(10)V99 declares twelve digit positions, and the leading S adds no byte of its own
-    //       because the sign is an overpunch folded into the low-order digit rather than a separate
-    //       sign character. Miscounting this as ten digits plus two decimals plus one sign byte is the
-    //       most common fixed-width error there is, and it is silent: it shifts every field after the
-    //       first money field while leaving the record its declared length, so the decode succeeds and
-    //       is wrong. The committed image at tests/fixtures/posting/happy_path/acctdata.txt shows the
-    //       twelve-byte form directly -- ACCT-CURR-BAL reads 00000001930{ where the trailing '{' is
-    //       the low-order digit zero carrying a positive sign.
+    // Assumptions: each of the five money fields below occupies TWELVE bytes and not thirteen.
+    // PIC S9(10)V99 declares twelve digit positions, and the leading S adds no byte of its own
+    // because the sign is an overpunch folded into the low-order digit rather than a separate
+    // sign character. Miscounting this as ten digits plus two decimals plus one sign byte is the
+    // most common fixed-width error there is, and it is silent: it shifts every field after the
+    // first money field while leaving the record its declared length, so the decode succeeds and
+    // is wrong. The committed image at tests/fixtures/posting/happy_path/acctdata.txt shows the
+    // twelve-byte form directly -- ACCT-CURR-BAL reads 00000001930{ where the trailing '{' is
+    // the low-order digit zero carrying a positive sign.
     /**
      * The current outstanding balance, declared at {@code app/cpy/CVACT01Y.cpy:7}.
      */
@@ -153,17 +153,20 @@ public final class AccountRecordMapper {
      */
     private static final String FIELD_OPEN_DATE = "ACCT-OPEN-DATE";
 
-    // WHY : Assumptions: the baseline declares this field as ACCT-EXPIRAION-DATE at
-    //       app/cpy/CVACT01Y.cpy:11, without the T in the third syllable; the Java implements it as
-    //       expirationDate over the expiration_date column; and the divergence is documented in
-    //       docs/architecture/data-model-and-schema-mapping.md. The constant below keeps the baseline
-    //       spelling exactly, because the descriptor resolves field names by exact match and because a
-    //       citation whose text has been tidied no longer locates the line it claims to. This boundary
-    //       is where the two spellings meet and the only place either name may appear beside the
-    //       other, which is what keeps the baseline spelling out of every column name, transfer object
-    //       and interface downstream.
     /**
      * The account expiration date, declared at {@code app/cpy/CVACT01Y.cpy:11}.
+     *
+     * <p>Assumptions: the source field is named {@code ACCT-EXPIRAION-DATE} -- without the T in the
+     * third syllable -- and the target names are the {@code expirationDate} property over the
+     * {@code expiration_date} column, a mapping recorded in
+     * {@code docs/architecture/data-model-and-schema-mapping.md}. The constant holds the source
+     * spelling verbatim because the record descriptor resolves field names by exact match and because
+     * the citation above must locate the line it names.</p>
+     *
+     * <p>Assumptions: this anti-corruption layer owns the translation, and it is the only place the two
+     * names may appear beside each other. Owning it here is what keeps the source spelling out of every
+     * column name, transfer object and published interface downstream, so a consumer never has to know
+     * which of the two spellings a given layer expects.</p>
      */
     private static final String FIELD_EXPIRATION_DATE = "ACCT-EXPIRAION-DATE";
 
@@ -204,16 +207,16 @@ public final class AccountRecordMapper {
      * Prevents construction of this stateless converter.
      */
     private AccountRecordMapper() {
-        // WHY : Alternatives Considered: an injectable instance shaped for constructor injection, as
-        //       the service and repository layers of this module are. Rejected because this type holds
-        //       no collaborator that could vary -- the descriptor is a registered constant and the
-        //       codecs are themselves stateless holders -- so an instance would add a bean whose only
-        //       distinguishing state is none, and a job would have to be wired to obtain a conversion
-        //       that depends on nothing. The shape chosen matches the three shared-kernel types this
-        //       file consumes, each of which is a final class with a private constructor and static
-        //       members, so a reader meeting all four meets one shape. This charter's package
-        //       separately forbids a shared supertype among the mappers here, so nothing is given up
-        //       in polymorphism that was available in the first place.
+        // Alternatives Considered: an injectable instance shaped for constructor injection, as
+        // the service and repository layers of this module are. Rejected because this type holds
+        // no collaborator that could vary -- the descriptor is a registered constant and the
+        // codecs are themselves stateless holders -- so an instance would add a bean whose only
+        // distinguishing state is none, and a job would have to be wired to obtain a conversion
+        // that depends on nothing. The shape chosen matches the three shared-kernel types this
+        // file consumes, each of which is a final class with a private constructor and static
+        // members, so a reader meeting all four meets one shape. This charter's package
+        // separately forbids a shared supertype among the mappers here, so nothing is given up
+        // in polymorphism that was available in the first place.
     }
 
     /**
@@ -242,23 +245,23 @@ public final class AccountRecordMapper {
      *     the money contract requires
      */
     public static Account toEntity(byte[] image) {
-        // WHY : Assumptions: the length and null checks are the codec's and are not repeated here. Its
-        //       record-length guard rejects a null or wrongly sized image with a failure naming the
-        //       record, the expected width and the received one, which is strictly more informative
-        //       than a guard written here could be without restating the width this type deliberately
-        //       does not hold. Adding a second check would create a second place the expected length is
-        //       written down, and two places disagree eventually.
+        // Assumptions: the length and null checks are the codec's and are not repeated here. Its
+        // record-length guard rejects a null or wrongly sized image with a failure naming the
+        // record, the expected width and the received one, which is strictly more informative
+        // than a guard written here could be without restating the width this type deliberately
+        // does not hold. Adding a second check would create a second place the expected length is
+        // written down, and two places disagree eventually.
         Map<String, Object> fields = FixedWidthCodec.decodeRecord(image, LAYOUT);
 
-        // WHY : Assumptions: the two adjacent PIC X(10) character fields are treated DIFFERENTLY on
-        //       purpose, and the asymmetry is not an inconsistency. ACCT-GROUP-ID keeps all ten
-        //       characters because it is a join key whose space padding is load-bearing:
-        //       app/cbl/CBACT04C.cbl:437 moves the literal 'DEFAULT' into a PIC X(10) field, so the
-        //       stored value is DEFAULT followed by three blanks, and the disclosure-group rate lookup
-        //       matches only if that padding survives the boundary. Trimming it would silently lose the
-        //       fallback rate for every account in the default group. ACCT-ADDR-ZIP is descriptive, so
-        //       its trailing blanks are padding rather than data and are removed; the encode side pads
-        //       the field back to ten bytes, so removing them costs nothing in round-trip fidelity.
+        // Assumptions: the two adjacent PIC X(10) character fields are treated DIFFERENTLY on
+        // purpose, and the asymmetry is not an inconsistency. ACCT-GROUP-ID keeps all ten
+        // characters because it is a join key whose space padding is load-bearing:
+        // app/cbl/CBACT04C.cbl:437 moves the literal 'DEFAULT' into a PIC X(10) field, so the
+        // stored value is DEFAULT followed by three blanks, and the disclosure-group rate lookup
+        // matches only if that padding survives the boundary. Trimming it would silently lose the
+        // fallback rate for every account in the default group. ACCT-ADDR-ZIP is descriptive, so
+        // its trailing blanks are padding rather than data and are removed; the encode side pads
+        // the field back to ten bytes, so removing them costs nothing in round-trip fidelity.
         String groupId = textField(fields, FIELD_GROUP_ID);
         String addrZip = trailingBlanksRemoved(textField(fields, FIELD_ADDR_ZIP));
 
@@ -308,9 +311,9 @@ public final class AccountRecordMapper {
     public static byte[] toRecord(Account account) {
         Objects.requireNonNull(account, "account must not be null");
 
-        // WHY : Assumptions: the map carries the twelve named fields and no thirteenth entry for the
-        //       trailing pad. The codec rebuilds a registered pad it was not handed, and it rejects a
-        //       key that names no declared field, so naming FILLER here would be redundant at best.
+        // Assumptions: the map carries the twelve named fields and no thirteenth entry for the
+        // trailing pad. The codec rebuilds a registered pad it was not handed, and it rejects a
+        // key that names no declared field, so naming FILLER here would be redundant at best.
         Map<String, Object> fields = new LinkedHashMap<>();
         fields.put(FIELD_ACCOUNT_ID, account.getAccountId());
         fields.put(FIELD_ACTIVE_STATUS, blankIfAbsent(account.getActiveStatus()));
@@ -325,14 +328,14 @@ public final class AccountRecordMapper {
         fields.put(FIELD_ADDR_ZIP, blankIfAbsent(account.getAddrZip()));
         fields.put(FIELD_GROUP_ID, blankIfAbsent(account.getGroupId()));
 
-        // WHY : Assumptions: the optimistic-locking version is deliberately absent from the map, and
-        //       its absence is a ruling rather than an oversight. It is a target-side artifact that the
-        //       owning schema adds so a lost update can be detected; the 300-byte record declares no
-        //       counterpart to it, so there is no interval to write it into. Supplying it would either
-        //       be rejected as a key naming no declared field or, if a span were invented for it, would
-        //       displace the trailing pad and change the record length. The observable consequence is
-        //       the property this type's tests assert: two entities differing only in version encode to
-        //       identical bytes.
+        // Assumptions: the optimistic-locking version is deliberately absent from the map, and
+        // its absence is a ruling rather than an oversight. It is a target-side artifact that the
+        // owning schema adds so a lost update can be detected; the 300-byte record declares no
+        // counterpart to it, so there is no interval to write it into. Supplying it would either
+        // be rejected as a key naming no declared field or, if a span were invented for it, would
+        // displace the trailing pad and change the record length. The observable consequence is
+        // the property this type's tests assert: two entities differing only in version encode to
+        // identical bytes.
         return FixedWidthCodec.encodeRecord(fields, LAYOUT);
     }
 
@@ -390,18 +393,18 @@ public final class AccountRecordMapper {
     private static BigDecimal moneyField(Map<String, Object> fields, String fieldName) {
         Object value = fields.get(fieldName);
 
-        // WHY : Alternatives Considered: an IEEE-754 binary64 primitive, which is the reflex choice for
-        //       an amount and is wrong here for a reason specific to this picture clause.
-        //       app/cpy/CVACT01Y.cpy:7 declares ACCT-CURR-BAL as PIC S9(10)V99, which is twelve
-        //       significant decimal digits once the two cent positions are counted. A binary64 value
-        //       represents at most 15 to 17 significant decimal digits and only those whose exact value
-        //       is a dyadic rational, and one cent is not: 0.01 has no terminating binary expansion, so
-        //       a balance held that way is already an approximation before any arithmetic runs, and the
-        //       error lands in the least significant cent. That is precisely the position the inclusive
-        //       over-limit comparison at app/cbl/CBTRN02C.cbl:407 turns on, so the approximation is not
-        //       cosmetic -- it decides whether a transaction posts or is rejected with reason 102. The
-        //       exact decimal type carries the twelve digits and the scale as declared values, so no
-        //       representation error exists to accumulate.
+        // Alternatives Considered: an IEEE-754 binary64 primitive, which is the reflex choice for
+        // an amount and is wrong here for a reason specific to this picture clause.
+        // app/cpy/CVACT01Y.cpy:7 declares ACCT-CURR-BAL as PIC S9(10)V99, which is twelve
+        // significant decimal digits once the two cent positions are counted. A binary64 value
+        // represents at most 15 to 17 significant decimal digits and only those whose exact value
+        // is a dyadic rational, and one cent is not: 0.01 has no terminating binary expansion, so
+        // a balance held that way is already an approximation before any arithmetic runs, and the
+        // error lands in the least significant cent. That is precisely the position the inclusive
+        // over-limit comparison at app/cbl/CBTRN02C.cbl:407 turns on, so the approximation is not
+        // cosmetic -- it decides whether a transaction posts or is rejected with reason 102. The
+        // exact decimal type carries the twelve digits and the scale as declared values, so no
+        // representation error exists to accumulate.
         if (!(value instanceof BigDecimal amount)) {
             throw registryDisagreement(fieldName, "an exact decimal amount", value);
         }
@@ -445,18 +448,18 @@ public final class AccountRecordMapper {
         try {
             return LocalDate.parse(text);
         } catch (DateTimeParseException malformed) {
-            // WHY : Alternatives Considered: letting the parse failure propagate as it is. Rejected so
-            //       that every failure this mapper can raise belongs to one family -- the codec's own
-            //       record-length and field failures both extend the platform argument exception -- and
-            //       a caller wrapping a conversion needs one catch rather than two unrelated ones. The
-            //       cause is chained rather than discarded, so the position within the ten characters
-            //       that the parser objected to is still available.
-            // WHY : Assumptions: the raw characters are quoted only when the descriptor declares the
-            //       field not sensitive, which is the discipline this package's charter sets and the
-            //       shared codecs already follow. No field of this record is marked sensitive today, so
-            //       the branch always quotes here; it is written as a test rather than as an
-            //       unconditional quote so that marking a field sensitive later cannot put its content
-            //       into a log line by omission.
+            // Alternatives Considered: letting the parse failure propagate as it is. Rejected so
+            // that every failure this mapper can raise belongs to one family -- the codec's own
+            // record-length and field failures both extend the platform argument exception -- and
+            // a caller wrapping a conversion needs one catch rather than two unrelated ones. The
+            // cause is chained rather than discarded, so the position within the ten characters
+            // that the parser objected to is still available.
+            // Assumptions: the raw characters are quoted only when the descriptor declares the
+            // field not sensitive, which is the discipline this package's charter sets and the
+            // shared codecs already follow. No field of this record is marked sensitive today, so
+            // the branch always quotes here; it is written as a test rather than as an
+            // unconditional quote so that marking a field sensitive later cannot put its content
+            // into a log line by omission.
             CopybookLayout.FieldSpec field = LAYOUT.field(fieldName);
             String quoted = field.sensitive() ? "" : " from '" + text + "'";
             throw new IllegalArgumentException("record " + RECORD_NAME + " field " + field.describe()
@@ -479,11 +482,11 @@ public final class AccountRecordMapper {
      *     blanks when the date is absent
      */
     private static String isoDateText(LocalDate date) {
-        // WHY : Trade-offs: a year outside the four-digit range renders with an explicit sign and extra
-        //       digits, which the codec then refuses because the value exceeds the ten bytes the field
-        //       holds. Refusing is the intended outcome and is why no range check is written here: such
-        //       a date has no representation in this record, and truncating it to ten characters would
-        //       write a different date rather than reporting an unwritable one.
+        // Trade-offs: a year outside the four-digit range renders with an explicit sign and extra
+        // digits, which the codec then refuses because the value exceeds the ten bytes the field
+        // holds. Refusing is the intended outcome and is why no range check is written here: such
+        // a date has no representation in this record, and truncating it to ten characters would
+        // write a different date rather than reporting an unwritable one.
         return date == null ? ABSENT_TEXT : date.toString();
     }
 
@@ -510,10 +513,10 @@ public final class AccountRecordMapper {
      * @return the characters with trailing blanks removed, leading and interior blanks untouched
      */
     private static String trailingBlanksRemoved(String value) {
-        // WHY : Alternatives Considered: trimming both ends. Rejected because only the trailing side is
-        //       padding in a fixed-width field: content is written left-justified into the field, so a
-        //       leading blank is a character the source actually holds and removing it would change the
-        //       value rather than remove its padding.
+        // Alternatives Considered: trimming both ends. Rejected because only the trailing side is
+        // padding in a fixed-width field: content is written left-justified into the field, so a
+        // leading blank is a character the source actually holds and removing it would change the
+        // value rather than remove its padding.
         return value.stripTrailing();
     }
 
@@ -533,10 +536,10 @@ public final class AccountRecordMapper {
      */
     private static IllegalArgumentException registryDisagreement(String fieldName, String expected,
             Object actual) {
-        // WHY : Assumptions: the value's TYPE is reported and its content is not, following this
-        //       package's charter on diagnostics. The type is what identifies a descriptor that has
-        //       changed kind, which is the only way this failure arises, so nothing diagnostic is lost
-        //       by withholding content that could reach a log aggregator.
+        // Assumptions: the value's TYPE is reported and its content is not, following this
+        // package's charter on diagnostics. The type is what identifies a descriptor that has
+        // changed kind, which is the only way this failure arises, so nothing diagnostic is lost
+        // by withholding content that could reach a log aggregator.
         String actualType = actual == null ? "absent" : actual.getClass().getSimpleName();
         return new IllegalArgumentException("record " + RECORD_NAME + " field "
                 + LAYOUT.field(fieldName).describe() + " should decode to " + expected

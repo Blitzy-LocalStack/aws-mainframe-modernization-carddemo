@@ -414,7 +414,7 @@ public class ReportExecutionService {
      * <p>Assumptions: the literal is {@code app/cbl/CORPT00C.cbl} L438 character for character,
      * including the three ASCII full stops and the lower-case "report" in both positions. It is a named
      * constant rather than an inline string because {@code reporting-api.yaml} publishes the same text at
-     * L1988 as one of the messages this operation may carry, and a test can hold the two to each other
+     * L1961 as one of the messages this operation may carry, and a test can hold the two to each other
      * only if this side has a name.</p>
      *
      * <p>⚠️ Assumptions: the three full stops here have NO space before them, which is where this sentence
@@ -603,7 +603,7 @@ public class ReportExecutionService {
         //       earlier revision reported "exactly one of monthly, yearly or custom must be selected
         //       but 0 were". That sentence was authored here, described the refusal that has just
         //       been withdrawn, and was not in the catalogue reporting-api.yaml publishes as the
-        //       messages this operation may carry -- which lists this literal, at L1988, and states
+        //       messages this operation may carry -- which lists this literal, at L1961, and states
         //       that every message is carried verbatim from the reference. Transformation rule T8
         //       requires user-visible strings to be reproduced character for character, and the
         //       three trailing full stops and the capitalisation are part of the text.

@@ -25,16 +25,14 @@
  */
 
 import { Button, Flex, Form, Input, Result, Select, Spin, Typography } from 'antd';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useNavigate, useParams } from 'react-router';
 
 import { getCard, updateCard } from '../../api/cards';
 import type { CardDetail, CardUpdateRequest } from '../../api/cards';
-import { MessageBand } from '../../layout/MessageBand';
+import { useShellSlot } from '../../layout/AppShell';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
-import { PfKeyBar } from '../../layout/PfKeyBar';
-import { ScreenHeader } from '../../layout/ScreenHeader';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { usePfKeys } from '../../layout/usePfKeys';
 import type { PfKeyHandlerMap } from '../../layout/usePfKeys';
@@ -200,6 +198,13 @@ export function CardUpdateScreen(): ReactElement {
    *       the confirmation prompt, the no-change refusal and the committed acknowledgement.
    */
   const [pendingValues, setPendingValues] = useState<CardFormValues | null>(null);
+  /*
+   * WHY : Assumptions: the read generation is a REF and not state, because nothing renders from it and
+   *       it must be readable synchronously by a settlement that ran before the next render. A state
+   *       value would be read from the closure of the render that opened the read, so every settlement
+   *       would compare its own number against itself and every one of them would look current.
+   */
+  const readGeneration = useRef(0);
   const selector =
     routeIdentifier !== undefined && isCardSelector(routeIdentifier) ? routeIdentifier : null;
 
@@ -218,6 +223,21 @@ export function CardUpdateScreen(): ReactElement {
   const reload = useCallback(
     /**
      * Reads the record the form edits and seeds the form from it, discarding any uncommitted edit.
+     *
+     * ⚠️ Refactoring Rationale: each read opens a GENERATION and seeds the form only while that
+     * generation is still the current one. Every read used to apply unconditionally, and two can be
+     * outstanding at once for two ordinary reasons: a route change from one card to another re-creates
+     * this callback and the effect re-runs it while the first request is in flight, and the cancel arm
+     * re-reads on demand. Whichever settled LAST won, so following one row while a slower read of the
+     * previous card was outstanding could seed this form -- and the version the save sends with it --
+     * from the wrong card. That is worse here than on the detail screen: the retained record carries the
+     * optimistic-lock value, so a stale seed would send a write against the version of a card the
+     * operator is no longer editing.
+     *
+     * Alternatives Considered: `AbortController` threaded into `getCard`. Rejected because it would
+     * widen the transport signature for every caller of that operation to fix an ordering property of
+     * two screens, and because an aborted request still has to be prevented from applying -- so the
+     * guard is needed either way.
      * @returns {void} Completion is represented by the screen's own state.
      */
     (): void => {
@@ -226,10 +246,20 @@ export function CardUpdateScreen(): ReactElement {
         return;
       }
 
+      const generation = readGeneration.current + 1;
+
+      readGeneration.current = generation;
       setLoading(true);
       setPendingValues(null);
       setMessage(null);
       setSeverity('error');
+
+      /**
+       * Whether this read is still the one whose answer the form wants.
+       * @returns {boolean} True while no later read has been opened.
+       */
+      const isCurrent = (): boolean => readGeneration.current === generation;
+
       getCard(selector).then(
         /**
          * Seeds the form with the three editable fields and retains the loaded
@@ -237,6 +267,9 @@ export function CardUpdateScreen(): ReactElement {
          * @param {CardDetail} selectedCard - The record the service returned.
          */
         (selectedCard) => {
+          if (!isCurrent()) {
+            return;
+          }
           setCard(selectedCard);
           form.setFieldsValue({
             embossedName: selectedCard.embossedName,
@@ -258,8 +291,17 @@ export function CardUpdateScreen(): ReactElement {
          *       CICS response and reason codes, which are not carried across at all.
          *       Assumptions: the sentence names no card, so no identifier reaches the band or a log.
          */
+        /*
+         * WHY : ⚠️ Assumptions: a superseded FAILURE is discarded exactly as a superseded success is. It
+         *       is the half that is easy to leave out, and leaving it out is worse than leaving out the
+         *       other: the refusal sentence would appear over a form that had seeded correctly, so an
+         *       operator would be told a card could not be read while editing it.
+         */
         /** Reports a retrieval failure using the source program's own not-found sentence. */
         () => {
+          if (!isCurrent()) {
+            return;
+          }
           setMessage(CARD_UPDATE_MESSAGES.DID_NOT_FIND_ACCTCARD_COMBO.text);
           setSeverity('error');
           setLoading(false);
@@ -502,6 +544,48 @@ export function CardUpdateScreen(): ReactElement {
     },
   });
 
+  /*
+   * WHY : ⚠️ Refactoring Rationale: this screen DELEGATES its title band and its key legend to
+   *       the shell instead of painting them itself. `ui/src/layout/AppShell.tsx` is mounted as
+   *       the authenticated layout route, so the frame is painted once above the outlet rather
+   *       than rebuilt per screen; a screen that also painted them would show two title bands
+   *       and two legends. The message band stays local, because the shell paints a zone only
+   *       when it is delegated and this screen's message is bound to controls in its own body.
+   * WHY : Assumptions: the legend is delegated rather than dropped, so the SCREEN keeps owning
+   *       its keys -- `bindings` and `invoke` come from this screen's own `usePfKeys` call and
+   *       are handed up unchanged. The shell adds its sign-off key beside them only when this
+   *       screen leaves that attention identifier free, which is decided by AID in the shell.
+   */
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the row-23 message line is delegated WITH the title band and the
+   *       legend. An earlier revision of this delegation withheld it, on the stated ground that this
+   *       screen's message is bound to controls in its own body -- but this screen stopped composing a
+   *       band when it stopped composing the header, so every sentence it reports through `report`
+   *       had nowhere to be painted. Publishing it here restores the one row-23 field the mapset has.
+   * WHY : Assumptions: the publication is unconditional and ABOVE both early returns, because a hook
+   *       called after one of them would change hook order between renders. The two erased states
+   *       publish an EMPTY key list and no header or message, which is what they rendered before the
+   *       shell existed: the reference answers an unaddressable selector with `SEND TEXT ... ERASE`
+   *       rather than by re-sending the map, and a read in flight has no counterpart in it at all.
+   * WHY : Trade-offs: an empty list is published rather than the member being omitted. This screen
+   *       binds PF12 as `cancel` and the shell binds PF12 as sign-off whenever no screen has
+   *       published keys, so omitting the member would put both listeners on the document and one
+   *       PF12 press would cancel the edit AND end the session.
+   */
+  useShellSlot(
+    selector === null || loading
+      ? { pfKeys: { keys: [], onInvoke: invoke } }
+      : {
+          screen: {
+            transactionId: CARD_UPDATE_TRANSACTION_ID,
+            programName: CARD_UPDATE_PROGRAM_NAME,
+          },
+          now: paintedAt,
+          message: { text: message, severity },
+          pfKeys: { keys: bindings, onInvoke: invoke },
+        },
+  );
+
   if (selector === null) {
     return (
       <Result
@@ -539,30 +623,7 @@ export function CardUpdateScreen(): ReactElement {
        *       not render the band on this screen's behalf; the hook supplies the one value that is
        *       NOT screen-specific without inventing a component to hold it.
        */}
-      <ScreenHeader
-        transactionId={CARD_UPDATE_TRANSACTION_ID}
-        programName={CARD_UPDATE_PROGRAM_NAME}
-        now={paintedAt}
-      />
       <Typography.Title level={3}>{CARD_UPDATE_TITLE}</Typography.Title>
-      {/*
-       * Refactoring Rationale: the band replaces a conditional raw antd Alert.
-       * On an update screen the reserved space carries a second consequence
-       * beyond layout stability: the baseline's own update programs re-send the
-       * SAME map with row 23 populated (app/cbl/COCRDUPC.cbl), so the form and
-       * its message occupy one screen with the message line in a fixed place.
-       * A band that appears and disappears would move the very fields an
-       * operator is correcting mid-correction.
-       * Refactoring Rationale: the severity is now passed rather than defaulted.
-       * This note previously recorded that the band "only ever carries a
-       * failure", which held while the screen validated and wrote in one step;
-       * the two-turn confirmation the source performs means it also carries the
-       * confirmation prompt and the cancel acknowledgement, both of which the
-       * source paints in its neutral informational field rather than in red.
-       * `report` above records how each call site reads its appearance off the
-       * catalog entry's own `field` member.
-       */}
-      <MessageBand message={message} severity={severity} />
       {/*
        * Refactoring Rationale: `onFinish` runs the VALIDATE arm, not the write. The source screen's
        * Enter key edits the fields and asks for confirmation, and only the later PF5 turn writes, so
@@ -645,16 +706,15 @@ export function CardUpdateScreen(): ReactElement {
         </Form.Item>
       </Form>
       {/*
-       * Refactoring Rationale: the bespoke `Cancel` and `Save` controls are gone, and the key bar
-       * below carries both as F12 and F5. Keeping them would have put two controls behind each action
+       * Refactoring Rationale: the bespoke `Cancel` and `Save` controls are gone, and the delegated key
+       * legend carries both as F12 and F5. Keeping them would have put two controls behind each action
        * with two chances to diverge, and the `Save` control specifically wrote without the
        * confirmation turn the source requires -- so the mapset's second legend field, which exists
        * only to reveal those two keys, would have had nothing to reveal.
-       * Assumptions: the legend colour is left at its default, which `app/bms/COCRDUP.bms` L159 and
-       * L164 confirm -- both of this screen's legend fields are `COLOR=YELLOW`, the majority the bar
-       * already defaults to.
+       * Assumptions: no legend colour is delegated, which `app/bms/COCRDUP.bms` L159 and L164 confirm --
+       * both of this screen's legend fields are `COLOR=YELLOW`, the majority the slot already defaults
+       * to.
        */}
-      <PfKeyBar keys={bindings} onInvoke={invoke} />
     </Flex>
   );
 }

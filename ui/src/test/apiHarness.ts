@@ -26,8 +26,11 @@
  * are where the bearer token, the correlation identifier and the failure normalisation live -- a test
  * dispatching through a mocked module would assert against a request the application never makes.
  *
- * Assumptions: every test API is imported explicitly rather than taken from an ambient global, because
- * `ui/vitest.config.ts` sets `globals: false` and records that as a contract.
+ * Assumptions: every test API is imported rather than taken from an ambient global, because
+ * ui/tsconfig.json keeps its `types` list EMPTY -- so nothing is declared ambiently and an omitted
+ * import fails to compile on the symbol it omitted. The runner's own `globals` option is set to
+ * `true`, for the separate reason recorded beside it, so the enforcing mechanism is the empty
+ * `types` list and never that option.
  */
 
 import type { AxiosRequestConfig, AxiosResponse } from 'axios';
@@ -199,6 +202,30 @@ export function answerWith(
  */
 export function answerEveryRequestWith(body: unknown, status: number = HTTP_OK): void {
   fallback = { body, status, headers: {} };
+}
+
+/**
+ * Discards the recorded requests, leaving the client, the queued answers and the fallback untouched.
+ *
+ * Purpose
+ * -------
+ * A case that has to ARRANGE a signed-on session does so by performing a real sign-on exchange, because
+ * the session is held in memory and nothing else can install one. That exchange is a dispatched request
+ * like any other, so a case asserting on the requests its own subject produced would count the
+ * arrangement too.
+ *
+ * Alternatives Considered: having such a case assert on the requests from index one onwards, or on
+ * `toHaveLength(2)`. Rejected because the number would then encode how the fixture happens to be built:
+ * an arrangement that grew to two requests would silently shift every index and every count in every
+ * file that used it, and each of those assertions would still pass while measuring the wrong request.
+ *
+ * Alternatives Considered: re-calling {@link installApiHarness}, which also clears the recordings.
+ * Rejected because it additionally discards the queue and REBUILDS the client, so a case would lose the
+ * answers it had already queued for its subject and any adapter it had installed by hand.
+ * @returns {void} Nothing; the recording restarts from empty.
+ */
+export function forgetDispatchedRequests(): void {
+  dispatched = [];
 }
 
 /**

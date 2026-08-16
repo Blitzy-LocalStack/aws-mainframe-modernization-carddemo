@@ -42,8 +42,8 @@ import tools.jackson.databind.json.JsonMapper;
  * <p>Those three settle a fourth case that they do not name, and the resolution is stated here
  * because it is the one a reader is most likely to assume wrongly: a caller that supplies an identity
  * which cannot be carried -- too wide for the width contract, carrying a character the response
- * header must not receive, or shaped like a primary account number -- has its request <b>refused</b>
- * with a client error. It is not served
+ * header must not receive, or shaped like any protected identifier this system holds -- has its
+ * request <b>refused</b> with a client error. It is not served
  * under a minted identity. The first obligation is what forbids the substitution: an identity the
  * caller did not send is one it cannot correlate on, so quietly replacing a value satisfies the
  * filter's mechanics while defeating its purpose. Minting belongs to the second obligation alone, and
@@ -417,21 +417,38 @@ public final class CorrelationIdFilter implements Filter {
     private static final String ACCEPTED_PUNCTUATION = "-_.";
 
     /**
-     * The fewest digits a bare numeric value must carry to be treated as a primary account number.
+     * The fewest digits a bare numeric value must carry to be treated as a protected identifier.
      *
-     * <p>Assumptions: thirteen is the shortest length the card family issues, so it is the point below
-     * which an all-digit value cannot be one of these numbers. It is deliberately lower than the
-     * sixteen characters this system's own record declares at
-     * {@code CARD-NUM PIC X(16)}, line 5 of {@code app/cpy/CVACT02Y.cpy}, because the value judged
-     * here arrives from a caller rather than from this system's storage and is not bound by that
-     * width.</p>
+     * <p>Assumptions: NINE, which is the shortest protected identifier this system holds, so it is the
+     * point below which an all-digit value cannot be one of them. Three widths are measured and the
+     * smallest governs: a customer identifier and a national identifier are both nine digits --
+     * {@code CUST-ID PIC 9(09)} at line 5 of {@code app/cpy/CVCUS01Y.cpy} and
+     * {@code CUST-SSN PIC 9(09)} at line 16 -- an account identifier is eleven,
+     * {@code ACCT-ID PIC 9(11)} at line 5 of {@code app/cpy/CVACT01Y.cpy}, and a card number is
+     * sixteen, {@code CARD-NUM PIC X(16)} at line 5 of {@code app/cpy/CVACT02Y.cpy}. One bound at the
+     * smallest of the three covers all three and needs no per-width rule.</p>
      *
-     * <p>Trade-offs: the identifiers this system does put in a path are all shorter -- an account is
-     * {@code PIC 9(11)} and a customer {@code PIC 9(09)} -- so nothing the platform itself generates
-     * falls into the refused class, and the cost lands only on a caller that chose a long bare number
-     * as its own correlation identity.</p>
+     * <p>⚠️ Refactoring Rationale: this was thirteen, and thirteen was chosen as "the shortest length
+     * the card family issues" -- a bound stated for ONE of the four identifiers while the rule it
+     * governs protects all of them. The consequence was not theoretical: a nine-digit national
+     * identifier or customer identifier, and an eleven-digit account identifier, all cleared a
+     * thirteen-digit floor, so a caller could place any of them in this header and have it published to
+     * the mapped diagnostic context on every log line the request produced, and echoed back in the
+     * response. The bound is now derived from the identifier set the rule exists to keep out rather
+     * than from the widest member of it.</p>
+     *
+     * <p>Trade-offs: the refused class widens by four digits and the cost is real. A caller whose own
+     * correlation scheme is a bare nine-, ten-, eleven- or twelve-digit number -- an epoch second is
+     * ten digits, an epoch millisecond thirteen -- is refused where it was previously echoed, and the
+     * refusal names the rule so it can be acted on. That is accepted because the alternative is to
+     * admit a class of value that is indistinguishable by inspection from a customer, national or
+     * account identifier: nothing about the digits themselves says which of the two a nine-digit run
+     * is. Every value carrying a letter at any position is unaffected, which includes every identity
+     * this platform mints -- {@link #GENERATED_ID_PREFIX} guarantees a leading letter -- so no
+     * platform-generated value falls into the refused class and no service-to-service hop is affected.
+     * A caller needing a numeric scheme prefixes it with a letter, which the refusal message states.</p>
      */
-    private static final int ACCOUNT_NUMBER_MIN_DIGITS = 13;
+    private static final int PROTECTED_IDENTIFIER_MIN_DIGITS = 9;
 
     /**
      * The media type the refusal body is written with.
@@ -872,13 +889,22 @@ public final class CorrelationIdFilter implements Filter {
         //       width and the alphabet would read the refusal as contradicting itself. The rule is
         //       stated as a shape, so the message explains the refusal without reproducing the value
         //       that caused it -- which is the whole point of refusing it.
+        // WHY : ⚠️ Assumptions: the message additionally states the REMEDY for a numeric scheme, which
+        //       is to carry a letter. Widening the refused class from thirteen digits to nine puts
+        //       ordinary numeric correlation schemes inside it -- an epoch second is ten digits -- so a
+        //       caller that was previously served now needs to change something, and a refusal that
+        //       named the rule without naming the way out would leave it guessing. The remedy is exact
+        //       rather than advisory: any letter at any position takes the value out of the class, which
+        //       is the same property that keeps every platform-minted identity out of it.
         String detail = "The " + CORRELATION_ID_HEADER + " header must be 1 to "
                 + CORRELATION_ID_MAX_LENGTH
                 + " characters, each a letter, a digit or one of "
                 + ACCEPTED_PUNCTUATION
-                + ", and must not carry " + ACCOUNT_NUMBER_MIN_DIGITS
-                + " or more digits once separators are removed; the supplied value is "
-                + inbound.length() + " characters. Omit the header to have one generated.";
+                + ", and must not carry " + PROTECTED_IDENTIFIER_MIN_DIGITS
+                + " or more digits once separators are removed, so that no protected identifier can be"
+                + " carried; the supplied value is " + inbound.length()
+                + " characters. Include a letter to use a numeric scheme, or omit the header to have"
+                + " one generated.";
 
         String correlationId = generateCorrelationId();
         ApiError problem = ApiError.ofFieldErrors(detail, HttpServletResponse.SC_BAD_REQUEST,
@@ -962,9 +988,9 @@ public final class CorrelationIdFilter implements Filter {
      * <p>A value conforms when it is present, occupies at least one and at most
      * {@code CORRELATION_ID_MAX_LENGTH} characters, every one of those characters is token-safe by
      * {@link #isTokenSafe(char)} -- an ASCII letter, an ASCII digit, or one of the separators in
-     * {@link #ACCEPTED_PUNCTUATION} -- and the value as a whole is not a bare run of digits long
-     * enough to be a primary account number, by {@link #isAccountNumberShaped(String)}. The rule
-     * itself lives in
+     * {@link #ACCEPTED_PUNCTUATION} -- and the value as a whole is not a run of digits long
+     * enough to be any protected identifier this system holds, by
+     * {@link #isProtectedIdentifierShaped(String)}. The rule itself lives in
      * {@link #conformsWithin(String, int)} so that the edge identity, whose width contract differs, is
      * judged by the same alphabet.</p>
      *
@@ -984,7 +1010,7 @@ public final class CorrelationIdFilter implements Filter {
 
     /**
      * Reports whether a value is present, within a stated width, made only of token-safe characters,
-     * and not shaped like a primary account number.
+     * and not shaped like a protected identifier.
      *
      * <p>Alternatives Considered: two separate checks, one per identity. Rejected because the alphabet
      * rule is the same for both -- both are written into the same log field, so both carry the same
@@ -997,8 +1023,8 @@ public final class CorrelationIdFilter implements Filter {
      * @param maxLength the widest value the calling contract admits; a longer value is refused rather
      *     than shortened, for the reason argued on {@link #isContractConforming(String)}
      * @return {@code true} when the value carries at least one character, no more than
-     *     {@code maxLength} of them, nothing that is not token-safe, and is not a bare run of
-     *     {@link #ACCOUNT_NUMBER_MIN_DIGITS} or more digits
+     *     {@code maxLength} of them, nothing that is not token-safe, and is not a run of
+     *     {@link #PROTECTED_IDENTIFIER_MIN_DIGITS} or more digits once separators are removed
      */
     private static boolean conformsWithin(String candidate, int maxLength) {
         if (candidate == null || candidate.isEmpty()) {
@@ -1038,30 +1064,41 @@ public final class CorrelationIdFilter implements Filter {
             }
         }
 
-        // WHY : Assumptions: the alphabet check cannot see this exposure, because the characters of an
-        //       account number are individually unobjectionable. A conforming value is published to the
-        //       mapped diagnostic context and therefore onto every log line the request produces, so a
-        //       caller could place cardholder data into log storage through a header. This test is what
-        //       keeps that class of value out.
+        // WHY : Assumptions: the alphabet check cannot see this exposure, because the characters of a
+        //       protected identifier are individually unobjectionable. A conforming value is published to
+        //       the mapped diagnostic context and therefore onto every log line the request produces, and
+        //       is echoed in the response, so a caller could place cardholder data into log storage
+        //       through a header. This test is what keeps that class of value out.
+        //       ⚠️ Assumptions: the class it keeps out is now every protected identifier this system
+        //       holds and not the card number alone -- a nine-digit customer or national identifier and
+        //       an eleven-digit account identifier are in it too, and all three cleared the previous
+        //       thirteen-digit floor. The three widths and the one bound that covers them are recorded on
+        //       PROTECTED_IDENTIFIER_MIN_DIGITS.
         //       Alternatives Considered: hashing an inbound identity instead of refusing it, so that any
         //       value at all could be accepted. Rejected because it defeats the reason the identity is
         //       echoed: a caller matches a response to its request on the value it sent, and a hashed
-        //       identity is no longer that value. Refusing the narrow account-number-shaped class keeps
-        //       the echo exact for every other value.
-        return !isAccountNumberShaped(candidate);
+        //       identity is no longer that value. Refusing the shaped class keeps the echo exact for
+        //       every other value.
+        //       Alternatives Considered: having the edge overwrite the identity outright, so no caller
+        //       value is ever carried. Rejected because it removes the one property the echo exists for
+        //       -- an external caller correlating its own request to this system's answer -- and the
+        //       narrower rule achieves the containment without taking that away.
+        return !isProtectedIdentifierShaped(candidate);
     }
 
     /**
-     * Reports whether a value is a bare run of digits long enough to be a primary account number.
+     * Reports whether a value is a run of digits long enough to be a protected identifier.
      *
-     * <p>Assumptions: the accepted range is {@link #ACCOUNT_NUMBER_MIN_DIGITS} through
+     * <p>Assumptions: the refused range is {@link #PROTECTED_IDENTIFIER_MIN_DIGITS} through
      * {@link #CORRELATION_ID_MAX_LENGTH} digits, and both ends are derived rather than chosen. The
-     * lower bound is the shortest number the card family issues, so nothing shorter can be one; the
+     * lower bound is the shortest protected identifier this system holds -- nine digits, shared by the
+     * customer identifier and the national identifier -- so nothing shorter can be one of them; the
      * upper bound is simply the widest value this contract admits at all, so no separate ceiling is
-     * needed. The declared field in this system is sixteen characters --
-     * {@code CARD-NUM PIC X(16)} at line 5 of {@code app/cpy/CVACT02Y.cpy} -- and the range is written
-     * wider than that single width deliberately, because a caller choosing to smuggle a number is not
-     * bound by the width this system stores.</p>
+     * needed. The range therefore spans every declared width in one rule: nine for a customer or
+     * national identifier, eleven for an account, sixteen for a card. It is deliberately not a set of
+     * exact-width tests, because a caller choosing to smuggle an identifier is not bound by the width
+     * this system stores it at -- a leading zero or a trailing digit would defeat an equality test while
+     * leaving the value just as readable in a log.</p>
      *
      * <p>Assumptions: the test is applied to the value with its SEPARATORS REMOVED, because the
      * alphabet has to admit a hyphen, a dot and an underscore for legitimate callers and a rule stated
@@ -1071,21 +1108,24 @@ public final class CorrelationIdFilter implements Filter {
      * problem.</p>
      *
      * <p>Trade-offs: the refused class widens, and the cost is real and worth naming. A legitimate
-     * identity of thirteen or more digits is refused whether it is written bare or with separators, so
-     * a caller whose scheme is a separated timestamp such as {@code 2024-01-15-093000} -- fifteen
-     * digits once normalised -- is now refused where before it was echoed. That is accepted for two
-     * reasons: the same caller writing the same value WITHOUT separators was already refused, so
-     * admitting the separated form was an inconsistency rather than a feature; and a separated
-     * fifteen-digit value is indistinguishable from a separated card number by inspection, so no rule
-     * can admit one and exclude the other. Every value carrying a letter at any position is unaffected,
-     * which includes every identity this platform mints -- {@link #GENERATED_ID_PREFIX} guarantees
-     * it -- and the refusal names the rule so a caller can act on it.</p>
+     * identity of nine or more digits is refused whether it is written bare or with separators, so a
+     * caller whose scheme is a separated date such as {@code 2024-01-15} -- eight digits once
+     * normalised, and therefore still accepted -- differs from {@code 2024-01-15-09} only in one
+     * trailing field. That is accepted for three reasons: the same caller writing the same value WITHOUT
+     * separators is refused identically, so the rule does not turn on punctuation; a separated
+     * nine-digit value is indistinguishable from a separated customer or national identifier by
+     * inspection, so no rule can admit one and exclude the other; and the remedy is one character, since
+     * every value carrying a letter at any position is unaffected. That last property is what keeps
+     * every identity this platform mints out of the refused class -- {@link #GENERATED_ID_PREFIX}
+     * guarantees a leading letter -- so the widening costs no internal hop, and the refusal names both
+     * the rule and the remedy so an external caller can act on it.</p>
      *
      * @param candidate the value to classify, already known to be non-empty and token-safe
      * @return {@code true} when the value carries only digits and accepted separators, and its digits
-     *     alone number {@link #ACCOUNT_NUMBER_MIN_DIGITS} or more; {@code false} otherwise
+     *     alone number {@link #PROTECTED_IDENTIFIER_MIN_DIGITS} or more -- the shape of a customer,
+     *     national, account or card identifier; {@code false} otherwise
      */
-    private static boolean isAccountNumberShaped(String candidate) {
+    private static boolean isProtectedIdentifierShaped(String candidate) {
         int digits = 0;
 
         for (int position = 0; position < candidate.length(); position++) {
@@ -1096,15 +1136,16 @@ public final class CorrelationIdFilter implements Filter {
             }
             // WHY : Assumptions: a separator does not disqualify the value and does not count towards
             //       the digit total, while ANY other character disqualifies it outright. That
-            //       asymmetry is what keeps the rule narrow: a value carrying a letter is not a
-            //       written card number in any convention, so it is admitted immediately rather than
-            //       having its digits counted.
+            //       asymmetry is what keeps the rule narrow: a value carrying a letter is not a written
+            //       account, customer, national or card identifier in any convention, so it is admitted
+            //       immediately rather than having its digits counted. It is also the property the
+            //       refusal message offers as the remedy, so the two agree by construction.
             if (ACCEPTED_PUNCTUATION.indexOf(character) < 0) {
                 return false;
             }
         }
 
-        return digits >= ACCOUNT_NUMBER_MIN_DIGITS;
+        return digits >= PROTECTED_IDENTIFIER_MIN_DIGITS;
     }
 
     /**

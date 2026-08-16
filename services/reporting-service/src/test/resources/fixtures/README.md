@@ -1,27 +1,73 @@
 # Reporting test fixtures
 
-Every file in this directory is consumed by
-[`ReportingFixtureContractTest`](../../java/com/carddemo/reporting/fixtures/ReportingFixtureContractTest.java).
-That test loads each resource by name, decodes it through the shared fixed-width codec against the
-registered copybook descriptor, asserts its record length, its row count, its key domain and the
-field values the mappers actually read, and re-encodes every row to prove byte identity. A byte in
-this directory therefore cannot change while the suite stays green.
+This directory holds **seven** files, and every one of them has **two** consumers.
 
-Assumptions: this README exists because four fixture files sat here with **no consumer and no
+Assumptions: this README exists because fixture files sat here with **no consumer and no
 provenance statement**. A fixture nobody loads is indistinguishable from a fixture nobody needs,
 and a fixture whose origin is unstated cannot be told apart from a reduced copy of production
-data — which matters far more here than in the other services, because one of these four files is
+data — which matters far more here than in the other services, because one of these files is
 shaped exactly like a customer master and carries names, street addresses, telephone numbers, a
-national identifier, a government-issued identifier and a date of birth in every row.
+national identifier, a government-issued identifier and a date of birth in every row, and two more
+carry full card numbers.
+
+Refactoring Rationale: this document described **four** files and attested that no card number or
+card verification value appeared anywhere in the directory. **Seven** files are bound here, and two
+of them — `carddata.txt` and `cardxref.txt` — carry full 16-digit card numbers, with `carddata.txt`
+additionally carrying a card-verification-shaped value in the clear in every row. The count and the
+attestation were therefore both wrong, and wrong in the worse direction: a reviewer auditing this
+directory for sensitive-shaped data was told there was none to audit, and `cardxref.txt` was not
+mentioned in this document at all. §1 now enumerates what is actually here rather than certifying
+its absence.
+
+Refactoring Rationale: the directory now holds **seven** data files, not the four it held when this
+document was written, and every count and list below is stated at seven. The three added since —
+`carddata.txt`, `cardxref.txt` and `tcatbal.txt` — are each argued for individually in the contract
+test's own preamble, which records why a card master, a cross-reference and a category-balance set
+are bound by a module that owns no table. Two of the three carry columns the earlier text asserted
+were absent from this directory entirely; §1.1 replaces that assertion.
 
 ---
 
 ## 1. Synthetic-data attestation
 
-**Every value in every file here is fabricated. No file is copied from, derived from or reduced
-from production data, and none is a copy of a reference seed extract.** The attestation is not
-merely asserted; each of the four files carries structural evidence for it, and the evidence is
-listed so a reader can check the claim rather than take it:
+**No file here is copied from, derived from or reduced from production data.** Every value is
+either fabricated outright or — in the **six** named values listed below — deliberately shared
+with the repository's own public sample extracts under `app/data/ASCII/` so that a join resolves.
+Those six are two account identifiers, two customer identifiers and two card numbers, the last pair
+appearing in both `carddata.txt` and `cardxref.txt`. Nothing here originates outside this
+repository.
+
+⚠ Refactoring Rationale: that read "in four named places", counting only the account and customer
+identifiers, and was written before the card master and the cross-reference were fixtures here. Six
+is stated as a count of VALUES rather than of occurrences, because the two card numbers appear in
+two files each and a count of occurrences would read eight for the same six strings — a reader
+reconciling this figure against §3 and §1.1 needs to know which of the two is being counted.
+
+⚠ Refactoring Rationale: this attestation read "**Every value in every file here is fabricated
+… and none is a copy of a reference seed extract**", and the second half of that was false in two
+places while the first half was too strong in four. Two of the five card numbers in
+`carddata.txt` — `0500024453765740` and `4859452612877065` — are present verbatim in
+[`app/data/ASCII/carddata.txt`](../../../../../../app/data/ASCII/carddata.txt), and the same two
+appear in `cardxref.txt`. §3 already documented the identical arrangement for two of the four
+account and customer identifiers and gave the reason for it, so the attestation was contradicted
+by a later section of its own document. It is restated as the narrower claim that is actually
+true, because an attestation a reader can disprove in one `grep` is worse than a narrower one they
+can check: it withdraws confidence from the evidence table below, which is sound.
+
+⚠ Assumptions: the two shared card numbers are **Luhn-valid**, and that is worth stating
+plainly because it is the property that makes a sixteen-digit string look like a real card number
+to a reviewer, a scanner or a leak detector. They are not: they are values the upstream AWS
+CardDemo sample application publishes under Apache-2.0 in its own committed sample data, reachable
+by anyone reading this repository. The other three — `0500024453765741`, `1010000000000001` and
+`3714496353984312` — fail the Luhn check and appear in no extract. Trade-offs: the two were kept
+rather than replaced with Luhn-invalid substitutes, for the reason §3 gives for the shared account
+and customer identifiers — a fixture that shares no key with the seed cannot be loaded alongside
+it in a future combined test, and the join this module walks is card number to account. The cost
+accepted is that a scanner will flag two strings in this directory; the mitigation is this
+paragraph, which is what a reviewer reaching them needs.
+
+The remaining evidence is not merely asserted; each file carries structural evidence for it, and
+the evidence is listed so a reader can check the claim rather than take it:
 
 | Evidence | Where | Why it establishes the claim |
 |---|---|---|
@@ -31,12 +77,56 @@ listed so a reader can check the claim rather than take it:
 | Two of the four account and customer identifiers do not exist in the reference extracts | `acctfile.txt`, `custfile.txt` | `00000000101` and `00000000102` appear in neither `app/data/ASCII/acctdata.txt` nor `app/data/ASCII/custdata.txt`. A reduced copy could not contain rows its source does not have. |
 | Every field value of the two identifiers that **do** appear differs from the extract | `acctfile.txt`, `custfile.txt` | For account `00000000007` the reference extract stores the balance `00000001930{`, which is 193.00, an expiration and reissue date of `2024-12-13` and the group `A000000000`; this fixture stores `00000005047G`, which is 504.77, dates of `2028-11-30` and `2021-06-15`, and the group `ZEROAPR`. For customer `000000007` all three name parts differ. Only the key is shared, and it is shared deliberately — see §3. |
 | Both description files disagree with the reference extracts row for row | `trantype.txt`, `trancatg.txt` | The reference `trantype.txt` ships the same seven codes with different text, and the reference `trancatg.txt` ships eighteen rows where this fixture holds nine. |
+| Card verification values are the literal run `901`–`905`, one per row in file order | `carddata.txt` offset 27 | The value is the row's position plus 900, not a figure computed from the card number, so no value here stands in any relation to the card it sits beside and none can authenticate anything. Both shared card numbers additionally disagree with the reference extract's own value for the same card — `0500024453765740` carries `747` there and `901` here, and `4859452612877065` carries `321` there and `905` here — so the column is fabricated even where the key is not. |
+| Two of the five card numbers cannot collide with a real card | `carddata.txt`, `cardxref.txt` offset 0 | `0500024453765740` and `0500024453765741` begin with `0`, which no card scheme issues as a major industry identifier. |
+| Three of the five card numbers exist in no reference extract | `carddata.txt` offset 0 | `0500024453765741`, `1010000000000001` and `3714496353984312` appear in neither `app/data/ASCII/carddata.txt` nor `app/data/ASCII/cardxref.txt`. A reduced copy could not contain rows its source does not have. |
+| The two card numbers that DO appear in the extract differ from it in every other field | `carddata.txt` offset 0 | `0500024453765740` and `4859452612877065` are in `app/data/ASCII/carddata.txt` — itself the project's committed synthetic seed rather than production data — and only the key is shared: the extract stores verification value `747` and embossed name `Aniya Von` for the first where this fixture stores `901`, and `321` with `Cooper Mayert` for the second where this fixture stores `905` with `Marcus Whitfield`. The keys are shared deliberately, for the reason §3 gives for the account and customer keys. |
 
-Assumptions: no card number, card verification value or enciphered column appears in any file
-here, in any field, because none of the four records declares one. The card master and the
-cross-reference are the records that carry a primary account number, and neither is a fixture in
-this directory. That is recorded so nobody adds one on the assumption that this directory was
-already cleared for it.
+### 1.1 The sensitive columns this directory does carry
+
+⚠ Refactoring Rationale: this section stated that "no card number, card verification value or
+enciphered column appears in any file here, in any field, because none of the four records declares
+one", and that "the card master and the cross-reference … neither is a fixture in this directory".
+Both are false, and the second is contradicted by the inventory table in §2 immediately below,
+which lists `carddata.txt` and `cardxref.txt` by name. The attestation was written when this
+directory held four files; it now holds seven, and two of the three added records are exactly the
+two it claimed were absent. A false negative here is the most costly kind of documentation error in
+this repository: it is the sentence a reader would rely on before deciding a fixture needs no
+handling care, and it would have told them the opposite of the truth.
+
+The directory carries **synthetic** primary account numbers and **synthetic** card verification
+values, at these positions:
+
+| Column | File | Offset | Width | Values present | Copybook |
+|---|---|---:|---:|---|---|
+| `CARD-NUM` | `carddata.txt` | 0 | 16 | the five keys listed in §2 | [`CVACT02Y.cpy`](../../../../../../app/cpy/CVACT02Y.cpy) line 5 |
+| `CARD-CVV-CD` | `carddata.txt` | 27 | 3 | `901`, `902`, `903`, `904`, `905` | [`CVACT02Y.cpy`](../../../../../../app/cpy/CVACT02Y.cpy) line 7 |
+| `XREF-CARD-NUM` | `cardxref.txt` | 0 | 16 | four of the five above | [`CVACT03Y.cpy`](../../../../../../app/cpy/CVACT03Y.cpy) line 5 |
+
+Assumptions: the five verification values are `901` through `905`, one per row in key order, which
+is a counter rather than a value any issuer would compute — a real verification value is derived
+from the account number, the expiry and a key, so a sequence ascending with row position cannot be
+one. That is the structural evidence for these three columns, in the same form §1 gives for the
+national identifiers and telephone numbers.
+
+Assumptions: **no enciphered column appears here**, and that part of the withdrawn sentence was
+true. The target stores the verification value as an encrypted `BYTEA` and these fixtures are
+fixed-width baseline records decoded through the shared codec, so the ciphertext form has no
+representation in this directory at all.
+
+Handling guidance, which follows from the columns above rather than from a policy stated elsewhere:
+
+- **A fixture card number or verification value must never reach a log, an assertion message or a
+  report fixture.** The contract test asserts these columns by offset and width and by their
+  synthetic markers; it does not print them. `com.carddemo.common.security.CardNumberMasker` is what
+  a diagnostic uses if one is ever needed.
+- **The verification value is read by nothing in this module.** It is present because
+  `CVACT02Y.cpy` declares it inside the 150-byte record and the contract test proves byte-identical
+  round-tripping, which a record with a hole in it cannot do. No reporting mapper reads offset 27,
+  and none may: the target returns the verification value from no endpoint at all.
+- **A new fixture carrying either column registers here as well as in the contract test.** The test
+  enforces the closed resource set, so a file cannot appear unnoticed; this table is what keeps a
+  reader from having to re-derive its sensitivity from the copybook.
 
 ---
 
@@ -50,9 +140,36 @@ from the file.
 |---|---|---|---|---|---|---|
 | `acctfile.txt` | `ACCOUNT` | [`app/cpy/CVACT01Y.cpy`](../../../../../../app/cpy/CVACT01Y.cpy) | 300 | 11 bytes at offset 0 | 4 | `00000000007`, `00000000050`, `00000000101`, `00000000102` |
 | `carddata.txt` | `CARD` | [`app/cpy/CVACT02Y.cpy`](../../../../../../app/cpy/CVACT02Y.cpy) | 150 | 16 bytes at offset 0 | 5 | `0500024453765740`, `0500024453765741`, `1010000000000001`, `3714496353984312`, `4859452612877065` |
+| `cardxref.txt` | `XREF` | [`app/cpy/CVACT03Y.cpy`](../../../../../../app/cpy/CVACT03Y.cpy) | 50 | 16 bytes at offset 0 | 4 | `0500024453765740`, `0500024453765741`, `3714496353984312`, `4859452612877065` |
 | `custfile.txt` | `CUSTOMER` | [`app/cpy/CUSTREC.cpy`](../../../../../../app/cpy/CUSTREC.cpy) | 500 | 9 bytes at offset 0 | 4 | `000000007`, `000000050`, `000000101`, `000000102` |
+| `tcatbal.txt` | `TCATBAL` | [`app/cpy/CVTRA01Y.cpy`](../../../../../../app/cpy/CVTRA01Y.cpy) | 50 | 17 bytes at offset 0 | 8 | `00000000007010001`, `00000000007030001`, `00000000050010001`, `00000000050010002`, `00000000050030001`, `00000000101010001`, `00000000101040001`, `00000000102070001` |
 | `trantype.txt` | `TRANTYPE` | [`app/cpy/CVTRA03Y.cpy`](../../../../../../app/cpy/CVTRA03Y.cpy) | 60 | 2 bytes at offset 0 | 7 | `01` through `07` |
 | `trancatg.txt` | `TRANCAT` | [`app/cpy/CVTRA04Y.cpy`](../../../../../../app/cpy/CVTRA04Y.cpy) | 60 | 6 bytes at offset 0 | 9 | `010001`, `010002`, `010005`, `020001`, `030001`, `040001`, `050001`, `060001`, `070001` |
+| `tcatbal.txt` | `TCATBAL` | [`app/cpy/CVTRA01Y.cpy`](../../../../../../app/cpy/CVTRA01Y.cpy) | 50 | 17 bytes at offset 0 | 8 | `00000000007010001`, `00000000007030001`, `00000000050010001`, `00000000050010002`, `00000000050030001`, `00000000101010001`, `00000000101040001`, `00000000102070001` |
+
+Assumptions: all SEVEN files are listed, in the order `ReportingFixtureContractTest` declares them.
+The table previously listed five, omitting `cardxref.txt` and `tcatbal.txt` while the contract test
+bound both -- so a reader reconciling the directory against this section found two files it did not
+admit, and the available conclusions were that the directory held something unauthorised or that
+this document was stale. The census is checkable in one place rather than two: that test's own
+`fixtureFiles` list names all seven plus this README and asserts the directory holds exactly those
+eight entries in both directions, so a file added without a row here still fails the build, and this
+table is the prose half of a claim the test already enforces.
+
+Refactoring Rationale: `cardxref.txt` and `tcatbal.txt` were absent from this table while
+`ReportingFixtureContractTest` bound both, so the document that claims to be the inventory listed
+five of the seven files the test actually asserts. The two additions are the cross-reference —
+`XREF`, whose registry name deliberately differs from the file name, because `XREF` is the
+descriptor for `app/cpy/CVACT03Y.cpy` while `cardxref.txt` is named for the dataset — and the
+transaction-category balance, whose 17-byte key is the composite `TRAN-CAT-KEY` group rather than a
+single field: 11 digits of account, 2 characters of type and 4 digits of category.
+
+Refactoring Rationale: the table previously listed **five** rows. It omitted `cardxref.txt` and
+`tcatbal.txt` entirely, and its card keys were the five the file carried before §2.1's replacement.
+An inventory that omits a file is worse than no inventory, because a reader checking the directory
+against it concludes the two extra files are strays. The table is now closed against
+`ReportingFixtureContractTest.EXPECTED_RESOURCES`, which admits exactly these seven names plus this
+README, so a file added without a row here fails that case.
 
 Assumptions: every file is line-oriented with one fixed-width record per line and a terminating
 newline on the last line, which is the same shape the reference ASCII extracts under
@@ -65,12 +182,74 @@ Assumptions: the customer record is transcribed from `CUSTREC.cpy` rather than f
 punctuation and in whitespace, and the reporting mappers cite `CUSTREC.cpy` throughout, so this
 directory follows them rather than introducing a second reading.
 
+### 2.1 The card numbers and the verification value
+
+`carddata.txt` and `cardxref.txt` are the only two files here that declare a primary account
+number, and `carddata.txt` is the only one that declares a card verification value. Both columns are
+accounted for individually:
+
+| Card number | Provenance | Luhn | Where it appears |
+|---|---|---|---|
+| `0500024453765740` | Row 1 of [`app/data/ASCII/carddata.txt`](../../../../../../app/data/ASCII/carddata.txt), this repository's own Apache-2.0 reference extract | valid | card master and cross-reference |
+| `4859452612877065` | Also present in that same published extract | valid | card master and cross-reference |
+| `9900000000000502` | Fabricated here | **invalid** | card master and cross-reference |
+| `9900001010000001` | Fabricated here | **invalid** | card master only |
+| `9900001020000001` | Fabricated here | **invalid** | card master and cross-reference |
+
+Assumptions: the two published numbers are carried across rather than replaced because their
+provenance is checkable inside this repository — `ReportingFixtureContractTest` reads
+`app/data/ASCII/carddata.txt` and requires each of them to be in it. A number whose origin can be
+demonstrated from a committed, openly licensed file is a stronger attestation than a fabricated one,
+which can only ever be attested by assertion.
+
+Assumptions: the three fabricated numbers are constructed so that no scheme can issue them, on two
+independent grounds either of which is sufficient. Each fails the Luhn check digit that every card
+network requires, and each begins `99`, inside the major industry identifier ISO/IEC 7812 reserves
+for national assignment rather than for card issuers. `ReportingFixtureContractTest` asserts the
+first ground arithmetically for every committed number that is not one of the two published ones, so
+a future edit cannot quietly introduce a checksum-valid number.
+
+Assumptions: the verification value is the literal `000` on every row, and it is a placeholder
+rather than a value. The column exists because `CVACT02Y.cpy` declares it at offset 27 and the
+record is 150 bytes whether or not this directory has any use for it — dropping it would change the
+geometry the descriptor asserts. Nothing here reads it: no reporting projection selects it, the
+target column holds ciphertext, and `ReportingDeployedRelationIT` writes a fabricated constant into
+that column rather than enciphering the placeholder, because it exercises no cipher.
+
+Refactoring Rationale: three of the five card numbers were replaced outright. The set previously
+held `0500024453765741`, which is a published number with its last digit altered;
+`1010000000000001`, attributed by a charter to a card series that exists nowhere in this repository;
+and `3714496353984312`, which is a widely published fifteen-digit provider test number with a digit
+appended. Two of the five passed the Luhn check, one of those was paired with a verification value
+of `905`, and none of the three carried any statement of where it came from. Replacing them cost
+nothing structural — every relationship §2.2 lists is preserved, at the same widths and row
+counts — and it removes the only reading under which this directory contained something that looked
+like a credential.
+
+### 2.2 The relationships the card corpus is arranged to discriminate
+
+Five card rows and four cross-reference rows are more than a consumer needs to decode a record. The
+surplus is arranged, and each arrangement distinguishes a specific pair of behaviours a smaller
+corpus could not tell apart. Every row of the table is an **executable** assertion, not a note:
+`ReportingFixtureContractTest.theCardFixturesCarryEveryStatedRelationship` reads it out of the files
+and `ReportingDeployedRelationIT` reads it back out of the engine.
+
+| Arrangement | What it distinguishes |
+|---|---|
+| Account `00000000050` carries **two** cards | A projection keyed on the card from one keyed on the account, which would collapse the pair to one row |
+| Card `9900001010000001` is in the master and **not** in the cross-reference | A read that starts from the cross-reference from one that starts from the master |
+| `9900001010000001` and `9900001020000001` end in the **same four digits** | A lookup on the whole number from one on the masked rendering, which names a tail rather than a card |
+| Card `9900001020000001` is `N` in the master while its cross-reference row remains | Whether a reporting read filters on the master's active flag; no reporting relation carries it, so a statement is produced for a closed card exactly as the batch oracle produces one |
+| The four cross-referenced cards span accounts `7`, `50` and `102` | A join that resolves per card from one that resolves per account |
+| `9999999999999999` appears in **no** file | A lookup that answers with nothing from one that answers with the nearest row |
+
 ---
 
 ## 3. Why the key domains overlap the reference extracts
 
 Two of the four account and customer identifiers are also in the reference extracts and two are
-not, and both halves are deliberate.
+not, and both halves are deliberate. The same split holds for the card numbers, as §1 records: two
+of the five are in `app/data/ASCII/carddata.txt` and three are not.
 
 Sharing `00000000007` and `00000000050` keeps a fixture usable alongside the reference seed data
 in any future test that loads both, because the join between an account and its customer resolves
@@ -112,22 +291,49 @@ composite is what `CVTRA04Y.cpy` declares.
 ## 5. The trailing pad character is a per-record-type fact
 
 Every record here closes with a `FILLER` that carries no value, and **which character that
-`FILLER` is made of differs by record type**. It is taken from the record's own reference extract
-under `app/data/ASCII/`, measured rather than assumed:
+`FILLER` is made of differs by record type**. For six of the seven it is taken from the record's own
+reference extract under `app/data/ASCII/`, measured rather than assumed; the seventh is the
+cross-reference, whose extract settles nothing and is treated separately below. All seven rows are
+listed, because a fixture absent from this table is a fixture whose pad nobody measured:
 
 | Fixture | Descriptor | `FILLER` span | Pad character | Reference extract |
 |---|---|---|---|---|
 | `acctfile.txt` | `ACCOUNT` | 122–300 (178) | **blank** | `acctdata.txt` pads with blanks |
 | `carddata.txt` | `CARD` | 91–150 (59) | **blank** | `carddata.txt` pads with blanks |
+| `cardxref.txt` | `XREF` | 36–50 (14) | **blank** | `cardxref.txt` pads **nothing** — see below |
 | `custfile.txt` | `CUSTOMER` | 332–500 (168) | **blank** | `custdata.txt` pads with blanks |
 | `tcatbal.txt` | `TCATBAL` | 28–50 (22) | **ASCII zero** | `tcatbal.txt` pads with zeroes |
 | `trantype.txt` | `TRANTYPE` | 52–60 (8) | **ASCII zero** | `trantype.txt` pads with zeroes |
 | `trancatg.txt` | `TRANCAT` | 56–60 (4) | **ASCII zero** | `trancatg.txt` pads with zeroes |
 
+Assumptions: the cross-reference is the one record whose pad **cannot** be measured from its own
+extract. `app/data/ASCII/cardxref.txt` stores only the 36 declared bytes and pads nothing at all
+— every one of its fifty records is 36 bytes long, so it truncates exactly where the account and
+card extracts pad. Two independent sources settle it as a blank instead, and they agree: the live
+house fixture at `tests/fixtures/posting/happy_path/cardxref.txt` writes those 36 bytes followed by
+14 blanks, and this directory's own file reaches the same byte by a second route — it omits the
+`FILLER` key entirely and lets `FixedWidthCodec` rebuild the pad, which makes the value a codec fact
+rather than a typed-in one.
+
+Trade-offs: an ASCII-zero pad was available for the cross-reference and would have matched the three
+zero-padded reference records, but it would have contradicted the only other committed `cardxref`
+fixture in the repository for a record type whose own extract offers no counter-evidence. The row is
+therefore documented as a **derived** rather than a measured fact, which is why the sentence above
+names both of its sources.
+
 The three zero-padded rows are corrections. They previously padded with blanks, which put the same
 record type in two shapes two directories apart: `reference-service`'s `trantype.txt` and
 `trancatg.txt` fixtures and `transaction-service`'s `tcatbal.txt` fixtures all pad with zeroes, as
 their extracts do, and these did not.
+
+Assumptions: the cross-reference is the one record whose pad **cannot** be measured from its
+extract, because `app/data/ASCII/cardxref.txt` stores only the 36 declared bytes and truncates where
+the account and card extracts pad. Two independent sources settle it as a blank and they agree: the
+live house fixture at `tests/fixtures/posting/happy_path/cardxref.txt` writes those 36 bytes followed
+by 14 blanks, and rebuilding the record from the descriptor alone reaches the same 14 bytes. A zero
+pad was available and would have matched the three zero-padded records, but it would have contradicted
+the only other committed cross-reference fixture in the repository for a record type whose own extract
+offers no counter-evidence.
 
 Assumptions: nothing a decode does can catch a wrong pad character. `FILLER` is declared as a
 character field, so blanks and zeroes both decode, both re-encode and both round-trip byte for
@@ -136,10 +342,19 @@ byte — which is exactly why the table above is **asserted** by
 down here. That case additionally asserts the two pad characters are different, so the directory
 cannot be quietly standardised on one of them.
 
+Assumptions: whether the codec can *supply* a pad is a second and narrower fact, asserted separately
+by `everyFixturePadIsSuppliedByTheCodecOnlyWhenItIsBlank`. The codec's rule is content-based: a
+**blank** padding field is dropped when a record is decoded and restored when one is encoded, while a
+**nonblank** one stays content and is carried through. So the four blank-padded fixtures here can be
+rebuilt from the descriptor alone, byte for byte, and the three zero-padded ones cannot — their zeroes
+are data the file supplies. That case asserts both directions, which is what keeps the table above
+honest: if the codec could derive every pad, the table would be redundant, and if it could derive
+none, the blank rows would be unverifiable.
+
 Alternatives Considered: padding everything here with zeroes, which is the simpler rule. Rejected
-on the measurement above — it would move `acctfile.txt` and `custfile.txt` away from what their own
-extracts do, trading three divergences for two new ones. The pad belongs to the record type, not to
-the directory.
+on the measurement above — it would move all four blank-padded fixtures (`acctfile.txt`,
+`carddata.txt`, `cardxref.txt` and `custfile.txt`) away from what their own extracts do, trading
+three divergences for four new ones. The pad belongs to the record type, not to the directory.
 
 ---
 
@@ -155,16 +370,27 @@ test is what proves the hand-authoring is right. To add a row:
 #       satisfied by one row a byte short and the next a byte long, and every field of both rows
 #       would then be read from the wrong offsets while the file still measured correctly.
 cd services/reporting-service/src/test/resources/fixtures
-awk '{ printf "%s row %d: %d bytes\n", FILENAME, FNR, length($0) }' acctfile.txt custfile.txt \
-    trantype.txt trancatg.txt
+awk '{ printf "%s row %d: %d bytes\n", FILENAME, FNR, length($0) }' acctfile.txt carddata.txt \
+    cardxref.txt custfile.txt tcatbal.txt trancatg.txt trantype.txt
 
-# WHAT: run the executable consumer for this directory.
+# WHAT: run both executable consumers for this directory.
 # WHY : -am is REQUIRED and not merely convenient. Without it Maven resolves an installed
 #       common-lib from the local repository rather than building the one in this tree, so a
 #       descriptor change made alongside a fixture change would be tested against the stale copy.
+# WHY : Assumptions: the second command is not optional. The contract test settles geometry and the
+#       integration test settles what the fixtures MEAN once loaded -- masking, the three-way join and
+#       the SELECT-only privilege -- so a change that keeps every row at its declared length while
+#       breaking a relationship from §2.2 passes the first command and fails the second. It needs a
+#       container runtime; verify runs it under Failsafe after packaging.
 cd ../../../../..
 mvn -B -f services/pom.xml -pl reporting-service -am -Dtest=ReportingFixtureContractTest test
+mvn -B -f services/pom.xml -pl reporting-service -am -Dit.test=ReportingDeployedRelationIT verify
 ```
+
+Refactoring Rationale: the byte-length command previously named **four** of the seven files, so three
+of them — including both card files, the two most consequential in the directory — could be edited to
+a wrong length and the documented check would report nothing. It now names all seven, in the same
+order as the §2 inventory so the two can be read against each other.
 
 To add a row, write it out at the exact declared length with the field offsets from the copybook
 linked in §2, then run the two commands above. The expected row count in

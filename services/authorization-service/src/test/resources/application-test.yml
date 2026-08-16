@@ -106,7 +106,7 @@ spring:
   # WHY : Refactoring Rationale: the clause above read "both overlays and the
   #       parameter-store starter were withdrawn together". The starter was NOT
   #       withdrawn. pom.xml declares
-  #       io.awspring.cloud:spring-cloud-aws-starter-parameter-store at L297-300,
+  #       io.awspring.cloud:spring-cloud-aws-starter-parameter-store at L288-291,
   #       deliberately, so that the resolver the queue starter registers module-wide
   #       is never left without the Systems Manager client it constructs: with the
   #       client absent a claimed location fails as NoClassDefFoundError inside
@@ -465,7 +465,6 @@ carddemo:
 #         - carddemo.security.jwt.expected-client-id
 #         - carddemo.messaging.pauth-request-queue
 #         - carddemo.messaging.reply-queue-allowlist
-#         - carddemo.messaging.hmac-key
 #         - carddemo.account-context.base-url
 #         - carddemo.internal-identity.authorization-signing-key
 # WHY : Assumptions: `spring.flyway.clean-disabled` is also left unset, and it is

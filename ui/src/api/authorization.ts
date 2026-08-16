@@ -112,6 +112,7 @@
  */
 
 import { getApiClient, keysetPagingMembers, requestPath } from './client';
+import { MASKED_CARD_NUMBER } from './masking';
 import type {
   ContractOperation,
   FraudMarkRequest,
@@ -229,9 +230,6 @@ export const AUTHORIZATION_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
   GET_NEXT_PENDING_AUTHORIZATION,
   SET_AUTHORIZATION_FRAUD_STATE,
 ];
-
-/** Matches the masked rendering every authorization response must carry. */
-const MASKED_CARD_NUMBER = /^[*]{12}[0-9]{4}$/u;
 
 /**
  * Lists one account's pending authorizations with the account summary above them.

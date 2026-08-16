@@ -353,10 +353,17 @@ class AuthApiContractTest {
 
     /**
      * Asserts that exactly the five user-administration operations are administrative and exactly the
-     * two token-issuing operations are open, which is the split the baseline's menu graph had.
+     * four session operations are open, which is the split the baseline's menu graph had.
+     *
+     * <p>Assumptions: ⚠️ Refactoring Rationale: the open set grew from three members to four when the
+     * sign-out operation was published. It belongs in the open set for the same reason the renewal does,
+     * argued once at the route: a caller closing a session may no longer hold a usable access token, and
+     * gating revocation behind one would refuse it in exactly the case that most needs it -- an abandoned
+     * session whose access token has expired and whose refresh token has weeks of life left. Its authority
+     * is possession of the refresh token, which is all the pool's revocation operation accepts.
      */
     @Test
-    @DisplayName("the five user operations are administrative and the two token operations are open")
+    @DisplayName("the five user operations are administrative and the four session operations are open")
     void theAdministrativeAndOpenSetsAreExactlyAsPublished() {
         List<String> administrative = new ArrayList<>();
         List<String> open = new ArrayList<>();
@@ -378,15 +385,17 @@ class AuthApiContractTest {
                         "put /api/v1/auth/users/{userId}",
                         "delete /api/v1/auth/users/{userId}");
         assertThat(open)
-                .as("only the operations a caller reaches BEFORE it holds a usable token may be"
-                        + " reachable without one: the two that issue a token set and the one that"
-                        + " renews it, whose access token may already have expired")
+                .as("only the operations a caller reaches WITHOUT a usable token may be reachable without"
+                        + " one: the two that issue a token set, the one that renews it, and the one that"
+                        + " revokes it -- on each of the last two the access token may already have"
+                        + " expired")
                 .containsExactlyInAnyOrder(
                         "post /api/v1/auth/signon",
                         "post /api/v1/auth/challenge",
-                        "post /api/v1/auth/refresh");
+                        "post /api/v1/auth/refresh",
+                        "post /api/v1/auth/signout");
         assertThat(SecurityConfig.unauthenticatedPaths())
-                .as("the chain's open list must be exactly those three paths and no subtree, and it is"
+                .as("the chain's open list must be exactly those four paths and no subtree, and it is"
                         + " asserted against the contract's own set so neither side can gain a member"
                         + " without the other")
                 .containsExactlyInAnyOrderElementsOf(
@@ -978,17 +987,26 @@ class AuthApiContractTest {
         //       public predicate over a vector set rather than being eyeballed. An earlier revision
         //       published only the bound and the character set, which is BROADER than what the filter
         //       accepts -- the filter additionally refuses a value made only of digits and the three
-        //       separators carrying thirteen or more digits, because that is the shape of a primary
-        //       account number and this identity is echoed on the response and written to every log
-        //       line. A contract broader than the filter documents requests the service rejects, so a
-        //       client built from it fails at run time on a value the document said was fine.
+        //       separators carrying nine or more digits, because that is the shape of every protected
+        //       identifier this system holds and this identity is echoed on the response and written
+        //       to every log line. A contract broader than the filter documents requests the service
+        //       rejects, so a client built from it fails at run time on a value the document said was
+        //       fine. This equality is what caught the widening: the filter's floor moved from
+        //       thirteen digits to nine and this assertion failed on the published pattern until the
+        //       seven documents were corrected to match, which is the whole reason it compares a
+        //       vector set against the predicate instead of restating the regex.
         // WHY : Assumptions: the vectors cover both sides of the boundary rather than only the refused
-        //       side. The three separated forms and the contiguous form must be refused; a
-        //       timestamp-like value, a value carrying a letter and a minted-shaped value must be
-        //       accepted, and each of those is a realistic identity a caller or this service supplies.
+        //       side, and they name each protected width rather than only the widest. Refused: the
+        //       card number in contiguous and all three separated forms, the nine-digit customer and
+        //       national identifier width, the eleven-digit account identifier width contiguous and
+        //       separated, and two intermediate all-digit runs. Accepted: an eight-digit run and an
+        //       eight-digit separated date, both below the floor; a value carrying a letter; a
+        //       minted-shaped value; and a value of full width made only of letters. Each is a
+        //       realistic identity a caller or this service supplies.
         for (String vector : List.of("4111111111111111", "4111-1111-1111-1111",
                 "4111.1111.1111.1111", "4111_1111_1111_1111", "1234567890123",
-                "2022-07-18-0930", "a1b2c3d4e5f6a7b8c9d0e1f2", "CD0123456789ABCDEF012345",
+                "123456789", "00000000011", "000-0000-0011", "2022-07-18-0930",
+                "12345678", "2022-07-18", "a1b2c3d4e5f6a7b8c9d0e1f2", "CD0123456789ABCDEF012345",
                 "123456789012", "A".repeat(CorrelationIdFilter.CORRELATION_ID_MAX_LENGTH))) {
             assertThat(declared.matcher(vector).matches())
                     .as("the published pattern must accept exactly what"
@@ -1128,7 +1146,7 @@ class AuthApiContractTest {
 
         assertThat(operations)
                 .as("the census is not vacuous; every published operation was examined")
-                .isEqualTo(8);
+                .isEqualTo(9);
 
         Map<String, Object> declared = mapping(mapping(document, "components"), "responses");
         assertThat(declared)

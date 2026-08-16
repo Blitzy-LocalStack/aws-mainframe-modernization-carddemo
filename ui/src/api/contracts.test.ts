@@ -125,7 +125,7 @@ const BROWSER_CLIENTS: ReadonlyArray<
  * How many BROWSER-FACING operations the seven published contracts declare in total.
  *
  * Assumptions: this figure is the scanner's self-check and not a target. It is measured across the seven
- * documents -- account 3 of its 11, auth 8, authorization 5, card 5, reference 19, reporting 8 and
+ * documents -- account 4 of its 12, auth 8, authorization 5, card 5, reference 19, reporting 8 and
  * transaction 5 -- and its only job is to fail loudly if the scanner ever stops matching, because a
  * scanner that matches nothing agrees with an empty manifest. Account contributes only its non-internal
  * operations, for the reason recorded on {@link BROWSER_CLIENTS}.
@@ -149,8 +149,49 @@ const BROWSER_CLIENTS: ReadonlyArray<
  * no caller could open, because the bucket behind them refuses every request that does not arrive
  * through the private endpoint. Three operations close that: a run's status by execution NAME, the
  * report document, and one statement document through the opaque selector the service minted for it.
+ *
+ * Refactoring Rationale: it is now 54, with account at 4 of its 12. The account contract gained
+ * `POST /api/v1/accounts/update/validate`, which is the baseline's own ENTER turn on the update screen --
+ * `app/cbl/COACTUPC.cbl`'s show-details arm at L2582 to L2590 moves to
+ * `88 ACUP-CHANGES-OK-NOT-CONFIRMED` and paints `Changes validated.Press F5 to save`, while only the
+ * later PF5 turn writes. A review found the screen had no operation for that turn and so validated in the
+ * browser: it checked that a record had been read and that something had changed, announced that the
+ * changes were validated, and left the thirty-six non-key edits to be discovered by the write. Publishing
+ * the turn keeps the service the single authority on what is acceptable.
+ *
+ * Refactoring Rationale: it is now 55, with transaction at 5 of its 5. One remedy for the copy-last
+ * finding proposed a read-only FIRST HALF of the baseline's PF5 key press as a second operation.
+ * `app/cbl/COTRN02C.cbl` splits COPY-LAST-TRAN-DATA at its own seam -- L473 validates the key fields
+ * alone, L480 to L493 paint eleven values into the map's input fields, and only L495 captures -- and the
+ * whole paragraph published as one operation could not be called from the empty form an operator presses
+ * the key on, because the capture body requires eleven data members and a schema violation is answered
+ * before any handler runs. A review found the screen had therefore validated all eleven fields BEFORE
+ * copying and could not have painted the copied values in any case, since the preview shape carried no
+ * copied value at all. The delivered contract answers the same finding the other way -- `CopyLastRequest`
+ * asks for the two keys alone and the preview CARRIES the eleven copied values -- so the operation count
+ * moves on `POST /api/v1/auth/sign-out` instead, and the note below the constant records the measurement.
  */
-const EXPECTED_OPERATION_COUNT = 53;
+/*
+ * WHY : Refactoring Rationale: it is now 54. The account contract gained the no-write validation turn at
+ *       `POST /api/v1/accounts/update/validate`, which the reference screen's first turn needs: its
+ *       `2000-DECIDE-ACTION` show-details arm advances only when the edits found no error and something
+ *       changed, so a browser with no way to ask for that verdict alone could only advance without having
+ *       validated or write in order to find out. The figure is MEASURED from the documents, not
+ *       incremented, for the reason this file's own comment above gives.
+ * WHY : ⚠️ Refactoring Rationale: the figure is 55, RE-MEASURED, and the paragraph above it that already
+ *       argued for 55 credited the movement to a SECOND transaction operation at
+ *       `POST /api/v1/transactions/copy-last/lookup`. That operation does not exist: copy-last is one
+ *       operation, `copyLastTransaction`, taking `CopyLastRequest` -- the two keys and the confirmation
+ *       flag -- and answering `TransactionAddPreview`, whose `copied` member carries the eleven values of
+ *       `CopiedTransactionData`. Splitting the reference's `COPY-LAST-TRAN-DATA` at `app/cbl/COTRN02C.cbl`
+ *       L473 into a read half and a capture half was one remedy for the finding that the screen could not
+ *       paint copied values; carrying the copied values IN THE PREVIEW is the other, and it is the one the
+ *       delivered contract implements, so the browser-facing transaction surface is 5 rather than 6. The
+ *       55th operation is `POST /api/v1/auth/sign-out`, whose `SignOutRequest` body is what lets a sign-off
+ *       revoke the refresh token instead of merely forgetting it. Measured per contract: account 4, auth 9,
+ *       authorization 5, card 5, reference 19, reporting 8, transaction 5.
+ */
+const EXPECTED_OPERATION_COUNT = 55;
 
 /** The methods a path item may declare, matching the set the Java-side contract tests filter on. */
 const HTTP_METHODS = ['get', 'post', 'put', 'delete', 'patch'] as const;
@@ -1950,6 +1991,12 @@ const SCHEMA_TYPE_BINDINGS: Readonly<Record<string, readonly string[]>> = {
   'reporting:TransactionReportLinePage': ['PageResponse'],
   'transaction:TransactionPage': ['PageResponse'],
   'account:CardXrefPage': ['PageResponse'],
+  // WHY : Assumptions: the copy-last body is bound to `CopyLastTransactionRequest`, whose name states
+  //   which copy it is the request for. The contract can call it `CopyLastRequest` because it sits in one
+  //   service's document where nothing else copies anything; the client holds every service's shapes in
+  //   one module, so an unqualified `CopyLastRequest` there would not say what it copies. The companion
+  //   `CopiedTransactionData` needs no entry, because it is named identically on both sides.
+  'transaction:CopyLastRequest': ['CopyLastTransactionRequest'],
   // WHY : Assumptions: the screen projection is bound to `PendingAuthDetailScreen`, whose name states
   //   what the schema's does not -- that it is the record of what the terminal displayed rather than a
   //   second reading of the segment.
@@ -2212,9 +2259,19 @@ function compareClosure(): {
  * makes an absence-asserting gate worthless. Both figures were measured against the seven documents as
  * they stand and are expected to move whenever a contract legitimately gains or loses a shape. Measured
  * per contract: account 17, auth 19, authorization 21, card 11, reference 42, reporting 21 and
- * transaction 32. Eighty-nine of the 163 are object schemas; the member comparison reads eighty-seven of
+ * transaction 34. Ninety-one of the 165 are object schemas; the member comparison reads eighty-nine of
  * those, the two entries of {@link UNBOUND_SCHEMAS} being the exceptions, and the remaining seventy-four
  * are the scalars, enums and cursor tokens the objects are built from.
+ *
+ * Refactoring Rationale: both figures read 163 and 534, with transaction measured at 32. The transaction
+ * contract gained `TransactionCopiedDraft` and `TransactionCopyRequest`, which together declare thirteen
+ * properties, and `TransactionAddPreview` gained the `copiedDraft` member that references the first --
+ * fourteen properties in total, which is the whole of the 534-to-548 movement. Both are object schemas
+ * built from scalars the document already declared, which is why the scalar tally is unchanged. They exist
+ * because the copy-last operation previously answered the amount alone and took the capture operation's
+ * whole request shape: a screen could neither render the ten other copied fields nor re-send them, so its
+ * only way to confirm a copied row was to ask for "the latest row" a second time, which a concurrent
+ * insert changes.
  *
  * Refactoring Rationale: both figures read 154 and 523, and the per-contract line beside them read
  * auth 16, authorization 21, card 11, reference 42, reporting 17, transaction 32 and account 15 -- a
@@ -2224,11 +2281,33 @@ function compareClosure(): {
  * recorded in {@link SCHEMA_TYPE_BINDINGS}, which moved nine of its properties from unbound into the
  * comparison. Every figure here is the measured one, and the comparison reports no difference at any of
  * the 534 properties.
+ *
+ * Refactoring Rationale: they now read 165 and 547, and both were RE-MEASURED from the files rather
+ * than incremented by what anyone expected. The transaction contract reaches 34 where it reached 32,
+ * having gained `TransactionCopyLookupRequest` and `TransactionCopyView` for the read-only half of the
+ * PF5 key press; the property total moved by thirteen, which is those two shapes' two and eleven
+ * members. Both new shapes are bound by NAME to types in `types.ts`, so neither needed an entry in
+ * {@link SCHEMA_TYPE_BINDINGS}, and the member, optionality and nullability comparisons report no
+ * difference at any of the 547 properties.
+ *
+ * ⚠️ Refactoring Rationale: they now read 167 and 556, and the pair they replace disagreed with each
+ * other -- the paragraph above records 547 properties while the constant below it read 548 -- which is
+ * what a figure adjusted by hand rather than re-measured looks like. Both are re-measured. The closure
+ * reaches two shapes it did not: `AccountUpdateValidationResponse`, the four-member answer to the
+ * account contract's no-write validation turn, and `SignOutRequest`, the single-member body that lets a
+ * sign-off revoke its refresh token rather than merely forget it. The transaction contract still reaches
+ * 34, but they are not the same 34: the copy-last read-half operation is withdrawn and `CopyLastRequest`
+ * (3 members) with `CopiedTransactionData` (11) and a `TransactionAddPreview` of 6 stand where a lookup
+ * request and a copy view stood, which is the remainder of the property movement. Measured per contract,
+ * schemas then compared properties: account 18/111, auth 20/63, authorization 21/98, card 11/38,
+ * reference 42/82, reporting 21/76, transaction 34/88. Ninety-three of the 167 are object schemas; the
+ * member comparison reads ninety-one of those, the two entries of {@link UNBOUND_SCHEMAS} being the
+ * exceptions.
  */
-const EXPECTED_CLOSURE_SCHEMA_COUNT = 163;
+const EXPECTED_CLOSURE_SCHEMA_COUNT = 167;
 
 /** How many properties the bound object schemas of that closure declare in total. */
-const EXPECTED_COMPARED_PROPERTY_COUNT = 534;
+const EXPECTED_COMPARED_PROPERTY_COUNT = 556;
 
 /**
  * Asserts every reachable object schema is bound to a type that declares members.

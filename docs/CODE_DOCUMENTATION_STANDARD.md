@@ -599,7 +599,8 @@ which lints deliberately non-conforming sources through the ESLint Node API
 against this very configuration, so a future relaxation fails a test rather than
 passing quietly. Refactoring Rationale: this link named
 `ui/src/test/documentationGate.test.ts`, a path that does not exist -- `ui/src/test/`
-holds `setup.ts` and nothing else. The probe sits at the `ui/` root because that is
+holds the runner's own setup plus the shared harnesses and the cases that exercise them,
+and no gate probe. The probe sits at the `ui/` root because that is
 where the configuration it lints sits, and the correction matters more than a broken
 link normally would: a reader following it found nothing and had no way to tell whether
 the probe was missing or merely misfiled, which is the difference between a gate with a

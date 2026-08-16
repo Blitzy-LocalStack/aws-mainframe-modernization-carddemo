@@ -1,7 +1,9 @@
 //=============================================================================
 // WHY : Assumptions: this descriptor is the one place the rulings below are
 //       recorded, and the seven repository interfaces beside it cite it rather
-//       than restating them. The questions it settles are the ones each author
+//       than restating them. The one CLASS beside them, InquiryReplyLedger, is
+//       governed by none of the browse rulings -- it reads by primary key only --
+//       and the exception it represents is argued in the prose below. The questions it settles are the ones each author
 //       would otherwise answer alone -- whether a window is taken by key or by
 //       ordinal, which row's key a page publishes, whether a category code is
 //       character or numeric -- and seven independent answers to one question is
@@ -21,7 +23,8 @@
 /**
  * Data access for the reference-data bounded context: seven Spring Data JPA repository interfaces over
  * the six tables of the PostgreSQL {@code reference} schema, together with the keyset queries that
- * replace the baseline's cursor paging.
+ * replace the baseline's cursor paging and one native-statement ledger over the seventh, operational
+ * table.
  *
  * <h2>Purpose</h2>
  *
@@ -35,9 +38,11 @@
  * to a type in this package is the one this descriptor constrains: how a row is located, and in what
  * order rows are returned.</p>
  *
- * <p>Assumptions: all seven types in this package are {@code interface} declarations with no
+ * <p>Assumptions: seven of the eight types in this package are {@code interface} declarations with no
  * implementation authored anywhere, because the persistence provider derives one at run time from the
- * method names and the query annotations. This matters for documentation rather than for behaviour:
+ * method names and the query annotations; the eighth, {@code InquiryReplyLedger}, is the documented
+ * exception recorded below and is an authored class. This matters for documentation rather than for
+ * behaviour:
  * {@code config/checkstyle/checkstyle.xml} lists {@code INTERFACE_DEF} first among the tokens its
  * type-documentation check inspects, so the project Explainability rule's word "class" at line 15
  * covers every type declaration here, and each interface and each of its members carries its own
@@ -55,10 +60,47 @@
  * <h2>The seven repositories, the entities they read, and their identities</h2>
  *
  * <p>Assumptions: all seven are landed as compilation units beside this descriptor, so a reader who
- * cannot open one has found a gap rather than the expected state. The closed set is eight compilation
- * units: this descriptor and the seven interfaces. The pairing below is settled here and enumerated
- * nowhere else, which is why it is written out in full rather than left to be inferred from a file
- * name.</p>
+ * cannot open one has found a gap rather than the expected state. The closed set is nine compilation
+ * units: this descriptor, the seven interfaces, and the one class described immediately below. The
+ * pairing further down is settled here and enumerated nowhere else, which is why it is written out in
+ * full rather than left to be inferred from a file name.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: this package declares ONE CLASS, {@code InquiryReplyLedger}, and it is the
+ * single documented exception to "one repository interface per table". This descriptor previously stated
+ * that every type here is an {@code interface} declaration and that the closed set is eight units; both
+ * sentences are withdrawn rather than stretched. The exception exists because the class's central
+ * statement cannot be expressed as a Spring Data method: it must insert a row if and only if no row
+ * holds that key and report which of the two happened, in ONE round trip, which is
+ * {@code INSERT ... ON CONFLICT DO NOTHING} and has no JPQL form. Expressing the same intent as a read
+ * followed by a conditional insert would leave the decision to the gap between two statements, which is
+ * exactly where two concurrent deliveries of one message would both decide they were first. Alternatives
+ * Considered: mapping {@code reference.inquiry_reply_ledger} as an eighth entity so an eighth interface
+ * could be declared over it. Rejected because a mapped entity would let any member of this module read or
+ * write the ledger through the persistence context -- including flushing a stale copy over a row a
+ * concurrent delivery had already advanced -- where three named statements over one table offer nothing
+ * else. Assumptions: the precedent does not generalise; it is admissible here because the statement is
+ * not expressible otherwise, not because a class is a convenient shape. The identically shaped ledger in
+ * {@code account-service} reached the same conclusion first, and it is followed rather than re-argued so
+ * the two asynchronous exchanges cannot acquire two idempotency disciplines.</p>
+ *
+ * <p>Assumptions: what that ledger is FOR belongs to the exchange rather than to this package, and the
+ * argument is recorded in full on the class and on
+ * {@code services/reference-service/src/main/resources/db/migration/V3__reference_inquiry_reply_ledger.sql}.
+ * In outline: the asynchronous date-conversion consumer sends its reply and then returns, and the queue
+ * acknowledges the request only on that return, so a task killed between the two leaves the request
+ * visible again -- and because that reply body is the system date and time read at the moment of
+ * composition, a redelivery that recomposed would answer with a LATER timestamp rather than the same
+ * answer. The ledger records the composed reply under the BROKER's own identifier for the delivery and
+ * commits before it is sent, so a redelivery re-sends the recorded bytes instead of asking the clock
+ * again. Assumptions: it holds no reference DATA, and it is the only table in this schema that does not;
+ * the migration header records why it lives beside the context that owns the exchange rather than in a
+ * schema of its own.</p>
+ *
+ * <p>Trade-offs: one class among seven interfaces makes the package's shape non-uniform, so a reader
+ * cannot infer from the directory alone that every member is a derived interface. That cost is accepted
+ * over the alternative of a second package for one type, which would put the exchange's durable state
+ * outside the data-access package that every other row of this context is reached through and would need
+ * its own descriptor to say the same things this one now says.</p>
  *
  * <p>Assumptions: the mapping is one interface per table for five of the six tables. The sixth,
  * {@code reference.us_phone_area_codes}, carries TWO, and the division between them is by question:
@@ -70,11 +112,27 @@
  * {@code PhoneAreaCodeRepository}, {@code StateRepository} and {@code StateZipPrefixRepository} -- were
  * second interfaces over the same three entities the {@code Us}-prefixed three already address, and each
  * duplicated the other's whole query surface: the same walks and the same keyed finder, derived twice,
- * with no basis for a reader to choose between them. {@code StateRepository} and
- * {@code StateZipPrefixRepository} remain withdrawn for that reason and are recorded here as names not
- * to reintroduce. {@code PhoneAreaCodeRepository} has been reinstated, and it is reinstated as ONE
+ * with no basis for a reader to choose between them. {@code StateZipPrefixRepository} remains withdrawn
+ * for that reason and is recorded here as a name not to reintroduce as a SECOND interface.
+ * {@code PhoneAreaCodeRepository} has been reinstated, and it is reinstated as ONE
  * method rather than as the seven it previously duplicated, so the objection that withdrew it does not
  * apply to what it now declares.
+ *
+ * <p>⚠️ Refactoring Rationale: {@code StateRepository} is no longer withdrawn either, and the change is
+ * a RENAME rather than a reinstatement, which is the distinction this paragraph exists to make. The
+ * interface over {@code UsState} was authored here as {@code UsStateRepository}; it now carries the name
+ * {@code StateRepository}, which is the name this package's own checkpoint contract assigns to that
+ * interface. Nothing was added: the same four members are declared by the same one interface, so the
+ * objection that withdrew the duplicate -- two interfaces deriving one query surface with no basis to
+ * choose between them -- is not reopened and could not be, because there is still exactly one interface
+ * over that entity. Assumptions: the ENTITY keeps its {@code UsState} name and the table keeps
+ * {@code reference.us_states}; only the interface moved, so a reader tracing the table or the entity
+ * finds the prefixed names unchanged. Trade-offs: the directory therefore mixes prefixed and unprefixed
+ * interface names -- {@code StateRepository} beside {@code UsPhoneAreaCodeRepository} and
+ * {@code UsStateZipPrefixRepository} -- and that inconsistency is accepted rather than resolved by
+ * renaming the other two, because renaming an interface with no contract requiring it would be churn,
+ * and because the two remaining prefixed names are the ones whose unprefixed forms were withdrawn as
+ * duplicates and are recorded above as not to be reintroduced.
  *
  * <p>Refactoring Rationale: the ground given for withdrawing the area-code interface was that
  * {@code findByAreaCode} on the surviving interface "answers strictly more", because it returns the row
@@ -138,9 +196,13 @@
  *       interface names in its own documentation rather than re-declaring, so one query keeps one
  *       derivation.</dd>
  *
- *   <dt>{@code UsStateRepository}</dt>
+ *   <dt>{@code StateRepository}</dt>
  *   <dd>Over {@code UsState}, table {@code reference.us_states}, identity {@code String}. Three walks
- *       and a keyed finder.</dd>
+ *       and a keyed finder. Assumptions: the seeded domain is 56 codes -- the fifty states, the
+ *       District of Columbia and the five territory codes -- and the interface's own Javadoc records
+ *       why narrowing it to 50 would be a parity break rather than a tidy-up. The union-scoped
+ *       membership predicate is the inherited {@code existsById}, which that interface names rather
+ *       than re-declaring, so one question keeps one derivation.</dd>
  *
  *   <dt>{@code UsStateZipPrefixRepository}</dt>
  *   <dd>Over {@code UsStateZipPrefix}, table {@code reference.us_state_zip_prefixes}, identity
@@ -524,7 +586,7 @@
  *
  * <p>Assumptions: two Checkstyle modules enforce that, and neither is redundant.
  * {@code JavadocPackage} inspects the file set and requires this file to exist in any directory holding
- * an audited source file -- this directory holds seven interfaces, so it fires. {@code
+ * an audited source file -- this directory holds seven interfaces and one class, so it fires. {@code
  * MissingJavadocPackage} inspects the parsed tree and requires this file to carry Javadoc. A descriptor
  * reduced to a bare package statement, or to an ordinary block comment, satisfies the first and fails
  * the second, which is why prose is the deliverable and this file's existence is not. Both run at the

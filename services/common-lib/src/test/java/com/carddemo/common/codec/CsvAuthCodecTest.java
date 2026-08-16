@@ -83,10 +83,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Assumptions: no test here reads a clock, a file, an environment variable or a network resource.
  * Every expectation is a literal transcribed from the reference source, which is what lets this
  * class run with no database, no emulator and no COBOL compiler present.</p>
- *
- * <p>Parameters, return values and exceptions at type level: declared inapplicable. A class
- * declaration accepts no parameter, yields no value and raises nothing, so this block carries no
- * parameter, return or exception at-clause.</p>
  */
 class CsvAuthCodecTest {
 
@@ -406,8 +402,6 @@ class CsvAuthCodecTest {
      * COBOL pad before the case enters the stream, while its leading and internal spaces remain data.
      * Parameterized display names use only the case index so no card number reaches a test report.</p>
      *
-     * <p>This provider takes no parameter.</p>
-     *
      * @return a {@link Stream} of {@link AuthRequest} values covering positive, negative and zero
      *     money, exact widths, leading zeros, alphanumeric merchant data, significant spaces and
      *     normalized trailing pad
@@ -447,8 +441,6 @@ class CsvAuthCodecTest {
      * excluded from this round-trip provider because the production formatter emits suppression
      * spaces after its minus while the production parser strips pad only around the whole token; the
      * separate negative-asymmetry test below records that real API boundary instead of hiding it.</p>
-     *
-     * <p>This provider takes no parameter.</p>
      *
      * @return a {@link Stream} of {@link AuthReply} values covering canonical positive and zero money
      *     plus diverse character-field shapes
@@ -544,7 +536,7 @@ class CsvAuthCodecTest {
     /**
      * Asserts that a rendered money token carries no {@code +} character.
      *
-     * <p>This helper returns no value; JUnit reports an assertion failure when the token contains a
+     * <p>JUnit reports an assertion failure when the token contains a
      * plus sign.</p>
      *
      * @param rendered the rendered {@link String} token to inspect
@@ -561,8 +553,6 @@ class CsvAuthCodecTest {
      * 374 of {@code COPAUA0C.cbl} names its eighteen receivers in the order
      * {@code CCPAURQY.cpy} declares them at lines 19 to 36, and a component moved on the carrier would
      * move a value on the wire while every field still read as plausible text.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the request carrier declares eighteen components in copybook order")
@@ -581,8 +571,6 @@ class CsvAuthCodecTest {
      * leading components are the card number and the transaction identifier for a stated reason -- a
      * consumer pairs a reply with its request from them without decoding the rest -- so a reordering
      * of the first two would break correlation as well as parsing.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the reply carrier declares six components in copybook order")
@@ -600,8 +588,6 @@ class CsvAuthCodecTest {
      * any one of them changing alone is a defect rather than a refinement. Asserting them against each
      * other rather than each against a literal is what makes a partial edit fail: adding a component
      * without a width leaves the tables unequal even though each remains internally consistent.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("carrier components, field counts, widths and names all agree")
@@ -625,8 +611,6 @@ class CsvAuthCodecTest {
      * top-level exception would be reusable somewhere the format does not apply. The failure type
      * extends {@link IllegalArgumentException} so that a consumer can route a malformed payload to a
      * dead-letter queue while still catching it with one type.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("carriers and the failure type are nested in the codec")
@@ -644,8 +628,6 @@ class CsvAuthCodecTest {
      * the pictures {@code CCPAURQY.cpy} declares at lines 19 to 36 with
      * {@code PA-RQ-TRANSACTION-AMT PIC +9(10).99} at line 27 counted as the fourteen characters it
      * declares.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the request width table is the copybook's own and sums to 153")
@@ -671,8 +653,6 @@ class CsvAuthCodecTest {
      * trailing one because the {@code UNSTRING} at line 354 of {@code COPAUA0C.cbl} names eighteen
      * receiving fields and therefore consumes only interior separators, which is the respect in which
      * the request differs from the reply.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the request payload is 170 characters with seventeen interior delimiters")
@@ -697,8 +677,6 @@ class CsvAuthCodecTest {
      * localises a width defect to the field that caused it. The first eight positions are the same
      * whichever money width is used, so the ninth is the earliest place a wrong money width becomes
      * visible -- and once it is wrong there, every position after it is wrong too.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the request delimiters sit at the declared zero-based positions")
@@ -717,8 +695,6 @@ class CsvAuthCodecTest {
      * about ordinal order and not about byte offsets. Each expectation is the whole emitted field
      * including any pad, so a value that reached the right ordinal at the wrong width fails here
      * too.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("each request field lands in its own ordinal slot")
@@ -754,8 +730,6 @@ class CsvAuthCodecTest {
      * compensating width errors sum to the right total. A field one character short and its neighbour
      * one character long would pass a length check on the whole payload and would still shift the
      * boundary between them for any reader that trusts the widths.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("every request field occupies its full emitted width")
@@ -777,8 +751,6 @@ class CsvAuthCodecTest {
      * and decode share one mistaken width. The literal is the eighteen values of
      * {@link #orderedRequest()} joined by seventeen commas, with the ordinal-nine value rendered by
      * the fourteen-character request renderer.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the ordered request payload matches its golden vector byte for byte")
@@ -803,8 +775,6 @@ class CsvAuthCodecTest {
      * <p>Alternatives Considered: stripping both ends, which would look symmetrical and would silently
      * alter any value whose first character is genuinely a space -- a merchant city of {@code " YORK"}
      * would become {@code "YORK"} and no longer match the record it came from.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("DELIMITED BY SIZE keeps leading and internal spaces and pads to full width")
@@ -837,10 +807,10 @@ class CsvAuthCodecTest {
         assertEquals(13, fieldAt(payload, 14).length());
         assertEquals(CsvAuthCodec.REQUEST_WIRE_LENGTH, payload.length());
 
-        // WHY : Assumptions: the decode direction has to agree with the strip rule or the round trip
-        //       would report a value the producer never sent. The leading space and the internal
-        //       two-space run come back and the restored trailing pad does not, which is exactly the
-        //       asymmetry the wire declares.
+        // Assumptions: the decode direction has to agree with the strip rule or the round trip
+        // would report a value the producer never sent. The leading space and the internal
+        // two-space run come back and the restored trailing pad does not, which is exactly the
+        // asymmetry the wire declares.
         AuthRequest decoded = CsvAuthCodec.decodeRequest(payload);
         assertEquals(" ACME  SUPERMARKET", decoded.merchantName());
         assertEquals(" A B", decoded.merchantCity());
@@ -855,8 +825,6 @@ class CsvAuthCodecTest {
      * {@code 000008} and {@code 7} for {@code 07}, which loses five characters and one respectively
      * and shifts every field after it -- and the reference {@code UNSTRING} would then read the
      * shifted payload without complaint, because a delimited reader has no width to check against.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("digit-picture fields keep their leading zeros as text")
@@ -887,22 +855,17 @@ class CsvAuthCodecTest {
      * the amount, or that carried the card number in a different position, would pass a difference check
      * and still disclose the value.</p>
      *
-     * <p>Refactoring Rationale: the transaction identifier is now asserted ABSENT from both renderings,
-     * where this case previously asserted it PRESENT "for correlation". The earlier assertion encoded a
-     * position the class under test contradicted in the same file: its sensitive-field set lists
-     * {@code PA-RQ-TRANSACTION-ID} and {@code PA-RL-TRANSACTION-ID} and states the reason -- the
-     * identifier is the deduplication key of the ordered queue, so it appears in operational tooling
-     * beside the card number it was grouped by, and quoting it while masking the card number still
-     * narrows a search to one cardholder. A test asserting the opposite of the type's own stated
-     * contract pins the defect rather than the behaviour, so it is the test that moves.</p>
+     * <p>Assumptions: the transaction identifier is asserted ABSENT from both renderings, because the
+     * class under test lists {@code PA-RQ-TRANSACTION-ID} and {@code PA-RL-TRANSACTION-ID} in its
+     * sensitive-field set and states the reason -- the identifier is the deduplication key of the
+     * ordered queue, so it appears in operational tooling beside the card number it was grouped by, and
+     * quoting it while masking the card number still narrows a search to one cardholder.</p>
      *
      * <p>Trade-offs: the reply's three decision fields are still rendered, because they are the values
      * that make a log line diagnostically useful and none of them is cardholder data. Correlation is
      * served by {@code correlationKey}, which answers a keyed token over the same identity -- so the
      * pressure that leads an author to log the raw payload instead is answered by a safe accessor
      * rather than by an unsafe rendering.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("carrier renderings mask the card number and withhold identifier and monetary detail")
@@ -936,10 +899,10 @@ class CsvAuthCodecTest {
         assertFalse(request.correlationKey(tokeniser).contains(CARD_NUM),
                 "the correlation token must not disclose the card number");
 
-        // WHY : Assumptions: the request withholds its merchant and acquirer detail as a group rather
-        //       than field by field, because those fields identify where a cardholder transacted and
-        //       are jointly re-identifying even when the card number is masked. The reply withholds its
-        //       amount and its identifier, since its other four fields are the decision itself.
+        // Assumptions: the request withholds its merchant and acquirer detail as a group rather
+        // than field by field, because those fields identify where a cardholder transacted and
+        // are jointly re-identifying even when the card number is masked. The reply withholds its
+        // amount and its identifier, since its other four fields are the decision itself.
         assertTrue(requestText.contains("<withheld>"),
                 "the request rendering must state that components are withheld");
         assertFalse(requestText.contains("ACME SUPERMARKET NO 12"),
@@ -963,8 +926,6 @@ class CsvAuthCodecTest {
      * therefore a rename of an identifier and nothing else: the field stays tenth, stays four
      * characters, and stays between the money field and the acquirer country code. Renaming it in the
      * name table instead would send a reader looking for a copybook line that does not exist.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the merchant category code misspelling is lineage only")
@@ -989,8 +950,6 @@ class CsvAuthCodecTest {
      * field of the golden vector is already at its declared width; a payload carrying a shortened
      * field re-encodes to the padded form instead, which the tolerant-decode discipline accepts and
      * this class asserts separately.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("a request payload decodes and re-encodes byte for byte")
@@ -1010,8 +969,6 @@ class CsvAuthCodecTest {
      * {@code CCPAURLY.cpy}: sixteen for the card number, fifteen for the transaction identifier, six
      * for the authorization identifier, two for the response code, four for the reason and fourteen
      * for the approved amount.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the six reply fields occupy fifty-seven declared characters")
@@ -1037,10 +994,8 @@ class CsvAuthCodecTest {
      * which gives five and produces the incorrect total {@code 57 + 5 = 62}. The {@code STRING} at
      * lines 722 to 727 of {@code COPAUA0C.cbl} instead pairs a comma literal with every field,
      * including the approved amount at line 727, so the correct arithmetic is
-     * {@code 57 + 6 = 63}. This regression records the baseline statement as written; it makes no
-     * claim that the baseline was repaired or changed.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
+     * {@code 57 + 6 = 63}. The assertion records the width the baseline emits; the baseline itself is
+     * reference material and is not changed by this project.</p>
      */
     @Test
     @DisplayName("the canonical reply length is sixty-three, not sixty-two")
@@ -1063,8 +1018,6 @@ class CsvAuthCodecTest {
      * it proves the sixth comma is physically present at the end of the 63-character payload. The
      * positions are fixed literals rather than values recomputed from the production table, so a
      * width and its derived constant cannot drift together without this test noticing.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the reply delimiters sit at zero-based positions 16, 32, 39, 42, 47 and 62")
@@ -1083,8 +1036,6 @@ class CsvAuthCodecTest {
      * seven tokens, but {@code CCPAURLY.cpy} declares only six values. The decoder consumes the first
      * six and permits the seventh only when it is pad-only, which keeps the framing comma visible
      * without enlarging {@link AuthReply} or shifting its component order.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the empty token after the trailing comma is not a seventh reply field")
@@ -1105,8 +1056,6 @@ class CsvAuthCodecTest {
      * declared display character one byte. A text-only check could miss a future byte encoder using a
      * variable-width charset, while a length-only byte check could miss the right length carrying the
      * wrong zero-suppressed money or a misplaced comma.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the reply encoder emits exactly sixty-three canonical bytes")
@@ -1130,8 +1079,6 @@ class CsvAuthCodecTest {
      * from the remaining {@code PIC X(200)} buffer, not a seventh field. The Java encoder does not
      * reproduce that cursor defect: it emits the 63-byte canonical form, while the decoder accepts
      * the one pad-only framing token needed for baseline interoperability.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the baseline sixty-four-byte frame decodes as the canonical reply")
@@ -1141,10 +1088,10 @@ class CsvAuthCodecTest {
         Arrays.fill(baselineBuffer, (byte) ' ');
         System.arraycopy(canonical, 0, baselineBuffer, 0, canonical.length);
 
-        // WHY : Assumptions: strict encode and tolerant decode are deliberately asymmetric. Emitting
-        //       only the 63 contract bytes prevents Java from perpetuating a cursor-as-length defect,
-        //       while accepting the pad-only seventh token keeps replies already produced by the
-        //       baseline readable during migration.
+        // Assumptions: strict encode and tolerant decode are deliberately asymmetric. Emitting
+        // only the 63 contract bytes prevents Java from perpetuating a cursor-as-length defect,
+        // while accepting the pad-only seventh token keeps replies already produced by the
+        // baseline readable during migration.
         AuthReply expected = replyWith(Money.of("100.99"));
         assertEquals(63, canonical.length);
         assertEquals((byte) ' ', baselineBuffer[63]);
@@ -1162,7 +1109,7 @@ class CsvAuthCodecTest {
      * padding; rejecting it proves the tolerance cannot turn a seven-field reply into a six-field
      * carrier by silently discarding data.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -1189,7 +1136,7 @@ class CsvAuthCodecTest {
      * second SPACE: two spaces remain one pad-only token under the real public API and production
      * must not be changed merely to make a broader test statement true.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -1214,8 +1161,6 @@ class CsvAuthCodecTest {
      * proves every one of the six business values survived, while the literal and byte assertions
      * prove the blank sign position, zero suppression and trailing comma also survived even though
      * they are representation details not visible in the record's values.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("a canonical reply round trip preserves all values and every byte")
@@ -1245,8 +1190,6 @@ class CsvAuthCodecTest {
      * the COBOL clause; it is not a second punctuation character in the field. Only the point between
      * the integer and fractional pictures occupies a wire position, which is why the copybook picture
      * is fourteen characters rather than fifteen.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("money text occupies its sign, digit, point and fraction positions exactly")
@@ -1293,8 +1236,6 @@ class CsvAuthCodecTest {
      * character for every value including a positive one, so it is not optional and does not become a
      * space. The ten integer positions are separate from it, which is why the full ten-digit domain
      * survives alongside the sign rather than competing with it for a position.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("positive request money is plus-signed, zero-padded and two-place exact")
@@ -1331,8 +1272,6 @@ class CsvAuthCodecTest {
      * applies it immediately after decoding and before any lookup, so a negative amount is refused
      * there rather than approved. Reading this case as an endorsement of a negative authorization would
      * be a misreading of what a codec test can assert.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("negative request money uses a minus and ten integer positions")
@@ -1357,8 +1296,6 @@ class CsvAuthCodecTest {
      * it is numerically well formed, and re-rendering it produces the plus form, which is the behaviour
      * registered centrally as D-SIGNED-ZERO-ZONED for the zoned regime and applied consistently
      * here.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("zero request money renders with the non-negative forced sign")
@@ -1378,8 +1315,6 @@ class CsvAuthCodecTest {
      * <p>Assumptions: {@code PIC -zzzzzzzzz9.99} emits a space from its sign control for a
      * non-negative value and a space from every leading {@code z}. The final {@code 9} before the
      * point is forced, so the integer run never disappears altogether.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("positive reply money uses a blank sign and zero suppression")
@@ -1415,8 +1350,6 @@ class CsvAuthCodecTest {
      * its first digit. This test therefore pins the formatter's baseline mask and the parser's compact
      * negative grammar separately; it does not claim a negative reply encode/decode round trip that
      * the real public API does not provide.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("negative reply money uses the sign-control position")
@@ -1439,8 +1372,6 @@ class CsvAuthCodecTest {
      * {@code 9} immediately before the point emits {@code 0}. A field of only blanks and
      * {@code .00} would have no integer digit for the parser, so the forced position is part of the
      * contract rather than cosmetic formatting.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("zero reply money keeps one forced digit and a blank sign")
@@ -1462,8 +1393,6 @@ class CsvAuthCodecTest {
      * character for every value, while the leading {@code -} of {@code PIC -zzzzzzzzz9.99} is a sign
      * control that emits a blank when no minus is needed. Asserting both from one value is what keeps
      * the two pictures from being collapsed into one renderer.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("request money forces a plus where reply money blanks its sign position")
@@ -1485,8 +1414,6 @@ class CsvAuthCodecTest {
      * cents are the integer representation that proves no binary approximation or implicit rounding
      * occurred. Negative request parsing and negative reply rendering/parsing are asserted separately
      * because the production reply parser does not remove suppression spaces after a leading minus.</p>
-     *
-     * <p>This test returns no value.</p>
      *
      * @param amountText the {@link String} exact decimal value to render through both text forms
      */
@@ -1518,8 +1445,6 @@ class CsvAuthCodecTest {
      * value or the bounded money value and return text; the parser accepts text and returns
      * {@code Money}. A new overload outside those five shapes would fail this inventory before a
      * caller could choose an inexact path accidentally.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("money entry points expose only exact decimal, money and text types")
@@ -1552,8 +1477,6 @@ class CsvAuthCodecTest {
      * <p>Assumptions: adding zero fraction positions is lossless and is distinct from reducing a
      * wider scale. The renderer may append {@code .00} or one trailing zero, but it must not choose a
      * rounding rule because no non-zero digit is discarded in either case.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("narrow exact decimal scales are padded without rounding")
@@ -1586,7 +1509,7 @@ class CsvAuthCodecTest {
      * decimal whose scale is three, leaving any reduction to the caller before it crosses the wire
      * boundary.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures both expected exceptions so
+     * <p>It captures both expected exceptions so
      * neither exception escapes the test.</p>
      */
     @Test
@@ -1614,8 +1537,6 @@ class CsvAuthCodecTest {
      * digits rather than carved out of them, so the widest negative amount the picture admits renders
      * without losing a digit. This is the vector that would fail if the sign were ever taken out of an
      * integer position again.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("a negative ten-digit request amount renders in full and round-trips")
@@ -1637,8 +1558,6 @@ class CsvAuthCodecTest {
      * therefore re-rendered with a {@code +} for {@code PIC +9(10).99} and with a blank for
      * {@code PIC -zzzzzzzzz9.99}, and asserting both from one parse is what proves the sign is a property
      * of the destination field and not of the source text.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("an explicit parsed plus is re-rendered per destination picture")
@@ -1660,8 +1579,6 @@ class CsvAuthCodecTest {
      * parser therefore accepts {@code -0000000000.00} as numerically well formed and neither renderer
      * reproduces its minus: the request emits its forced non-negative sign and the reply emits a blank
      * sign-control position.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("textual negative zero normalizes to the one canonical zero")
@@ -1683,7 +1600,7 @@ class CsvAuthCodecTest {
      * are stripped, a token with no sign, digit or point cannot represent zero implicitly because the
      * reply picture has a forced zero position for that value.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -1703,7 +1620,7 @@ class CsvAuthCodecTest {
      * that may be reconstructed from the final two digits. Inferring it would accept bytes no edited
      * display producer emitted and would make a punctuation loss invisible.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -1723,7 +1640,7 @@ class CsvAuthCodecTest {
      * or silently discard a segment. The grammar therefore rejects ambiguity before any integer
      * conversion is attempted.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -1743,7 +1660,7 @@ class CsvAuthCodecTest {
      * digit must follow it before the point. Accepting {@code +.99} would invent the missing zero and
      * admit a form neither baseline picture emits.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -1763,7 +1680,7 @@ class CsvAuthCodecTest {
      * one parameterized test rather than duplicate methods. Each case differs only in which run
      * contains the invalid character, and both must fail before a numeric value is constructed.</p>
      *
-     * <p>This test returns no value; it captures the expected exception so no exception escapes the
+     * <p>It captures the expected exception so no exception escapes the
      * test.</p>
      *
      * @param malformedToken the {@link String} reply amount containing a non-digit in an integer or
@@ -1789,7 +1706,7 @@ class CsvAuthCodecTest {
      * the wire grammar beyond either source picture and could conceal a producer using a locale
      * format.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -1811,7 +1728,7 @@ class CsvAuthCodecTest {
      * positions after the point are fixed digits, so one or three fraction digits are both malformed
      * rather than values to pad or round.</p>
      *
-     * <p>This test returns no value; it captures the expected exception so no exception escapes the
+     * <p>It captures the expected exception so no exception escapes the
      * test.</p>
      *
      * @param malformedToken the {@link String} reply amount carrying one or three fraction digits
@@ -1835,7 +1752,7 @@ class CsvAuthCodecTest {
      * make the received token longer than fourteen characters, but an eleventh integer digit cannot
      * fit {@code 9(10)} and must never be truncated to make the token fit.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -1856,7 +1773,7 @@ class CsvAuthCodecTest {
      * from text and the other from an exact decimal value. Rejecting before rendering avoids a
      * plausible-looking fourteen-character suffix of a materially different amount.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -1879,8 +1796,6 @@ class CsvAuthCodecTest {
      * strict geometry lies inside the value -- at most ten integer digits, one literal point and
      * exactly two fraction digits -- so both a short value and a pad-extended value represent the
      * same exact amount.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("zero suppression and surrounding pad do not change a parsed reply amount")
@@ -1899,8 +1814,6 @@ class CsvAuthCodecTest {
      * tokeniser, not the public token it returns. The source is {@code PA-*-CARD-NUM X(16)} followed
      * by {@code PA-*-TRANSACTION-ID X(15)}, and the single-byte wire character set makes those
      * thirty-one characters thirty-one bytes without any numeric interpretation.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the private correlation source is sixteen plus fifteen characters")
@@ -1917,13 +1830,11 @@ class CsvAuthCodecTest {
      * The two published correlation widths name two different quantities and neither describes the
      * other.
      *
-     * <p>Refactoring Rationale: a single constant used to be named for the correlation key and carried
-     * the width of the composite the key is derived from, so a consumer sizing a column or a buffer
-     * from it was wrong by nine characters in the direction that truncates. This test pins both
-     * quantities and pins the returned token to the one that actually describes it, so the two cannot
-     * be silently merged again.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
+     * <p>Assumptions: the composite is the card number followed by the transaction identifier, and the
+     * token is the keyed digest taken over it, so the two widths differ by nine characters. A consumer
+     * that sizes a column or a buffer from the composite width while storing the token is wrong in the
+     * direction that truncates, so both quantities are published apart and this test pins the returned
+     * token to the one that describes it.</p>
      */
     @Test
     @DisplayName("the composite width and the token width are published as two distinct constants")
@@ -1949,8 +1860,6 @@ class CsvAuthCodecTest {
      * <p>Assumptions: both APIs protect the same padded thirty-one-character source with the same
      * purpose string and key. Equality is the only correlation property a caller needs, so the raw
      * source pair remains private while either leg can independently reproduce its token.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("request and reply derive the same opaque correlation token")
@@ -1969,8 +1878,6 @@ class CsvAuthCodecTest {
      * <p>Assumptions: the public representation is twenty-two URL-safe characters rather than the
      * thirty-one-character source. Checking both complete source values avoids mistaking fixed output
      * length for opacity: a value could be bounded and still copy one component into its output.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the public correlation token is bounded, URL-safe and opaque")
@@ -1994,8 +1901,6 @@ class CsvAuthCodecTest {
      * <p>Assumptions: stability is checked across two tokeniser instances rather than by invoking one
      * instance twice, so the assertion covers deterministic key use and not merely an accidental
      * per-instance cache. No global state or clock may influence a correlation value.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the same pair and key material always derive the same token")
@@ -2014,8 +1919,6 @@ class CsvAuthCodecTest {
      * <p>Assumptions: card and transaction changes are asserted independently so a derivation that
      * accidentally omitted either half cannot pass. The replacement values retain the exact declared
      * widths, leaving content as the only changed input.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("changing either source component changes the correlation token")
@@ -2039,8 +1942,6 @@ class CsvAuthCodecTest {
      * to contain only digits. Comparing a full leading-zero value with its numerically equivalent
      * short text proves the derivation never parses either component as a number and never discards
      * leading zeros before padding.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("leading zeros remain significant in both correlation components")
@@ -2064,8 +1965,6 @@ class CsvAuthCodecTest {
      * <p>Assumptions: the correlation path preserves the exact display characters and applies no
      * case normalization. Upper- and lower-case values are distinct source identities even when an
      * operator might read them as the same word.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("correlation derivation performs no case normalization")
@@ -2087,8 +1986,6 @@ class CsvAuthCodecTest {
      * or inside a value is data. The three under-width transaction identifiers below all become
      * fifteen characters, but their non-pad characters occupy different positions and must derive
      * different tokens.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("leading and internal spaces remain significant in correlation values")
@@ -2115,8 +2012,6 @@ class CsvAuthCodecTest {
      * over-width value. Strict exact-width construction would reject the zero-suppressed and trimmed
      * values the decoder intentionally returns, while truncation could make two different identifiers
      * collide. The implemented boundary accepts and right-pads short values but rejects long ones.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("under-width correlation values are right-padded and trailing pad is normalized")
@@ -2151,7 +2046,7 @@ class CsvAuthCodecTest {
      * request, so both {@code PA-RQ-CARD-NUM} and {@code PA-RL-CARD-NUM} reject the value at carrier
      * construction instead.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures both expected exceptions so
+     * <p>It captures both expected exceptions so
      * neither exception escapes the test.</p>
      */
     @Test
@@ -2182,7 +2077,7 @@ class CsvAuthCodecTest {
      * {@code PA-RQ-TRANSACTION-ID} and {@code PA-RL-TRANSACTION-ID} therefore reject the value by
      * name.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures both expected exceptions so
+     * <p>It captures both expected exceptions so
      * neither exception escapes the test.</p>
      */
     @Test
@@ -2210,7 +2105,7 @@ class CsvAuthCodecTest {
      * number, and an unkeyed derivation would let an observer confirm guesses, so both carriers require
      * the caller to supply an explicitly keyed {@link OpaqueIdentifier}.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures both expected exceptions so
+     * <p>It captures both expected exceptions so
      * neither exception escapes the test.</p>
      */
     @Test
@@ -2230,8 +2125,6 @@ class CsvAuthCodecTest {
      * <p>Assumptions: purpose separation prevents an observer from joining queue ordering metadata to
      * a correlation value from an application trace. Both values are stable opaque tokens, but one
      * protects card plus transaction and the other protects only the card under a different purpose.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("correlation and ordering purposes derive unrelated tokens")
@@ -2257,7 +2150,7 @@ class CsvAuthCodecTest {
      * raises {@code CsvAuthCodec.AuthMessageFormatException} for
      * {@code PA-RQ-TRANSACTION-ID} rather than being truncated.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -2289,8 +2182,6 @@ class CsvAuthCodecTest {
      * <p>Assumptions: letters and a leading zero are data in {@code PA-RQ-MERCHANT-ID X(15)}. Reading
      * the field through the ledger's nine-digit picture would either reject the letters or drop the
      * leading zero, so the payload keeps the original text and its authorization width.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("authorization merchant identifiers remain fifteen-character alphanumeric text")
@@ -2323,7 +2214,7 @@ class CsvAuthCodecTest {
      * {@code CsvAuthCodec.AuthMessageFormatException} for {@code PA-RQ-MERCHANT-NAME}, while an
      * authorization-width value occupies exactly its twenty-two-character slot.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -2362,7 +2253,7 @@ class CsvAuthCodecTest {
      * {@code CsvAuthCodec.AuthMessageFormatException} for {@code PA-RQ-MERCHANT-CITY} rather than
      * being copied or shortened.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -2400,7 +2291,7 @@ class CsvAuthCodecTest {
      * raises {@code CsvAuthCodec.AuthMessageFormatException} for {@code PA-RQ-MERCHANT-ZIP}; an
      * authorization value remains exactly nine characters on the wire.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -2440,8 +2331,6 @@ class CsvAuthCodecTest {
      * name, city and postal code fields only. The state at authorization ordinal sixteen therefore
      * cannot be dropped merely because no ledger column receives it; it remains a separate
      * {@code X(02)} MQ field between city and postal code.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("authorization state remains a field even though the ledger has no counterpart")
@@ -2474,7 +2363,7 @@ class CsvAuthCodecTest {
      * seventeen tokens. The decoder must report that structural count before attempting to assign
      * any token to a copybook field, and the report must not reproduce the card number or payload.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -2500,7 +2389,7 @@ class CsvAuthCodecTest {
      * {@code EXTRA} therefore proves the compatibility rule cannot be used to discard a genuine
      * nineteenth business value.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -2524,7 +2413,7 @@ class CsvAuthCodecTest {
      * the payload has four delimiters and five business tokens. The decoder must not reinterpret the
      * response reason as an amount to make the count fit.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -2551,7 +2440,7 @@ class CsvAuthCodecTest {
      * placing {@code EXTRA} in that token turns it into business data. The decoder must reject it
      * rather than silently treating the reply as six fields.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -2585,8 +2474,6 @@ class CsvAuthCodecTest {
      * rather than a value stored trimmed -- and
      * {@code truncatedRequestPayloadIsRefusedRatherThanShorteningTheTransactionId} pins its
      * refusal.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("under-width carrier values are accepted and right-padded on re-encode")
@@ -2610,18 +2497,18 @@ class CsvAuthCodecTest {
      * A request payload short of its declared length is refused instead of shortening the transaction
      * identifier.
      *
-     * <p>Refactoring Rationale: width used to be checked as an upper bound alone, so a payload one,
-     * two or three bytes short still split into eighteen fields, every token still fitted, and the
-     * final token -- {@code PA-RQ-TRANSACTION-ID} -- silently lost that many characters. The
-     * consequences compounded rather than surfacing: the shortened value re-emitted at the full
-     * declared width, so the corruption became indistinguishable from a well-formed payload; the
-     * correlation token changed, so a reply carrying the original identifier no longer matched it; and
-     * two identifiers differing only in their last character collapsed onto one, so a genuinely
-     * distinct authorization could be discarded as a duplicate by a deduplicating transport. Each
-     * dropped-byte count is asserted separately because the defect was uniform rather than positional
-     * and a single case would not have shown that.</p>
+     * <p>Assumptions: the declared length is checked exactly rather than as an upper bound. A payload
+     * one, two or three bytes short still splits into eighteen fields and every token still fits, so an
+     * upper-bound check would let the final token -- {@code PA-RQ-TRANSACTION-ID} -- silently lose that
+     * many characters, and the consequences compound rather than surfacing: the shortened value
+     * re-emits at the full declared width, so the corruption is indistinguishable from a well-formed
+     * payload; the correlation token changes, so a reply carrying the original identifier no longer
+     * matches it; and two identifiers differing only in their last character collapse onto one, so a
+     * genuinely distinct authorization can be discarded as a duplicate by a deduplicating transport.
+     * Each dropped-byte count is asserted separately because the shortfall is uniform rather than
+     * positional and a single case would not show that.</p>
      *
-     * <p>This test returns no value; it captures the expected exception so no exception escapes the
+     * <p>It captures the expected exception so no exception escapes the
      * test.</p>
      *
      * @param droppedBytes the {@code int} number of trailing characters to remove from an otherwise
@@ -2657,7 +2544,7 @@ class CsvAuthCodecTest {
      * still re-emits as fifteen pad characters, and every request that lost its identifier would then
      * correlate and deduplicate against every other.</p>
      *
-     * <p>This test returns no value; it captures the expected exception so no exception escapes the
+     * <p>It captures the expected exception so no exception escapes the
      * test.</p>
      */
     @Test
@@ -2682,7 +2569,7 @@ class CsvAuthCodecTest {
      * the defect was never positional: the trailing field merely made it easiest to reach, because
      * losing bytes in transit removes them from the end.</p>
      *
-     * <p>This test returns no value; it captures the expected exception so no exception escapes the
+     * <p>It captures the expected exception so no exception escapes the
      * test.</p>
      */
     @Test
@@ -2710,7 +2597,7 @@ class CsvAuthCodecTest {
      * passes the length it received cannot detect that by itself, which is why the refusal has to come
      * from the codec.</p>
      *
-     * <p>This test returns no value; it captures the expected exception so no exception escapes the
+     * <p>It captures the expected exception so no exception escapes the
      * test.</p>
      */
     @Test
@@ -2737,7 +2624,7 @@ class CsvAuthCodecTest {
      * declared widths cannot reject the canonical form, the 62-character form without a trailing
      * delimiter, or the 64-byte frame the reference put actually sends.</p>
      *
-     * <p>This test returns no value; it captures the expected exception so no exception escapes the
+     * <p>It captures the expected exception so no exception escapes the
      * test.</p>
      */
     @Test
@@ -2769,8 +2656,6 @@ class CsvAuthCodecTest {
      * is inside the value -- at most ten integer digits, one literal point, exactly two fraction digits
      * -- and that is what refuses a truncated amount. A width requirement over the money token would
      * reject amounts the reference program emits.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("a zero-suppressed reply amount is accepted despite being narrower than fourteen")
@@ -2787,15 +2672,16 @@ class CsvAuthCodecTest {
     /**
      * A character the single-byte wire cannot represent is refused where the field enters.
      *
-     * <p>Refactoring Rationale: such a character used to be accepted by the carrier and then replaced
-     * with a question mark by the encoder, which changed the value with nothing raised and nothing a
-     * caller could inspect. The emoji case was worse than lossy: a supplementary code point is two Java
-     * characters and encodes to ONE substitute byte, so the payload came out a byte short of its
-     * declared length, every field after it shifted one position earlier, and the under-width token
-     * that produced was absorbed silently as well. Refusing at the field is what makes the failure name
-     * the field, and it closes the text and byte emission paths together.</p>
+     * <p>Assumptions: the refusal happens where the field enters rather than at encoding time. The wire
+     * is single-byte, so an encoder that substitutes writes a question mark and changes the value with
+     * nothing raised and nothing a caller can inspect. The emoji case is worse than lossy: a
+     * supplementary code point is two Java characters and encodes to ONE substitute byte, so the payload
+     * comes out a byte short of its declared length, every field after it shifts one position earlier,
+     * and the under-width token that produces is absorbed silently as well. Refusing at the field is
+     * what makes the failure name the field, and it closes the text and byte emission paths
+     * together.</p>
      *
-     * <p>This test returns no value; it captures the expected exception so no exception escapes the
+     * <p>It captures the expected exception so no exception escapes the
      * test.</p>
      *
      * @param merchantName the {@link String} merchant name carrying one character above U+00FF
@@ -2826,8 +2712,6 @@ class CsvAuthCodecTest {
      * encoding maps U+0000 through U+00FF onto the byte values 0x00 through 0xFF one for one, so an
      * accented Latin-1 letter is legitimate data on this wire and is preserved rather than refused;
      * refusing it would narrow the contract instead of protecting it.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("a Latin-1 character round-trips as one byte and is not refused")
@@ -2852,8 +2736,6 @@ class CsvAuthCodecTest {
      * consumer with every field after the disagreement shifted, and the consumer would have no way to
      * tell. Asserting it over both payloads and over a negative amount covers the sign position as
      * well.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("emitted payloads are one byte per character in both directions")
@@ -2877,7 +2759,7 @@ class CsvAuthCodecTest {
      * That would produce a syntactically valid request carrying a different authorization type, so
      * the decoder rejects the field by name and includes the non-sensitive value for diagnosis.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -2904,7 +2786,7 @@ class CsvAuthCodecTest {
      * {@code X(15)} fields, so a sixteen-character token must be rejected by name and withheld from
      * the diagnostic rather than truncated.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures both expected exceptions so
+     * <p>It captures both expected exceptions so
      * neither exception escapes the test.</p>
      */
     @Test
@@ -2934,7 +2816,7 @@ class CsvAuthCodecTest {
      * the date and time into one token and reducing the structural count to seventeen. Because the
      * contract is delimiter-positional, no width inference may reconstruct the missing comma.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -2961,7 +2843,7 @@ class CsvAuthCodecTest {
      * construction preserves the field identity needed for an actionable diagnostic and prevents
      * every later ordinal from shifting.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -2984,22 +2866,20 @@ class CsvAuthCodecTest {
     /**
      * A control character inside a character field is refused where the field enters.
      *
-     * <p>Refactoring Rationale: this test was written to assert the OPPOSITE and it found a defect,
-     * which is why the rationale is recorded rather than the outcome alone. The decode path refused any
-     * control character in a whole payload while the encode path refused none, so this class would emit
-     * a full-length payload that its own decoder then rejected -- the assertion below originally called
-     * {@code encodeRequest} and then {@code decodeRequest} on the result, and the second call threw. The
-     * field-level refusal now closes that hole, and the decode-side rule is the one that was kept: a
-     * carriage return or line feed inside a value forges or splits a record in any line-oriented log the
-     * value later reaches, and an escape sequence reaching a terminal is interpreted rather than
-     * displayed.</p>
+     * <p>Assumptions: the refusal is field-level so that the encode and decode paths agree on the same
+     * rule. A decoder that refuses a control character anywhere in a payload while the encoder refuses
+     * none would let this codec emit a full-length payload its own parser then rejects, so
+     * {@code encodeRequest} has to reject what {@code decodeRequest} rejects. The rule itself is a
+     * safety rule rather than a wire-format one: a carriage return or line feed inside a value forges or
+     * splits a record in any line-oriented log the value later reaches, and an escape sequence reaching
+     * a terminal is interpreted rather than displayed.</p>
      *
      * <p>Assumptions: the vectors cover both ISO control ranges rather than only the familiar low one.
      * The delete character and the upper range from U+0080 to U+009F are control characters too, and a
      * check written as a comparison against the space character would have admitted every one of them --
      * which is exactly why the production check uses the platform predicate.</p>
      *
-     * <p>This test returns no value; it captures the expected exception so no exception escapes the
+     * <p>It captures the expected exception so no exception escapes the
      * test.</p>
      *
      * @param merchantName the {@link String} merchant name carrying one control character
@@ -3027,8 +2907,6 @@ class CsvAuthCodecTest {
      * refusals: a space, the printable extremes of the single-byte range, and the highest representable
      * character. Each must survive encode and decode unchanged, because a value this codec accepts on
      * the way out and refuses on the way in is a message that cannot be delivered to its own consumer.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("every value the encoder accepts is one the decoder reads back unchanged")
@@ -3056,7 +2934,7 @@ class CsvAuthCodecTest {
      * sensitive, so the diagnostic must name it and the violated punctuation rule without quoting the
      * token or the full request.</p>
      *
-     * <p>This test returns no value; it captures the expected exception so no exception escapes the
+     * <p>It captures the expected exception so no exception escapes the
      * test.</p>
      *
      * @param malformedAmount the {@link String} amount token containing an invalid sign or point
@@ -3085,7 +2963,7 @@ class CsvAuthCodecTest {
      * a diagnostic or a line-oriented log. NUL and line feed exercise both an invisible terminator
      * and a record-splitting character while sharing the same structural rule.</p>
      *
-     * <p>This test returns no value; it captures the expected exception so no exception escapes the
+     * <p>It captures the expected exception so no exception escapes the
      * test.</p>
      *
      * @param controlCode the {@code int} ISO control code inserted at zero-based payload position 20
@@ -3117,7 +2995,7 @@ class CsvAuthCodecTest {
      * remains bounded for an untrusted queue payload. The oversized suffix contains no delimiter,
      * making the length the first and only applicable rejection.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -3146,7 +3024,7 @@ class CsvAuthCodecTest {
      * allocates a string. Testing a buffer that is itself large enough isolates the maximum-bound
      * rejection from the separate rule that the declared length must fit the buffer.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -3172,7 +3050,7 @@ class CsvAuthCodecTest {
      * capacity and is validated in both directions. A negative length cannot identify a prefix, and
      * a length one byte beyond the buffer cannot be satisfied by reading unowned memory.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures both expected exceptions so
+     * <p>It captures both expected exceptions so
      * neither exception escapes the test.</p>
      */
     @Test
@@ -3202,8 +3080,6 @@ class CsvAuthCodecTest {
      * the seventeen delimiter positions are properties of the contract, not of one golden literal.
      * Value equality proves normalization is stable; re-encoding and byte comparison prove no
      * representation detail changes after decode.</p>
-     *
-     * <p>This test returns no value.</p>
      *
      * @param request the {@link AuthRequest} corpus item to encode, decode and reproduce
      */
@@ -3237,8 +3113,6 @@ class CsvAuthCodecTest {
      * leading/internal spaces. The sixth trailing comma is retained as a seventh empty framing token
      * but never becomes a seventh business component.</p>
      *
-     * <p>This test returns no value.</p>
-     *
      * @param reply the {@link AuthReply} corpus item to encode, decode and reproduce
      */
     @ParameterizedTest(name = "reply corpus case {index}")
@@ -3271,8 +3145,6 @@ class CsvAuthCodecTest {
      * negative, while the reply's sign-CONTROL position emits a blank and its final integer position is
      * forced to {@code 0}. The two forms represent the same {@link Money} value and are intentionally not
      * textually identical, which is why zero is asserted in both corpora rather than in one.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("round-trip corpus zero uses plus-signed request and blank-sign reply text")
@@ -3299,12 +3171,9 @@ class CsvAuthCodecTest {
      * contract: whatever {@code encodeReply} emits, {@code decodeReply} accepts and returns equal.</p>
      *
      * <p>Assumptions: the whole reply is compared rather than the amount alone, so the assertion proves
-     * the round trip of the message and not merely of one field. An earlier revision asserted the
-     * opposite -- that this exact payload could not be decoded -- which recorded a real defect as though
-     * it were a contract; the parser now removes the pad the mask produces and the geometry assertions
-     * below are unchanged, so the closure is proved rather than excused.</p>
-     *
-     * <p>This test takes no parameter and returns no value.</p>
+     * the round trip of the message and not merely of one field. The geometry assertions below hold over
+     * the same payload, so the parser's removal of the blank run is proved to leave the declared widths
+     * and delimiter positions intact rather than to work only for the amount.</p>
      */
     @Test
     @DisplayName("the production negative reply mask decodes back to the same reply")
@@ -3330,7 +3199,7 @@ class CsvAuthCodecTest {
      * first digit, so a token whose blank falls after a digit is not a zero-suppressed rendering of
      * anything and is rejected rather than being silently read as the digits with the gap closed up.</p>
      *
-     * <p>This test takes no parameter and returns no value; it captures the expected exception so no
+     * <p>It captures the expected exception so no
      * exception escapes the test.</p>
      */
     @Test
@@ -3372,7 +3241,7 @@ class CsvAuthCodecTest {
      * that same charset is what makes the assertion a statement about the wire rather than about the
      * platform's default encoding, which would differ between a developer machine and a container.</p>
      *
-     * <p>This helper returns no value; JUnit reports an assertion failure when the byte length or
+     * <p>JUnit reports an assertion failure when the byte length or
      * decoded text differs from the expected wire text.</p>
      *
      * @param expectedText the {@link String} payload text the bytes must carry

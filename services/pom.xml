@@ -71,26 +71,17 @@
     that is stated explicitly rather than left implied.
 
   HOW TO READ EVERY TEST COMMENT IN THIS REACTOR:
-    Assumptions: every test suite this file configures has real work, so no comment
-      below describes a plugin passing trivially. Two wirings carry that claim, and
-      each has an observable signal rather than a count:
-        - The `architecture-rules` Surefire execution packages LayeringRulesTest
-          into common-lib-<version>-tests.jar and re-runs it inside every module
-          that consumes the shared kernel. Its executing signal is the execution
-          reporting `Tests run: <n>` under each consumer rather than
-          `Tests are skipped.`; the rule families it asserts are enumerated in the
-          class itself, which is the only place they cannot drift from what runs.
-          Selecting nothing is a BUILD FAILURE rather than a silent success - see
-          the `architecture-rules-fail-if-absent` profile at the foot of this file.
-        - Failsafe has `*IT` classes in common-lib and in five service modules, so
-          the integration configuration beside it likewise runs rather than
-          no-ops.
-      Assumptions: this block deliberately names NO test-class count, method total
-      or per-module rule count. The two signals above distinguish an executing gate
-      from a skipped one without a figure, and a figure in the file that CONFIGURES
-      the gate is worse than one in prose: a reader reconciling it against a build
-      log cannot tell whether the gate or the comment is at fault.
-      `mvn -f services/pom.xml verify` is the authority, and it cannot go stale.
+    Assumptions: no comment in this file states a test-class count, a method total
+      or a per-module rule count. Whether a gate is executing is read from the build
+      itself: the `architecture-rules` Surefire execution packages LayeringRulesTest
+      into common-lib-<version>-tests.jar, re-runs it inside every module that
+      consumes the shared kernel, and reports `Tests run: <n>` under each consumer
+      rather than `Tests are skipped.`, while selecting nothing is a BUILD FAILURE
+      through the `architecture-rules-fail-if-absent` profile at the foot of this
+      file. A figure in the file that CONFIGURES a gate is worse than one in prose,
+      because a reader reconciling it against a build log cannot tell whether the
+      gate or the comment is at fault. `mvn -f services/pom.xml verify` is the
+      authority, and it cannot go stale.
       Alternatives Considered: configuring the test plugins only once the tests
       exist. Rejected because the plugin split, the include patterns and the report
       locations are exactly the decisions a test author needs settled BEFORE the
@@ -98,7 +89,7 @@
       wrong phase, and a suite whose reports land outside the collected directory
       passes locally while the pipeline reports nothing.
 
-  WHY (non-obvious design decisions):
+  Rationale for the decisions that belong to no single element:
     Each decision is justified in a comment adjacent to the element it
     concerns, using the four rationale categories the project's Explainability
     rule defines. The rationales that belong to no single element are:
@@ -962,17 +953,15 @@
                     message nobody reads. The cost is that this POM cannot be
                     used to grade a rule down, which is the intended loss of
                     flexibility.
-                  Assumptions: this build's exit status is BINARY. The COBOL test
-                    suite in tests/** grades its outcomes on a mainframe
-                    condition code rubric where a warning level result is the
-                    current green state, and that tolerance exists for exactly
-                    one reason: two baseline programs carry an unfixable record
-                    key defect in immutable reference source. That rubric belongs
-                    to the COBOL parity oracle alone and must never be imported
-                    into a Maven, Checkstyle, Surefire or Failsafe gate here.
-                    Nothing in this file skips the gate, downgrades a violation,
-                    or tolerates a non zero result, and nothing should be added
-                    that does.
+                  Assumptions: this build's exit status is BINARY, and the graded
+                    condition code rubric of the COBOL suite in tests/** belongs to
+                    that parity oracle alone. It is never imported into a Maven,
+                    Checkstyle, Surefire or Failsafe gate here: a Maven phase, this
+                    gate, the test runner and an assertion each have two outcomes,
+                    so describing one as warning level green would make a failure
+                    sound survivable. Nothing in this file skips the gate,
+                    downgrades a violation or tolerates a non zero result, and
+                    nothing should be added that does.
               -->
               <failOnViolation>true</failOnViolation>
               <violationSeverity>warning</violationSeverity>

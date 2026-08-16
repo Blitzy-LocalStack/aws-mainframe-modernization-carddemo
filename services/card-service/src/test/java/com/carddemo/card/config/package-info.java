@@ -8,7 +8,7 @@
  * nothing in a compiler or a linter compares them - a path is a string on one side and a string on the
  * other. The classes here are those comparisons.</p>
  *
- * this directory: 7 java files = 6 tests + 1 charter
+ * this directory: 8 java files = 7 tests + 1 charter
  *
  * <p>Refactoring Rationale: that sentence read "The single test class here is that comparison", which was
  * true of one class and is now false of six. It is restated in the plural AND accompanied by a counted

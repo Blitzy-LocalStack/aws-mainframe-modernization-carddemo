@@ -465,7 +465,7 @@
  * requirement in two independent halves, and neither is redundant: {@code JavadocPackage}, a
  * file-set check declared at {@code config/checkstyle/checkstyle.xml:245}, asserts that this file
  * <b>exists</b> in any directory holding an audited source file, while
- * {@code MissingJavadocPackage}, a tree check at line 378 of the same ruleset, asserts that the file
+ * {@code MissingJavadocPackage}, a tree check at line 371 of the same ruleset, asserts that the file
  * <b>carries Javadoc</b>. An empty {@code package-info.java} satisfies the first and fails the
  * second, and so does one whose block opens with an ordinary comment marker rather than the Javadoc
  * marker. Neither half can be waived from inside this source: the ruleset configures the file-based

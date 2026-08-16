@@ -1,0 +1,101 @@
+# WHAT: One SHA-256 digest per record file in this fixture tree, keyed by the file's
+#       path relative to this directory, in ascending path order.
+#
+# WHY : Assumptions: the structural checks in
+#       services/batch-service/src/test/java/com/carddemo/batch/fixtures/BatchFixtureContractTest.java
+#       pin geometry, line endings, a successful decode and each scenario's discriminating
+#       value -- but they cannot pin a field no scenario turns on. A same-width edit to a
+#       customer name, a merchant description or an unasserted FILLER byte satisfies every
+#       one of them, and for the nine supporting images of master section 1.5 no job run
+#       would notice either. This manifest closes that gap: any change to any byte of any of
+#       the 62 files fails everyRecordFileMatchesItsCommittedDigest by name.
+#
+# WHY : Alternatives Considered: (1) leaving the gap and documenting it, which was rejected
+#       because master section 1.1 promises "an edit is still detected" and a promise a
+#       reader can act on has to be true rather than qualified; (2) asserting digests inside
+#       the Java class as string constants, rejected because 62 literals in a test are 62
+#       lines a reviewer cannot diff against the files they describe, whereas this format is
+#       verifiable independently of the test; (3) a per-scenario manifest, rejected because
+#       the closed-set check that catches an ADDED or DELETED file needs one authority over
+#       the whole tree.
+#
+# WHY : Trade-offs: a deliberate fixture edit now requires regenerating this file, which is
+#       one extra step. That is the point -- the step is where the author states that the
+#       byte change was intended. Regenerate from this directory with:
+#
+#           grep '^#' FIXTURE_DIGESTS.txt > /tmp/h && \
+#             find . -name '*.txt' -not -name 'FIXTURE_DIGESTS.txt' | sed 's#^\./##' | \
+#             LC_ALL=C sort | xargs sha256sum > /tmp/b && \
+#             cat /tmp/h /tmp/b > FIXTURE_DIGESTS.txt
+#
+#       and verify independently of the test suite with:
+#
+#           grep -v '^#' FIXTURE_DIGESTS.txt | sha256sum -c -
+#
+# WHY : Assumptions: the comment lines are '#'-prefixed and the digest lines are left in
+#       exact sha256sum(1) format, so the verification command above needs only to strip the
+#       header. Emitting a bare sha256sum file with no header would have made the file
+#       directly checkable but left it with nowhere to carry the rationale Rule 1 requires,
+#       and this tree's contract is that every artifact in it explains itself.
+050383b2ce5c9d8f499d0c4b8a40e6edd6cad83a3bf963e9ceb4207a156f4d9b  export/happy_path/acctdata.txt
+1e6017a8863b466dc0f0ed1f9ef7b2272975ae7993e0fab6e9afe067947f61b8  export/happy_path/carddata.txt
+1462b7fc978b36aa94984db4fa733bd9c142200cbfef469798ec1cf0eeb1411e  export/happy_path/cardxref.txt
+2f9cedd59d952c543e22053ba7f0daf87538c87d25efced978b9fe403ff591e7  export/happy_path/custdata.txt
+e5f531430d8845185f6192779259dbf02df81fcca22e06af23a399347bd7ae8f  export/happy_path/trandata.txt
+bdffcb81ad5e70798551051412562c8b2f6795690d34d369bbd37d990c03e5e2  interest/default_fallback/acctdata.txt
+6a76bc562762d875b0395c27451593121ffecb0ad0a9ba342104e3c7e31332b1  interest/default_fallback/cardxref.txt
+753a50d6cfe8fdd5791882eba523e7f6f5856815c7c6f8fe7ef83b7a337ab173  interest/default_fallback/discgrp.txt
+ebe912b85b3466bf5c1443f6be73692c67dea1c2b5abc385db78f995844854c6  interest/default_fallback/tcatbal.txt
+e386b8a70dc4ba7842f648d936a86633a72cfe49bc4cc9b197736ad73ffe9e6f  interest/happy_path/acctdata.txt
+6a76bc562762d875b0395c27451593121ffecb0ad0a9ba342104e3c7e31332b1  interest/happy_path/cardxref.txt
+ad4355d9292da680eccc63182345892503c4ae3592a18528d4a22c8e869a0600  interest/happy_path/discgrp.txt
+ebe912b85b3466bf5c1443f6be73692c67dea1c2b5abc385db78f995844854c6  interest/happy_path/tcatbal.txt
+e386b8a70dc4ba7842f648d936a86633a72cfe49bc4cc9b197736ad73ffe9e6f  interest/zero_balance/acctdata.txt
+6a76bc562762d875b0395c27451593121ffecb0ad0a9ba342104e3c7e31332b1  interest/zero_balance/cardxref.txt
+ad4355d9292da680eccc63182345892503c4ae3592a18528d4a22c8e869a0600  interest/zero_balance/discgrp.txt
+a733489dc2ea384b2f1c7624e6a3a18762c6be760d15d1054917f7cd5ec3d5c6  interest/zero_balance/tcatbal.txt
+d1645a2891391ef6f8d53ebe5aa8ef819a9e23fea81439e48e67858b24d1c844  posting/boundary_exact_limit/acctdata.txt
+8b3afa08deeb5baeda1106d14712e0626d256e3cda90a3759721c696f54ef5b1  posting/boundary_exact_limit/cardxref.txt
+acb5504409433d86225308760e992075fb370636b83de5304cf67d4fc9dbcabe  posting/boundary_exact_limit/dailytran.txt
+ebe5ba4e1e1e381f56e6cab4aa967f2dac3c4e7ad1e98b3570dc370af44c3cd8  posting/boundary_exact_limit/tcatbal.txt
+d1645a2891391ef6f8d53ebe5aa8ef819a9e23fea81439e48e67858b24d1c844  posting/boundary_expiry_equal/acctdata.txt
+8b3afa08deeb5baeda1106d14712e0626d256e3cda90a3759721c696f54ef5b1  posting/boundary_expiry_equal/cardxref.txt
+b8d9d3c9da2723b46f999f4b73c2244e5ea7bf32065f722ea9c5581101e12842  posting/boundary_expiry_equal/dailytran.txt
+ebe5ba4e1e1e381f56e6cab4aa967f2dac3c4e7ad1e98b3570dc370af44c3cd8  posting/boundary_expiry_equal/tcatbal.txt
+d1645a2891391ef6f8d53ebe5aa8ef819a9e23fea81439e48e67858b24d1c844  posting/empty_input/acctdata.txt
+8b3afa08deeb5baeda1106d14712e0626d256e3cda90a3759721c696f54ef5b1  posting/empty_input/cardxref.txt
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  posting/empty_input/dailytran.txt
+ebe5ba4e1e1e381f56e6cab4aa967f2dac3c4e7ad1e98b3570dc370af44c3cd8  posting/empty_input/tcatbal.txt
+d1645a2891391ef6f8d53ebe5aa8ef819a9e23fea81439e48e67858b24d1c844  posting/happy_path/acctdata.txt
+8b3afa08deeb5baeda1106d14712e0626d256e3cda90a3759721c696f54ef5b1  posting/happy_path/cardxref.txt
+354d154faf1899e25de91916b722641a632e48adcd96818f7bd3ecfa4f67b8df  posting/happy_path/dailytran.txt
+56278a5aa081081b8d0bfa37e0029faa6af7de4fdb683a031d78db3987244d3e  posting/happy_path/tcatbal.txt
+d1645a2891391ef6f8d53ebe5aa8ef819a9e23fea81439e48e67858b24d1c844  posting/reject_100_card_missing/acctdata.txt
+25afcba4f3fe1aedfd666e9a711cc38560c4f6ba6e4118f29fb37dd792957d72  posting/reject_100_card_missing/cardxref.txt
+354d154faf1899e25de91916b722641a632e48adcd96818f7bd3ecfa4f67b8df  posting/reject_100_card_missing/dailytran.txt
+ebe5ba4e1e1e381f56e6cab4aa967f2dac3c4e7ad1e98b3570dc370af44c3cd8  posting/reject_100_card_missing/tcatbal.txt
+6ad8daf8f215c0d379f67bb63ec998af045c08973d2f9655d65869ffa5b3b23a  posting/reject_101_acct_missing/acctdata.txt
+8b3afa08deeb5baeda1106d14712e0626d256e3cda90a3759721c696f54ef5b1  posting/reject_101_acct_missing/cardxref.txt
+354d154faf1899e25de91916b722641a632e48adcd96818f7bd3ecfa4f67b8df  posting/reject_101_acct_missing/dailytran.txt
+ebe5ba4e1e1e381f56e6cab4aa967f2dac3c4e7ad1e98b3570dc370af44c3cd8  posting/reject_101_acct_missing/tcatbal.txt
+d1645a2891391ef6f8d53ebe5aa8ef819a9e23fea81439e48e67858b24d1c844  posting/reject_102_overlimit/acctdata.txt
+8b3afa08deeb5baeda1106d14712e0626d256e3cda90a3759721c696f54ef5b1  posting/reject_102_overlimit/cardxref.txt
+5fd878e3224ffd61b2b033c1852771f4b0049674645af4f12406ec26381d9930  posting/reject_102_overlimit/dailytran.txt
+ebe5ba4e1e1e381f56e6cab4aa967f2dac3c4e7ad1e98b3570dc370af44c3cd8  posting/reject_102_overlimit/tcatbal.txt
+d1645a2891391ef6f8d53ebe5aa8ef819a9e23fea81439e48e67858b24d1c844  posting/reject_103_expired/acctdata.txt
+8b3afa08deeb5baeda1106d14712e0626d256e3cda90a3759721c696f54ef5b1  posting/reject_103_expired/cardxref.txt
+5d54935a5ec34acf1cdc28dc499e226d236bffe1958c83a36ac05cdb0607d3df  posting/reject_103_expired/dailytran.txt
+ebe5ba4e1e1e381f56e6cab4aa967f2dac3c4e7ad1e98b3570dc370af44c3cd8  posting/reject_103_expired/tcatbal.txt
+7eb41e50340e5cbe937aaf36110ac2ee15f89539f635bb897399b2282a423d0a  posting/zero_balance/acctdata.txt
+8b3afa08deeb5baeda1106d14712e0626d256e3cda90a3759721c696f54ef5b1  posting/zero_balance/cardxref.txt
+354d154faf1899e25de91916b722641a632e48adcd96818f7bd3ecfa4f67b8df  posting/zero_balance/dailytran.txt
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  posting/zero_balance/tcatbal.txt
+d1645a2891391ef6f8d53ebe5aa8ef819a9e23fea81439e48e67858b24d1c844  preflight/happy_path/acctdata.txt
+8b3afa08deeb5baeda1106d14712e0626d256e3cda90a3759721c696f54ef5b1  preflight/happy_path/cardxref.txt
+354d154faf1899e25de91916b722641a632e48adcd96818f7bd3ecfa4f67b8df  preflight/happy_path/dailytran.txt
+6ad8daf8f215c0d379f67bb63ec998af045c08973d2f9655d65869ffa5b3b23a  preflight/unmatched_account/acctdata.txt
+8b3afa08deeb5baeda1106d14712e0626d256e3cda90a3759721c696f54ef5b1  preflight/unmatched_account/cardxref.txt
+354d154faf1899e25de91916b722641a632e48adcd96818f7bd3ecfa4f67b8df  preflight/unmatched_account/dailytran.txt
+d1645a2891391ef6f8d53ebe5aa8ef819a9e23fea81439e48e67858b24d1c844  preflight/unmatched_card/acctdata.txt
+25afcba4f3fe1aedfd666e9a711cc38560c4f6ba6e4118f29fb37dd792957d72  preflight/unmatched_card/cardxref.txt
+354d154faf1899e25de91916b722641a632e48adcd96818f7bd3ecfa4f67b8df  preflight/unmatched_card/dailytran.txt

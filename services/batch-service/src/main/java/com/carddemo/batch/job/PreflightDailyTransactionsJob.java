@@ -43,132 +43,115 @@ import org.springframework.transaction.PlatformTransactionManager;
  * carrying unresolvable records from a run that silently produces a reject stream into a run an
  * operator has already been told about.</p>
  *
- * <h2>Why this job exists at all, given the reference never scheduled it</h2>
+ * <h2>The reference never scheduled this program</h2>
  *
  * <p>Assumptions: this is the one genuinely driverless program in the reference. No job among the
- * thirty-eight files in {@code app/jcl/} names {@code CBTRN01C} — the token does not occur in that
- * directory at all, not merely as an {@code EXEC PGM=} operand — and neither {@code app/proc/} nor
- * {@code app/scheduler/} references it, so only an integration test ever drove it. The reading taken
- * here is that the absence is a packaging gap in the reference rather than evidence the logic is
- * dead: the procedure body implements a complete pre-posting validation pass over the same two
- * access paths posting itself uses, which is not the shape of abandoned code. The migration plan
- * takes the same reading and assigns the program state 3 of the chain.</p>
+ * thirty-eight files in {@code app/jcl/} names {@code CBTRN01C} -- the token does not occur in that
+ * directory at all -- and neither {@code app/proc/} nor {@code app/scheduler/} references it, so only
+ * an integration test ever drove it. The reading taken here is that the absence is a packaging gap
+ * rather than evidence the logic is dead: the procedure body implements a complete pre-posting
+ * validation pass over the same two access paths posting itself uses, which is not the shape of
+ * abandoned code, and the migration plan assigns the program state 3 of the chain.</p>
  *
- * <p>Refactoring Rationale: what was wrong with the reference arrangement is reachability, not
- * logic. A validation pass reachable only from a test is a pass no operator can run and no chain can
- * depend on, so its findings existed only when someone went looking for them. Giving it a real
- * orchestrated state makes the pre-posting check reproducible on every business date, and makes its
- * findings arrive before the posting run they describe rather than after it. Its position in the
- * chain is therefore a decision this migration makes rather than one it reproduces, and it is placed
- * immediately before posting because a report on a feed that has already been posted describes a
- * file that no longer needs the report.</p>
+ * <p>Assumptions: giving the pass a real orchestrated state is a decision this migration makes rather
+ * than one it reproduces. A validation pass reachable only from a test is a pass no operator can run
+ * and no chain can depend on, so its findings exist only when someone goes looking for them. It is
+ * placed immediately before posting, because a report on a feed that has already been posted describes
+ * a file that no longer needs the report.</p>
  *
  * <h2>Why this job can never report the warn tier</h2>
  *
- * <p>Assumptions: the pass reports {@link BatchReturnCode#CLEAN} on every completing run, and the
- * warn tier is unreachable here by construction rather than by choice. {@code app/cbl/CBTRN01C.cbl}
- * declares a bare {@code PROCEDURE DIVISION.} at {@code :154} — a main program taking no parameters
- * — and contains no {@code RETURN-CODE} statement anywhere in its 494 lines, no reject stream and no
- * counters. It either completes and falls through {@code GOBACK} at {@code :197}, or it abends. The
- * migrated outcome is therefore the clean tier or a hard failure at or above eight, and never four.
- * That is not a local convention: {@code BatchRunSummary}'s compact constructor rejects a summary
- * pairing the warn tier with any job other than {@code post-transactions}, so a warn tier escaping
- * this pass would be refused by the transfer type before it could reach a ledger row.</p>
+ * <p>Assumptions: the pass reports {@link BatchReturnCode#CLEAN} on every completing run, and the warn
+ * tier is unreachable by construction rather than by choice. {@code app/cbl/CBTRN01C.cbl} declares a
+ * bare {@code PROCEDURE DIVISION.} at {@code :154} and contains no {@code RETURN-CODE} statement
+ * anywhere in its 494 lines, no reject stream and no counters: it either completes and falls through
+ * {@code GOBACK} at {@code :197}, or it abends. The migrated outcome is therefore the clean tier or a
+ * hard failure at or above eight, and never four. That is not a local convention --
+ * {@code BatchRunSummary}'s compact constructor rejects a summary pairing the warn tier with any job
+ * other than {@code post-transactions}, so a warn tier escaping this pass would be refused by the
+ * transfer type before it could reach a ledger row.</p>
  *
  * <p>Assumptions: an unresolvable record must consequently NOT fail the chain and must NOT warn it.
- * Posting is where such a record becomes reject reason 100 or 101, and it is posting that carries
- * the only warn-tier gate in the tree. Pre-empting that decision here would either stop a chain the
- * reference lets run to completion, or report a tier twice for one record.</p>
+ * Posting is where such a record becomes reject reason 100 or 101, and posting carries the only
+ * warn-tier gate in the tree. Pre-empting that decision here would either stop a chain the reference
+ * lets run to completion, or report a tier twice for one record.</p>
  *
  * <h2>Divergence D-7: the reference performs one lookup past end of file</h2>
  *
- * <p>Refactoring Rationale: the loop at {@code app/cbl/CBTRN01C.cbl:164-186} guards too little, and
- * this pass deliberately does not reproduce the consequence. The outer test at {@code :165} opens a
- * block closing at {@code :185}; the inner test at {@code :167} closes with its own {@code END-IF}
- * at {@code :169} and therefore guards ONLY the record display at {@code :168}. The two
- * {@code MOVE} statements at {@code :170-171} and the cross-reference lookup at {@code :172} sit
- * outside that inner guard. So on the iteration where the read at {@code :166} reaches end of file
- * and sets the terminating flag, the program still moves a card number out of a record it did not
- * read and performs one further cross-reference lookup — and, when that resolves, one further
- * account read — against the stale contents of the previous record. The defect is one of guard
- * placement: the result of the read is not tested before its output is consumed.</p>
+ * <p>Assumptions: the loop at {@code app/cbl/CBTRN01C.cbl:164-186} guards too little and this pass
+ * does not reproduce the consequence. The outer test at {@code :165} opens a block closing at
+ * {@code :185}; the inner test at {@code :167} closes with its own {@code END-IF} at {@code :169} and
+ * therefore guards ONLY the record display at {@code :168}, so the two {@code MOVE} statements at
+ * {@code :170-171} and the cross-reference lookup at {@code :172} sit outside it. On the iteration
+ * where the read at {@code :166} reaches end of file and sets the terminating flag, the program still
+ * moves a card number out of a record it did not read and performs one further cross-reference lookup
+ * -- and, when that resolves, one further account read -- against the stale contents of the previous
+ * record. The defect is one of guard placement: the result of the read is not tested before its output
+ * is consumed.</p>
  *
- * <p>This pass implements the clean loop instead. It reads, and validates only when a record was
- * genuinely read; otherwise it terminates. A run over N records therefore performs exactly N
- * cross-reference lookups, not N+1.</p>
+ * <p>This pass implements the clean loop instead: it reads, validates only when a record was genuinely
+ * read, and otherwise terminates, so a run over N records performs exactly N cross-reference lookups
+ * and not N+1.</p>
  *
- * <p>Trade-offs: the accepted cost is that a run's total read count differs from the reference's by
- * one lookup pair, so the two are not comparable on read counters. That cost is bounded to counters
- * and never reaches output data, because the extra pair produced no record and no file change — its
- * only visible effect in the reference was one duplicated diagnostic line, emitted when the last
- * real record happened to be unresolvable and its stale card number was looked up a second time.
- * What makes the divergence safe rather than merely defensible is that no byte comparison can
- * observe it: {@code tests/golden/} holds no {@code preflight} tree, so no golden master for
- * {@code CBTRN01C} exists to break. Reproducing the extra lookup would have preserved a read count
- * nothing measures at the price of shipping a known defect.</p>
+ * <p>Trade-offs: the accepted cost is that a run's total read count differs from the reference's by one
+ * lookup pair, so the two are not comparable on read counters. That cost is bounded to counters and
+ * never reaches output data, because the extra pair produced no record and no file change -- its only
+ * visible effect in the reference was one duplicated diagnostic line, emitted when the last real record
+ * happened to be unresolvable and its stale card number was looked up a second time. No byte comparison
+ * can observe the difference either: {@code tests/golden/} holds no {@code preflight} tree, so no
+ * golden master for {@code CBTRN01C} exists to break.</p>
  *
- * <p>This divergence is registered as {@code D-PREFLIGHT-LOOKUP-PAST-END-OF-FILE} in
- * {@code docs/architecture/cobol-to-service-traceability.md}, which the migration plan designates as
- * the register of every documented behavioural divergence. A reader comparing this loop against the
- * reference should start there.</p>
- *
- * <p>Refactoring Rationale: this citation previously read "registered as D-7 in" that document, and
- * it resolved to the wrong entry. {@code D-7} there is the online header clock, which belongs to a
- * different program, and no entry covered this loop at all — so a reader following the citation
- * would have found an unrelated divergence and concluded this one was registered when it was not.
- * The heading above keeps the number, because {@code D-7} is correct as the class-local label within
- * this file's own documentation, the same way {@code ImportJob} numbers its own {@code D-8} and
- * {@code D-9}; the register-side identifier is a name precisely so that a class-local number can
- * never again collide with a register heading.</p>
+ * <p>Assumptions: the divergence is registered as
+ * {@code D-PREFLIGHT-LOOKUP-PAST-END-OF-FILE} in
+ * {@code docs/architecture/cobol-to-service-traceability.md}, which is the register of every documented
+ * behavioural divergence, while {@code D-7} above is this file's own class-local label -- the same way
+ * {@code ImportJob} numbers its own {@code D-8} and {@code D-9}. The register-side identifier is a name
+ * rather than a number precisely so that a class-local number cannot collide with a register
+ * heading.</p>
  *
  * <h2>Why only three repositories are injected, where the reference opens six files</h2>
  *
- * <p>The reference opens six files at {@code app/cbl/CBTRN01C.cbl:157-162} — the daily feed, the
- * customer master, the cross-reference, the card master, the account master and the transaction
- * master — and closes all six at {@code :188-193}. Its procedure body reads only two of them. The
- * customer master, the card master and the transaction master are opened, held for the whole run and
- * closed again without a single read or write.</p>
+ * <p>The reference opens six files at {@code app/cbl/CBTRN01C.cbl:157-162} -- the daily feed, the
+ * customer master, the cross-reference, the card master, the account master and the transaction master
+ * -- and closes all six at {@code :188-193}, while its procedure body reads only two of them. Only the
+ * daily feed, the cross-reference and the account master are injected here.</p>
  *
- * <p>Alternatives Considered: mirroring the open list, by injecting customer, card and transaction
- * repositories alongside the three this pass reads. Rejected on two independent grounds. It would
- * add three collaborators no statement touches, which the module's layering tests read as dead
- * coupling; and it would tell the next reader that this pass consults data it never consults,
- * turning a faithful transcription into a misleading one. Only the daily feed, the cross-reference
- * and the account master are injected.</p>
+ * <p>Alternatives Considered: mirroring the open list by injecting customer, card and transaction
+ * repositories alongside. Rejected on two independent grounds: it would add three collaborators no
+ * statement touches, which the module's layering tests read as dead coupling, and it would tell the
+ * next reader that this pass consults data it never consults.</p>
  *
- * <p>Assumptions: the discarded three carry no behaviour to preserve, because on z/OS an
- * {@code OPEN} is partly an allocation contract rather than purely a data-access one — it reserves
- * the dataset for the step and can fail the step outright if the dataset is unavailable, which makes
- * an unread {@code OPEN} a meaningful pre-flight assertion in its own right. The target has no
- * dataset to reserve: a connection is drawn from a pool per transaction and schema reachability is
- * granted to a database role once, at provisioning. The allocation half of the reference's open list
- * therefore has no analogue to preserve, and only the genuine data access survives translation.</p>
+ * <p>Assumptions: the discarded three carry no behaviour to preserve, because on z/OS an {@code OPEN}
+ * is partly an allocation contract rather than purely a data-access one -- it reserves the dataset for
+ * the step and can fail the step outright if the dataset is unavailable, which makes an unread
+ * {@code OPEN} a meaningful pre-flight assertion in its own right. The target has no dataset to
+ * reserve: a connection is drawn from a pool per transaction and schema reachability is granted to a
+ * database role once, at provisioning, so only the genuine data access survives translation.</p>
  *
  * <h2>Why no retry, and no resilience machinery of any kind, is configured here</h2>
  *
- * <p>Alternatives Considered: wrapping the two lookups, or the pass as a whole, in method-level retry
- * — which the framework this module builds on now offers in its core, so adopting it would have cost
- * one annotation and no new dependency. Rejected, because there is nothing here for a retry to
- * salvage. The pass writes nothing, so a failed attempt leaves no partial state that a second attempt
- * would either repair or duplicate; and its two failure modes are a missing cross-reference row and a
- * missing account row, neither of which is transient — retrying a lookup that correctly found nothing
- * returns the same nothing, more slowly. For a genuinely transient fault, such as a connection lost
- * mid-pass, the recovery that already exists is the right one and operates a level up: the step fails,
- * the durable ledger records the failure, and the orchestrator's own per-state retry re-runs the
- * state, at which point the ledger makes an already-completed step a no-op. Adding a retry here would
- * duplicate that tier while masking the failure the tier above needs to observe.</p>
+ * <p>Alternatives Considered: wrapping the two lookups, or the pass as a whole, in method-level retry,
+ * which the framework offers in its core so adopting it would cost one annotation and no new
+ * dependency. Rejected because there is nothing here for a retry to salvage. The pass writes nothing,
+ * so a failed attempt leaves no partial state a second attempt would repair or duplicate, and its two
+ * failure modes -- a missing cross-reference row and a missing account row -- are not transient:
+ * retrying a lookup that correctly found nothing returns the same nothing, more slowly. For a genuinely
+ * transient fault the recovery operates a level up -- the step fails, the durable ledger records the
+ * failure, and the orchestrator's per-state retry re-runs the state, at which point the ledger makes an
+ * already-completed step a no-op. A retry here would duplicate that tier while masking the failure the
+ * tier above needs to observe.</p>
  *
- * <p>Assumptions: no circuit breaker either. Both collaborators are repositories over the one
- * database this module already holds a bounded connection pool to, so there is no remote dependency
- * to trip a breaker on and no fallback a tripped breaker could route to — a preflight report with
- * fabricated results would be worse than none.</p>
+ * <p>Assumptions: no circuit breaker either. Both collaborators are repositories over the one database
+ * this module already holds a bounded connection pool to, so there is no remote dependency to trip a
+ * breaker on and no fallback a tripped breaker could route to -- a preflight report with fabricated
+ * results would be worse than none.</p>
  *
  * <h2>Baseline lineage: provenance only</h2>
  *
  * <p>The citations in this file are provenance. Nothing under {@code app/**} is read at run time and
- * nothing under it is altered by this migration — the reference implementation is the behavioural
- * oracle and stays byte-identical. Line numbers refer to the source as committed, and columns 73 to
- * 80 of a COBOL line carry a sequence field that is not part of the statement.</p>
+ * nothing under it is altered by this migration -- the reference implementation is the behavioural
+ * oracle and stays byte-identical. Line numbers refer to the source as committed, and columns 73 to 80
+ * of a COBOL line carry a sequence field that is not part of the statement.</p>
  */
 @Configuration
 public class PreflightDailyTransactionsJob {
@@ -226,15 +209,13 @@ public class PreflightDailyTransactionsJob {
     /**
      * The redaction written into the account-missing diagnostic in place of the identifier.
      *
-     * <p>⚠️ Refactoring Rationale: this replaces a {@code "%011d"} format that interpolated the
-     * account identifier itself, and the substitution is a security fix rather than a cosmetic one.
-     * The line is emitted at {@code WARN} and therefore reaches durable log storage, so every account
-     * whose master row was missing had its identifier published to every holder of log access -- and it
-     * was published TWICE, because the same value was also carried as a structured
-     * {@code accountId} field on the same statement. The identifier is now omitted from both, and what
-     * replaces it here is a fixed run of the redaction character at the field's own declared width, so
-     * the line keeps the shape a positional reader expects while carrying nothing that identifies an
-     * account.</p>
+     * <p>Assumptions: the account identifier is withheld from this line rather than interpolated into
+     * it. The line is emitted at {@code WARN} and therefore reaches durable log storage, so an
+     * interpolated identifier would publish every account whose master row was missing to every holder
+     * of log access. It is withheld from the structured {@code accountId} field of the same statement on
+     * the same ground, and what stands here instead is a fixed run of the redaction character at the
+     * field's own declared width, so the line keeps the shape a positional reader expects while
+     * carrying nothing that identifies an account.</p>
      *
      * <p>Assumptions: the width is eleven because {@code ACCT-ID} is declared {@code PIC 9(11)} at
      * {@code app/cpy/CVACT01Y.cpy:5}, and a COBOL {@code DISPLAY} of a numeric-display field emits
@@ -250,22 +231,20 @@ public class PreflightDailyTransactionsJob {
      * only this line cannot name the account, and must follow the ingestion ordinal into the feed to do
      * so; that indirection is the price of the line carrying no identifier at all.</p>
      *
-     * <p>⚠️ Assumptions: this paragraph named the TRANSACTION IDENTIFIER as a second way to reach the
-     * row, and no longer does, because that identifier is now redacted here too -- see
-     * {@link #TRANSACTION_ID_REDACTION}. The ingestion ordinal is the whole of what locates the row, and
-     * it is sufficient: it is unique on the feed table and is not a key of any financial record.</p>
+     * <p>Assumptions: the ingestion ordinal is the whole of what locates the row, the transaction
+     * identifier being withheld as well -- see {@link #TRANSACTION_ID_REDACTION}. The ordinal is
+     * sufficient: it is unique on the feed table and is not a key of any financial record.</p>
      */
     private static final String ACCOUNT_ID_REDACTION = "***********";
 
     /**
      * The redaction written into the card-unresolved diagnostic in place of the transaction identifier.
      *
-     * <p>⚠️ Refactoring Rationale: this replaces the identifier itself, which this class interpolated
-     * verbatim on the stated ground that it "identifies nobody". That ground does not hold. The value is
-     * {@code TRAN-ID}, the ledger's own primary key, so a holder of log access can join every line
-     * carrying it to a posted financial record and to the card and amount on that record -- which is the
-     * disclosure the card masking and the account redaction beside it already refuse. It reached durable
-     * storage twice per unresolved record, once as a structured field and once inside this diagnostic.
+     * <p>Assumptions: the transaction identifier is withheld rather than interpolated, even though it
+     * names no person. The value is {@code TRAN-ID}, the ledger's own primary key, so a holder of log
+     * access could join every line carrying it to a posted financial record and to the card and amount on
+     * that record -- which is the disclosure the card masking and the account redaction beside it already
+     * refuse. It is withheld from the structured field of the same statement for the same reason.
      *
      * <p>Assumptions: the width is sixteen because {@code TRAN-ID} is declared {@code PIC X(16)} at
      * {@code app/cpy/CVTRA06Y.cpy}, and the reference's line is that wide at this position whatever the
@@ -372,18 +351,18 @@ public class PreflightDailyTransactionsJob {
      * @return the registered job, carrying one step, never {@code null}
      */
     @Bean
-    // WHY : Refactoring Rationale: the factory method is named WITHOUT the "Job" suffix its class
-    //       carries, and the difference is load-bearing rather than cosmetic. A `@Configuration`
-    //       class registered by type takes a bean id from its own decapitalised class name, so a
-    //       `@Bean` method spelled `preflightDailyTransactionsJob` inside
-    //       `PreflightDailyTransactionsJob` claims the identifier the class itself already holds --
-    //       and Spring refuses the context with a BeanDefinitionOverrideException rather than
-    //       choosing between them. Dropping the suffix gives the two definitions distinct
-    //       identifiers.
-    // WHY : Assumptions: nothing selects this bean by its identifier. The command contract iterates
-    //       the `Job` beans and compares `getName()` against its argument, and `getName()` comes
-    //       from JOB_NAME above, so the identifier is free to change and the job's published token
-    //       is not.
+    // Refactoring Rationale: the factory method is named WITHOUT the "Job" suffix its class
+    // carries, and the difference is load-bearing rather than cosmetic. A `@Configuration`
+    // class registered by type takes a bean id from its own decapitalised class name, so a
+    // `@Bean` method spelled `preflightDailyTransactionsJob` inside
+    // `PreflightDailyTransactionsJob` claims the identifier the class itself already holds --
+    // and Spring refuses the context with a BeanDefinitionOverrideException rather than
+    // choosing between them. Dropping the suffix gives the two definitions distinct
+    // identifiers.
+    // Assumptions: nothing selects this bean by its identifier. The command contract iterates
+    // the `Job` beans and compares `getName()` against its argument, and `getName()` comes
+    // from JOB_NAME above, so the identifier is free to change and the job's published token
+    // is not.
     public Job preflightDailyTransactions(JobRepository jobRepository,
             PlatformTransactionManager transactionManager, JobParametersValidator validator) {
 
@@ -464,18 +443,18 @@ public class PreflightDailyTransactionsJob {
     private BatchReturnCode reportOnEveryRecord() {
         LOG.info("event=batch.preflight.started banner=\"{}\"", START_BANNER);
 
-        // WHY : Refactoring Rationale: this pass starts at the feed's stored consumed position and
-        //       no longer at the first row, so it reports on the SAME window the posting step will
-        //       consume. The reference's preflight and its posting job read one dataset that was
-        //       replaced between runs (app/jcl/POSTTRAN.jcl:30-31), so both necessarily saw the same
-        //       records; the target's feed accumulates, so a preflight starting at the beginning
-        //       described every night ever loaded while posting described one -- and the counts an
-        //       operator reconciles them by would not have matched for a correct run.
-        // WHY : Assumptions: the UNLOCKED read is used here, and posting uses the locking one. This
-        //       pass writes nothing and advances nothing, so it must not hold a row lock that the
-        //       step which does consume would then wait on. It also means this window can be one
-        //       night stale if a posting pass overlapped, which is acceptable for a report and is
-        //       impossible in the chain, where this state runs before the posting state.
+        // Assumptions: the pass starts at the feed's stored consumed position rather than at the
+        //     first row, so it reports on the SAME window the posting step will consume. The
+        //     reference's preflight and its posting job read one dataset that was replaced between
+        //     runs (app/jcl/POSTTRAN.jcl:30-31), so both necessarily saw the same records; the
+        //     target's feed accumulates, so a pass starting at the beginning would describe every
+        //     night ever loaded while posting described one, and the counts an operator reconciles
+        //     them by would not match for a correct run.
+        // Trade-offs: the UNLOCKED read is used here while posting uses the locking one. This pass
+        //     writes nothing and advances nothing, so it must not hold a row lock that the step
+        //     which does consume would then wait on. The accepted consequence is that this window
+        //     can be one night stale if a posting pass overlaps, which is acceptable for a report
+        //     and is impossible in the chain, where this state runs before the posting state.
         long lastOrdinal = this.watermark.consumedThroughForReader(
                 DailyFeedWatermarkService.DAILY_TRANSACTION_FEED);
         long startedAbove = lastOrdinal;
@@ -490,24 +469,24 @@ public class PreflightDailyTransactionsJob {
                 break;
             }
 
-            // WHY : Refactoring Rationale: every record in this batch was genuinely read, so each one
-            //       is inspected -- which is the whole of divergence D-7. The reference reaches its
-            //       inspection through a guard that covers only its record display
-            //       (app/cbl/CBTRN01C.cbl:167-169), so it inspects once more after end of file using
-            //       a card number left over from the previous record. Driving the inspection from the
-            //       batch the query returned makes that state unrepresentable: there is no iteration
-            //       here in which no record was read.
+            // Refactoring Rationale: every record in this batch was genuinely read, so each one
+            // is inspected -- which is the whole of divergence D-7. The reference reaches its
+            // inspection through a guard that covers only its record display
+            // (app/cbl/CBTRN01C.cbl:167-169), so it inspects once more after end of file using
+            // a card number left over from the previous record. Driving the inspection from the
+            // batch the query returned makes that state unrepresentable: there is no iteration
+            // here in which no record was read.
             for (DailyTransaction feedRecord : batch) {
                 read++;
                 switch (inspect(feedRecord)) {
                     case CARD_UNRESOLVED -> unresolvedCards++;
                     case ACCOUNT_UNRESOLVED -> unresolvedAccounts++;
                     case RESOLVED -> {
-                        // WHY : Assumptions: a record that resolved needs no counter of its own,
-                        //       because the reference reports nothing for it -- the successful path at
-                        //       app/cbl/CBTRN01C.cbl:173-179 displays only when the account read
-                        //       fails. The resolved total is the read total less the two unresolved
-                        //       totals, all three of which are reported below.
+                        // Assumptions: a record that resolved needs no counter of its own,
+                        // because the reference reports nothing for it -- the successful path at
+                        // app/cbl/CBTRN01C.cbl:173-179 displays only when the account read
+                        // fails. The resolved total is the read total less the two unresolved
+                        // totals, all three of which are reported below.
                     }
                     default -> throw new IllegalStateException(
                             "unhandled preflight inspection outcome for transaction "
@@ -519,10 +498,10 @@ public class PreflightDailyTransactionsJob {
 
         LOG.info("event=batch.preflight.completed read={} unresolvedCards={} unresolvedAccounts={}"
                 + " banner=\"{}\"", read, unresolvedCards, unresolvedAccounts, END_BANNER);
-        // WHY : Assumptions: the WINDOW is logged on its own line rather than added to the line
-        //       above, so the reference's reported totals keep their own event and this pass's
-        //       target-only context keeps its. An operator comparing this report against the posting
-        //       step's counters needs both windows to see that the two describe the same rows.
+        // Assumptions: the WINDOW is logged on its own line rather than added to the line
+        // above, so the reference's reported totals keep their own event and this pass's
+        // target-only context keeps its. An operator comparing this report against the posting
+        // step's counters needs both windows to see that the two describe the same rows.
         LOG.info("event=batch.preflight.window feed={} above={} through={} read={}",
                 DailyFeedWatermarkService.DAILY_TRANSACTION_FEED, startedAbove, lastOrdinal, read);
         return BatchReturnCode.CLEAN;
@@ -536,17 +515,17 @@ public class PreflightDailyTransactionsJob {
      * a query returned. This method asserts that contract at the one point the walk depends on it
      * rather than trusting it silently.</p>
      *
-     * <p>Refactoring Rationale: the ordinal was previously assigned straight into the primitive
-     * accumulator, which auto-unboxes. A record carrying no ordinal — an instance built through the
-     * entity's public constructor, which leaves the generated identity unset, rather than loaded from
-     * the feed table — therefore aborted the pass with a bare {@code NullPointerException} naming
-     * only the accessor. That failure surfaced part-way through a batch, after some records had
-     * already been reported and others never would be, so a log showed a partial pass with no
-     * indication that it was partial. Testing the value first turns the same fault into a message
-     * naming the offending record and the contract it broke, and it still stops the pass rather than
-     * skipping the record — a skipped record would silently drop it from the totals and, because the
-     * walk continues strictly above the last ordinal it accepted, would re-read the same batch
-     * forever.</p>
+     * <p>Assumptions: the value is tested before it reaches the primitive accumulator, which would
+     * auto-unbox it. A record carrying no ordinal -- an instance built through the entity's public
+     * constructor, which leaves the generated identity unset, rather than loaded from the feed table --
+     * would otherwise abort the pass with a bare {@code NullPointerException} naming only the accessor,
+     * part-way through a batch, so a log would show a partial pass with no indication that it was
+     * partial. Testing first turns the same fault into a message naming the offending record and the
+     * contract it broke.</p>
+     *
+     * <p>Trade-offs: the pass stops rather than skipping such a record. A skipped record would silently
+     * drop out of the totals and, because the walk continues strictly above the last ordinal it
+     * accepted, would leave the same batch re-read forever.</p>
      *
      * @param feedRecord the record most recently inspected in the current batch; must not be
      *     {@code null}
@@ -599,26 +578,26 @@ public class PreflightDailyTransactionsJob {
      * @return which of the three mutually exclusive paths the record took, never {@code null}
      */
     private RecordOutcome inspect(DailyTransaction feedRecord) {
-        // WHY : ⚠️ Refactoring Rationale: this renders three CHOSEN members rather than the entity, and
-        //       it rendered the entity. That type's diagnostic form deliberately omits the card number
-        //       and the amount, which is why it was used here, but it names the TRANSACTION IDENTIFIER
-        //       -- the ledger's primary key -- so raising this class to DEBUG published a ledger key for
-        //       every record read. A level that is off by default is not a control: an operator raising
-        //       it to diagnose one record writes them all. Alternatives Considered: narrowing the
-        //       entity's own rendering, which is where the value originates. Rejected because this is
-        //       its ONLY logging consumer, its rendering is a documented contract reasoned about in its
-        //       own charter, and the ordinal it also carries already identifies the row here.
+        // Assumptions: three CHOSEN members are rendered rather than the entity. The entity's
+        //     diagnostic form omits the card number and the amount but names the TRANSACTION
+        //     IDENTIFIER -- the ledger's primary key -- so rendering it would publish a ledger key for
+        //     every record read once this class is raised to DEBUG. A level that is off by default is
+        //     not a control: an operator raising it to diagnose one record writes them all.
+        // Alternatives Considered: narrowing the entity's own rendering, where the value originates.
+        //     Rejected because this is its only logging consumer, its rendering is a documented
+        //     contract reasoned about in its own charter, and the ordinal rendered here already
+        //     identifies the row.
         LOG.debug("event=batch.preflight.record ingestSeq={} typeCd={} categoryCd={} origTs={}",
                 feedRecord.getIngestSeq(), feedRecord.getTypeCd(), feedRecord.getCategoryCd(),
                 feedRecord.getOrigTs());
 
         Optional<CardXref> resolved = this.crossReferences.findByCardNum(feedRecord.getCardNum());
         if (resolved.isEmpty()) {
-            // WHY : ⚠️ Refactoring Rationale: the structured field is the run-local ingestion ORDINAL
-            //       and was the transaction identifier. Both name the same feed row; only one of them is
-            //       also the ledger's primary key, and that one reached durable log storage for every
-            //       unresolved record. See TRANSACTION_ID_REDACTION for the full reasoning, including why
-            //       the identifier inside the verbatim diagnostic is redacted rather than kept.
+            // Assumptions: the structured field is the run-local ingestion ORDINAL rather than the
+            //     transaction identifier. Both name the same feed row; only the identifier is also the
+            //     ledger's primary key, and this line reaches durable log storage for every unresolved
+            //     record. See TRANSACTION_ID_REDACTION for the full reasoning, including why the
+            //     identifier inside the verbatim diagnostic is withheld as well.
             LOG.warn("event=batch.preflight.card-unresolved ingestSeq={} diagnostic=\"{}\"",
                     feedRecord.getIngestSeq(), cardUnresolvedDiagnostic(feedRecord));
             return RecordOutcome.CARD_UNRESOLVED;
@@ -626,20 +605,15 @@ public class PreflightDailyTransactionsJob {
 
         Long accountId = resolved.get().getAccountId();
         if (this.accounts.findByAccountId(accountId).isEmpty()) {
-            // WHY : ⚠️ Refactoring Rationale: the account identifier is gone from this statement. It
-            //       used to appear twice on one WARN line -- once as a structured accountId field and
-            //       again interpolated into the diagnostic -- so a durable log recorded, for every
-            //       account whose master row was missing, an identifier that any holder of log access
-            //       could read. What replaces it is identity that locates the record without naming the
-            //       account: the run-local ingestion ordinal, which is the feed table's own row
-            //       position. It is enough to reach the row and resolve the account through the
-            //       cross-reference, which is where that lookup belongs. See ACCOUNT_ID_REDACTION for
-            //       why a partial identifier was rejected as well as a full one.
-            // WHY : ⚠️ Refactoring Rationale: this statement also carried the TRANSACTION IDENTIFIER,
-            //       and the paragraph above described it as identity that "identifies nobody". It is the
-            //       ledger's primary key, so it identifies a posted financial record and, through it, a
-            //       card and an amount. It is gone from this line; the ordinal that remains locates the
-            //       same row without keying anything outside the feed.
+            // Assumptions: this WARN line names neither the account identifier nor the transaction
+            //     identifier. It reaches durable log storage for every account whose master row is
+            //     missing, so an interpolated or structured account identifier would be readable by
+            //     any holder of log access, and the transaction identifier is the ledger's primary
+            //     key, which identifies a posted financial record and through it a card and an
+            //     amount. What the line carries instead is the run-local ingestion ordinal, the feed
+            //     table's own row position, which is enough to reach the row and resolve the account
+            //     through the cross-reference -- where that lookup belongs. See ACCOUNT_ID_REDACTION
+            //     for why a partial identifier is refused as well as a full one.
             LOG.warn("event=batch.preflight.account-unresolved ingestSeq={}"
                     + " diagnostic=\"{}\"",
                     feedRecord.getIngestSeq(), accountMissingDiagnostic());
@@ -659,10 +633,10 @@ public class PreflightDailyTransactionsJob {
      * recognise a card. This is the one place the verbatim-text rule is knowingly qualified, and it is
      * qualified only in the interpolated values.</p>
      *
-     * <p>⚠️ Refactoring Rationale: the transaction identifier this line ends with is REDACTED too, and
-     * was interpolated in full on the ground that it "identifies nobody". It is the ledger's primary
-     * key, so it identifies a posted financial record; the ingestion ordinal on the same statement is
-     * what locates the record in the feed. See {@link #TRANSACTION_ID_REDACTION}.</p>
+     * <p>Assumptions: the transaction identifier this line ends with is withheld as well, because it is
+     * the ledger's primary key and therefore identifies a posted financial record; the ingestion ordinal
+     * on the same statement is what locates the record in the feed. See
+     * {@link #TRANSACTION_ID_REDACTION}.</p>
      *
      * @param feedRecord the record whose card did not resolve; must not be {@code null}
      * @return the diagnostic line, never {@code null}

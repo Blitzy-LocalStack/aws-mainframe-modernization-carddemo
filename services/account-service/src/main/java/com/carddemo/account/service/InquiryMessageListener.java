@@ -4,10 +4,12 @@ import com.carddemo.account.domain.Account;
 import com.carddemo.account.mapper.AccountInquiryReplyMapper;
 import com.carddemo.account.repository.AccountRepository;
 import com.carddemo.account.repository.InquiryReplyLedger;
+import com.carddemo.common.codec.DateInquiryReplyCodec;
 import com.carddemo.common.codec.InquiryRequestCodec;
 import com.carddemo.common.codec.InquiryRequestCodec.InquiryRequest;
 import com.carddemo.common.messaging.MessageExpiry;
 import com.carddemo.common.messaging.MessagingCorrelationId;
+import com.carddemo.common.messaging.QueueDestination;
 import com.carddemo.common.observability.ThrowableDigest;
 import io.awspring.cloud.sqs.annotation.SqsListener;
 import io.awspring.cloud.sqs.listener.SqsHeaders;
@@ -15,10 +17,10 @@ import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -29,12 +31,11 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 import software.amazon.awssdk.services.sqs.SqsClient;
-import software.amazon.awssdk.services.sqs.model.GetQueueUrlRequest;
 import software.amazon.awssdk.services.sqs.model.MessageAttributeValue;
 import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
 
 /**
- * Answers the asynchronous account-inquiry exchange, replacing the queue-driven transaction that served it.
+ * Answers the asynchronous inquiry exchange, replacing the queue-driven transactions that served it.
  *
  * <h2>Purpose</h2>
  * <p>This class is the migrated form of {@code app/app-vsam-mq/cbl/COACCT01.cbl}, a 620-line queue-triggered
@@ -43,12 +44,26 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  * as the specification for this class and is never modified. Every divergence named below is registered in
  * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
  *
+ * <p>Refactoring Rationale: this consumer is the SOLE consumer of the migrated inquiry request queue, and it
+ * therefore answers the second inquiry flow as well -- the date-and-time inquiry of
+ * {@code app/app-vsam-mq/cbl/CODATE01.cbl}. The baseline defines one request destination for both,
+ * {@code DEFINE QLOCAL('CARDDEMO.REQUEST.QUEUE')} at {@code app/app-vsam-mq/README.md:53} aliased to CICS as
+ * {@code MQQUEUE(CARDREQ)} at {@code :71}, and the migrated topology provisions that one queue rather than
+ * one per consumer. One queue admits exactly one owning consumer, because a receive hides the message from
+ * every other consumer, so a second consumer elsewhere would take work only this one can do and this one
+ * would take work only it could not. {@link #replyFor(InquiryRequest)} dispatches on the request's own
+ * four-character function code, and the date answer is rendered from
+ * {@link com.carddemo.common.codec.DateInquiryReplyCodec} -- a clock reading and a fixed layout, with no
+ * reference data and no cross-context call. The date EVALUATION rules of {@code CSUTLDTC} remain with the
+ * reference context, which answers them on its synchronous route.</p>
+ *
  * <p>Paragraph-to-method traceability, cited by PHYSICAL line in that file because it is legacy
  * sequence-numbered and its column-one sequence numbers are not line numbers:</p>
  * <ul>
  *   <li>{@code 4000-MAIN-PROCESS} at physical line 325, whose {@code EXEC CICS SYNCPOINT} verb sits at
  *       physical line 327, together with {@code 3000-GET-REQUEST} at physical line 334, become
- *       {@link #onRequest(Message)} plus the container properties on its annotation.</li>
+ *       {@link #onRequest(Message)} plus the container properties declared under
+ *       {@code spring.cloud.aws.sqs.listener} in {@code src/main/resources/application.yml}.</li>
  *   <li>{@code 4000-PROCESS-REQUEST-REPLY} at physical line 390 becomes
  *       {@link #replyFor(InquiryRequest)}.</li>
  *   <li>{@code 4100-PUT-REPLY} at physical line 462 becomes
@@ -113,8 +128,13 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  * <p>Assumptions: this is NOT the outbox the section above rules out, and the distinction is the
  * requirement rather than the mechanism. An outbox guarantees a reply EXISTS for every committed decision,
  * which this exchange does not need because it commits no decision -- its read is read-only, so no state
- * survives that a missing reply would contradict. A claim guarantees a reply is not sent TWICE. The
- * authorization consumer needs the first and has one; this consumer needs the second and now has one, and
+ * survives that a missing reply would contradict. A claim guarantees a reply is never answered TWICE with
+ * DIFFERING content: a redelivery either suppresses its duplicate outright or re-sends the recorded bytes,
+ * so no requester can be handed two disagreeing answers under one correlation identifier. It does NOT
+ * guarantee a single send -- the Trade-offs paragraph below names the one window in which a byte-identical
+ * copy still goes out -- and stating it as though it did would describe a property this class cannot
+ * deliver without the two-phase commit that paragraph rules out. The authorization consumer needs the
+ * existence guarantee and has one; this consumer needs the no-disagreement guarantee and now has one, and
  * neither is a substitute for the other.</p>
  *
  * <p>Trade-offs: one crash window remains open and is stated rather than glossed. A task that dies after the
@@ -122,7 +142,13 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  * receives two byte-identical copies. Closing it entirely would require the queue send and the database mark
  * to commit together across two resource managers, which is the two-phase commit AAP section 0.7.6 records as
  * eliminated by this migration and not to be refilled. What is bought is that duplication is now one specific
- * failure rather than the outcome of every redelivery.</p>
+ * failure rather than the outcome of every redelivery, and that the duplicate is discardable at the far end:
+ * both copies carry the requester's own {@code messageId} and {@code correlationId} attributes, so a requester
+ * that has already accepted an answer under one message identifier can drop the second without inspecting it.
+ * Alternatives Considered: content-based deduplication on the reply queue, which the queue service offers only
+ * on an ORDERED queue. Adopting it would make the inquiry reply queue ordered, which
+ * {@code docs/adr/ADR-004-messaging.md} rejects for this flow because independent inquiries would then be
+ * serialised behind one another for a property no requester observes.</p>
  *
  * <p>⚠️ Refactoring Rationale: the claim was keyed on the PRODUCER-supplied message attribute, falling back
  * to the correlation identifier, and that inverted the guarantee for a whole class of requester. Neither value
@@ -182,8 +208,13 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  * does the same and then propagates.</p>
  *
  * <h2>Queue topology and endpoints</h2>
- * <p>Assumptions: all three destinations arrive from configuration and none is written into this class, and
- * that is what the baseline itself does. {@code 01 QUEUE-INFO.} at physical line 92 declares four
+ * <p>Assumptions: all three destinations arrive from configuration as queue NAMES, not addresses, and none
+ * is written into this class -- which is what the baseline itself does. A name is what
+ * {@code @SqsListener} binds and what {@link #queueUrl(String)} resolves an address from, so the calling
+ * root publishes {@code infra/modules/sqs}'s {@code _queue_name} outputs rather than its {@code _queue_url}
+ * outputs: handed a full URL, the resolution call would ask the service for the address of a queue whose
+ * name contains a scheme and a host, and the publication would fail on the reply path rather than at
+ * start-up. {@code 01 QUEUE-INFO.} at physical line 92 declares four
  * queue-name fields -- the queue manager, the input queue, the reply queue and the error queue -- and every
  * one of them is {@code PIC X(48) VALUE SPACES}, filled at run time. The two places the baseline does assign
  * a name by literal produce dotted uppercase names that
@@ -197,7 +228,20 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  * flow needs ordering per card because authorizations against one card must apply in order; imposing the same
  * here would serialise independent inquiries behind one another and cap throughput to no purpose. These are
  * standard queues, each with a dead-letter queue at a maximum receive count of five, provisioned by
- * {@code infra/modules/sqs}.</p>
+ * {@code infra/modules/sqs}, which provisions ONE request queue for the whole inquiry exchange rather than
+ * one per consumer -- the shape of the baseline, whose single {@code CARDDEMO.REQUEST.QUEUE} at
+ * {@code app/app-vsam-mq/README.md:53} feeds both inquiry transactions. This class is that queue's only
+ * consumer and dispatches on the request's function code, so the reference context receives no queue grant
+ * on it and no second container polls it.</p>
+ *
+ * <p>Trade-offs: the polling bounds are declared in configuration under
+ * {@code spring.cloud.aws.sqs.listener} and NOT on the {@code @SqsListener} annotation. A non-null
+ * annotation attribute wins over the container factory it would otherwise inherit from, so an attribute
+ * placed here silently disables the profile that was written to size this consumer -- which is how the two
+ * concurrency bounds and the wait came to differ per profile in configuration while a fixed set applied in
+ * fact. Declaring them in exactly one place costs the ability to size this one listener differently from
+ * another in the same service, and this service has one; it buys a sizing that an operator can read from the
+ * profile that is actually in force.</p>
  *
  * <h2>Money</h2>
  * <p>Alternatives Considered: rendering the reply's five monetary fields in this class with a decimal
@@ -233,6 +277,15 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  * business-rules section governs the posting, interest and category-balance programs rather than this one.
  * Parity here rests on the transcribed logic and on the copybook contract, both cited line by line above and
  * on each method below.</p>
+ *
+ * <p>Trade-offs: one behavioural divergence follows from the single request queue and is registered rather
+ * than hidden. In the baseline a request whose function code is neither {@code 'INQA'} nor recognised by
+ * {@code CODATE01} could still receive a date reply, because {@code CODATE01.cbl} declares {@code WS-FUNC}
+ * at physical line 110 and never reads it -- it answers ANY message with the system date. Here the function
+ * code decides: {@code 'INQA'} takes the account route, {@code 'DATE'} takes the date route, and anything
+ * else receives {@code COACCT01}'s own invalid-parameters reply, transcribed verbatim from its physical
+ * lines 448 to 456. That is the stricter of the two baseline behaviours and the only one a caller can
+ * distinguish; answering an unrecognised code with a date would make a malformed request look serviced.</p>
  */
 @Service
 public class InquiryMessageListener {
@@ -246,6 +299,23 @@ public class InquiryMessageListener {
      * descriptor mapping against one constant rather than against a repeated literal.</p>
      */
     public static final String ATTRIBUTE_CORRELATION_ID = "correlationId";
+
+    /**
+     * The four-character function code the date-and-time inquiry flow arrives under.
+     *
+     * <p>Assumptions: the value is the baseline's own. {@code app/app-vsam-mq/README.md} declares the date
+     * request as {@code REQUEST-TYPE PIC X(4) VALUE 'DATE'} in the first field of the same
+     * 1000-character layout {@code COACCT01.cbl} declares at physical lines 111 to 113, so the two flows
+     * are distinguished on the wire by this field and by nothing else.</p>
+     *
+     * <p>Assumptions: it is declared HERE rather than in the shared codec, where
+     * {@code FUNCTION_ACCOUNT_INQUIRY} lives. That constant is in the shared kernel because the codec's own
+     * charter records it as a value the reference program branches on; this one is a routing decision this
+     * consumer makes, and the codec's charter is explicit that judging a function code is a domain question
+     * it declines to answer. Publishing it here keeps the codec structural and lets a test assert the
+     * dispatch against one constant rather than a repeated literal.</p>
+     */
+    public static final String FUNCTION_DATE_INQUIRY = "DATE";
 
     /**
      * The attribute carrying the request's own message identifier onto the reply.
@@ -415,14 +485,29 @@ public class InquiryMessageListener {
     private final SqsClient sqs;
 
     /**
-     * The configured queue name replies are published to.
+     * The configured destination replies are published to, either a queue address or a queue name.
+     *
+     * <p>Assumptions: both representations are admitted, because the environment roots inject the
+     * queue's URL while the property is named for a queue. {@link #queueUrl(String)} records why, and
+     * is the one place the two are told apart.</p>
      */
-    private final String replyQueue;
+    private final String replyQueueUrl;
 
     /**
-     * The configured queue name error reports are published to.
+     * The configured destination error reports are published to, either a queue address or a queue name.
      */
-    private final String errorQueue;
+    private final String errorQueueUrl;
+
+    /**
+     * The name of the error queue, as the diagnostic block declares it.
+     *
+     * <p>Assumptions: derived from {@link #errorQueueUrl} at construction rather than configured separately,
+     * so the name a diagnostic reports and the queue it is published to cannot name two different queues. The
+     * baseline's diagnostic field is a queue NAME -- {@code app/app-vsam-mq/cbl/COACCT01.cbl} has no addresses
+     * to put there -- and it is a declared forty-eight-character field, so an address would be both the wrong
+     * kind of value and long enough to be truncated mid-host.</p>
+     */
+    private final String errorQueueName;
 
     /**
      * The clock the expiry comparison reads the current instant from.
@@ -459,42 +544,29 @@ public class InquiryMessageListener {
     private final TransactionTemplate ledgerTransaction;
 
     /**
-     * Resolved queue addresses, cached by configured name.
-     *
-     * <p>Assumptions: a queue's address is stable for the life of the queue, and this service is configured
-     * to FAIL rather than create a queue that does not exist, so a cached entry cannot become a pointer to a
-     * queue this system did not provision. Resolving per message instead would add a service call to every
-     * reply for a value that never changes. The map is concurrent because the container dispatches messages
-     * on several threads at once.</p>
-     *
-     * <p>Refactoring Rationale: this description was authored immediately ABOVE a second documentation block
-     * and therefore documented nothing -- a compiler attaches only the last block before a declaration, so
-     * the explanation of the one piece of mutable state on this class was dropped from the generated
-     * documentation while this field carried none at all. It is attached to the field it describes.</p>
-     */
-    private final Map<String, String> queueUrls = new ConcurrentHashMap<>();
-
-    /**
      * Creates the consumer.
      *
      * @param accounts the account master repository; must not be {@code null}
      * @param replies the reply renderer; must not be {@code null}
      * @param sqs the queue client; must not be {@code null}
-     * @param replyQueue the configured reply queue name; must not be {@code null} or blank
-     * @param errorQueue the configured error queue name; must not be {@code null} or blank
+     * @param replyQueueUrl the configured reply destination as a fully-qualified queue address; must
+     *     not be {@code null} or blank
+     * @param errorQueueUrl the configured error destination as a fully-qualified queue address; must
+     *     not be {@code null} or blank
      * @param ledger the durable record of already-answered requests; must not be {@code null}
      * @param clock the clock the expiry check reads; must not be {@code null}
      * @param transactionManager the manager the short units of work are opened against; must not
      *     be {@code null}
      * @throws NullPointerException if any reference argument is {@code null}
-     * @throws IllegalArgumentException if either queue name is blank, because a consumer that cannot address
-     *     its reply queue would take requests off the request queue and answer none of them
+     * @throws IllegalArgumentException if either destination is not a fully-qualified queue URL, because a
+     *     consumer that cannot address its reply queue would take requests off the request queue and answer
+     *     none of them
      */
     public InquiryMessageListener(AccountRepository accounts,
             AccountInquiryReplyMapper replies,
             SqsClient sqs,
-            @Value("${carddemo.account.inquiry.reply-queue}") String replyQueue,
-            @Value("${carddemo.account.inquiry.error-queue}") String errorQueue,
+            @Value("${carddemo.account.inquiry.reply-queue-url}") String replyQueueUrl,
+            @Value("${carddemo.account.inquiry.error-queue-url}") String errorQueueUrl,
             InquiryReplyLedger ledger,
             Clock clock,
             PlatformTransactionManager transactionManager) {
@@ -508,8 +580,22 @@ public class InquiryMessageListener {
         this.accounts = Objects.requireNonNull(accounts, "accounts must not be null");
         this.replies = Objects.requireNonNull(replies, "replies must not be null");
         this.sqs = Objects.requireNonNull(sqs, "sqs must not be null");
-        this.replyQueue = requireQueueName(replyQueue, "carddemo.account.inquiry.reply-queue");
-        this.errorQueue = requireQueueName(errorQueue, "carddemo.account.inquiry.error-queue");
+
+        // WHY : Refactoring Rationale: both destinations are validated as queue ADDRESSES here and are
+        //   published to verbatim. They were previously accepted as any non-blank string and then resolved
+        //   through a name-to-address lookup on first use, which could only fail, because the deployment
+        //   supplies an address: infra/envs/dev/main.tf sets both variables from module.sqs.*_queue_url. The
+        //   failure landed exclusively on the reply and diagnostic paths -- reached only after a request had
+        //   been taken off the request queue and, here, only after its ledger claim had been committed -- so
+        //   requests were consumed, recorded as claimed and never answered, while start-up and health both
+        //   reported a working service. A shape check at construction reproduces the baseline's own
+        //   discipline, which opens all three queues before it gets a single message and terminates the task
+        //   if any open fails.
+        this.replyQueueUrl = QueueDestination.requireQueueUrl(replyQueueUrl,
+                "carddemo.account.inquiry.reply-queue-url");
+        this.errorQueueUrl = QueueDestination.requireQueueUrl(errorQueueUrl,
+                "carddemo.account.inquiry.error-queue-url");
+        this.errorQueueName = QueueDestination.queueNameOf(this.errorQueueUrl);
         this.ledger = Objects.requireNonNull(ledger, "ledger must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
         Objects.requireNonNull(transactionManager, "transactionManager must not be null");
@@ -538,9 +624,16 @@ public class InquiryMessageListener {
      * misconfigured destination stops the program before it can consume anything. Deferring the check would
      * let this consumer start, take requests off the request queue and fail to answer every one of them.</p>
      *
+     * <p>Assumptions: only BLANKNESS is refused, and the shape of a non-blank value is deliberately not
+     * examined here. A destination may legitimately arrive as a queue address or as a queue name --
+     * {@link #queueUrl(String)} records why both reach this class -- so a name-shaped check would reject
+     * the very value the environment roots inject, and an address-shaped check would reject a local
+     * configuration that names its queue. Blankness is the one condition that is wrong under either
+     * reading, so it is the one condition tested at construction.</p>
+     *
      * @param value the configured value
      * @param property the property name, so a refusal names exactly what to set
-     * @return the trimmed name, never {@code null}
+     * @return the trimmed destination, never {@code null}
      * @throws NullPointerException if {@code value} is {@code null}
      * @throws IllegalArgumentException if the value is blank
      */
@@ -562,10 +655,13 @@ public class InquiryMessageListener {
      * descriptor and hands the payload on at physical line 374, and it runs inside the unit of work
      * {@code 4000-MAIN-PROCESS} opens with its {@code EXEC CICS SYNCPOINT} verb at physical line 327.</p>
      *
-     * <p>Assumptions: two of the three polling values on the annotation are the baseline's own rather than
-     * chosen defaults. The wait is five seconds because physical line 337 moves 5000 into the get's wait
-     * interval, in milliseconds, under the program's own comment on physical line 336 recording that as five
-     * seconds. The loop is bounded by queue emptiness alone: physical lines 214 to 216 perform the get and
+     * <p>Assumptions: two of the three polling values are the baseline's own rather than chosen defaults, and
+     * all three are declared in {@code src/main/resources/application.yml} under
+     * {@code spring.cloud.aws.sqs.listener} rather than on the annotation below -- the WHY block at the
+     * annotation records why that is the only namespace that sizes this container. The wait is five seconds
+     * because physical line 337 moves 5000 into the get's wait interval, in milliseconds, under the program's
+     * own comment on physical line 336 recording that as five seconds, which the base profile carries as
+     * {@code poll-timeout: 5s}. The loop is bounded by queue emptiness alone: physical lines 214 to 216 perform the get and
      * then repeat until the no-more-messages condition, which physical lines 377 and 378 set when the get
      * reports that no message is available, and the counter incremented at physical line 375 is never
      * compared against a ceiling. The five-hundred-message ceiling that DOES exist in this system belongs to
@@ -573,7 +669,9 @@ public class InquiryMessageListener {
      * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} physical line 40, and is not this program's
      * discipline.</p>
      *
-     * <p>Trade-offs: the third value, concurrency, has no counterpart in the reference and is ADDITIVE. The
+     * <p>Trade-offs: the third value, concurrency, has no counterpart in the reference and is ADDITIVE, and
+     * it is the one of the three whose value differs between profiles -- ten in production, two in
+     * development, where the datasource pool is four connections wide. The
      * baseline's driver is one task performing one get at a time, whereas this container fetches a batch and
      * runs handlers concurrently, so the target processes more requests per unit of time than the reference
      * does and two requests in one batch are not guaranteed to be answered in the order they were enqueued
@@ -619,10 +717,37 @@ public class InquiryMessageListener {
      *     instead of being acknowledged unanswered; the concrete types are the data-access exceptions the
      *     repository raises and the queue-client exceptions the send raises
      */
-    @SqsListener(queueNames = "${carddemo.account.inquiry.request-queue}",
-            maxConcurrentMessages = "${carddemo.account.inquiry.max-concurrent-messages:10}",
-            maxMessagesPerPoll = "${carddemo.account.inquiry.max-messages-per-poll:10}",
-            pollTimeoutSeconds = "${carddemo.account.inquiry.poll-timeout-seconds:5}")
+    // WHY : Refactoring Rationale: this annotation named ONLY the request queue after carrying three
+    //   sizing attributes -- maxConcurrentMessages, maxMessagesPerPoll and pollTimeoutSeconds -- each
+    //   written as a placeholder over a carddemo.account.inquiry.* key with a literal default of 10, 10
+    //   and 5. Those three keys are declared in NO profile of this module, so every deployment took the
+    //   literal defaults, and an annotation attribute is applied to the container AFTER the factory's
+    //   own options: SqsMessageListenerContainerFactory feeds each non-null endpoint value through
+    //   ConfigUtils.acceptIfNotNull onto the options the factory already built, so an attribute that
+    //   resolves overrides the profile rather than falling back to it. The dev profile's
+    //   spring.cloud.aws.sqs.listener.max-concurrent-messages: 2 and max-messages-per-poll: 2 were
+    //   therefore silently replaced by 10 and 10 against a datasource pool of four connections -- the
+    //   exact over-subscription those two values exist to prevent, invisible because both namespaces
+    //   read as deliberate.
+    // WHY : Assumptions: an ABSENT attribute is not a zero, and that is what makes the removal safe
+    //   rather than a change of value. Verified against the pinned spring-cloud-aws-sqs 4.1.0 artifact
+    //   rather than from documentation: every sizing attribute of io.awspring.cloud.sqs.annotation
+    //   .SqsListener is declared String, AbstractListenerAnnotationBeanPostProcessor.resolveAsInteger
+    //   returns null for a value with no text, and the factory applies each through acceptIfNotNull. An
+    //   omitted attribute consequently leaves the container option exactly as the factory built it from
+    //   spring.cloud.aws.sqs.listener.*, which is the one namespace this module now sizes itself in.
+    // WHY : Alternatives Considered: keeping the three attributes and repointing them at the framework's
+    //   own keys, so the annotation read ${spring.cloud.aws.sqs.listener.max-concurrent-messages}.
+    //   Rejected because it re-states in Java a value the framework already binds, and it re-introduces
+    //   the same failure the moment a profile omits the key: a placeholder with no default aborts context
+    //   refresh, and one with a default silently re-establishes the override this change removes. Also
+    //   considered was keeping the carddemo.* namespace and declaring the three keys in every profile,
+    //   which was rejected because it leaves TWO namespaces sizing one container, and a reader tuning the
+    //   documented spring.cloud.aws.sqs.listener.* block would still have no indication that a second
+    //   set of keys outranked it. Trade-offs: the sizing is no longer visible at the handler, so the poll
+    //   wait transcribed from COACCT01 L337 must be read in application.yml where poll-timeout: 5s
+    //   carries it. That is accepted because one authoritative location beats two agreeing ones.
+    @SqsListener(queueNames = "${carddemo.account.inquiry.request-queue}")
     public void onRequest(Message<String> message) {
         Objects.requireNonNull(message, "message must not be null");
 
@@ -664,8 +789,8 @@ public class InquiryMessageListener {
             //   ends before it is sent, and the send happens with no transaction open. This method was
             //   annotated transactional across the whole exchange, so a database connection was held for the
             //   duration of a queue publish -- a network round trip to a service this one does not control.
-            //   With ten concurrent messages configured by default, a slow or unreachable queue endpoint
-            //   could therefore hold ten connections while doing no database work at all, and starve every
+            //   At the production profile's concurrency of ten, a slow or unreachable queue endpoint could
+            //   therefore hold ten connections while doing no database work at all, and starve every
             //   request-serving path in this process. The read itself is one keyed lookup, so the
             //   transaction it needs is very short.
             // WHY : Assumptions: nothing about the exchange's guarantees changes. The read is read-only, so
@@ -715,7 +840,41 @@ public class InquiryMessageListener {
      *     so a null could only arrive from a direct call and is a defect rather than a wire condition
      */
     private String replyFor(InquiryRequest request) {
+        // WHY : Refactoring Rationale: this dispatch is new, and it exists because the two inquiry flows
+        //   now arrive on ONE queue. The baseline defines a single request destination for both --
+        //   DEFINE QLOCAL('CARDDEMO.REQUEST.QUEUE') at app/app-vsam-mq/README.md:53 -- and the migrated
+        //   topology provisions that one queue rather than one per consumer, because SQS admits exactly
+        //   one owning consumer per queue: a receive hides the message from every other consumer, so two
+        //   competing consumers would each lose work only the other could do. This context owns the
+        //   queue and therefore answers both function codes.
+        // WHY : Assumptions: 'DATE' is the discriminator the baseline itself publishes for the second
+        //   flow. app/app-vsam-mq/README.md declares the date request as REQUEST-TYPE PIC X(4) VALUE
+        //   'DATE' in the first field of the same 1000-character layout this codec decodes, and
+        //   CODATE01.cbl reads no field of its request at all -- WS-FUNC and WS-KEY are declared at
+        //   physical lines 110 and 111 and never referenced -- so the function code is the only thing
+        //   available to route on and the baseline names the value.
+        // WHY : Trade-offs: the answer is rendered here from the clock rather than fetched from the
+        //   context that owns date conversion. That context still owns the date EVALUATION rules and
+        //   answers them on its synchronous route; what is rendered here is the positional reply body of
+        //   this queue's wire, whose value is a function of the clock and a fixed layout alone, and whose
+        //   layout is single-sourced in the shared kernel beside the request half. The alternative was a
+        //   cross-context call per message, which would have added a pairwise machine-identity signing
+        //   key with its own rotation obligation, its IAM grants and a network hop on the message path,
+        //   to obtain the current time.
+        if (request.isFunction(FUNCTION_DATE_INQUIRY)) {
+            LOG.info("event=date.inquiry.answered");
+            return DateInquiryReplyCodec.framedSystemDateAndTime(
+                    LocalDateTime.ofInstant(this.clock.instant(), ZoneOffset.UTC));
+        }
+
         if (!request.isFunction(InquiryRequestCodec.FUNCTION_ACCOUNT_INQUIRY) || !request.hasUsableKey()) {
+            // WHY : Assumptions: an unrecognised function code still receives COACCT01's own refusal, and
+            //   that is the ONE observable change the merge makes. On the baseline's separate trigger
+            //   queues an unrecognised code reaching CODATE01's queue was answered with the date, because
+            //   that program tests nothing; reaching COACCT01's queue it was answered with this sentence.
+            //   With one queue the refusal is the answer, which is the stricter of the two and the one
+            //   whose text the baseline documents. The divergence is registered in
+            //   docs/architecture/cobol-to-service-traceability.md.
             LOG.info("event=account.inquiry.rejected reason=guard function={}", request.trimmedFunction());
             return this.replies.frame(this.replies.invalidRequest(request.key(), request.function()));
         }
@@ -775,13 +934,17 @@ public class InquiryMessageListener {
      * Honouring an arbitrary address instead would make this consumer a confused deputy, able to direct an
      * account's financial position to a queue of the sender's choosing.</p>
      *
+     * <p>Refactoring Rationale: the permitted address is now the CONFIGURED value itself rather than the
+     * result of resolving a configured name, so this method performs no queue-service call and can raise
+     * nothing. Resolving here was what made a request's reply path depend on a lookup that the deployment's
+     * URL-valued configuration could never satisfy, and it put that failure after the ledger claim had already
+     * been committed.</p>
+     *
      * @param requestedReplyTo the destination the request names, or {@code null} when it names none
      * @return the destination to publish the reply to, never {@code null}
-     * @throws software.amazon.awssdk.services.sqs.model.QueueDoesNotExistException if the configured
-     *     destination cannot be resolved, which is a deployment fault rather than a request fault
      */
     private String resolveReplyDestination(String requestedReplyTo) {
-        String permitted = queueUrl(this.replyQueue);
+        String permitted = this.replyQueueUrl;
         if (permitted.equals(requestedReplyTo)) {
             return permitted;
         }
@@ -1088,9 +1251,9 @@ public class InquiryMessageListener {
      */
     private void reportProtocolFault(String attributeName, int length) {
         try {
-            send(queueUrl(this.errorQueue),
+            send(this.errorQueueUrl,
                     this.replies.frame(errorDiagnostic(PARAGRAPH_PROCESS_REQUEST_REPLY, null,
-                            this.errorQueue,
+                            this.errorQueueName,
                             "identity-refused attribute=" + attributeName + " length=" + length)),
                     replyAttributes(null, null));
         } catch (RuntimeException reportingFailure) {
@@ -1128,7 +1291,7 @@ public class InquiryMessageListener {
      */
     public void publishError(String diagnostic) {
         Objects.requireNonNull(diagnostic, "diagnostic must not be null");
-        send(queueUrl(this.errorQueue), this.replies.frame(diagnostic), replyAttributes(null, null));
+        send(this.errorQueueUrl, this.replies.frame(diagnostic), replyAttributes(null, null));
     }
 
     /**
@@ -1177,9 +1340,9 @@ public class InquiryMessageListener {
                 PARAGRAPH_PROCESS_REQUEST_REPLY, digest);
 
         try {
-            send(queueUrl(this.errorQueue),
+            send(this.errorQueueUrl,
                     this.replies.frame(errorDiagnostic(PARAGRAPH_PROCESS_REQUEST_REPLY,
-                            DIAGNOSTIC_READ_FAILED, this.errorQueue, digest)),
+                            DIAGNOSTIC_READ_FAILED, this.errorQueueName, digest)),
                     replyAttributes(messageId, correlationId));
         } catch (RuntimeException reportingFailure) {
             if (reportingFailure != failure) {
@@ -1364,23 +1527,7 @@ public class InquiryMessageListener {
         return value instanceof String text ? text : null;
     }
 
-    /**
-     * Resolves a configured queue name to its address, caching the result.
-     *
-     * @param name the configured queue name; must not be {@code null}
-     * @return the queue address, never {@code null}
-     * @throws software.amazon.awssdk.services.sqs.model.QueueDoesNotExistException if the queue is absent,
-     *     which propagates rather than being defaulted because a consumer that cannot address its reply
-     *     queue must not acknowledge a request it cannot answer
-     * @throws NullPointerException if {@code name} is {@code null}, raised by the caching map, which refuses
-     *     a null key. The precondition holds by construction: every name reaching here is a constructor
-     *     argument already refused when blank, so a null names a defect in this class
-     */
-    private String queueUrl(String name) {
-        return this.queueUrls.computeIfAbsent(name, queueName -> this.sqs
-                .getQueueUrl(GetQueueUrlRequest.builder().queueName(queueName).build())
-                .queueUrl());
-    }
+
 
     /**
      * Wraps a value as a textual message attribute.

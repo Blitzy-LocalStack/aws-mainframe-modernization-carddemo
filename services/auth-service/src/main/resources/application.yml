@@ -599,8 +599,8 @@ springdoc:
     # against that document rather than against this endpoint. The document
     # served here has to agree with it; a difference between the two is a defect
     # in whichever one moved and is not something to reconcile at runtime.
-    # Assumptions: the contract declares eight operations and ui/src/api/auth.ts
-    # implements exactly those eight, which ui/src/api/contracts.test.ts asserts.
+    # Assumptions: the contract declares nine operations and ui/src/api/auth.ts
+    # implements exactly those nine, which ui/src/api/contracts.test.ts asserts.
     # The endpoint below describes AuthController and UserController, so what it
     # serves is the generated view of those two adapters and is comparable against
     # the contract of record. The inventory is kept adjacent to the key it explains

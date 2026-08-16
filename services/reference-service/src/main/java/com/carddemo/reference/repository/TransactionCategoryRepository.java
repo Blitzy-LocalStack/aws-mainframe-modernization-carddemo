@@ -96,7 +96,7 @@ import org.springframework.stereotype.Repository;
  * this interface -- each walk parameter, each bound, the count's argument -- is a {@code String} and
  * never a boxed or primitive integral type. No convenience member taking an integral code is
  * offered, and none may be added. The charter settles this as the first of its three type rulings
- * and the migration argues it at {@code V1__reference.sql} lines 179 to 203; the ruling is cited
+ * and the migration argues it at {@code V1__reference.sql} lines 168 to 192; the ruling is cited
  * rather than restated, but its consequence for the members below is stated here because these are
  * the declarations it governs.</p>
  *
@@ -172,9 +172,9 @@ import org.springframework.stereotype.Repository;
  *
  * <p>Assumptions: every walk orders by the type code and then the category code, in that sequence,
  * and the sequence is chosen to match the column order of the {@code pk_transaction_categories}
- * constraint that {@code V1__reference.sql} declares at line 234 over {@code (type_cd, cat_cd)}.
+ * constraint that {@code V1__reference.sql} declares at line 223 over {@code (type_cd, cat_cd)}.
  * PostgreSQL enforces that key with a unique B-tree on exactly those two columns in exactly that
- * order -- which, as the migration records at lines 225 to 233, is also what already satisfies the
+ * order -- which, as the migration records at lines 225 to 222, is also what already satisfies the
  * baseline's own unique index, {@code X_TRAN_TYPE_CATG}, named at
  * {@code app/app-transaction-type-db2/ddl/XTRNTYCAT.ddl} line 1 and defined at line 3 over
  * {@code (TRC_TYPE_CODE ASC, TRC_TYPE_CATEGORY ASC)}. An ordering that matches an available index in

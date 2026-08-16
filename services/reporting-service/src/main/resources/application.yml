@@ -763,6 +763,47 @@ spring:
         sslmode: verify-full
         sslrootcert: ${CARDDEMO_DB_SSL_ROOT_CERT:/etc/ssl/certs/carddemo-rds-ca-bundle.pem}
 
+        # WHY : (1) Refactoring Rationale: this entry exists because
+        #       `connection-init-sql` above, on its own, DOES NOT PIN THE SEARCH PATH
+        #       IN THIS POOL, and that was measured rather than reasoned about.
+        #       repository/ReportingDeployedRelationIT reads
+        #       current_setting('search_path') back off a borrowed connection; before
+        #       this entry it read `"$user", public`, not `reporting`. The cause is
+        #       the interaction between two settings this file deliberately keeps: a
+        #       PostgreSQL `SET` is TRANSACTIONAL, and `auto-commit: false` above
+        #       means the pool runs its initialisation statement inside a transaction
+        #       it never commits, so the value is discarded when that transaction is
+        #       disposed of and the borrower sees the server default. Under the
+        #       default auto-commit the same statement would take effect immediately,
+        #       which is why the six sibling services that leave auto-commit alone are
+        #       unaffected and this pool is not.
+        #       (2) Assumptions: a startup-packet option is immune to that, and that
+        #       is the whole reason it is the mechanism chosen. The driver sends it in
+        #       the connection request, so the value is established before any
+        #       transaction exists and no rollback can revert it.
+        #       (3) Alternatives Considered, and why each was refused. Turning
+        #       auto-commit on: refused, the disabled auto-commit is what makes a
+        #       server-side cursor possible, and the streaming statement read depends
+        #       on one. Setting `isolate-internal-queries: true` so the pool commits
+        #       the statement: refused, that flag makes the pool ROLL BACK the
+        #       initialisation statement when auto-commit is off, so it would make the
+        #       observed behaviour deliberate rather than fix it. `ALTER ROLE ... SET
+        #       search_path`: refused because data-migration/sql/V0__schemas_and_roles.sql
+        #       records the decision NOT to set a role-level path, on the ground that
+        #       it would silently outrank whatever a pool declares.
+        #       (4) Trade-offs: the schema name is now written in this file twice,
+        #       here and in `connection-init-sql`, and two spellings of one value can
+        #       drift. That cost is accepted rather than hidden, and it is closed by a
+        #       test rather than by a comment: the integration test named above reads
+        #       the effective path off a borrowed connection and requires it to be the
+        #       `reporting` schema, so changing one spelling and not the other fails
+        #       the build. The initialisation statement is KEPT rather than replaced,
+        #       because the start-up guard in config/DataSourceConfig.java parses it to
+        #       prove this service pins exactly one schema, and
+        #       common-lib's CrossSchemaPrivilegeContractTest reads it to cross-check
+        #       this pool's reach against the grants the bootstrap issues.
+        options: "-c search_path=reporting"
+
   jpa:
 
     # WHY : (1) Trade-offs: closing the persistence context before the response

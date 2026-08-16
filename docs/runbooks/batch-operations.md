@@ -319,7 +319,8 @@ is refused rather than unimplemented. The divergence is registered in
 ## Export or Load the Pending-Authorization Segments
 
 The segment export and the extract load are operator-invoked, not scheduled, for
-the same reason the export/import pair above is: `app/jcl/DBPAUTP0.jcl` runs the
+the same reason the export/import pair above is:
+`app/app-authorization-ims-db2-mq/jcl/DBPAUTP0.jcl` runs the
 reference unload on request and appears in neither
 `app/scheduler/CardDemo.ca7` nor `app/scheduler/CardDemo.controlm`. One state
 machine serves both directions and a `mode` field in the input selects which.
@@ -468,108 +469,49 @@ prevents a later authorization from overtaking the failed one.
 > than recompute anything, and the value is a **primary account number**, so a transcript of this
 > procedure is a transcript containing cardholder data and must be handled as one.
 
-## Rotate the Messaging HMAC Key (operator-managed)
+## Rotate the Messaging HMAC Key — WITHDRAWN
 
-Each environment root holds `<name-prefix>/<env>/messaging/hmac-key`, injected into the
-`authorization` task alone, where `config/MessagingIdentityConfig` keys the one tokeniser that
-context holds. Its resource carries a recorded `checkov` suppression for `CKV2_AWS_57` stating that
-rotation is an **attended** procedure documented in this runbook. This section is that procedure.
+⚠️ Refactoring Rationale: this section documented an attended rotation of
+`<name-prefix>/<env>/messaging/hmac-key`, and **there is no such secret any more**. The
+procedure is removed rather than left standing, because a runbook procedure that names a
+secret nobody provisions sends an operator to a console page that shows nothing, at the one
+moment they are least able to tell an error from a gap. The record stays because the secret
+existed in any environment applied before this change, and because the reason it is gone is
+the reason this section had become so hard to write.
 
-> Refactoring Rationale: this paragraph said the key derives "the FIFO **message-group identity** and
-> the correlation identity of every pending-authorization message". It no longer derives the group
-> identity at all — sections 0.4.1.8 and 0.7.6 of the technical specification freeze `MessageGroupId`
-> as `card_num` and `MessageDeduplicationId` as `transaction_id`, and both are emitted literally,
-> because a group identity orders one card's messages only while every producer computes it
-> identically and a deduplication identity suppresses a resend only while the requester can predict
-> it. What the key still stands for is the values this context computes **for itself**: the business
-> correlation token and the redacted diagnostic digest, which are the surfaces of `.mapper` that take
-> the tokeniser as a parameter. Assumptions: no component injects that bean today, so no run-time
-> value is currently derived from it; the key is nonetheless required and has no default, because a
-> defaulted or absent key would reduce every value derived through it to an unkeyed digest of a short
-> structured input, which anyone holding one confirms by enumeration.
+**What was withdrawn.** The Secrets Manager entry, the `ephemeral` generator behind it in both
+environment roots, the `CARDDEMO_MESSAGING_HMAC_KEY` container secret, the task-role read
+grant, the `infra/modules/ecs-service` condition that required the `authorization` task to
+receive it, the `carddemo.messaging.hmac-key` property, and the single Spring bean the property
+keyed. All of it. The bean had **no injection point**: once specification sections 0.4.1.8 and
+0.7.6 fixed `MessageGroupId` as `card_num` and `MessageDeduplicationId` as `transaction_id` —
+because a group identity orders one card's messages only while every producer computes it
+identically, and a deduplication identity suppresses a resend only while the requester can
+predict it — nothing in the authorization context derived anything through that key.
 
-> Refactoring Rationale: the suppression cited this file while no such procedure existed in it. A
-> suppression whose justification points at a missing document is indistinguishable from an
-> unjustified one — the reviewer accepts a promise and the operator finds nothing. The procedure is
-> written here rather than in `deploy.md` because the constraint that makes it attended is a
-> **messaging-ordering** constraint, and the window it must run in is the batch quiesce bracket this
-> runbook already defines.
+**Why it survived as long as it did, which is the part worth keeping.** This section had already
+been rewritten twice to stay true. Its original hazard — that rotating mid-flight would split one
+card's messages across two group identifiers and forfeit per-card ordering — stopped existing when
+the group identity became the literal card number. Its queue-depth check was then retained and
+explicitly marked "no longer load-bearing". Its own text ended up conceding that "no component
+injects that bean today, so no run-time value is currently derived from it" while still requiring
+the key. Each revision was locally reasonable and the result was a procedure whose stated purpose
+had been withdrawn twice over. The `checkov` `CKV2_AWS_57` suppression on the secret pointed here
+for its justification, this section pointed at a required key, and the key was required because
+the module demanded it — a loop with no participant able to be the one that goes. Withdrawing the
+whole chain at once is what breaks it.
 
-**Why this one is still attended, and what stopped being true.**
+**What an operator does instead.** Nothing: there is no rotation to perform. If a future component
+genuinely needs a keyed derivation in this context, it arrives with its own provisioned secret and
+its own rotation procedure in the same change, and that procedure is written here then. The
+rotations that remain live are documented in
+[`deploy.md`](deploy.md): the two per-caller internal-identity signing keys, the pagination cursor
+signing key and the card selector signing key. Assumptions: the reporting artifact-identity key is
+deliberately NOT claimed here — it is a fifth generated key with its own attended-rotation
+reasoning recorded on its resource, and no procedure for it exists in `deploy.md`, so naming it
+would repeat the pointing-at-a-missing-document defect this record was written to stop.
 
-> Refactoring Rationale: this section argued that the key could not be rotated while the queue was
-> non-empty, because "the group identity is derived from the key, so equal cards must derive equal
-> groups across every producer *at the same instant*", and that rotating mid-flight split one card's
-> messages across two group identifiers and silently forfeited per-card ordering. That hazard **no
-> longer exists**, because the group identity is now the literal card number and is computed from the
-> message rather than from any key. Deleting the section would have been wrong all the same: the
-> secret is still provisioned, still required, and still carries a suppression that names this runbook
-> as where its rotation is written down.
-
-What makes it attended now is narrower and is stated plainly: rotation is a change of key material
-that the running task reads **once at start-up**, so it takes effect only on a roll, and until every
-task has rolled two tasks hold different keys. Any value derived under the old key stops matching one
-derived under the new key, so two log lines about one authorization would not join across the
-rotation boundary. Running it inside the batch quiesce bracket keeps that window inside a period when
-no online writes are being accepted anyway.
-
-Trade-offs: the queue-depth check below is **retained but is no longer load-bearing**, and it is worth
-knowing which. It cannot protect ordering any more, because ordering does not depend on the key; a
-consumer restarted mid-decision is safe on its own terms, since the per-message transaction rolls back
-and the unacknowledged message returns to the queue when its visibility timeout lapses. It is kept
-because it costs one call, it confirms the bracket is genuinely quiet before a roll, and it is the
-check that becomes load-bearing again the moment a derived surface is wired into the message path.
-
-```bash
-# WHAT: confirms there is nothing in flight before the key changes.
-# WHY : Assumptions: both queues are checked, including the dead-letter queue, because a quarantined
-#       message replayed later is processed by whichever task holds the key at that time.
-#       ApproximateNumberOfMessagesNotVisible is included because an in-flight message held under a
-#       visibility timeout is exactly the case a depth-only check misses.
-aws sqs get-queue-attributes --region "<aws-region>" \
-  --queue-url "<pauth-request-queue-url>" \
-  --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
-aws sqs get-queue-attributes --region "<aws-region>" \
-  --queue-url "<pauth-request-dlq-url>" \
-  --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
-```
-
-```bash
-# WHAT: replaces the stored key with freshly generated bytes, without the value ever appearing in a
-#       command line.
-# WHY : Trade-offs: the value travels on STDIN via --secret-string fileb:///dev/stdin. An argv value
-#       is readable from the process table by any local process for as long as the call runs, is
-#       retained by the shell's history file, and is echoed by `set -x`. `set +o xtrace` is issued
-#       explicitly for that last reason.
-# WHY : Assumptions: --exclude-punctuation matches the generator both roots use (special = false),
-#       and 32 characters matches the byte floor the deriving component enforces at start-up.
-#       --query null keeps the new version identifier out of the transcript.
-set +o xtrace
-aws secretsmanager get-random-password --region "<aws-region>" \
-  --exclude-punctuation --password-length 32 --query RandomPassword --output text \
-  | tr -d '\n' \
-  | aws secretsmanager put-secret-value --region "<aws-region>" \
-  --secret-id "<name-prefix>/<env>/messaging/hmac-key" \
-  --secret-string fileb:///dev/stdin \
-  --query "null" --output text
-```
-
-```bash
-# WHAT: rolls the single consuming service and waits for it to settle before the bracket is released.
-# WHY : Assumptions: exactly ONE service binds this key, which is what makes this rotation simpler
-#       than the internal-identity one -- there is no second holder to keep in step, so the only
-#       requirement is that no message is processed while two tasks hold different keys. Waiting for
-#       PRIMARY to reach COMPLETED before resuming online writes is what guarantees that.
-aws ecs update-service --region "<aws-region>" --cluster "<cluster-name>" \
-  --service "<authorization-service-name>" --force-new-deployment
-aws ecs describe-services --region "<aws-region>" --cluster "<cluster-name>" \
-  --services "<authorization-service-name>" \
-  --query "services[].deployments[?status=='PRIMARY'].[serviceName:@.id,rolloutState]" --output table
-```
-
-Advance the secret's `secret_string_wo_version` in a reviewed diff instead if the value should be
-regenerated by Terraform. The identity performing the manual form needs
-`secretsmanager:PutSecretValue` on that one entry, `kms:GenerateDataKey` and `kms:Decrypt` through
-Secrets Manager on the secrets CMK, `sqs:GetQueueAttributes` on the two queues above, and
-`ecs:UpdateService` and `ecs:DescribeServices` on the authorization service. No task role should ever
-hold `PutSecretValue`: the task reads this entry and never writes it.
+**If an environment was applied before this change.** Its Secrets Manager entry is removed by the
+next `terraform apply` of that root, subject to the root's `recovery_window_in_days`, and the next
+task definition revision stops injecting the variable. No service reads it in either state, so the
+order the two happen in does not matter and no quiesce bracket is needed.

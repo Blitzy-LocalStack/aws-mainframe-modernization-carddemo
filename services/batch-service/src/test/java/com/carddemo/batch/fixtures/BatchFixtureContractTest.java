@@ -10,10 +10,13 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -24,13 +27,23 @@ import org.junit.jupiter.params.provider.MethodSource;
 /**
  * Holds the whole fixture corpus to the byte values its scenario READMEs state.
  *
- * <p>Assumptions: 51 record files across sixteen scenario directories had almost no executable
- * consumer. The pre-posting job test opens four of them and the export job test one; the
- * interest job test reads the reference tree under {@code tests/} rather than this one, and the nine
- * posting scenarios are cited in prose and asserted against values declared inside unit tests. So a
- * one-cent boundary, a one-day boundary, a deliberately absent cross-reference row or a deliberately
- * zero-byte file could all change here with every test staying green -- which is precisely the change
- * these fixtures exist to make detectable.</p>
+ * <p>Assumptions: 62 record files across sixteen scenario directories need one authority over the
+ * corpus as a whole, because the per-file consumers do not cover it. Section 1.5 of
+ * {@code services/batch-service/src/test/resources/fixtures/README.md} measures that 53 of the 62 are
+ * opened as job input -- all four files of all nine posting scenarios by {@code PostTransactionsJobTest}
+ * and {@code PostTransactionsJobParityIT}, all four of all three interest scenarios by
+ * {@code CalculateInterestJobTest}, four preflight files by {@code PreflightDailyTransactionsJobTest}
+ * and one export file by {@code ExportJobTest} -- leaving nine supporting images that no job run reads.
+ * Without this class a one-cent boundary, a one-day boundary, a deliberately absent cross-reference row
+ * or a deliberately zero-byte file could change in any of them with every job test staying green, which
+ * is precisely the change these fixtures exist to make detectable.</p>
+ *
+ * <p>Refactoring Rationale: this comment previously said the interest job test read the reference tree
+ * "rather than this one" and that the nine posting scenarios were only cited in prose. Both statements
+ * were stale -- both domains are now driven from this tree -- and the correction matters here rather
+ * than only in the README, because a reader deciding what this class is for reads this paragraph first.
+ * The class's own reason to exist is unchanged by the correction: the nine supporting images still have
+ * no other consumer, and no job assertion covers a field its scenario does not turn on.</p>
  */
 class BatchFixtureContractTest {
 
@@ -39,6 +52,18 @@ class BatchFixtureContractTest {
 
     /** The same tree as a source path, used for the census the classpath cannot enumerate. */
     private static final Path TREE = Path.of("src", "test", "resources", "fixtures");
+
+    /**
+     * The committed byte-identity manifest, relative to {@link #TREE}.
+     *
+     * <p>Assumptions: the name is uppercase and is not a lowercase dataset base, so master section 2's
+     * naming rule cannot mistake it for a record file, and it sits at the tree root rather than inside
+     * a scenario so {@code recordFiles} need not learn a second exclusion.</p>
+     */
+    private static final String DIGEST_MANIFEST = "FIXTURE_DIGESTS.txt";
+
+    /** The character length of a hexadecimal SHA-256, which is where a manifest line's path begins. */
+    private static final int SHA256_HEX_LENGTH = 64;
 
     /** The card number every scenario uses on its transaction record. */
     private static final String SEED_CARD = "4859452612877065";
@@ -622,6 +647,111 @@ class BatchFixtureContractTest {
             assertThat(recordCount("export/happy_path", file))
                     .as("export/happy_path/%s must carry the same five rows as its siblings", file)
                     .isEqualTo(5);
+        }
+    }
+
+    /**
+     * Asserts that every record file in the tree still hashes to the digest the manifest commits.
+     *
+     * <p>Assumptions: the checks above pin geometry, line endings, a successful decode and the one
+     * value or relationship each scenario turns on -- and they cannot pin a field no scenario turns
+     * on. A same-width edit to a customer name, a merchant description or an unasserted {@code FILLER}
+     * byte satisfies every one of them, and for the nine supporting images of master section 1.5 no
+     * job run would notice either. The manifest closes that residue: it is a closed set in both
+     * directions, so an added, deleted or altered file all fail, each named.</p>
+     *
+     * <p>Alternatives Considered: declaring the digests as string constants in this class was rejected
+     * because 62 literals in a test are 62 lines a reviewer cannot diff against the files they
+     * describe, whereas the committed manifest is verifiable without this suite at all --
+     * {@code grep -v '^#' FIXTURE_DIGESTS.txt | sha256sum -c -} from the fixture directory. Deriving
+     * the expected digests at run time was rejected outright: a check that recomputes what it compares
+     * against passes for every possible corpus.</p>
+     *
+     * <p>Trade-offs: a deliberate fixture edit now needs the manifest regenerated, and the manifest's
+     * own header carries the exact command. The extra step is the point -- it is where the author
+     * states that the byte change was intended, rather than discovering later that it was not.</p>
+     *
+     * @throws IOException if the manifest or a fixture cannot be read
+     */
+    @Test
+    @DisplayName("every record file still hashes to its committed digest, as a closed set")
+    void everyRecordFileMatchesItsCommittedDigest() throws IOException {
+        Map<String, String> committed = committedDigests();
+        Map<String, String> actual = new TreeMap<>();
+        try (Stream<Path> walk = Files.walk(TREE)) {
+            for (Path file : walk.filter(Files::isRegularFile).sorted().toList()) {
+                String relative = TREE.relativize(file).toString().replace('\\', '/');
+                if (relative.endsWith(".txt") && !DIGEST_MANIFEST.equals(relative)) {
+                    actual.put(relative, sha256(Files.readAllBytes(file)));
+                }
+            }
+        }
+
+        // WHY : Assumptions: the census is asserted first and separately from the digests, because the
+        //       two failures need different words. A path present in one map and not the other means a
+        //       file was ADDED or DELETED without the manifest being regenerated; a path in both with
+        //       different values means its BYTES changed. Comparing the maps in one assertion would
+        //       report either as "maps differ" and leave the reader to work out which happened.
+        assertThat(actual.keySet())
+                .as("%s and the tree disagree about which record files exist", DIGEST_MANIFEST)
+                .containsExactlyElementsOf(committed.keySet());
+        assertThat(actual)
+                .as("a record file's bytes changed without %s being regenerated", DIGEST_MANIFEST)
+                .containsExactlyInAnyOrderEntriesOf(committed);
+    }
+
+    /**
+     * Reads the committed digest manifest, skipping its header.
+     *
+     * @return each record file's path relative to the fixture root mapped to its committed lowercase
+     *     hexadecimal SHA-256, in ascending path order, never {@code null}
+     * @throws IOException if the manifest cannot be read
+     * @throws IllegalStateException if the manifest is absent, or holds a line that is neither a
+     *     comment nor a {@code sha256sum(1)}-format entry
+     */
+    private static Map<String, String> committedDigests() throws IOException {
+        Path manifest = TREE.resolve(DIGEST_MANIFEST);
+        if (!Files.isRegularFile(manifest)) {
+            throw new IllegalStateException("the digest manifest " + manifest
+                    + " is absent, so the corpus has no byte-identity authority");
+        }
+        Map<String, String> digests = new TreeMap<>();
+        for (String line : Files.readAllLines(manifest, StandardCharsets.US_ASCII)) {
+            // WHY : Assumptions: '#' lines and blank lines are skipped and everything else must parse.
+            //       Silently ignoring an unparseable line would let a typo drop a file from the
+            //       expected set, and a dropped file is exactly the omission the closed-set assertion
+            //       above exists to catch -- so the parser refuses rather than shrinking the set.
+            if (line.isBlank() || line.startsWith("#")) {
+                continue;
+            }
+            int split = line.indexOf("  ");
+            if (split != SHA256_HEX_LENGTH) {
+                throw new IllegalStateException(DIGEST_MANIFEST
+                        + " holds a line that is not sha256sum(1) format: " + line);
+            }
+            digests.put(line.substring(split + 2), line.substring(0, split));
+        }
+        return digests;
+    }
+
+    /**
+     * Hashes one file's exact bytes.
+     *
+     * @param content the bytes to hash, of type {@code byte[]}; must not be {@code null}
+     * @return the lowercase hexadecimal SHA-256, never {@code null}
+     * @throws IllegalStateException if this JVM does not provide SHA-256, which no supported runtime
+     *     omits and which therefore names a broken installation rather than a fixture problem
+     */
+    private static String sha256(byte[] content) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(content);
+            StringBuilder hex = new StringBuilder(digest.length * 2);
+            for (byte octet : digest) {
+                hex.append(String.format("%02x", octet));
+            }
+            return hex.toString();
+        } catch (NoSuchAlgorithmException unavailable) {
+            throw new IllegalStateException("this JVM provides no SHA-256 implementation", unavailable);
         }
     }
 }

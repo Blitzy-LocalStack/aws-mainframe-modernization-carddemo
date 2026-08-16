@@ -525,44 +525,104 @@ def _state_block(name: str) -> str:
     return _bracket_span(body, found.end())
 
 
-def test_every_task_state_declares_a_retry() -> None:
+def test_every_task_state_declares_a_retry_except_the_documented_one() -> None:
     """Hold the header's retry claim to the states, so the two cannot disagree again."""
     body = _without_comments(_module_text())
-    # WHY : Assumptions: the count comparison is the assertion because two of the Task
+    # WHY : Assumptions: the count comparison is the assertion because three of the Task
     #   declarations are templates a for expression fans out into several states, so there is no
-    #   one-to-one mapping from a state name to a line to walk. Every Retry in this module sits
-    #   in a Task state, so equal counts is exactly the claim "every Task retries".
+    #   one-to-one mapping from a state name to a line to walk.
+    # WHY : ⚠️ Refactoring Rationale: the assertion is `tasks == retries + 1` where it was
+    #   `tasks == retries`, and the change fixes a test that passed for two WRONG reasons at
+    #   once. Its premise was that every Retry in the module sits in a Task state, so that equal
+    #   counts restate "every Task retries". Both halves were false and they cancelled: the
+    #   seed-staging Map carried a Retry of its own, which is not a Task, adding one to the
+    #   right-hand side; and StopResidualBatchTask carries NO Retry, taking one away. The Map's
+    #   Retry has since been withdrawn -- every error name in it was either not an ASL built-in
+    #   at all or unraisable for an INLINE Map, and two of them made CreateStateMachine reject
+    #   the whole definition -- which unmasked the missing one and turned this assertion red.
+    #   Equality was never the right claim, so it is replaced rather than re-tuned.
+    # WHY : Assumptions: the single exception is named rather than absorbed into the arithmetic,
+    #   because an off-by-one that anyone may adjust is not a contract. Asserting the exception
+    #   BY NAME means a Retry added to a Map still fails the count, a Retry removed from any
+    #   other Task still fails the count, and a Retry added to StopResidualBatchTask fails the
+    #   named assertion instead of silently rebalancing the total.
+    stop_branch = _state_block("StopResidualBatchTask")
+    assert re.search(r"(?m)^\s*Retry\s*=", stop_branch) is None, (
+        "StopResidualBatchTask now declares a Retry; the cancellation loop already re-issues"
+        " the stop on every pass and the branch catches its own failure, so a Retry here"
+        " delays the confirmation pass without changing the outcome"
+    )
     tasks = len(re.findall(r'Type\s+=\s+"Task"', body))
     retries = len(re.findall(r"(?m)^\s*Retry\s*=", body))
-    assert tasks == retries, f"{tasks} Task states declare {retries} retries"
+    assert tasks == retries + 1, (
+        f"{tasks} Task states declare {retries} retries; exactly one Task state"
+        " (StopResidualBatchTask) is documented as retry-free, so any other difference means"
+        " either a Task lost its Retry or a non-Task state gained one"
+    )
 
 
-def test_the_seed_dataset_map_retries_the_work_only_inside_its_branch() -> None:
-    """Pin the documented split: the branch retries the work, the Map only its own faults."""
-    block = _state_block("StageSeedDatasets")
-    processor = re.search(r"(?m)^\s*ItemProcessor\s*=\s*(?={)", block)
-    assert processor is not None, "StageSeedDatasets no longer declares an ItemProcessor"
-    branch = _bracket_span(block, processor.end())
-    outer = block.replace(branch, "")
-    # WHY : Assumptions: the branch's own retry is the one that must exist, because it is the only
-    #   one that can replay ONE dataset. The Map's own Retry may exist beside it -- a Map raises
-    #   item-reader, result-writer, runtime, quota and throttling faults on its own account, which
-    #   no branch-level Retry can ever see -- but it must not admit the WORK's failures, since
-    #   re-entering the Map on a task failure would re-run every dataset to recover the one that
-    #   faulted. That is the asymmetry the module header states, and it is asserted here as a split
-    #   rather than as an absence, which is the stronger form of the same claim.
+def test_the_seed_dataset_refresh_retries_the_work_only_at_the_task() -> None:
+    """Pin the documented split: the per-dataset task retries the work, and neither wrapper does."""
+    # WHY : ⚠️ Refactoring Rationale: this case reads three nesting levels where it read two,
+    #   because state 2 gained a wrapper. StageSeedDatasets is now a Parallel holding ONE branch,
+    #   and that branch holds the Map followed by the whole-migration verification gate; the gate
+    #   is nested there so the nightly chain keeps the ELEVEN top-level work states AAP section
+    #   0.4.1.7 fixes while still running the verification sections 0.9.2 and 0.7.7 mandate. The
+    #   old two-level read still passed after the fold, but only by accident: its "outer" text had
+    #   silently grown to include the gate, so it was asserting the gate's properties while
+    #   claiming to assert the Map's. Each level is now located by name.
+    wrapper = _state_block("StageSeedDatasets")
+    mapping = _state_block("RefreshEachSeedDataset")
+    gate = _state_block("VerifyMigration")
+    assert re.search(r'Type\s*=\s*"Parallel"', wrapper) is not None, (
+        "StageSeedDatasets is no longer a Parallel; the verification gate has nowhere to run"
+        " inside state 2, which would put it back among the top-level states"
+    )
+    assert mapping in wrapper, "the seed-refresh Map is no longer inside StageSeedDatasets"
+    assert gate in wrapper, "the verification gate is no longer inside StageSeedDatasets"
+    processor = re.search(r"(?m)^\s*ItemProcessor\s*=\s*(?={)", mapping)
+    assert processor is not None, "the seed-refresh Map no longer declares an ItemProcessor"
+    branch = _bracket_span(mapping, processor.end())
+    map_own = mapping.replace(branch, "")
+    parallel_own = wrapper.replace(mapping, "").replace(gate, "")
+    # WHY : Assumptions: the per-dataset task's retry is the one that must exist, because it is
+    #   the only one that can replay ONE dataset. Re-entering either wrapper on a task failure
+    #   would re-run every dataset to recover the one that faulted, and re-entering the Parallel
+    #   would additionally repeat the read-only verification pass over a migration that had not
+    #   changed.
     assert re.search(r"(?m)^\s*Retry\s*=", branch) is not None
-    assert re.search(r"(?m)^\s*TimeoutSeconds\s*=", outer) is not None
-    assert re.search(r"(?m)^\s*Catch\s*=", outer) is not None
-    if re.search(r"(?m)^\s*Retry\s*=", outer) is not None:
-        assert "States.TaskFailed" not in outer, (
-            "the Map's own Retry admits States.TaskFailed, so one faulted dataset would replay"
-            " every branch of the fan-out"
-        )
-        assert "States.Timeout" not in outer, (
-            "the Map's own Retry admits States.Timeout, so a single slow dataset would replay"
-            " every branch of the fan-out"
-        )
+    # WHY : Assumptions: the two ABSENCES are asserted, not merely tolerated as the previous form
+    #   did with an `if`. A conditional assertion cannot fail, so it documented an intention
+    #   without holding anything to it -- which is how a Map-level Retry naming two non-existent
+    #   `States.` error codes survived long enough to make the machine un-creatable.
+    assert re.search(r"(?m)^\s*Retry\s*=", map_own) is None, (
+        "the seed-refresh Map declares a Retry again; for an INLINE Map with no ItemReader and no"
+        " ResultWriter every Map-level error is either unraisable or documented as non-retriable,"
+        " and re-entering the Map replays every branch of the fan-out"
+    )
+    assert re.search(r"(?m)^\s*Retry\s*=", parallel_own) is None, (
+        "the StageSeedDatasets Parallel declares a Retry; re-entering it would replay a completed"
+        " refresh of every dataset in order to redo one read-only verification pass"
+    )
+    # WHY : Assumptions: the ceiling sits on the Map and NOT on the Parallel, and both directions
+    #   are asserted. The States Language defines TimeoutSeconds for Task and Activity states and
+    #   at the machine's top level; it is absent from the Parallel field list, so a value written
+    #   there would be silently inert rather than rejected -- exactly the kind of ceiling an
+    #   operator would believe was in force.
+    assert re.search(r"(?m)^\s*TimeoutSeconds\s*=", map_own) is not None
+    assert re.search(r"(?m)^\s*TimeoutSeconds\s*=", parallel_own) is None, (
+        "the StageSeedDatasets Parallel declares a TimeoutSeconds, which the States Language does"
+        " not define for a Parallel; the ceiling belongs on the Map and on each task inside it"
+    )
+    # WHY : Assumptions: the failure edge is asserted on the WRAPPER, because a state inside a
+    #   Parallel branch cannot transition out of it. The Map's and the gate's own catchers were
+    #   withdrawn for that reason, so this is the only Catch that can carry a branch failure to
+    #   the shared notification path, and it writes the same $.failure the other work states do.
+    assert re.search(r"(?m)^\s*Catch\s*=", parallel_own) is not None
+    assert re.search(r"(?m)^\s*Catch\s*=", map_own) is None, (
+        "the seed-refresh Map declares a Catch, whose target cannot be outside the enclosing"
+        " branch; the wrapper's Catch is what carries a branch failure to NotifyFailure"
+    )
 
 
 @pytest.mark.parametrize(

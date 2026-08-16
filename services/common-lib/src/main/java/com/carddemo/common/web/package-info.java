@@ -327,7 +327,7 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel holds <b>44 production classes</b> and <b>11</b> package
+ * <p>The shared kernel holds <b>46 production classes</b> and <b>11</b> package
  * charters -- one at the kernel root and one for each subpackage -- for <b>55</b>
  * compilation units in total. This package contributes four of the production
  * classes and one of the charters.
@@ -347,13 +347,13 @@
  * meter filter, the money codec module and the error advice, in every service:
  *
  * <pre>
- * root 1 + money 2 + codec 6 + error 7 + web 4 + security 9 + observability 4 + time 1 + validation 2 + messaging 4 + control 4 = 44
+ * root 1 + money 2 + codec 7 + error 7 + web 4 + security 9 + observability 4 + time 1 + validation 2 + messaging 5 + control 4 = 46
  * </pre>
  *
  * <p>Cross-check by compilation unit, adding one charter per package:
  *
  * <pre>
- * root 2 + money 3 + codec 7 + error 8 + web 5 + security 10 + observability 5 + time 2 + validation 3 + messaging 5 + control 5 = 55
+ * root 2 + money 3 + codec 8 + error 8 + web 5 + security 10 + observability 5 + time 2 + validation 3 + messaging 6 + control 5 = 57
  * </pre>
  *
  * <p>This package's own share is:
@@ -362,8 +362,8 @@
  * this package: web 4 production + 1 charter = 5 compilation units
  * </pre>
  *
- * <p>Assumptions: the authoritative totals are <strong>44 production classes and
- * 55 compilation units, 11 of the latter being charters</strong>. They are stated
+ * <p>Assumptions: the authoritative totals are <strong>46 production classes and
+ * 57 compilation units, 11 of the latter being charters</strong>. They are stated
  * beside the two labelled sums and not merely as bare totals for a reason: a bare
  * total invites a reader to trust it, whereas a labelled sum is re-derived from the
  * directory by a test, so any figure that does not reproduce these two sums is wrong

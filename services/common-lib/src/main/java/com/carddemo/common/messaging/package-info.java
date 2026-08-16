@@ -9,9 +9,9 @@
  * are shared by more than one consumer while belonging to none of them.</p>
  *
  * <p>Refactoring Rationale: the heading read "transport-neutral rules for the message metadata", and it is
- * reworded because one of the four types here is neither metadata nor transport-neutral. The failure
+ * reworded because one of the five types here is neither metadata nor transport-neutral. The failure
  * handler is in this package for the same reason the metadata rules are -- three consuming contexts must
- * agree on it and none of them owns it -- but a heading that described only the other three would leave a
+ * agree on it and none of them owns it -- but a heading that described only the others would leave a
  * reader who found it here concluding it was misfiled.</p>
  *
  * <p>Refactoring Rationale: this package was created because the metadata rules had been borrowed from
@@ -22,14 +22,26 @@
  * messaging rule in its own package makes the distinction visible in an import line rather than leaving
  * it to be rediscovered.</p>
  *
- * <p>Assumptions: nothing here touches a queue client or a database, and THREE of the four types touch no
- * message either. {@code MessageExpiry}, {@code MessagingCorrelationId} and {@code QueueClientBudget} are
- * pure rules over values, so they are unit-testable without a broker, a container or a message. That
- * applies to {@code QueueClientBudget} as much as to the other two: it states the relationship between a
- * client's time bounds and a queue's visibility period as three durations, and leaves APPLYING those
- * values to whichever client library each service configures.</p>
+ * <p>Assumptions: nothing here touches a queue client or a database, and FOUR of the five types touch no
+ * message either. {@code MessageExpiry}, {@code MessagingCorrelationId}, {@code QueueClientBudget} and
+ * {@code QueueDestination} are pure rules over values, so they are unit-testable without a broker, a
+ * container or a message. That applies to {@code QueueClientBudget} as much as to the other three: it
+ * states the relationship between a client's time bounds and a queue's visibility period as three
+ * durations, and leaves APPLYING those values to whichever client library each service configures. It
+ * applies to {@code QueueDestination} in the same way: it judges the SHAPE of a configured destination and
+ * recovers a queue's name from its address, and never opens a connection to either.</p>
+
+ * <p>Refactoring Rationale: {@code QueueDestination} was added because two consumers -- the account-inquiry
+ * and date-conversion flows -- had each written their own acceptance rule for a configured destination, and
+ * both were the same wrong rule: accept any non-blank string, then treat it as a queue NAME. Every
+ * destination this deployment publishes is a queue URL, so each consumer asked the queue service to resolve
+ * a queue whose name was an address. That could only fail, and it failed on the reply and diagnostic paths
+ * alone -- reached only after a request had already been taken off the request queue -- so requests were
+ * consumed and never answered while every start-up signal looked correct. The rule belongs here for this
+ * package's defining reason: the deployment publishes one shape to every context, so a per-service copy of
+ * the rule is a chance for one context to accept a form another refuses.</p>
  *
- * <p>Refactoring Rationale: the fourth type, {@code RethrowingDigestErrorHandler}, is the stated exception
+ * <p>Refactoring Rationale: the fifth type, {@code RethrowingDigestErrorHandler}, is the stated exception
  * and this paragraph names it rather than letting the sentence above quietly stop being true. It takes a
  * {@code org.springframework.messaging.Message} and implements the queue starter's own error-handler
  * interface, because it is the ONE rule in this package that has to be handed to the framework rather than
@@ -38,7 +50,7 @@
  * touches no database, so the layering gate that forbids infrastructure types inside shared-kernel domain
  * packages is unaffected -- this module has no {@code domain} package at all.</p>
  *
- * <p>Alternatives Considered: giving that fourth type a nested {@code messaging.listener} subpackage, so
+ * <p>Alternatives Considered: giving that fifth type a nested {@code messaging.listener} subpackage, so
  * this charter could keep the shorter claim. Rejected because the shared kernel's root charter declares a
  * closed inventory of a root and ten FLAT subpackages, and {@code SharedKernelInventoryTest} re-derives
  * that table one level deep and treats a nested package as drift to expose rather than absorb. Naming one

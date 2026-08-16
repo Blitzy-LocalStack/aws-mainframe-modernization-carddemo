@@ -5,7 +5,7 @@
 #   The entire public contract of the reusable `ecr` module. This directory is
 #   never applied on its own -- it is consumed as
 #   `source = "../../modules/ecr"` by the infra/envs/dev and infra/envs/prod
-#   roots -- so everything a caller can see of the eleven container repositories
+#   roots -- so everything a caller can see of the ten container repositories
 #   provisioned in infra/modules/ecr/main.tf is what the four blocks below
 #   publish, and nothing else.
 #
@@ -35,7 +35,7 @@
 #                      namespaced name the registry actually stores
 #   repository_arns ... map, keyed by logical artifact name, of the ARN an
 #                      IAM policy statement is scoped to
-#   registry_id ....... string, the one registry all eleven repositories live in
+#   registry_id ....... string, the one registry all ten repositories live in
 #
 #   These four NAMES are a one-way contract rather than an implementation
 #   detail. Both environment roots transcribe them, so renaming one here
@@ -50,12 +50,12 @@
 #   - An output naming a key absent from `var.repository_names` would fail at
 #     plan time with an invalid-index error. That is precisely why all three
 #     maps below are PROJECTED from `aws_ecr_repository.this` with a `for`
-#     expression rather than listing the eleven artifacts a second time: a key
+#     expression rather than listing the ten artifacts a second time: a key
 #     present in an output and absent from the resource cannot be written at
 #     all, so the failure class is removed instead of guarded against.
 #   - `registry_id` would fail at plan time with an index-out-of-range error
 #     against an empty repository collection. It cannot be empty: variables.tf
-#     asserts both a non-empty set and a length of exactly ELEVEN before any
+#     asserts both a non-empty set and a length of exactly TEN before any
 #     resource is touched. The dependency is recorded on that output.
 #     Refactoring Rationale: this said ten, which understated the assertion it
 #     cites. The number matters here because it is offered as the proof that the
@@ -215,7 +215,7 @@ output "registry_id" {
   #       the choice deterministic rather than incidental. It is safe only
   #       because the collection is never empty, and that is guaranteed
   #       upstream: variables.tf asserts a non-empty set and a length of
-  #       exactly ELEVEN at plan time, before any resource is touched.
+  #       exactly TEN at plan time, before any resource is touched.
   value = values(aws_ecr_repository.this)[0].registry_id
 }
 
@@ -238,7 +238,7 @@ output "registry_id" {
 # rejected, because an unused output is still a public surface a consumer can
 # come to depend on and this file cannot then be narrowed without a breaking
 # change. A per-repository map of registry identifiers would repeat one value
-# eleven times, since all eleven repositories share a single registry. A flattened
+# ten times, since all ten repositories share a single registry. A flattened
 # list of addresses would reintroduce exactly the positional indexing the map
 # shape above exists to prevent. And a convenience map of complete image URIs
 # with a tag already appended would put image tagging in this module, whereas

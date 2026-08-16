@@ -67,10 +67,15 @@
 > one genuine semantic gap between the two transports; and the explicit warning
 > that the three extensions do not share a single messaging discipline. Its
 > consumers are `authorization-service`, which owns the authorization request and
-> reply flow; `account-service`, which owns the account-inquiry flow; and
-> `reference-service`, which owns the date-conversion flow — the three services the
-> catalog records as queue participants at
-> [`service-catalog.md`](service-catalog.md) L892–L894. The shared codec that
+> reply flow, and `account-service`, which owns the one shared inquiry request queue
+> and answers BOTH inquiry flows on it — the account inquiry of `COACCT01` and the
+> date-and-time reply of `CODATE01` — by dispatching on the request's own
+> four-character function code. Refactoring Rationale: `reference-service` was named
+> here as a third consumer owning the date-conversion flow. It consumes no queue: the
+> baseline defines one request destination for both programs and a queue admits
+> exactly one owning consumer, so the queue half of the date flow is answered where
+> the queue's owner lives, while that context keeps the date **evaluation** of
+> `CSUTLDTC` on its synchronous route. The shared codec that
 > encodes and decodes both payloads is the authored `CsvAuthCodec` in the shared
 > kernel, and the authored `sqs` module defines the queue topology.
 > `docs/architecture/observability.md` names this document in its own
@@ -194,31 +199,50 @@ convention already established for the test suite at
   byte narrower than its declaration. The duplication is bounded — eighteen fields
   and six — and it is checkable against the cited lines.
 - Alternatives Considered: the alternative to writing this document at all was to
-  let each of the three consuming services derive the wire format independently
-  from the copybooks. That was rejected because the three services are authored
-  separately: `authorization-service`, `account-service` and `reference-service`
-  would each have had to rediscover the delimiter, the trailing-comma behaviour and
-  the two timing units, and any one of them getting it wrong produces a
-  wire-incompatibility that no unit test in a single service can detect.
+  let each consuming service derive the wire format independently from the
+  copybooks. That was rejected because the services are authored separately:
+  `authorization-service` and `account-service` would each have had to rediscover
+  the delimiter, the trailing-comma behaviour and the two timing units, and either
+  getting it wrong produces a wire-incompatibility that no unit test in a single
+  service can detect. Refactoring Rationale: this named three consuming services;
+  the third, `reference-service`, consumes no queue, and the shared layout it once
+  transcribed for itself now lives once in the shared kernel — the request half in
+  `InquiryRequestCodec` and the date reply half in `DateInquiryReplyCodec` — which is
+  the same single-source argument applied one level lower.
 
 ---
 
-## The five baseline queues and six target primary queues
+## The five baseline queues and five target primary queues
 
 The baseline uses five IBM MQ queues across the two messaging extensions. They
-map to **six** primary SQS queues plus six dedicated dead-letter queues. The one
-shared baseline inquiry-request queue is deliberately refined into separate
-account and date request queues so competing consumers cannot remove each
-other's work. Queue names are given in their parameterised `<env>` form; no
-account identifier, resource identifier or endpoint appears anywhere in this
-document.
+map to **five** primary SQS queues plus five dedicated dead-letter queues — ten
+in total. Queue names are given in their parameterised `<env>` form; no account
+identifier, resource identifier or endpoint appears anywhere in this document.
+
+> ⚠️ Refactoring Rationale: this section described **six** primaries, refining the
+> one shared baseline inquiry-request queue into separate account and date request
+> queues "so competing consumers cannot remove each other's work". That refinement
+> is **withdrawn**. It was a topology change rather than an implementation choice:
+> the baseline defines ONE request destination for both inquiry programs —
+> `DEFINE QLOCAL('CARDDEMO.REQUEST.QUEUE')` at
+> [`app/app-vsam-mq/README.md`](../../app/app-vsam-mq/README.md) L53, aliased to
+> CICS as `MQQUEUE(CARDREQ)` at L71 — and §0.4.1.8 of the technical specification
+> maps that one name to one target queue. The competing-consumer hazard the split
+> was reaching for is real, and splitting the queue is not how the transport
+> resolves it: a receive **hides** a message from every other consumer rather than
+> delivering a copy to each, so one queue is answerable by exactly one OWNING
+> consumer, and that consumer dispatches on content it already decodes. The
+> four-character function code is the first field of every request, single-sourced
+> by `common-lib`'s `InquiryRequestCodec`. Splitting instead required a producer to
+> know which of two addresses to use for a discriminator the payload already
+> carries, and it left an external producer holding one address able to reach only
+> one of the two flows.
 
 | Target queue | Replaces | Type | Key configuration |
 |---|---|---|---|
 | `carddemo-pauth-request-<env>.fifo` + `-dlq` | the pending-authorization request queue | FIFO | `MessageGroupId` is the card number itself and `MessageDeduplicationId` is the transaction identifier itself, exactly as §0.4.1.8 freezes them; DLQ at `maxReceiveCount` 5 |
 | `carddemo-pauth-reply-<env>.fifo` + `-dlq` | the pending-authorization reply queue | FIFO | Short retention, mirroring the original non-persistent reply. The group identity is the same card number the request carried, and retention must outlast the whole visibility, receive-count and long-poll budget so a repeatedly failing reply reaches its dead-letter queue before the source can expire it |
-| `carddemo-account-inquiry-request-<env>` + `-dlq` | account-detail traffic from `CARDDEMO.REQUEST.QUEUE` | Standard | Consumed only by `account-service` |
-| `carddemo-date-inquiry-request-<env>` + `-dlq` | date-conversion traffic from `CARDDEMO.REQUEST.QUEUE` | Standard | Consumed only by `reference-service` |
+| `carddemo-inquiry-request-<env>` + `-dlq` | `CARDDEMO.REQUEST.QUEUE`, which feeds **both** inquiry programs | Standard | Owned by `account-service`, its single consumer, which dispatches on the request's four-character function code: `INQA` to the account inquiry of `COACCT01`, `DATE` to the shared date-and-time reply renderer, anything else to `COACCT01`'s invalid-parameters reply |
 | `carddemo-inquiry-reply-<env>` + `-dlq` | the two per-flow inquiry reply queues | Standard | Configured shared destination; replies echo the request's correlation attribute |
 | `carddemo-error-<env>` + `-dlq` | the error queue | Standard | Terminal error sink |
 
@@ -310,20 +334,25 @@ constants:
 > fixed reply queues by literal (L198 and L147), and the target account/date
 > consumers likewise send only to the configured shared inquiry-reply queue.
 
-> Refactoring Rationale: **the shared inquiry request queue is split at the
-> ownership boundary.** Both inquiry programs are
-> triggered from the same request/reply pair described in
-> [`app-vsam-mq/README.md`](../../app/app-vsam-mq/README.md) L53–L54, but they
-> answer different questions — `COACCT01.cbl` performs an account inquiry and
-> `CODATE01.cbl` performs a date conversion — and the catalog assigns them to two
-> different owners, `account-service` and `reference-service` respectively
-> ([`service-catalog.md`](service-catalog.md) L892–L894). A consumer that assumes
-> every message on the inquiry queue is its own will process the other service's
-> traffic. Two competing SQS consumers cannot safely “peek and put back” a
-> sibling's message, so the authored target routes account inquiries to
-> `account_inquiry_request` and date conversions to `date_inquiry_request` before
-> either consumer receives them. Each has its own DLQ; the reply and error queues
-> remain shared.
+> ⚠️ Refactoring Rationale: **the shared inquiry request queue stays one queue with
+> one owner.** Both inquiry programs are triggered from the same request/reply pair
+> described in [`app-vsam-mq/README.md`](../../app/app-vsam-mq/README.md) L53–L54,
+> and they do answer different questions — `COACCT01.cbl` performs an account
+> inquiry and `CODATE01.cbl` a date-and-time reply. The observation that followed
+> was correct and its conclusion was not: two competing SQS consumers cannot safely
+> "peek and put back" a sibling's message, which is precisely why a queue admits
+> exactly **one** owning consumer rather than why it should be split in two. The
+> owner is `account-service`, and it dispatches on the four-character function code
+> the payload already carries; the DATE answer is a clock reading rendered through
+> `common-lib`'s `DateInquiryReplyCodec`, so no cross-context call is on the message
+> path. `reference-service` keeps the date **evaluation** of `CSUTLDTC` on its
+> synchronous route, which is a different question — the baseline keeps them apart
+> too, since a search for `CSUTLDTC` across all 524 lines of `CODATE01.cbl` returns
+> zero occurrences. One divergence follows and is registered in
+> [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md): a request
+> whose function code is neither `INQA` nor `DATE` receives `COACCT01`'s
+> invalid-parameters reply, where `CODATE01` — which reads no field of its request —
+> would have answered it with the date.
 
 - Alternatives Considered: **managed queues rather than an IBM MQ broker run on
   EC2.** Assumptions: IBM MQ is not an Amazon MQ engine — Amazon MQ offers
@@ -822,10 +851,14 @@ on commas would recover one field holding the whole record.
 
 The **date**-inquiry reply is not delimited either, for the same reason.
 `CODATE01.cbl` sets `MQFMT-STRING` on every put, and the reply
-`DateInquiryReplyMapper` renders is a 46-character positional block located by
-offset and framed to the same declared 1000. `DateInquiryMessageListener`
-therefore stamps `text/plain` as well, so **both** positional inquiry consumers
-carry one value and only the authorization flow carries `text/csv`.
+`common-lib`'s `DateInquiryReplyCodec` renders is a 46-character positional block
+located by offset and framed to the same declared 1000. Refactoring Rationale: both
+inquiry replies are now emitted by ONE consumer — `account-service`'s
+`InquiryMessageListener`, which owns the single shared request queue and dispatches
+on the function code — so `text/plain` is stamped in one place for both, and the two
+values cannot drift apart. That is a stronger guarantee than the paragraph below
+describes, and the paragraph is kept because the drift it records is why the
+attribute is documented at all.
 
 - Assumptions: `text/csv` would be WRONG here even though it is correct on the
   authorization flow, and the two must not be copied from one another. Nothing
@@ -840,9 +873,10 @@ carry one value and only the authorization flow carries `text/csv`.
   positional for the same reason as this one, already declares `text/plain`". Two
   consumers of one wire had drifted apart on the discriminator, and each described
   its own value as the shared one — which is the failure this section exists to
-  prevent and had not caught, because the section named only one of the two. Both
-  are named now, and a case in the reference consumer's own suite holds them to
-  each other rather than each to a literal of its own.
+  prevent and had not caught, because the section named only one of the two. That
+  class of drift is now structurally impossible on this wire: there is one consumer,
+  and the divergence it made possible is recorded here so a future second consumer is
+  understood as re-opening it.
 - Trade-offs: `text/plain` rather than a bespoke media type such as
   `application/vnd.carddemo.acctinfo+fixed`. A registered-looking vendor type
   would carry more information, at the cost of inventing a name no registry
@@ -885,17 +919,18 @@ there is no ambiguity to resolve:
 > role becoming a confused deputy.
 >
 > The two inquiry programs remain the contrast: they pre-open fixed reply queues
-> by literal (`COACCT01.cbl` L198 and L261, `CODATE01.cbl` L147 and L210), and
-> the target account/reference consumers send only to the configured shared
-> inquiry-reply queue.
+> by literal (`COACCT01.cbl` L198 and L261, `CODATE01.cbl` L147 and L210), and the
+> one target inquiry consumer sends only to the configured shared inquiry-reply
+> queue.
 >
-> Assumptions: both listeners are authored --
+> Assumptions: the one inquiry listener is authored --
 > `services/account-service/src/main/java/com/carddemo/account/service/InquiryMessageListener.java`
-> and
-> `services/reference-service/src/main/java/com/carddemo/reference/service/DateInquiryMessageListener.java`
-> -- and each publishes **only** to the queue named by its own configuration, so the
+> -- and it publishes **only** to the queue named by its own configuration, so the
 > validation described here is enforced in code rather than required of a future
-> one. Neither reads a destination from the message: both are written against the
+> one. Refactoring Rationale: a second listener in `reference-service` was named here
+> and is withdrawn; the queue it bound is the one shared request queue, which admits a
+> single owning consumer. It does not read a destination from the message: it is
+> written against the
 > baseline's own behaviour, which saves the request's reply-to queue (`COACCT01.cbl` L341) and then
 > does not use it, putting instead to the handle opened from the statically assigned
 > reply-queue name. Honouring a message-supplied destination would have been both
@@ -904,15 +939,56 @@ there is no ambiguity to resolve:
 > `InquiryMessageListenerTest.theReplyIgnoresAMessageSuppliedDestination` asserts it
 > does not.
 
+### Divergence: an inquiry reply carries no copy of the request's message identifier
+
+Both inquiry programs restore the saved inbound **message** identifier onto the reply
+descriptor beside the correlation identifier — `CODATE01.cbl` L373 does
+`MOVE SAVE-MSGID TO MQMD-MSGID` immediately before its put at L383, having saved it at
+L321, and `COACCT01.cbl` does the same for its own reply. **Neither target listener
+re-publishes it.** `DateInquiryMessageListener.publishReply` and
+`InquiryMessageListener` each put a closed attribute set on a reply: `contentType`
+always, and `correlationId` only when the requester supplied one. There is no
+`messageId` attribute and no `replyToQueueUrl` attribute on an inquiry reply.
+
+- Assumptions: this is a property of the target transport rather than an omission. SQS
+  assigns a `MessageId` to every message it accepts, so a reply carrying a copy of the
+  request's identifier under that name would carry **two** identifiers with one meaning
+  and leave a consumer to guess which one it held. The correlation identifier is the
+  value a requester actually matches an answer against, and it crosses verbatim — which
+  is what preserves the request/reply pairing the baseline descriptor provided.
+- Trade-offs: what is surrendered is a requester's ability to match a reply by the
+  request's own message identifier, which the baseline permitted and which nothing in
+  either reference program relies on. What is kept is one unambiguous identity per
+  message plus the requester's own opaque correlation value. A requester that keyed on
+  the message identifier rather than the correlation identifier would need to change;
+  no baseline consumer does, because the reference programs are the only producers of
+  these replies.
+- Assumptions: the asymmetry is asserted rather than left to be discovered.
+  `DateConversionMessageListenerTest` fixes the reply's attribute set as a **closed**
+  key set rather than as a presence check, so an attribute added beside `correlationId`
+  fails that case; `InquiryMessageListenerTest` does the same for the account flow.
+
+This document is the register for that divergence. `SqsConfig` in `reference-service`
+records the same asymmetry at the point of use and cites this section rather than
+restating it, so the two cannot drift into disagreeing.
+
 The IAM boundary is already authored independently of that future validation.
-`infra/modules/sqs/outputs.tf` publishes `service_queue_permissions` as three
-closed sets:
+`infra/modules/sqs/outputs.tf` publishes `service_queue_permissions` as closed sets,
+one per workload that touches a queue:
 
 | Service | Receives from | Sends to |
 |---|---|---|
 | `authorization-service` | `pauth_request` | `pauth_reply` |
-| `account-service` | `account_inquiry_request` | `inquiry_reply`, `error` |
-| `reference-service` | `date_inquiry_request` | `inquiry_reply`, `error` |
+| `account-service` | `inquiry_request` | `inquiry_reply`, `error` |
+
+Refactoring Rationale: there is no `reference-service` row, and the module publishes
+no such member. That context consumes no queue, so a receive grant for it would let a
+second identity take messages only the owning consumer can answer, and a send grant
+would address a reply it never produces. `infra/modules/sqs` publishes
+`service_queue_permissions` with `authorization_service`, `account_service` and
+`batch_service` members; both roots fall a workload absent from that map through to an
+empty receive-and-send pair, so `infra/modules/ecs-service` creates no queue-boundary
+policy for it at all.
 
 `infra/modules/ecs-service` accepts those exact ARNs through
 `sqs_receive_queue_arns` and `sqs_send_queue_arns`. Its `AllowExactQueueSend`
@@ -1017,15 +1093,17 @@ message the way the descriptor's expiry field does.
   "the system correctly declined a stale message" from "the system lost a message",
   and the cost is one log line per expired message. The record lands in the structured logging described in
   `docs/architecture/observability.md`.
-- Trade-offs: **an attribute that will not parse is not the same as an absent one, and the three
+- Trade-offs: **an attribute that will not parse is not the same as an absent one, and the two
   consumers answer it differently on purpose.** An absent attribute means the producer states no
   expiry and its request is answered; an attribute that is present but unreadable is refused by
-  `AuthorizationRequestListener` and treated as absent by `InquiryMessageListener` and
-  `DateInquiryMessageListener`. The asymmetry is the point: the authorization flow commits a decision
-  and moves an account's counters, so accepting an unreadable attribute would let a producer defeat
-  the control by corrupting it, whereas the two inquiry flows answer read-only questions where
-  honouring a stale request costs a wasted reply and refusing a merely oddly-formatted one costs a
-  real answer. In every case only the attribute's LENGTH is logged, never its value: it came off the
+  `AuthorizationRequestListener` and treated as absent by `InquiryMessageListener`. The asymmetry is
+  the point: the authorization flow commits a decision and moves an account's counters, so accepting
+  an unreadable attribute would let a producer defeat the control by corrupting it, whereas the
+  inquiry flow answers read-only questions where honouring a stale request costs a wasted reply and
+  refusing a merely oddly-formatted one costs a real answer. Refactoring Rationale: this named three
+  consumers, the third being a second inquiry listener in `reference-service`; that listener is
+  withdrawn with the per-consumer queue split, so the inquiry side of the asymmetry is now one
+  consumer answering both function codes. In every case only the attribute's LENGTH is logged, never its value: it came off the
   wire and did not parse, so nothing bounds what it contains.
 
 ---
@@ -1088,12 +1166,28 @@ sends a **second** reply bearing the same correlation identifier as the first �
 answers to one question, with nothing on the wire to tell them apart. The remedy is
 a durable **claim** keyed by the **queue service's own identifier for the
 delivery** — stable across every redelivery of one message, unique per accepted
-send, and not settable by a producer — in
-`account.inquiry_reply_ledger` from
-[`V2__account_inquiry_reply_ledger.sql`](../../services/account-service/src/main/resources/db/migration/V2__account_inquiry_reply_ledger.sql),
-read and written by `com.carddemo.account.repository.InquiryReplyLedger`: the reply
-is recorded and committed, then sent, then marked sent, so a redelivery either
-suppresses its duplicate or re-sends the **recorded** bytes.
+send, and not settable by a producer: the reply is recorded and committed, then
+sent, then marked sent, so a redelivery either suppresses its duplicate or re-sends
+the **recorded** bytes.
+
+**Both** inquiry consumers carry one, because the argument above is a property of the
+target acknowledgement boundary rather than of either exchange's payload:
+
+| Exchange | Table | Migration | Repository |
+|---|---|---|---|
+| Account inquiry (`COACCT01`) | `account.inquiry_reply_ledger` | [`V2__account_inquiry_reply_ledger.sql`](../../services/account-service/src/main/resources/db/migration/V2__account_inquiry_reply_ledger.sql) | `com.carddemo.account.repository.InquiryReplyLedger` |
+| Date inquiry (`CODATE01`) | `reference.inquiry_reply_ledger` | [`V3__reference_inquiry_reply_ledger.sql`](../../services/reference-service/src/main/resources/db/migration/V3__reference_inquiry_reply_ledger.sql) | `com.carddemo.reference.repository.InquiryReplyLedger` |
+
+Refactoring Rationale: this section named the account ledger alone, and the date
+exchange was left with delete-on-success only on the ground that "the answer is the
+clock, so two answers to one request are the same answer". That has the implication
+backwards, and the date exchange is in fact the **worse** of the two. Its reply body
+is the system date and time read at the moment of composition
+([`CODATE01.cbl`](../../app/app-vsam-mq/cbl/CODATE01.cbl) L343–L353), so a redelivery
+does not repeat the answer, it composes a **later** one — two replies bearing one
+correlation identifier and disagreeing about the time. Being a function of the clock
+is precisely what makes the two differ. The account exchange's duplicate is at least
+byte-identical whenever the account has not moved; the date exchange's never is.
 
 - Assumptions: a claim is **not** the outbox the authorization path uses, and the
   difference is the requirement rather than the mechanism. An outbox guarantees a
@@ -1105,9 +1199,12 @@ suppresses its duplicate or re-sends the **recorded** bytes.
   dying there causes the redelivery to re-send — so the requester receives two
   **byte-identical** copies rather than two possibly-disagreeing ones, because the
   payload is stored verbatim instead of recomposed from an account that may have
-  moved. Closing it entirely would need the queue send and the database mark to
-  commit together across two resource managers, which is the two-phase commit this
-  migration records as eliminated.
+  moved or a clock that has advanced. Closing it entirely would need the queue send
+  and the database mark to commit together across two resource managers, which is the
+  two-phase commit this migration records as eliminated. Assumptions: `attempts` on
+  each ledger row counts sends, so a value above one is the operational signal that
+  this window was actually entered — the only residual divergence either exchange
+  admits.
 - Refactoring Rationale: the claim was keyed on the **producer-supplied** message
   attribute, falling back to the correlation identifier, and that inverted the
   guarantee for a whole class of requester. Neither value is authenticated or
@@ -1121,9 +1218,15 @@ suppresses its duplicate or re-sends the **recorded** bytes.
   constants rather than written as literals. The two producer-supplied values
   remain **below** it as explicitly legacy fallbacks, reachable only by a request
   that never passed the broker.
-- Assumptions: every identity that reaches the durable row is **bounded at intake**
-  by the shared queue-identity rule in `com.carddemo.common.messaging.MessagingCorrelationId`
-  — non-blank, at most 64 characters, printable US-ASCII. An unbounded producer
+- Assumptions: every identity that reaches either durable row, and every identity
+  echoed onto either reply, is **bounded at intake** by the shared queue-identity rule
+  in `com.carddemo.common.messaging.MessagingCorrelationId` — non-blank, at most 64
+  characters, printable US-ASCII. Assumptions: 64 rather than the baseline's own
+  24-**byte** descriptor fields, because the natural text rendering of 24 arbitrary
+  bytes is 48 hexadecimal characters, so a 24-character bound would refuse a faithful
+  rendering of a value the baseline accepts; the bound is taken instead from the widest
+  durable column an echoed identity is stored in, which is where a value that passed
+  intake would otherwise fail. An unbounded producer
   value previously reached `request_key VARCHAR(128)` and an outbound message
   attribute unchecked, so the insert or the send raised, the request was
   redelivered, and the requester ended with **no reply** and its request on the
@@ -1467,7 +1570,7 @@ sentence above can be read as a claim to the contrary:
 * **Kafka and Kinesis.** Both were evaluated and both were rejected; neither is
   provisioned, and no streaming platform forms any part of this design. The
   reasoning is recorded under
-  [the queue mapping](#the-five-baseline-queues-and-six-target-primary-queues).
+  [the queue mapping](#the-five-baseline-queues-and-five-target-primary-queues).
 * **Exposing distributed transactions.** The target contract eliminates the
   two-phase commit and introduces no replacement two-phase protocol, transaction
   coordinator or distributed-commit endpoint.
@@ -1480,12 +1583,12 @@ sentence above can be read as a claim to the contrary:
 
 **Boundaries, stated honestly.**
 
-* The twelve SQS resources are authored as infrastructure-as-code and the module has
-  been statically validated, and **all three consumers are now authored**: the
-  authorization consumer as `AuthorizationRequestListener` with its bounded processing
-  window, `AuthReplyOutbox` and `OutboxPublisher`; the account inquiry consumer as
-  `InquiryMessageListener`; and the reference date consumer as
-  `DateInquiryMessageListener`, each behind its own `SqsConfig` and each the **only**
+* The ten SQS resources are authored as infrastructure-as-code and the module has been
+  statically validated, and **both consumers are now authored**: the authorization
+  consumer as `AuthorizationRequestListener` with its bounded processing window,
+  `AuthReplyOutbox` and `OutboxPublisher`; and the inquiry consumer as
+  `InquiryMessageListener`, which owns the one shared inquiry request queue and answers
+  both function codes on it — each behind its own `SqsConfig` and each the **only**
   `@SqsListener` bound to its queue. **One producer is now authored on the terminal error
   sink as well**: `batch-service`'s `BatchErrorPublisher`, called once per failed nightly run
   by `BatchApplication` and wired behind the same property gate as the rest of that module's
@@ -1496,15 +1599,24 @@ sentence above can be read as a claim to the contrary:
   declared widths; none is an observation of a running messaging flow, and no
   throughput, latency or ordering behaviour has been measured.
 
-  - Refactoring Rationale: the reference date flow is listed with ONE consumer, where this
-    bullet previously named two — `DateInquiryMessageListener` "with
-    `DateConversionMessageListener`". Naming two was not a richer description of the same
-    flow; it described a defect. Both classes declared `@SqsListener` on the same request
-    queue, so each request went to whichever bean received it, and the two disagreed about
-    the reply's media type, about whether a requester's `expiresAt` was honoured, and about
-    whether a reply went to the configured queue or to one the sender named. The second
-    consumer is withdrawn. Its one queue-independent member, the date-edit verdict the
-    synchronous endpoint calls, moved to `DateConversionService`, which addresses no queue.
+  - Refactoring Rationale: the resource count reads TEN where it read twelve, and the
+    consumer count TWO where it read three, and both moves have one cause. The per-consumer
+    split of the shared inquiry request queue is withdrawn — the baseline defines one request
+    destination for both inquiry programs and a queue admits exactly one owning consumer —
+    so five primaries with five dead-letter queues replace six with six, and the reference
+    context's listener is gone with the queue it bound. Its behaviour is not lost: the
+    account consumer dispatches on the request's four-character function code and renders
+    the date answer from `common-lib`'s `DateInquiryReplyCodec`, and that context keeps the
+    date **evaluation** of `CSUTLDTC` on its synchronous route.
+  - Refactoring Rationale: an earlier correction to this bullet recorded a DIFFERENT
+    withdrawal in the same module and is kept, because the two are separate facts. The
+    reference date flow once carried TWO consumers of its own —
+    `DateInquiryMessageListener` and a `DateConversionMessageListener` — declaring
+    `@SqsListener` on one queue with different reply widths, different reply routing,
+    different content types and different requester-expiry handling, so which contract a
+    message met depended on which container polled first. That was corrected to one
+    consumer, and the same reasoning applied across modules is what has now taken the
+    count to zero there.
   - Refactoring Rationale: the error-sink producer is named here because its absence was
     the sharper half of the same defect this bullet keeps correcting. `batch-service`
     carried an authored queue configuration -- a validated sink address, a media type, two
@@ -1526,18 +1638,16 @@ sentence above can be read as a claim to the contrary:
     were aspirational, and would not look for the code that implements them. What is
     genuinely still outstanding is narrower and unchanged: nothing has been **run**.
   - Refactoring Rationale: the "each the **only** `@SqsListener` bound to its queue"
-    clause and the removal of a second reference consumer from this bullet record a real
-    defect rather than a tidy-up. The reference date flow briefly carried TWO active
-    consumers on one request queue — `DateInquiryMessageListener` and a
-    `DateConversionMessageListener` — with different reply widths, different reply
-    routing, different content types and different requester-expiry handling, so which
-    contract a message met depended on which listener container polled it first. That is
-    not redundancy, it is a nondeterministic wire contract, and this document listing both
-    as though authoring two were a completeness milestone is how it survived review. The
-    competing consumer has been removed and
-    `ReferenceQueueConsumerContractTest` now fails the build if a second listener is ever
-    bound to that queue, so the property this clause claims is enforced rather than
-    described.
+    clause records a real defect rather than a tidy-up, and the enforcement behind it has
+    moved. A nondeterministic wire contract — two consumers on one queue, disagreeing about
+    reply width, reply routing, content type and requester expiry — is what this clause
+    exists to exclude, and this document listing both consumers as though authoring two were
+    a completeness milestone is how it survived review. The check that held it,
+    `ReferenceQueueConsumerContractTest`, asserted that exactly ONE listener was bound in
+    that module; with the queue owned elsewhere that claim is inverted rather than deleted —
+    `ReferenceServiceStructureTest` now fails the build if any member of that module binds a
+    queue listener, or if the queue-listener annotation resolves from its classpath at all,
+    so re-creating the hazard requires restoring a dependency as well as a class.
 * The **external point-of-sale authorizer that produces authorization requests is
   not supplied by the baseline.** Only a test stub exists, and building a real
   producer is not in scope. The practical consequence is asymmetric confidence: the

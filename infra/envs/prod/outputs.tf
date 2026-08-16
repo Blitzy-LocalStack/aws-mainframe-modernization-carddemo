@@ -59,7 +59,7 @@ output "messaging" {
 }
 
 output "batch_orchestration" {
-  description = "Complete daily, ad-hoc report, dataset round-trip and authorization-extract state-machine contract: the four machines, their per-machine execution roles, their log groups, the two bracket-release rules with their dead-letter queue and alarms, and the resolved dataset staging root."
+  description = "Complete daily, ad-hoc report, dataset round-trip and authorization-extract state-machine contract: the four machines, their per-machine execution roles, their log groups, the two bracket-release rules with their dead-letter queue and alarms, the resolved dataset staging root, and one deprecated dataset_source_extract_prefix alias the module retains for a compatibility window."
   value       = module.step_functions
 }
 
@@ -101,7 +101,7 @@ output "service_credentials" {
 }
 
 output "runtime_configuration" {
-  description = "Root-owned SSM parameter ARNs, operational Lambda ARNs, internal certificate handle and bootstrap result."
+  description = "Root-owned SSM parameter ARNs (runtime and platform), the online-write flag parameter ARN, the four operational Lambda ARNs, and the database bootstrap result. Publishes NO certificate or listener-secret handle: each task mints its own listener material, and the certificate the load balancer presents is the operator-supplied alb_certificate_arn the caller already holds."
   value = {
     runtime_parameter_arns = {
       for key, parameter in aws_ssm_parameter.runtime : key => parameter.arn

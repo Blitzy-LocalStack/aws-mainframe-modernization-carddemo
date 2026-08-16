@@ -809,7 +809,7 @@ public class AccountViewService {
      * reaches at L369 after its input edit has passed. It is the route the view screen and the update
      * screen's pre-read both take once an account identifier is in the request path.</p>
      *
-     * <p>Assumptions: BOTH masters and the cross-reference are read by ONE STATEMENT, so the account and
+     * <p>Assumptions: both masters and the cross-reference are read by ONE STATEMENT, so the account and
      * the customer on one screen are consistent with each other. That mirrors the reference, where all
      * three reads are driven from the single paragraph at L687 through L720 of
      * {@code app/cbl/COACTVWC.cbl} inside one task.</p>
@@ -825,22 +825,30 @@ public class AccountViewService {
      * serialisation-failure outcome this operation would then have to answer for, where one statement needs
      * no isolation change at all.</p>
      *
-     * <p>Trade-offs: a miss on any of the three reads is raised here rather than returned as a
-     * message-bearing response, which is the opposite of what the screen entry point beside this one
-     * does. The reference itself returns a re-rendered screen at L365 and L366, so raising is a
-     * rendering decision taken at this boundary and not a rule: this method is the route a machine
-     * caller and a path-parameter request take, and both express absence as HTTP 404, whereas the
-     * screen route expresses it as the same screen carrying the message. What is accepted is that one
-     * composition is rendered two ways; what is bought is that neither caller is given the other's
-     * shape. The verbatim reference sentence travels on the raised type, and whether it reaches the
-     * response body is decided by the shared advice rather than restated here.</p>
+     * <p>Trade-offs: a miss on the cross-reference or the account master is raised here rather than
+     * returned as a message-bearing response. The reference itself returns a re-rendered screen at L365
+     * and L366, so raising is a rendering decision taken at this boundary and not a rule: this method is
+     * the route a machine caller and a path-parameter request take, and both express absence as
+     * HTTP 404. What is accepted is that one composition is rendered two ways; what is bought is that
+     * neither caller is given the other's shape. The verbatim reference sentence travels on the raised
+     * type, and whether it reaches the response body is decided by the shared advice rather than
+     * restated here.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: a miss on the CUSTOMER master is NOT raised, and it used to be. That
+     * arm is the reference's own partial state -- the account region is painted under the disjunctive
+     * guard at L471 and L472 while the customer region is suppressed at L493 -- so it answers HTTP 200
+     * with the customer member null, the reference's sentence in {@code returnMessage} and no entity tag.
+     * Raising for it reported an account that exists as absent and withheld the ten fields the terminal
+     * displays.</p>
      *
      * @param accountId the account to read, the eleven-digit identifier the reference supplies as the
      *     record identification field of the read at L778
-     * @return the composed view carrying the account, its customer and both message channels, together
-     *     with the revision both rows stand at, a {@link RevisionedAccountView}, never {@code null}
-     * @throws NoSuchElementException if the cross-reference, the account master or the customer master
-     *     holds no matching row, which the shared advice renders as HTTP 404
+     * @return the composed view carrying the account, its customer where one was located and both
+     *     message channels, together with the revision both rows stand at when both were located, a
+     *     {@link RevisionedAccountView}, never {@code null}
+     * @throws NoSuchElementException if the cross-reference or the account master holds no matching row,
+     *     which the shared advice renders as HTTP 404; a missing CUSTOMER row is answered rather than
+     *     raised, as the rationale above records
      * @throws IllegalStateException if the composition reaches a data condition none of the three
      *     reads classifies, which is the first abend surface of L375 through L380, or if a read fails
      *     for a reason the program-wide handler of L916 would have caught
@@ -850,13 +858,26 @@ public class AccountViewService {
         RevisionedAccountView composed = readAccountUnderAbendHandler(accountId);
         AccountViewResponse view = composed.view();
 
-        // WHY : Assumptions: BOTH halves are required for this route to answer, and the disjunction is
-        //       not a redundancy. The composition leaves the customer half absent on its own when the
-        //       customer master holds no row for a located account, which is the state the reference
-        //       reaches by populating the account region under the disjunctive guard at L471 and L472
-        //       while leaving the customer region unpopulated at L493. A machine caller reading a
-        //       half-populated view would have no way to tell it apart from a complete one.
-        if (view.account() == null || view.customer() == null) {
+        // WHY : ⚠️ Refactoring Rationale: only the ACCOUNT half is required for this route to answer, and
+        //       the customer half used to be required too. That disjunction made the reference's own
+        //       partial state unreachable: app/cbl/COACTVWC.cbl guards its two screen regions
+        //       DIFFERENTLY -- the account region on FOUND-ACCT-IN-MASTER OR FOUND-CUST-IN-MASTER at
+        //       L471 and L472, the customer region on FOUND-CUST-IN-MASTER alone at L493 -- so an
+        //       account located with no customer row is painted with its ten account fields and the
+        //       verbatim sentence naming the miss, and the internal chain below already composes exactly
+        //       that at the arm returning the account with a null customer. Raising here discarded that
+        //       composition and reported an account that exists as HTTP 404, which loses ten fields the
+        //       terminal shows and tells a caller the account is absent.
+        // WHY : Assumptions: a machine caller can now tell the two apart, which is what the earlier note
+        //       was protecting and what the CONTRACT now carries instead of this guard:
+        //       account-api.yaml publishes the customer member as nullable, the returnMessage carries the
+        //       reference's own sentence on that arm, and no entity tag is issued because no precondition
+        //       can be formed from rows that were not both located.
+        // WHY : Assumptions: the ACCOUNT half still raises, and the asymmetry is the reference's rather
+        //       than a convenience. With no account row located both screen guards above are false and
+        //       the reference paints NEITHER region, so there is no partial state to publish and absence
+        //       of the account is absence of the view.
+        if (view.account() == null) {
             throw notFound(view.returnMessage());
         }
 
@@ -887,8 +908,9 @@ public class AccountViewService {
      * @param view the composed view carrying the account, its customer and both message channels; never
      *     {@code null}
      * @param revision the token both rows stand at, which the caller returns on its next edit of this
-     *     account; never {@code null} once the composition has both halves, and {@code null} on the
-     *     incomplete compositions this class never publishes
+     *     account; never {@code null} once the composition has both halves, and {@code null} when only
+     *     the account half was located -- an arm {@link #readAccountView} now publishes, because no
+     *     precondition can be formed from rows that were not both read
      */
     public record RevisionedAccountView(AccountViewResponse view, String revision) {
     }
@@ -1546,10 +1568,13 @@ public class AccountViewService {
      * Pairs an incomplete composition with no revision.
      *
      * <p>Assumptions: a composition missing either master row has NO revision, and the absence is
-     * expressed as {@code null} rather than as an empty or sentinel token. A caller cannot use a
-     * precondition for rows that were not both located, and this class never publishes these
-     * compositions in any case -- {@link #readAccountView} raises on them -- so the field exists here
-     * only because the internal chain returns one carrier type on every arm.</p>
+     * expressed as {@code null} rather than as an empty or sentinel token, because a caller cannot form
+     * a precondition for rows that were not both located.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: one of these compositions IS published now. This note read that the
+     * class never publishes them because {@link #readAccountView} raised on every incomplete one, and
+     * that stopped being true when the customer-miss arm became a 200: the adapter answers it with no
+     * {@code ETag} header at all rather than with a tag naming nothing.</p>
      *
      * @param view the re-rendered view the reference would have sent; must not be {@code null}
      * @return the view carried with no revision, a {@link RevisionedAccountView}, never {@code null}

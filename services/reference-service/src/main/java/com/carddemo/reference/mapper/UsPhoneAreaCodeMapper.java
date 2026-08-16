@@ -26,7 +26,11 @@ import org.springframework.stereotype.Component;
  * constructor injection, which is the dependency-injection pattern the Agent Action Plan fixes for this
  * migration in place of the baseline's static linkage, and an injected bean can be substituted in a
  * slice test where a static member cannot. The class is left non-final so that it stays proxyable, and
- * the charter already admits this second shape for {@code DateInquiryReplyMapper}.</p>
+ * the charter already admits this second shape for the two sibling lookup conversions beside this one.
+ * Refactoring Rationale: this sentence cited {@code DateInquiryReplyMapper} as the admitted precedent.
+ * That class has moved to the shared kernel as
+ * {@code com.carddemo.common.codec.DateInquiryReplyCodec}, so the precedent is now the two siblings,
+ * which are the same case as this class rather than a different one.</p>
  *
  * <p>Trade-offs: the cost is that this class does not read identically to its four static siblings, so
  * a reader moving between them meets two shapes inside one package. It is accepted because the static

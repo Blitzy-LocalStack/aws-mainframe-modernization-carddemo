@@ -83,7 +83,7 @@
 --      missing table.
 --   3. data-migration/sql/V1__reporting_views.sql has run, so the `reporting`
 --      schema's grant to carddemo_reporting is in place. This file does not
---      depend on the seven views themselves.
+--      depend on the eight views themselves.
 --   4. This file is executed by a principal that can SET ROLE to BOTH
 --      carddemo_auth_owner and carddemo_reporting_owner -- in practice the
 --      operator principal that applied V0, or a superuser. Each half asserts its

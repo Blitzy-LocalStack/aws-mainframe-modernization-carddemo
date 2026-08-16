@@ -159,7 +159,7 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
  * <p>Assumptions: no fifth configuration class joins this package on account of this chain, and no
  * chunk-oriented batch wiring belongs here at all. That starter is version-managed centrally but is
  * deliberately not declared by this module -- {@code services/account-service/pom.xml} records the
- * exclusion in prose at line 612 -- so the types such a class would reference are absent from this
+ * exclusion in prose at line 603 -- so the types such a class would reference are absent from this
  * module's compile classpath and the omission is enforced by the compiler rather than by convention.</p>
  *
  * <p>Trade-offs: the patterns below are stated as subtrees rather than as an enumeration of published
@@ -367,9 +367,15 @@ public class SecurityConfig {
      *
      * <p>Assumptions: sessions are STATELESS. The baseline is pseudo-conversational and carries its
      * continuity in a structure the client echoes; the migrated form carries identity in the token and
-     * selection context in the request path, so there is nothing left for a server-side session to
+     * selection context in the request BODY, so there is nothing left for a server-side session to
      * hold. Permitting one would reintroduce the sticky routing that horizontal scaling exists to
-     * avoid.</p>
+     * avoid. Refactoring Rationale: this said "in the request path". Statelessness does not depend on
+     * which part of the request carries the key, so the conclusion is unchanged — but the mechanism is
+     * named correctly because a reader auditing this chain against the controllers would otherwise look
+     * for path matchers that do not exist. Every account and customer operation is a {@code POST}
+     * taking its key from a body, registered as {@code D-ACCOUNT-SELECTION-IN-BODY} in
+     * {@code docs/architecture/cobol-to-service-traceability.md} §7.4, which is also why the request
+     * matchers below authorize by fixed segment and never by a templated identifier.</p>
      *
      * <p>Trade-offs: cross-site request forgery protection is disabled, which for a cookie-authenticated
      * application would be a defect. It is not one here: every request authenticates with a bearer token

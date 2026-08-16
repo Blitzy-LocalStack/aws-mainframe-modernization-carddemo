@@ -85,7 +85,7 @@ required content onto Rule 1's four elements, which is the mapping the table
 above follows.
 
 The gate on this obligation is **human review, with no mechanical fallback**.
-`config/checkstyle/checkstyle.xml` L185 scopes its `Checker` to
+`config/checkstyle/checkstyle.xml` L178 scopes its `Checker` to
 `fileExtensions="java"`, so no file in this directory is ever scanned; the
 `config/checkstyle/suppressions.xml` entry at L151 matching
 `src/test/resources/fixtures/` is defensive, covering the narrow case of a
@@ -142,17 +142,17 @@ chain being unbroken:
    `PRIMARY KEY(TR_TYPE)`.
 2. **The target constraint.**
    [`V1__reference.sql`](../../../../../main/resources/db/migration/V1__reference.sql)
-   **L266 to L268** declares
+   **L255 to L257** declares
    `FOREIGN KEY (type_cd) REFERENCES reference.transaction_types (type_cd)
-   ON DELETE RESTRICT`, and its adjacent note at **L236 to L242** records that
+   ON DELETE RESTRICT`, and its adjacent note at **L225 to L231** records that
    `RESTRICT` was chosen over `CASCADE`, `SET NULL` and `NO ACTION` precisely
    because it is the observable outcome the baseline asserts, calling the
    constraint the single load-bearing object of that file.
 3. **The baseline index order.** The composite key at `V1__reference.sql`
-   **L234**, `PRIMARY KEY (type_cd, cat_cd)`, builds a unique B-tree on exactly
+   **L223**, `PRIMARY KEY (type_cd, cat_cd)`, builds a unique B-tree on exactly
    the two columns and exactly the order that
    `app/app-transaction-type-db2/ddl/XTRNTYCAT.ddl` **L3** names as
-   `(TRC_TYPE_CODE ASC, TRC_TYPE_CATEGORY ASC)`. Its note at **L225 to L233**
+   `(TRC_TYPE_CODE ASC, TRC_TYPE_CATEGORY ASC)`. Its note at **L214 to L222**
    records that no separate `CREATE INDEX` is issued for that reason.
 4. **The database condition.** A delete blocked by that foreign key raises
    PostgreSQL `SQLSTATE` **23503**, named at `V1__reference.sql` **L57** as
@@ -165,13 +165,13 @@ chain being unbroken:
    abstraction.
 6. **The HTTP status.** That handler answers **HTTP 409** at **L1038 to L1041**,
    carrying the message constant declared at **L294 to L295**. `V1__reference.sql`
-   **L262 to L265** states the same mapping from the schema side and records that
+   **L251 to L254** states the same mapping from the schema side and records that
    `reference-service` declares no advice of its own, so the mapping cannot
    drift per service.
 
 Column types follow the same lineage rather than taste. `TRNTYCAT.ddl` **L2 to
 L4** declares `CHAR(2)`, `CHAR(4)` and `VARCHAR(50)`, which is where
-`V1__reference.sql` inherits them; its note at **L180 to L204** lists six
+`V1__reference.sql` inherits them; its note at **L169 to L193** lists six
 independent baseline sources for `cat_cd` being character rather than integer,
 because an integer column would turn `0001` into `1`. That is why the literal
 four-digit form and the 50-wide blank-padded descriptions in these fixtures are
@@ -356,7 +356,7 @@ absent.
 ### 4.6 No `.sql` file belongs in this directory
 
 Assumptions: the `ON DELETE RESTRICT` constraint this scenario exercises is
-owned **solely** by `V1__reference.sql` **L266 to L268**, and
+owned **solely** by `V1__reference.sql` **L255 to L257**, and
 [`application-test.yml`](../../../application-test.yml) sets
 `spring.jpa.hibernate.ddl-auto: validate` at its **L182** while enabling Flyway
 from `classpath:db/migration` at its **L214** to **L228**. The concrete
@@ -407,7 +407,7 @@ the only description in this directory that is not seed-derived.
 
 Assumptions: the second category row is not padding. Two distinct `cat_cd`
 values exercise the composite primary key `(type_cd CHAR(2), cat_cd CHAR(4))` at
-`V1__reference.sql` **L234** and the `(type_cd ASC, cat_cd ASC)` ordering
+`V1__reference.sql` **L223** and the `(type_cd ASC, cat_cd ASC)` ordering
 inherited from `XTRNTYCAT.ddl` **L3**, which one row cannot. `06` is also the
 only type in the seed carrying more than one category, so it is the only
 available code for which a refusal on *any* reference can be distinguished from
@@ -507,7 +507,7 @@ dropped: **4 bytes dropped**, again with no corresponding column.
 
 Assumptions: **`TRAN-CAT-CD` is unsigned display -- plain ASCII digits with no
 sign overpunch.** Its target column is `CHAR(4)` rather than an integer type
-(`V1__reference.sql` L180 to L204), so the literal `0001` form with its leading
+(`V1__reference.sql` L169 to L193), so the literal `0001` form with its leading
 zeros survives end to end. Applying overpunch decoding to it would read the
 trailing digit as a sign character and produce a value wrong by orders of
 magnitude, and the error would be silent; charter section 5.4 lists the unsigned

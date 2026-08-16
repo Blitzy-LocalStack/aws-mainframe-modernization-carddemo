@@ -15,9 +15,17 @@ import org.junit.jupiter.api.Test;
  * <h2>Purpose</h2>
  *
  * <p>Purpose: this class covers the one member of a withdrawn queue consumer that had no queue concern in
- * it. That consumer declared a second {@code @SqsListener} on the same request queue as
- * {@link DateInquiryMessageListener} and was removed for it; the verdict member moved to
- * {@link DateConversionService}, and no test named the member while it lived on the consumer.
+ * it. That consumer declared a second {@code @SqsListener} on the request queue this module no longer
+ * consumes, and was removed for it; the verdict member moved to {@link DateConversionService}, and no test
+ * named the member while it lived on the consumer.
+ *
+ * <p>Refactoring Rationale: this paragraph previously named the sibling consumer
+ * {@code DateInquiryMessageListener} as the class that shared the request queue. That class has since been
+ * withdrawn from this module too -- the whole inquiry exchange is served by one consumer in
+ * {@code account-service}, dispatching on the four-character function code -- so the reference would now
+ * point at a type that does not exist, and a reader following it would conclude the queue route still
+ * lives here. The shared queue is named without naming a class, because the class that answers it is not
+ * this module's to cite.
  *
  * <p>Assumptions: what is asserted here is the WIRING of the shared rules into the published shape -- which
  * mask is applied when none is sent, that the mask actually applied is echoed rather than the one
