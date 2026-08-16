@@ -501,28 +501,22 @@ export function signOnFailureMessage(failure: unknown): string {
     : SIGN_ON_MESSAGES.UNABLE_TO_VERIFY_THE_USER;
 }
 
-/**
- * The wire name the challenge body gives its replacement-credential member.
- *
- * Refactoring Rationale: this exists because a refusal addressed to it used to be DROPPED.
- * {@link signOnFieldRefusals} recognised only the two members of the sign-on body, and the challenge
- * body is a different shape: `services/auth-service/src/main/java/com/carddemo/auth/dto/SignOnChallengeRequest.java`
- * declares `userId`, `session` and `newPassword`, and a replacement the pool rejects on policy grounds
- * is reported against the third. Every such refusal therefore reached this screen and was thrown away,
- * leaving the operator the band's general sentence and no indication of which control was at fault —
- * on the one screen where the reason ("at least twelve characters", say) is the whole of what they need.
- *
- * Assumptions: it maps onto the `password` control rather than to a slot of its own, because the
- * challenge REPLACES the password control in the same row rather than adding a second one. That is
- * already why {@link PASSWORD_FIELD_ID} serves both renderings, and giving the refusal its own slot
- * would mean the row read one slot while the service wrote another.
- *
- * Assumptions: `session` is deliberately NOT mapped. It is an opaque continuation value the operator
- * never typed and cannot correct, so attaching its refusal to a control would label an input the
- * operator has no way of fixing; a refused session is handled instead by leaving the challenge
- * altogether — see the withdrawal note on the `refusalEndsTheChallenge` predicate below.
+/*
+ * WHY : ⚠️ Refactoring Rationale: a `CHALLENGE_PASSWORD_FIELD` of `'newPassword'` stood here, and
+ *       both it and the branch of {@link signOnFieldRefusals} that read it are withdrawn as
+ *       UNREACHABLE. It dated from a revision in which the challenge member was absent from
+ *       {@link SIGN_ON_FIELDS}, so a refusal naming it had to be recognised separately and was
+ *       redirected onto the `password` slot -- the two being one row and one control identifier. Two
+ *       remedies then landed for the same finding: the member was added to the list, and the challenge
+ *       item was re-keyed onto `refusals.newPassword`. With the member in the list the recognising
+ *       predicate matches it first, so the redirect could never run; and with the item reading its own
+ *       key, running it would have written the refusal to the slot the mounted control does NOT read.
+ * WHY : Assumptions: nothing is lost by the withdrawal, because the knowledge it carried is recorded
+ *       where it is used. {@link SIGN_ON_FIELDS} names the challenge body's three components and why
+ *       `session` is not among them, and {@link PASSWORD_FIELD_ID} records that one identifier serves
+ *       both renderings of the row -- which is what makes the shared cursor target and the shared help
+ *       identifier correct while the refusal slots stay distinct.
  */
-const CHALLENGE_PASSWORD_FIELD = 'newPassword';
 
 /*
  * WHY : Refactoring Rationale: an `UNAUTHENTICATED_STATUS` constant of 401 stood here beside
@@ -549,8 +543,8 @@ const CHALLENGE_PASSWORD_FIELD = 'newPassword';
  * — so teaching the band about the API layer was rejected upstream, and the screen that awaited the
  * call is the only component holding both the refusal and the controls it addresses.
  *
- * Assumptions: an entry naming anything other than this screen's two controls is dropped rather than
- * surfaced somewhere arbitrary. The band already carries the screen-level sentence for that refusal,
+ * Assumptions: an entry naming anything other than the three values in {@link SIGN_ON_FIELDS} is
+ * dropped rather than surfaced somewhere arbitrary. The band already carries the screen-level sentence for that refusal,
  * so nothing is lost, whereas attaching an unrecognised field's text to a control would label the
  * wrong input.
  * @param {unknown} failure - Whatever the sign-on or challenge call rejected with.
@@ -567,11 +561,11 @@ export function signOnFieldRefusals(failure: unknown): FieldRefusals {
   const refusals: Partial<Record<SignOnField, string>> = {};
   for (const fieldError of reported) {
     if (isSignOnField(fieldError.field)) {
+      // Assumptions: the entry is written under the name the service used, and the item that renders
+      //   the addressed control reads that same name -- `refusals.password` while the credential is
+      //   mounted, `refusals.newPassword` while the challenge has replaced it. No translation happens
+      //   here, which is the property {@link SIGN_ON_FIELDS} exists to give.
       refusals[fieldError.field] = fieldError.message;
-    } else if (fieldError.field === CHALLENGE_PASSWORD_FIELD) {
-      // Assumptions: the replacement's refusal is written to the `password` slot, which is the slot the
-      //   row it is rendered in reads. See CHALLENGE_PASSWORD_FIELD for why the two share one slot.
-      refusals.password = fieldError.message;
     }
   }
 
@@ -1023,8 +1017,10 @@ export function SignOnScreen(): ReactElement {
    * discard the session and the entered values and leave the operator on a screen they can sign on
    * from again.
    *
-   * Assumptions: the session is discarded through `useAuth`'s own `signOut` rather than by clearing
-   * storage here, so the four session-storage slots it owns stay owned by one module.
+   * Assumptions: the session is discarded through `useAuth`'s own `signOut` rather than from here, so
+   * the identity that hook holds and the bearer `ui/src/api/client.ts` holds are discarded together by
+   * their owners. Neither is in browser storage to clear: both are module variables, for the reason
+   * each records at its declaration, so a screen could not clear them even if it tried.
    * @returns {void} Nothing; the cleared controls, the band sentence and the discarded session carry
    *   the outcome.
    */
@@ -1177,11 +1173,14 @@ export function SignOnScreen(): ReactElement {
    *       between rows 5 and 21 stays here. The message severity falls back to `error` when there is no
    *       sentence, because row 23 of the mapset is `COLOR=RED` with `ATTRB=BRT` and the value is then
    *       unused anyway.
-   * WHY : Assumptions: this screen's own `usePfKeys` result is handed over rather than re-derived by the
-   *       shell, and that is also what keeps the keyboard singly owned: a published `pfKeys` slot makes
-   *       the shell stand its own sign-off key down, so exactly one document listener is installed while
-   *       this screen is mounted. It matters most on this screen, which is reachable while no operator is
-   *       signed on - the shell's key is already inactive then - and it must stay true once one is.
+   * WHY : ⚠️ Assumptions: this screen's own `usePfKeys` result is handed over rather than
+   *       re-derived by the shell, so what the shell receives is a legend to RENDER while this screen
+   *       keeps the keyboard: an activation of a rendered control is forwarded straight back to `invoke`.
+   *       The claim that stood here, that a published slot "makes the shell stand its own sign-off key
+   *       down", is withdrawn: the shell installs NO keyboard listener at all and offers sign-off as a
+   *       rendered control, for the reason recorded at `SHELL_SIGN_OFF_LABEL`. That REMOVES the concern
+   *       this screen raised rather than answering it -- there was never a shell key here to be active or
+   *       inactive, signed on or not.
    */
   useShellSlot({
     screen: { transactionId: SIGN_ON_TRANSACTION_ID, programName: SIGN_ON_PROGRAM_NAME },
@@ -1396,9 +1395,11 @@ export function SignOnScreen(): ReactElement {
                * WHY : Assumptions: `maxLength` is the SERVICE's bound and not the reference's
                *       `LENGTH=8`. See `D-SIGNON-RETIRED-WIDTH-HINT` for the full argument; the short
                *       form is that the provider accepts nothing shorter than twelve characters, so an
-               *       eight-character control would admit only credentials guaranteed to be refused --
-               *       which is also why the hint painted beside this control names that minimum rather
-               *       than repeating the mapset's eight.
+               *       eight-character control would admit only credentials guaranteed to be refused.
+               *       NO width hint is painted beside this control for the same reason: the mapset paints
+               *       its `(8 Char)` twice and the second copy would name the one length that cannot be
+               *       accepted, so the omission is registered as `D-SIGNON-RETIRED-WIDTH-HINT` and the
+               *       provider's own refusal sentence carries the requirement instead.
                * WHY : Assumptions: `autoComplete="current-password"` -- rather than the bare `on` -- is
                *       what tells the browser this is an EXISTING credential being presented, so a
                *       credential manager offers the stored value rather than proposing a new one. It is

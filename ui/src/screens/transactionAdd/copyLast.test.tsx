@@ -61,8 +61,24 @@ vi.mock('../../api/transactions', mockLedgerTransportModule);
 /** The account the operator is working on, eleven digits as the key field declares. */
 const KEYED_ACCOUNT = '00000000011';
 
-/** The card the cross-reference resolves for that account, sixteen digits and unmasked. */
-const RESOLVED_CARD = '4111111111111111';
+/**
+ * The masked rendering the service publishes for the card it resolved from that account.
+ *
+ * ⚠️ Refactoring Rationale: this was the sixteen-digit number, because the preview published the card
+ * unmasked and this screen painted it into the card control. A review found that a non-administrative
+ * preview therefore handed a whole primary account number to the browser, so the service publishes the
+ * masked rendering and the screen no longer repaints the control -- both of which this file now asserts.
+ */
+const RESOLVED_CARD_MASKED = '************1111';
+
+/**
+ * The opaque binding the preview publishes so the confirming turn can name the same card.
+ *
+ * Assumptions: only its presence on the confirming request is asserted; nothing here interprets it, because
+ * only the service can open it.
+ */
+// The value is deliberately low-entropy; `ui/src/api/transactions.test.ts` records why.
+const CONFIRMATION_TOKEN = 'v2.aaaaaaaaaaaaaaaa.notarealsealedvalue';
 
 /**
  * The ten copied members the service publishes, plus the row they came from.
@@ -101,12 +117,13 @@ const COPY_WITHHELD: TransactionAddOutcome = {
      *       service reports it on every withheld answer, because `app/cbl/COTRN02C.cbl` L166 performs
      *       `VALIDATE-INPUT-KEY-FIELDS` for the Enter arm exactly as L473 does for the copy arm, and L209
      *       and L221 write both key fields before the screen is re-sent.
-     * WHY : Assumptions: the resolved account matches the keyed one, which is the account arm's own
-     *       outcome; the resolved card is the sixteen-digit value the cross-reference yields, UNMASKED,
-     *       because it is the value the confirming turn submits rather than a value painted on the screen.
+     * WHY : ⚠️ Assumptions: the resolved account matches the keyed one, which is the account arm's own
+     *       outcome; the resolved card arrives MASKED, and the confirming turn names it by returning the
+     *       binding token rather than by re-sending digits the browser was never given.
      */
     resolvedAccountId: KEYED_ACCOUNT,
-    resolvedCardNumber: RESOLVED_CARD,
+    resolvedCardNumberMasked: RESOLVED_CARD_MASKED,
+    confirmationToken: CONFIRMATION_TOKEN,
     copied: COPIED,
   },
 };
@@ -195,13 +212,16 @@ function resetLedgerMocks(): void {
  * +99999999.99` at `app/cbl/COTRN02C.cbl` L59 is what L481 renders the stored figure through. Adopting the
  * service's shorter form would put a value in the control that the screen's own predicate refuses.
  *
- * Assumptions: the ACCOUNT field is asserted to still hold the keyed value and the CONFIRMATION to still
- * be blank, because a copy must land against the account the operator was already working on and must not
- * answer its own prompt. The CARD field is asserted to hold the RESOLVED card, which is the step
- * `VALIDATE-INPUT-KEY-FIELDS` performs on this same turn: `app/cbl/COTRN02C.cbl` L473 performs it before
- * the read, L208 reads the cross-reference by account and L209 moves the card number it found into
- * `CARDNINI`, and the screen is then re-sent -- so a blank card field would describe a screen the reference
- * never sends.
+ * ⚠️ Assumptions: the ACCOUNT field is asserted to still hold the keyed value and the CONFIRMATION to
+ * still be blank, because a copy must land against the account the operator was already working on and must
+ * not answer its own prompt. The CARD field is asserted to remain exactly as the operator left it -- blank
+ * on this case -- where it used to be asserted to hold the resolved card. The reference does repaint that
+ * field (`app/cbl/COTRN02C.cbl` L473 performs `VALIDATE-INPUT-KEY-FIELDS`, L208 reads the cross-reference
+ * and L209 moves the card into `CARDNINI`), but it repaints it with sixteen digits it already holds in
+ * storage. The migrated service publishes the MASKED rendering instead, so painting the answer into an
+ * editable numeric key field would leave a value there that the next turn's own pattern refuses. The
+ * resolved card is therefore shown as protected text on the confirmation surface, which the parity case in
+ * `transactionAddTurns.test.tsx` asserts.
  * @returns {Promise<void>} Resolves once every assertion has run.
  */
 async function adoptsEveryCopiedValue(): Promise<void> {
@@ -223,8 +243,7 @@ async function adoptsEveryCopiedValue(): Promise<void> {
   expect(controlFor('amount')).toHaveValue('+00000042.75');
 
   expect(controlFor('accountId')).toHaveValue(KEYED_ACCOUNT);
-  expect(controlFor('accountId')).toHaveValue(KEYED_ACCOUNT);
-  expect(controlFor('cardNumber')).toHaveValue(RESOLVED_CARD);
+  expect(controlFor('cardNumber')).toHaveValue('');
   expect(controlFor('confirmation')).toHaveValue('');
 }
 
@@ -276,6 +295,15 @@ async function confirmsThroughTheCaptureOperation(): Promise<void> {
     merchantZip: COPIED.merchantZip,
     amount: '42.75',
     confirmation: 'Y',
+    /*
+     * WHY : ⚠️ Assumptions: the binding token is asserted on the confirming request, and it is what
+     *       replaced the sixteen-digit card the browser used to hold and re-send. The service refuses a
+     *       token that does not name the card it resolves, so this member is what makes the write land on
+     *       the card the operator was shown -- and asserting it here is what stops the token being quietly
+     *       dropped from the builder, which would leave the service resolving the card again from the key
+     *       and the parity property unenforced.
+     */
+    confirmationToken: CONFIRMATION_TOKEN,
   });
 }
 

@@ -24,7 +24,7 @@
  * re-key-to-confirm convention. Losing it would make an accidental keypress a committed write.
  */
 
-import { Button, Flex, Form, Input, Result, Select, Spin, Typography } from 'antd';
+import { Button, Flex, Form, Input, Result, Select, Spin } from 'antd';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useNavigate, useParams } from 'react-router';
@@ -39,6 +39,7 @@ import type { PfKeyHandlerMap } from '../../layout/usePfKeys';
 import { STATUS_MESSAGES } from '../../messages/messages';
 import { cardDetailPath, isCardSelector, requireCardSelector } from '../../routes/cards';
 import { navigateSafely, navigationHandler } from '../../routes/navigation';
+import { ScreenTitle } from '../../layout/ScreenTitle';
 
 /** Screen-level messages this screen renders, taken verbatim from the catalog keyed by its program. */
 const CARD_UPDATE_MESSAGES = STATUS_MESSAGES.COCRDUPC;
@@ -551,10 +552,16 @@ export function CardUpdateScreen(): ReactElement {
    *       than rebuilt per screen; a screen that also painted them would show two title bands
    *       and two legends. The message band stays local, because the shell paints a zone only
    *       when it is delegated and this screen's message is bound to controls in its own body.
-   * WHY : Assumptions: the legend is delegated rather than dropped, so the SCREEN keeps owning
-   *       its keys -- `bindings` and `invoke` come from this screen's own `usePfKeys` call and
-   *       are handed up unchanged. The shell adds its sign-off key beside them only when this
-   *       screen leaves that attention identifier free, which is decided by AID in the shell.
+   * WHY : ⚠️ Assumptions: the legend is delegated rather than dropped, so the SCREEN keeps
+   *       owning the keyboard -- `bindings` and `invoke` come from this screen's own `usePfKeys`
+   *       call and travel up unchanged, and an activation of a rendered legend control is
+   *       forwarded straight back to `invoke`. The claim that stood here, that the shell "adds its
+   *       sign-off key beside them only when this screen leaves that attention identifier free,
+   *       which is decided by AID in the shell", is withdrawn: the shell installs NO keyboard
+   *       listener at all and offers sign-off as a rendered control, for the reason recorded at
+   *       `SHELL_SIGN_OFF_LABEL`. So there is no second listener to stand down and no AID
+   *       arbitration anywhere -- this screen's bindings are the only ones on the document while it
+   *       is mounted.
    */
   /*
    * WHY : ⚠️ Refactoring Rationale: the row-23 message line is delegated WITH the title band and the
@@ -567,10 +574,14 @@ export function CardUpdateScreen(): ReactElement {
    *       publish an EMPTY key list and no header or message, which is what they rendered before the
    *       shell existed: the reference answers an unaddressable selector with `SEND TEXT ... ERASE`
    *       rather than by re-sending the map, and a read in flight has no counterpart in it at all.
-   * WHY : Trade-offs: an empty list is published rather than the member being omitted. This screen
-   *       binds PF12 as `cancel` and the shell binds PF12 as sign-off whenever no screen has
-   *       published keys, so omitting the member would put both listeners on the document and one
-   *       PF12 press would cancel the edit AND end the session.
+   * WHY : ⚠️ Trade-offs: an empty list is published rather than the member being omitted, and
+   *       the reason recorded here -- that this screen binds PF12 as `cancel` while the shell binds PF12
+   *       as sign-off "whenever no screen has published keys", so omitting it would put both listeners on
+   *       the document and one press would cancel the edit AND end the session -- is withdrawn. The shell
+   *       installs NO keyboard listener at all and offers sign-off as a rendered control, for the reason
+   *       recorded at `SHELL_SIGN_OFF_LABEL`, so this screen's PF12 is the only PF12 on the document
+   *       either way. Both forms render the same legend, none: `PfKeyBar` returns `null` for an empty
+   *       binding list. The member is kept in both arms so they differ only in which zones carry content.
    */
   useShellSlot(
     selector === null || loading
@@ -623,7 +634,7 @@ export function CardUpdateScreen(): ReactElement {
        *       not render the band on this screen's behalf; the hook supplies the one value that is
        *       NOT screen-specific without inventing a component to hold it.
        */}
-      <Typography.Title level={3}>{CARD_UPDATE_TITLE}</Typography.Title>
+      <ScreenTitle>{CARD_UPDATE_TITLE}</ScreenTitle>
       {/*
        * Refactoring Rationale: `onFinish` runs the VALIDATE arm, not the write. The source screen's
        * Enter key edits the fields and asks for confirmation, and only the later PF5 turn writes, so

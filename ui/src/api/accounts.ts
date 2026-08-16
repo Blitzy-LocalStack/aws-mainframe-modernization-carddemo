@@ -170,8 +170,28 @@ export const ACCOUNT_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
   LIST_ACCOUNT_CARD_CROSS_REFERENCES,
 ];
 
-/** Matches an account identifier within the eleven-digit range the contract admits. */
-const ACCOUNT_ID_DIGITS = /^[0-9]{1,11}$/u;
+/**
+ * Matches an account identifier at EXACTLY the eleven-digit width the contract admits.
+ *
+ * ⚠️ Refactoring Rationale: this admitted one to eleven digits and now admits eleven, because the
+ * contract admits eleven: `AccountLookupRequest.accountId` is published with `minLength: 11`,
+ * `maxLength: 11` and `pattern: '^[0-9]{11}$'`, and every other account-keyed member of this migration
+ * spells the field the same way. The looser form let this client pass a short value that the service
+ * then refused with a bean-validation error naming a member the operator never saw as short -- a round
+ * trip whose only outcome was a refusal, and one that could not carry the reference's own sentence. It
+ * also misdescribed the baseline: the receiving field is `PIC 9(11)`, so `1210-EDIT-ACCOUNT` at
+ * `app/cbl/COACTUPC.cbl` L1783-L1817 and `2210-EDIT-ACCOUNT` in `app/cbl/COACTVWC.cbl` both fail their
+ * `IS NOT NUMERIC` test on the trailing spaces a short entry leaves, so the reference REFUSES a short
+ * form rather than resolving it to a padded row.
+ *
+ * Alternatives Considered: zero-padding a short value here so the previously-admitted entries kept
+ * working. Rejected because it would send a value the operator did not type and would make a refusal
+ * quote a value they cannot find on their screen; and because it would make this client the only place
+ * in the system where the field has two widths. Both screens that reach these operations already require
+ * the full width before they call -- `accountView` and `accountUpdate` each hold their own
+ * `^[0-9]{11}$` edit -- so nothing reaches here short except a caller that skipped the screen.
+ */
+const ACCOUNT_ID_DIGITS = /^[0-9]{11}$/u;
 
 /*
  * WHY : ⚠️ Assumptions: the masked-card pattern is IMPORTED from `./masking` and is no longer declared
@@ -242,18 +262,18 @@ const PRECONDITION_HEADER = 'If-Match';
  * malformed value here saves a round trip and gives immediate feedback; it must never be read as
  * replacing or pre-empting the server-side validation, so this function deliberately admits the
  * all-zeroes value the service refuses rather than duplicating that refusal with wording of its own.
- * @param {string} accountId - The identifier as a screen holds it, expected to be one to eleven
+ * @param {string} accountId - The identifier as a screen holds it, expected to be exactly eleven
  *   decimal digits.
  * @returns {string} The same value, once established to be well formed.
- * @throws {RangeError} If the value is empty, is wider than eleven digits, or holds a character that
- *   is not a decimal digit.
+ * @throws {RangeError} If the value is not exactly eleven characters, or holds a character that is not
+ *   a decimal digit.
  */
 function requireAccountIdDigits(accountId: string): string {
   if (!ACCOUNT_ID_DIGITS.test(accountId)) {
     // Assumptions: the offending value is described and never reproduced. An account identifier is
     //   one of the values this migration's sensitive-data contract keeps out of a durable
     //   diagnostic, and a thrown message reaches exactly such a store once anything logs it.
-    throw new RangeError('An account identifier must be one to eleven decimal digits.');
+    throw new RangeError('An account identifier must be exactly eleven decimal digits.');
   }
   return accountId;
 }
@@ -276,9 +296,9 @@ function requireAccountIdDigits(accountId: string): string {
  * declare its own `{ accountId: number }` return type at the point of use, which was a second definition
  * of one contract shape -- free to drift from the document, and outside the reach of the gate in
  * `ui/src/api/contracts.test.ts` that keeps every wire shape to a single declaration.
- * @param {string} accountId - The account to read, as one to eleven decimal digits.
+ * @param {string} accountId - The account to read, as exactly eleven decimal digits.
  * @returns {AccountLookupRequest} The request body, carrying the identifier exactly as it was supplied.
- * @throws {RangeError} If the identifier is not one to eleven decimal digits.
+ * @throws {RangeError} If the identifier is not exactly eleven decimal digits.
  */
 function accountLookupBody(accountId: string): AccountLookupRequest {
   return { accountId: requireAccountIdDigits(accountId) };
@@ -397,16 +417,46 @@ function requireRedactedIdentifier(value: string | undefined, member: string): v
  * identifier keep serving a screen that looked correct, so the leak would persist undetected. Failing
  * the read surfaces the misconfiguration at once, and the screen already renders a rejected read on its
  * error channel without echoing what the rejection carried.
+ *
+ * ⚠️ Refactoring Rationale: the customer half is now branched on rather than reached through optional
+ * chaining, and the difference is the whole of a reported defect. `customer` is `CustomerDetail | null`
+ * because the contract declares it `oneOf` a customer and the null type, and the service produces that
+ * null on a real success path -- `AccountViewService` answers the account with `customer: null` and the
+ * reference's own miss sentence when the account row was located and the customer master holds no
+ * matching row, which `app/cbl/COACTVWC.cbl` paints by guarding its two screen regions separately at
+ * L471 and L493. Chaining into a `null` yields `undefined`, and `requireRedactedIdentifier` refuses
+ * `undefined`, so every one of those successful reads was rejected with a `RangeError` before any screen
+ * could render it: the partial-success arm the service and the contract both publish was unreachable
+ * through this client. The redaction markers are therefore required on the arm that HAS a customer, and
+ * an absent customer is passed through as the state it is.
+ *
+ * Assumptions: only an explicit `null` takes the absent arm, and an OMITTED member is still refused.
+ * The contract lists `customer` among the response's `required` members and declares it `oneOf` a
+ * customer and the null type, so nullable and optional are different facts here: a null is a state the
+ * service produces, and a missing member is a service that did not answer its own schema -- the shape a
+ * stub or a partly-implemented service sends. Admitting the omission would let it reach the screen as the
+ * legitimate partial arm, which renders identically, so the fault would be invisible from either side.
+ *
+ * Assumptions: on the non-null arm the members are reached through a `Partial` view and an ABSENT member
+ * is refused, which is the property the branch must not lose. A customer that arrived without its masked
+ * identifiers is as much a contract violation as one carrying clear ones; refusing it here names the
+ * member instead of failing several frames away in a screen.
  * @param {AccountViewResponse} view - The composed read exactly as the service sent it.
  * @returns {AccountViewResponse} The same response, once both identifiers are established to be
- *   redacted.
- * @throws {RangeError} If either protected identifier is not the redaction marker.
+ *   redacted, or once the response is established to carry an explicit null customer.
+ * @throws {RangeError} If the response omits the customer member, or carries a customer whose national
+ *   or government-issued identifier is absent or is anything other than the redaction marker.
  */
 function validateAccountView(view: AccountViewResponse): AccountViewResponse {
-  // Assumptions: the customer grouping is reached with optional chaining although the contract declares
-  //   it required, so a response that omitted it is refused by the guard below rather than raising a
-  //   TypeError here. The declared type says the member is present; a response is not obliged to agree.
-  const customer: Partial<AccountViewResponse['customer']> | undefined = view.customer;
+  if (view.customer === null) {
+    return view;
+  }
+
+  // Assumptions: the members are reached through a Partial view although the contract declares them
+  //   required, so a customer that omitted one -- or a response that omitted the customer itself, which
+  //   reaches here as `undefined` -- is refused by the guard rather than raising a TypeError here. The
+  //   declared type says the member is present; a response is not obliged to agree.
+  const customer: Partial<CustomerDetail> | undefined = view.customer;
   requireRedactedIdentifier(customer?.ssnMasked, 'ssnMasked');
   requireRedactedIdentifier(customer?.governmentIssuedIdMasked, 'governmentIssuedIdMasked');
   return view;
@@ -427,13 +477,13 @@ function validateAccountView(view: AccountViewResponse): AccountViewResponse {
  * a caller that intends to edit must keep it. It is a WEAK entity tag, prefixed `W/`, because two
  * responses at one revision are semantically equivalent without being byte-identical: the masked
  * identifiers and the two message channels are assembled per response.
- * @param {string} accountId - The account to read, as one to eleven decimal digits, being the value
+ * @param {string} accountId - The account to read, as exactly eleven decimal digits, being the value
  *   the user typed into the screen's filter field.
  * @returns {Promise<{ account: AccountViewResponse; revision: string | null }>} Resolves with the
  *   account and its customer as the screen renders them, the two message channels alongside them,
  *   and the revision to submit an edit under -- `null` when the response carried no entity tag, in
  *   which case the account may be displayed but not edited from this read.
- * @throws {RangeError} If the identifier is not one to eleven decimal digits, or if the response's
+ * @throws {RangeError} If the identifier is not exactly eleven decimal digits, or if the response's
  *   national or government-issued identifier is not the fixed redaction marker -- see
  *   {@link requireRedactedIdentifier} for why that is checked here rather than trusted from the schema.
  * @throws {Error} If the request fails. The rejection is the normalised problem document `./client`
@@ -594,7 +644,7 @@ export async function validateAccountUpdate(
  * do. An account holding no card yields an EMPTY page rather than a 404, matching an alternate-index
  * browse that ends immediately: having no card is a state an account is legitimately in, and it is
  * not the absence of the account.
- * @param {string} accountId - The account whose rows are wanted, as one to eleven decimal digits.
+ * @param {string} accountId - The account whose rows are wanted, as exactly eleven decimal digits.
  * @param {string} [cursor] - The opaque boundary a previous page of THIS account's walk issued,
  *   resumed strictly beyond it: `lastKey` when reading forward and `firstKey` when reading backward.
  *   It is replayed verbatim and is never parsed, compared or incremented -- the service seals it
@@ -607,7 +657,7 @@ export async function validateAccountUpdate(
  * @returns {Promise<CardXrefPage>} Resolves with at most seven rows in ascending card-number order,
  *   each carrying a card number masked to its last four digits, together with both sealed boundaries
  *   and the forward-availability indicator the caller pages on.
- * @throws {RangeError} If the identifier is not one to eleven decimal digits, if a direction is
+ * @throws {RangeError} If the identifier is not exactly eleven decimal digits, if a direction is
  *   supplied without a usable cursor, or if any row arrives with a card number that is not masked.
  * @throws {Error} If the request fails. The rejection is the normalised problem document `./client`
  *   raises, whose `fieldErrors` array names `accountId`, `direction` or `cursor` on HTTP 400 -- a

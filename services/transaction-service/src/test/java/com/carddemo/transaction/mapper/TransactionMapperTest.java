@@ -234,7 +234,7 @@ class TransactionMapperTest {
             String processDate) {
         return new TransactionAddRequest("00000000011", "01", SEED_CATEGORY_CODE, "POS TERM  ",
                 "Purchase at Abshire-Lowe", amount, SEED_MERCHANT_ID, "Merchant Name",
-                "Merchant City", "12345     ", null, originDate, processDate, "Y");
+                "Merchant City", "12345     ", null, originDate, processDate, "Y", null);
     }
 
     /**
@@ -465,19 +465,33 @@ class TransactionMapperTest {
      * it by a backward browse to the high end of the key that no client can perform. The screen map
      * {@code app/cpy-bms/COTRN02.CPY} declares no identifier field at all, so a component here
      * would publish an input the reference has nowhere to read.
+     *
+     * <p>⚠️ Refactoring Rationale: the arity asserted is FIFTEEN where it was fourteen, and the
+     * fifteenth component is the confirming turn's binding token. It has no counterpart on the screen
+     * map either, and for the opposite reason to the identifier's: the reference confirms within a
+     * single screen turn, so the resolved card is still in the field the operator is looking at and
+     * nothing has to be carried between requests. Two stateless requests need that carrier, and the
+     * alternative -- publishing the resolved card in full so the client could echo it -- is the
+     * disclosure this token replaced. The token is asserted LAST and the confirmation second-to-last,
+     * so the twelve record-derived components keep the order lines 6 to 17 of
+     * {@code app/cpy/CVTRA05Y.cpy} declare them in.
      */
     @Test
     @DisplayName("the submission carries no transaction identifier")
     void theSubmissionCarriesNoTransactionIdentifier() {
         List<String> submitted = componentNames(TransactionAddRequest.class);
 
-        assertThat(submitted).hasSize(14);
+        assertThat(submitted).hasSize(15);
         assertThat(submitted.get(0))
                 .as("ACTIDINI PIC X(11) at COTRN02.CPY line 60 is the first field the screen keys")
                 .isEqualTo("accountId");
-        assertThat(submitted.get(submitted.size() - 1))
-                .as("CONFIRMI PIC X(1) at COTRN02.CPY line 138 is turn control and comes last")
+        assertThat(submitted.get(submitted.size() - 2))
+                .as("CONFIRMI PIC X(1) at COTRN02.CPY line 138 is turn control and comes last of the"
+                        + " components the screen keys")
                 .isEqualTo("confirmation");
+        assertThat(submitted.get(submitted.size() - 1))
+                .as("the binding token has no screen field, so it follows every component that has one")
+                .isEqualTo("confirmationToken");
         assertThat(submitted)
                 .as("COTRN02C lines 444 to 451 derive the identifier, so it is not submitted")
                 .doesNotContain("transactionId");

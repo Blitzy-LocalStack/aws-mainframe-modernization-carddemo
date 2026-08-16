@@ -241,6 +241,26 @@ class TransactionControllerTest {
      */
     private static final String RESOLVED_CARD_NUMBER = "4111111111111111";
 
+    /**
+     * {@link #RESOLVED_CARD_NUMBER} as a preview publishes it: twelve asterisks then its last four digits.
+     *
+     * <p>⚠️ Refactoring Rationale: the preview used to publish the sixteen digits, and these cases used to
+     * assert them on the wire. A review found the disclosure -- a non-administrative response carrying a
+     * whole primary account number -- and AAP section 0.4.1.9 masks it everywhere but the administrative
+     * card-detail read, so the member is masked and the cases assert both the masked value's presence and
+     * the old member's ABSENCE.</p>
+     */
+    private static final String RESOLVED_CARD_NUMBER_MASKED = "************1111";
+
+    /**
+     * The sealed binding a preview publishes so a confirming turn can name the same resolved card.
+     *
+     * <p>Assumptions: this class stubs the service, so the value is never sealed or opened here and its only
+     * requirement is that it be shaped as the sealer's grammar. The seal-and-open round trip is asserted in
+     * {@code TransactionAddServiceTest}, where it actually happens.</p>
+     */
+    private static final String SEALED_BINDING = "v2.0123456789abcdef.QUJDREVGR0hJSktMTU5PUFFS";
+
     /** {@link #LEADING_ZERO_CARD_NUMBER} reduced to its last four digits, as a response carries it. */
     private static final String MASKED_CARD_NUMBER = "************6232";
 
@@ -898,7 +918,7 @@ class TransactionControllerTest {
     @DisplayName("capture: answer a written capture created, at the assigned identifier's path")
     void captureAnswersAWrittenCaptureCreated() throws Exception {
         this.callerIn("carddemo-user");
-        when(this.addService.addTransaction(any(TransactionAddRequest.class))).thenReturn(
+        when(this.addService.addTransaction(any(TransactionAddRequest.class), any(), any())).thenReturn(
                 new TransactionAddResponse(ASSIGNED_ID, Money.of("125.50"), assembledSuccess()));
 
         this.mockMvc.perform(this.capture(captureBody("\"accountId\": \"00000000011\",", null)))
@@ -937,7 +957,7 @@ class TransactionControllerTest {
     @DisplayName("capture: keep the two consecutive spaces the assembly at lines 728 to 733 produces")
     void theSuccessSentenceKeepsItsTwoConsecutiveSpaces() throws Exception {
         this.callerIn("carddemo-user");
-        when(this.addService.addTransaction(any(TransactionAddRequest.class))).thenReturn(
+        when(this.addService.addTransaction(any(TransactionAddRequest.class), any(), any())).thenReturn(
                 new TransactionAddResponse(ASSIGNED_ID, Money.of("125.50"), assembledSuccess()));
 
         this.mockMvc.perform(this.capture(captureBody("\"accountId\": \"00000000011\",", null)))
@@ -974,10 +994,10 @@ class TransactionControllerTest {
     @DisplayName("capture: answer a withheld confirmation with the prompt of line 178")
     void captureAnswersAWithheldConfirmationWithThePrompt() throws Exception {
         this.callerIn("carddemo-user");
-        when(this.addService.addTransaction(any(TransactionAddRequest.class))).thenReturn(
+        when(this.addService.addTransaction(any(TransactionAddRequest.class), any(), any())).thenReturn(
                 TransactionAddPreview.prompting(Money.of("125.50"),
                         TransactionAddService.MESSAGE_CONFIRM_ADD, "00000000011",
-                        RESOLVED_CARD_NUMBER).withCopiedSource(copiedData()));
+                        RESOLVED_CARD_NUMBER, SEALED_BINDING).withCopiedSource(copiedData()));
 
         this.mockMvc.perform(this.capture(captureBody("\"accountId\": \"00000000011\",",
                         TransactionAddService.CONFIRM_NO_UPPER)))
@@ -1048,7 +1068,7 @@ class TransactionControllerTest {
     @DisplayName("capture: admit a submission carrying both keys, resolved account-first at line 196")
     void captureAdmitsASubmissionCarryingBothKeys() throws Exception {
         this.callerIn("carddemo-user");
-        when(this.addService.addTransaction(any(TransactionAddRequest.class))).thenReturn(
+        when(this.addService.addTransaction(any(TransactionAddRequest.class), any(), any())).thenReturn(
                 new TransactionAddResponse(ASSIGNED_ID, Money.of("125.50"), assembledSuccess()));
 
         this.mockMvc.perform(this.capture(captureBody("\"accountId\": \"00000000011\","
@@ -1083,7 +1103,7 @@ class TransactionControllerTest {
     @DisplayName("capture: report an already-stored identifier as a duplicate-key conflict")
     void captureReportsAnAlreadyStoredIdentifierAsADuplicateKeyConflict() throws Exception {
         this.callerIn("carddemo-user");
-        when(this.addService.addTransaction(any(TransactionAddRequest.class)))
+        when(this.addService.addTransaction(any(TransactionAddRequest.class), any(), any()))
                 .thenThrow(new RecordConflictException(RecordConflictException.Kind.DUPLICATE_KEY));
 
         this.mockMvc.perform(this.capture(captureBody("\"accountId\": \"00000000011\",", null)))
@@ -1110,7 +1130,7 @@ class TransactionControllerTest {
     @DisplayName("capture: render the catch-all sentence of line 745 on a 500")
     void captureReportsAFailedWriteWithItsCatchAllSentence() throws Exception {
         this.callerIn("carddemo-user");
-        when(this.addService.addTransaction(any(TransactionAddRequest.class))).thenThrow(
+        when(this.addService.addTransaction(any(TransactionAddRequest.class), any(), any())).thenThrow(
                 new IllegalStateException(TransactionAddService.MESSAGE_ADD_FAILED,
                         new RuntimeException("writer")));
 
@@ -1211,7 +1231,7 @@ class TransactionControllerTest {
         when(this.listService.listTransactions(any(), any(), any())).thenReturn(
                 PageResponse.ofRows(List.of(this.groceryRow()), boundary, boundary, false));
         when(this.viewService.viewTransaction(anyString())).thenReturn(this.groceryDetail(null));
-        when(this.addService.addTransaction(any(TransactionAddRequest.class))).thenReturn(
+        when(this.addService.addTransaction(any(TransactionAddRequest.class), any(), any())).thenReturn(
                 new TransactionAddResponse(ASSIGNED_ID, Money.of("125.50"), assembledSuccess()));
 
         String browsed = this.browseAs("carddemo-user").andReturn().getResponse()
@@ -1253,14 +1273,14 @@ class TransactionControllerTest {
         this.callerIn("carddemo-user");
         ArgumentCaptor<TransactionAddRequest> submitted =
                 ArgumentCaptor.forClass(TransactionAddRequest.class);
-        when(this.addService.addTransaction(any(TransactionAddRequest.class))).thenReturn(
+        when(this.addService.addTransaction(any(TransactionAddRequest.class), any(), any())).thenReturn(
                 new TransactionAddResponse(ASSIGNED_ID, Money.of("125.50"), assembledSuccess()));
 
         this.mockMvc.perform(this.capture(captureBody(
                         "\"cardNumber\": \"" + LEADING_ZERO_CARD_NUMBER + "\",", null)))
                 .andExpect(status().isCreated());
 
-        verify(this.addService).addTransaction(submitted.capture());
+        verify(this.addService).addTransaction(submitted.capture(), any(), any());
         assertThat(submitted.getValue().cardNumber())
                 .isEqualTo(LEADING_ZERO_CARD_NUMBER)
                 .startsWith("0")
@@ -1496,7 +1516,7 @@ class TransactionControllerTest {
     @DisplayName("copy: answer a confirmed copy created, at the assigned identifier's path")
     void copyAnswersAConfirmedCopyCreated() throws Exception {
         this.callerIn("carddemo-user");
-        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class))).thenReturn(
+        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class), any(), any())).thenReturn(
                 new TransactionAddResponse(ASSIGNED_ID, Money.of("125.50"), assembledSuccess()));
 
         this.mockMvc.perform(this.copyLast(copyBody("\"accountId\": \"00000000011\",",
@@ -1507,8 +1527,8 @@ class TransactionControllerTest {
                 .andExpect(jsonPath("$.transactionId").value(ASSIGNED_ID))
                 .andExpect(jsonPath("$.amount").value("125.50"));
 
-        verify(this.addService).copyLastTransactionData(any(CopyLastRequest.class));
-        verify(this.addService, never()).addTransaction(any(TransactionAddRequest.class));
+        verify(this.addService).copyLastTransactionData(any(CopyLastRequest.class), any(), any());
+        verify(this.addService, never()).addTransaction(any(TransactionAddRequest.class), any(), any());
     }
 
     /**
@@ -1529,10 +1549,10 @@ class TransactionControllerTest {
     @DisplayName("copy: answer a withheld confirmation 200 with the prompt and no created address")
     void copyAnswersAWithheldConfirmationWithThePrompt() throws Exception {
         this.callerIn("carddemo-user");
-        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class))).thenReturn(
+        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class), any(), any())).thenReturn(
                 TransactionAddPreview.prompting(Money.of("125.50"),
                         TransactionAddService.MESSAGE_CONFIRM_ADD, "00000000011",
-                        RESOLVED_CARD_NUMBER).withCopiedSource(copiedData()));
+                        RESOLVED_CARD_NUMBER, SEALED_BINDING).withCopiedSource(copiedData()));
 
         this.mockMvc.perform(this.copyLast(copyBody("\"accountId\": \"00000000011\",",
                         TransactionAddService.CONFIRM_NO_UPPER)))
@@ -1590,7 +1610,7 @@ class TransactionControllerTest {
     @DisplayName("copy: answer a key with nothing to copy as 404, never as created or as a fault")
     void copyAnswersNothingToCopyAsNotFound() throws Exception {
         this.callerIn("carddemo-user");
-        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class)))
+        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class), any(), any()))
                 .thenThrow(new NoSuchElementException(COPY_SOURCE_ABSENT_SENTENCE));
 
         this.mockMvc.perform(this.copyLast(copyBody("\"accountId\": \"00000000011\",",
@@ -1617,7 +1637,7 @@ class TransactionControllerTest {
     @DisplayName("copy: answer a fault with a leak-free 500 and no created address")
     void copyAnswersAFaultLeakFree() throws Exception {
         this.callerIn("carddemo-user");
-        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class)))
+        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class), any(), any()))
                 .thenThrow(new IllegalStateException(STORE_DIAGNOSTIC));
 
         MvcResult result = this.mockMvc.perform(this.copyLast(
@@ -1649,7 +1669,7 @@ class TransactionControllerTest {
     @Test
     @DisplayName("copy: admit a business authority and refuse a token carrying neither")
     void copyDemandsABusinessAuthority() throws Exception {
-        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class))).thenReturn(
+        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class), any(), any())).thenReturn(
                 new TransactionAddResponse(ASSIGNED_ID, Money.of("125.50"), assembledSuccess()));
 
         this.callerIn("carddemo-user");
@@ -1700,22 +1720,24 @@ class TransactionControllerTest {
     @DisplayName("copy: accept a key and a confirmation alone, with no data member at all")
     void copyAcceptsAKeyAndConfirmationAlone() throws Exception {
         this.callerIn("carddemo-user");
-        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class))).thenReturn(
+        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class), any(), any())).thenReturn(
                 TransactionAddPreview.prompting(Money.of("42.75"),
                         TransactionAddService.MESSAGE_CONFIRM_ADD, "00000000011",
-                        RESOLVED_CARD_NUMBER).withCopiedSource(copiedData()));
+                        RESOLVED_CARD_NUMBER, SEALED_BINDING).withCopiedSource(copiedData()));
 
         this.mockMvc.perform(this.copyLast(
                         "{\"accountId\": \"00000000011\", \"confirmation\": \"N\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.written").value(false))
-                .andExpect(jsonPath("$.resolvedCardNumber").value(RESOLVED_CARD_NUMBER));
+                .andExpect(jsonPath("$.resolvedCardNumberMasked")
+                        .value(RESOLVED_CARD_NUMBER_MASKED))
+                .andExpect(jsonPath("$.resolvedCardNumber").doesNotExist());
 
         this.mockMvc.perform(this.copyLast("{\"accountId\": \"00000000011\"}"))
                 .andExpect(status().isOk());
 
         verify(this.addService, times(2))
-                .copyLastTransactionData(any(CopyLastRequest.class));
+                .copyLastTransactionData(any(CopyLastRequest.class), any(), any());
     }
 
     /**
@@ -1739,16 +1761,19 @@ class TransactionControllerTest {
     @DisplayName("copy: publish the resolved pair, the source row and all ten data values")
     void copyPublishesTheResolvedPairAndTheCopiedRecord() throws Exception {
         this.callerIn("carddemo-user");
-        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class))).thenReturn(
+        when(this.addService.copyLastTransactionData(any(CopyLastRequest.class), any(), any())).thenReturn(
                 TransactionAddPreview.prompting(Money.of("42.75"),
                         TransactionAddService.MESSAGE_CONFIRM_ADD, "00000000011",
-                        RESOLVED_CARD_NUMBER).withCopiedSource(copiedData()));
+                        RESOLVED_CARD_NUMBER, SEALED_BINDING).withCopiedSource(copiedData()));
 
         this.mockMvc.perform(this.copyLast(copyBody("\"accountId\": \"00000000011\",",
                         TransactionAddService.CONFIRM_NO_UPPER)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.resolvedAccountId").value("00000000011"))
-                .andExpect(jsonPath("$.resolvedCardNumber").value(RESOLVED_CARD_NUMBER))
+                .andExpect(jsonPath("$.resolvedCardNumberMasked")
+                        .value(RESOLVED_CARD_NUMBER_MASKED))
+                .andExpect(jsonPath("$.resolvedCardNumber").doesNotExist())
+                .andExpect(jsonPath("$.confirmationToken").value(SEALED_BINDING))
                 .andExpect(jsonPath("$.copied.typeCode").value("01"))
                 .andExpect(jsonPath("$.copied.categoryCode").value("0001"))
                 .andExpect(jsonPath("$.copied.source").value("POS TERM"))

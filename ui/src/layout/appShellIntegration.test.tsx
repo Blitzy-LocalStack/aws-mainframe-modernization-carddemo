@@ -37,6 +37,8 @@ import { join } from 'node:path';
 import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { MemoryRouter } from 'react-router';
+
 import { MESSAGE_BAND_TEST_ID } from './MessageBand';
 import { PF_KEY_BAR_REGION_LABEL } from './PfKeyBar';
 import { usePfKeys } from './usePfKeys';
@@ -167,6 +169,32 @@ function PublishingScreen({ onKey }: { readonly onKey: (aid: CicsAid) => void })
 }
 
 /**
+ * Mounts the shell around a child inside a router, which is where the shell always runs.
+ *
+ * ⚠️ Refactoring Rationale: these cases rendered the shell with NO router around it, which
+ * worked while the shell consulted no routing. It now reads the current history entry, so that it can
+ * clear the sign-off surface when the operator navigates away from the entry they signed off at -- a
+ * surface that did not clear left every route beneath this layout unrendered, the sign-on route
+ * included. Wrapping here rather than making the routing read optional keeps one code path in the
+ * shell: `ui/src/router.tsx` mounts it as a layout route, so a router is present in the application by
+ * construction, and the `children` form these cases use is a test affordance rather than a second
+ * deployment shape.
+ *
+ * Assumptions: `MemoryRouter` rather than `BrowserRouter`, because the cases assert nothing about the
+ * address and a memory history needs no `jsdom` navigation. One entry is supplied explicitly so the
+ * entry key these cases run under is the router's initial one.
+ * @param {ReactElement} child - The screen to mount inside the frame.
+ * @returns {ReactElement} The child inside the shell inside a router.
+ */
+function framed(child: ReactElement): ReactElement {
+  return (
+    <MemoryRouter initialEntries={['/framed']}>
+      <AppShell>{child}</AppShell>
+    </MemoryRouter>
+  );
+}
+
+/**
  * A child that delegates nothing, standing in for a screen with no chrome of its own.
  * @returns {ReactElement} A marker element.
  */
@@ -223,11 +251,7 @@ function legendControlNames(): readonly string[] {
 function paintsEveryDelegatedZone(): void {
   const onKey = vi.fn();
 
-  render(
-    <AppShell>
-      <PublishingScreen onKey={onKey} />
-    </AppShell>,
-  );
+  render(framed(<PublishingScreen onKey={onKey} />));
 
   expect(screen.getByTestId(APP_SHELL_TEST_ID)).toBeInTheDocument();
   expect(screen.getByText(PUBLISHED_TRANSACTION_ID)).toBeInTheDocument();
@@ -246,11 +270,7 @@ function paintsEveryDelegatedZone(): void {
  * @returns {void} Nothing; the assertions carry the outcome.
  */
 function paintsNoZoneThatWasNotDelegated(): void {
-  render(
-    <AppShell>
-      <SilentScreen />
-    </AppShell>,
-  );
+  render(framed(<SilentScreen />));
 
   expect(screen.getByText('SILENT BODY')).toBeInTheDocument();
   expect(screen.queryByTestId(MESSAGE_BAND_TEST_ID)).not.toBeInTheDocument();
@@ -273,11 +293,7 @@ async function dispatchesOneKeyPressOnce(): Promise<void> {
   const onKey = vi.fn();
   const user = userEvent.setup();
 
-  render(
-    <AppShell>
-      <PublishingScreen onKey={onKey} />
-    </AppShell>,
-  );
+  render(framed(<PublishingScreen onKey={onKey} />));
 
   await user.keyboard('{F12}');
 
@@ -307,11 +323,7 @@ async function offersSignOffOnlyWhenUnclaimed(): Promise<void> {
   await signOn();
   const user = userEvent.setup();
 
-  render(
-    <AppShell>
-      <SilentScreen />
-    </AppShell>,
-  );
+  render(framed(<SilentScreen />));
 
   expect(
     screen.queryByRole('navigation', { name: PF_KEY_BAR_REGION_LABEL }),
@@ -354,11 +366,7 @@ async function offersSignOffOnlyWhenUnclaimed(): Promise<void> {
 function settlesAfterPublishingAPaintTimeClock(): void {
   clockScreenRenders = 0;
 
-  render(
-    <AppShell>
-      <ClockPublishingScreen />
-    </AppShell>,
-  );
+  render(framed(<ClockPublishingScreen />));
 
   expect(screen.getByText('CLOCK BODY')).toBeInTheDocument();
   expect(screen.getByText(PUBLISHED_TRANSACTION_ID)).toBeInTheDocument();
@@ -425,11 +433,7 @@ function mountsTheShellExactlyOnce(): void {
  * @returns {void} Nothing; the assertions carry the outcome.
  */
 function paintsItsOwnSentencesThroughTheTextGradeMap(): void {
-  render(
-    <AppShell>
-      <PublishingScreen onKey={vi.fn()} />
-    </AppShell>,
-  );
+  render(framed(<PublishingScreen onKey={vi.fn()} />));
 
   const link = screen.getByRole('link', { name: SKIP_TO_CONTENT_LABEL });
   expect(link.getAttribute('style'), 'the skip link must name a text-grade colour').toContain(

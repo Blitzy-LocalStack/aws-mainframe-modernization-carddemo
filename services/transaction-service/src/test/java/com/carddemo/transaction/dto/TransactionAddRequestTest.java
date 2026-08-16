@@ -259,9 +259,12 @@ class TransactionAddRequestTest {
      * @return a submission valid in every other respect, never {@code null}
      */
     private static TransactionAddRequest keys(String accountId, String cardNumber) {
+        // WHY : Assumptions: the binding token is omitted, because these cases are about the two KEY
+        //       alternatives and the token is not one of them. A submission carrying none is the
+        //       single-turn arm the contract admits, so omitting it keeps every case here on its subject.
         return new TransactionAddRequest(accountId, "01", "0001", "POS", "GROCERY PURCHASE",
                 Money.of("125.50"), "000000000", "CORNER STORE", "SEATTLE", "98101", cardNumber,
-                "2026-01-15", "2026-01-16", "Y");
+                "2026-01-15", "2026-01-16", "Y", null);
     }
 
     /**
@@ -274,6 +277,6 @@ class TransactionAddRequestTest {
     private static TransactionAddRequest request(String cardNumber) {
         return new TransactionAddRequest(ACCOUNT_ID, "01", "0001", "POS", "GROCERY PURCHASE",
                 Money.of("125.50"), "000000000", "CORNER STORE", "SEATTLE", "98101", cardNumber,
-                "2026-01-15", "2026-01-16", "Y");
+                "2026-01-15", "2026-01-16", "Y", null);
     }
 }

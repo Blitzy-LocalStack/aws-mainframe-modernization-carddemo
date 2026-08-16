@@ -2306,8 +2306,20 @@ function compareClosure(): {
  */
 const EXPECTED_CLOSURE_SCHEMA_COUNT = 167;
 
-/** How many properties the bound object schemas of that closure declare in total. */
-const EXPECTED_COMPARED_PROPERTY_COUNT = 556;
+/**
+ * How many properties the bound object schemas of that closure declare in total.
+ *
+ * ⚠️ Refactoring Rationale: this reads 558 where it read 556, and the two properties are the confirming
+ * turn's binding token in the two places it appears: `TransactionAddPreview` publishes it and
+ * `TransactionCreateRequest` accepts it back. The schema count is unchanged at 167 because no shape was
+ * added -- `TransactionAddPreview` also RENAMED a member, `resolvedCardNumber` becoming
+ * `resolvedCardNumberMasked`, which moves no count at all. That rename is the point of the change: a
+ * non-administrative preview was publishing a whole primary account number so a confirming client could
+ * echo it back, and the token carries the same guarantee in a form the browser cannot read. Measured per
+ * contract, schemas then compared properties: account 18/111, auth 20/63, authorization 21/98, card 11/38,
+ * reference 42/82, reporting 21/76, transaction 34/90.
+ */
+const EXPECTED_COMPARED_PROPERTY_COUNT = 558;
 
 /**
  * Asserts every reachable object schema is bound to a type that declares members.

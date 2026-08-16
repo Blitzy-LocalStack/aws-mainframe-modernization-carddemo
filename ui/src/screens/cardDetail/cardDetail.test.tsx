@@ -18,7 +18,7 @@
  */
 
 import { ConfigProvider } from 'antd';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router';
@@ -30,7 +30,7 @@ import type { ApiError } from '../../api/types';
 import { AppShell } from '../../layout/AppShell';
 import { MESSAGE_BAND_TEST_ID } from '../../layout/MessageBand';
 import {
-  ACCESS_DENIED_ADMIN_ONLY,
+  ACCESS_DENIED_NOT_AUTHORIZED,
   CARD_DETAIL_INVALID_LINK_GUIDANCE,
   SHARED_MESSAGES,
   STATUS_MESSAGES,
@@ -373,7 +373,20 @@ function reportsNothingForARefusedSessionLeavingTheTransportToEndIt(): void {
  * @returns {void} Completion of the case; the assertions are its effect.
  */
 function reportsTheAuthorityRefusalForA403(): void {
-  expect(describeRetrievalFailure(refusal(403, null))).toBe(ACCESS_DENIED_ADMIN_ONLY);
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the expected sentence is the GENERIC group refusal, where this
+   *       asserted the transcribed administrator-only sentence. Both operations this screen calls
+   *       declare `x-required-authority: carddemo-user`, which the card contract's authority model
+   *       defines as any authenticated caller, so a 403 from either means the token carries neither
+   *       CardDemo group and says nothing about administrative authority. The transcribed sentence is
+   *       still asserted where the baseline used it -- `ui/src/routes/guards.test.tsx` and the router
+   *       suites hold it for the administrative routes.
+   */
+  expect(describeRetrievalFailure(refusal(403, null))).toBe(ACCESS_DENIED_NOT_AUTHORIZED);
+  expect(
+    describeRetrievalFailure(refusal(403, null)),
+    'an ordinary read refusal must not name administrative authority',
+  ).not.toContain('Admin');
 }
 
 /**
@@ -536,6 +549,193 @@ async function resolvesATypedPairToTheAddressTheRecordIsPublishedUnder(): Promis
 }
 
 /**
+ * Builds a promise a case settles itself, so a resolution can be held in flight across other steps.
+ *
+ * Assumptions: the two settlement routes are captured rather than the promise being constructed with a
+ * fixed delay, because a timer makes the ordering a race the case hopes to win -- and the ordering IS
+ * the property under test here.
+ * @returns {{ promise: Promise<CardDetail>; settle: (record: CardDetail) => void }} The held promise
+ *   and the function that answers it.
+ */
+function heldResolution(): {
+  readonly promise: Promise<CardDetail>;
+  readonly settle: (record: CardDetail) => void;
+} {
+  /**
+   * Stands in until the promise's executor has run, so the binding is never read unset.
+   *
+   * Assumptions: it THROWS rather than doing nothing, because a silent placeholder would let a case
+   * that settled too early read as green while nothing was answered.
+   * @returns {never} Never returns; the call is a defect in the case that made it.
+   * @throws {Error} Always, because being called at all means the promise had not been constructed.
+   */
+  function notYetArmed(): never {
+    throw new Error('the held resolution was settled before it was armed');
+  }
+
+  let settle: (record: CardDetail) => void = notYetArmed;
+  const promise = new Promise<CardDetail>(
+    /**
+     * Captures the answering route without taking it.
+     * @param {(record: CardDetail) => void} resolve - Answers the held request.
+     * @returns {void} Nothing; the request is held until the case answers it.
+     */
+    function holdItOpen(resolve): void {
+      settle = resolve;
+    },
+  );
+
+  return {
+    promise,
+    /**
+     * Answers the held request.
+     * @param {CardDetail} record - The record the resolution answers with.
+     * @returns {void} Nothing; the awaiting caller resumes.
+     */
+    settle(record: CardDetail): void {
+      settle(record);
+    },
+  };
+}
+
+/** A second selector, so a superseded resolution can be told from the current one. */
+const A_LATER_SELECTOR = 'B'.repeat(CARD_SELECTOR_LENGTH);
+
+/**
+ * Asserts that a resolution superseded by a later turn does not move the address.
+ *
+ * ⚠️ Purpose: the criteria lookup answers with a NAVIGATION, and it used to apply that answer
+ * unconditionally while the selector read beside it was already generation-guarded. Whichever of two
+ * outstanding resolutions settled LAST won, so a slower earlier answer took the operator to a record a
+ * later turn had already superseded.
+ *
+ * Assumptions: the second turn is taken with the ENTER KEY and not by retyping, because a turn in flight
+ * replaces the whole search form with a spinner -- so the controls are detached and a case that tried to
+ * type into them fails to focus one. The key binding is installed on the document by `usePfKeys` above
+ * that early return, which is what makes a second turn reachable at all, and it is the same path the
+ * reference's own coerced invalid-key arm takes at `app/cbl/COCRDSLC.cbl` L291-L299.
+ *
+ * Assumptions: the two answers name DIFFERENT records although both turns carry the same typed number.
+ * That is a property of the stub rather than of the service, and it is what makes the two settlements
+ * distinguishable: with one selector for both, a superseded navigation would land on the same address as
+ * the current one and the defect would be invisible.
+ *
+ * Assumptions: the verdict is read off the SELECTOR READ, because arriving at a card's address is what
+ * triggers it -- `getCard` called with the later selector and never with the earlier one is the same
+ * statement as "the address moved once, to the record the last turn asked for".
+ * @returns {Promise<void>} Completion of the case; the assertions are its effect.
+ */
+async function ignoresAResolutionASecondTurnHasSuperseded(): Promise<void> {
+  const first = heldResolution();
+  const second = heldResolution();
+
+  lookupCardMock.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  getCardMock.mockResolvedValue(aCard(A_LATER_SELECTOR));
+
+  render(renderAt('/cards/not-a-selector'));
+  const account = await screen.findByLabelText(/Account Number/u);
+
+  await userEvent.type(account, AN_ACCOUNT_NUMBER);
+  await userEvent.type(screen.getByLabelText(/Card Number/u), A_CARD_NUMBER);
+  await userEvent.keyboard('{Enter}');
+  await userEvent.keyboard('{Enter}');
+
+  expect(
+    lookupCardMock.mock.calls.length,
+    'two turns must be outstanding for the ordering to be under test',
+  ).toBe(2);
+
+  // Assumptions: the LATER resolution is answered first and the earlier one afterwards, which is the
+  //   ordering the defect needed -- a first answer arriving last. Answering them in dispatch order
+  //   would exercise nothing, because the later answer would then be the last writer anyway.
+  await act(
+    /**
+     * Answers the second turn and then the first, in that order.
+     * @returns {Promise<void>} Resolves once both continuations have run.
+     */
+    async (): Promise<void> => {
+      second.settle(aCard(A_LATER_SELECTOR));
+      await Promise.resolve();
+      first.settle(aCard(A_SELECTOR));
+      await Promise.resolve();
+    },
+  );
+
+  await waitFor(
+    /**
+     * Waits for the later record's own address to be read.
+     * @returns {void} Nothing; the assertion is the wait condition.
+     */
+    (): void => {
+      expect(getCardMock).toHaveBeenCalledWith(A_LATER_SELECTOR);
+    },
+  );
+  expect(
+    getCardMock,
+    'the superseded resolution must not have moved the address to its own record',
+  ).not.toHaveBeenCalledWith(A_SELECTOR);
+}
+
+/**
+ * Asserts that a resolution settling after the operator has left does not move the address back.
+ *
+ * ⚠️ Purpose: this is the other half of the same omission, and the worse half. A resolution that
+ * settles after the screen has gone still holds a live router handle, so an unguarded answer navigated
+ * an operator who had pressed F3 -- or signed off, or followed any other transition -- into a card
+ * detail they had left, under whatever session was current by then.
+ *
+ * Assumptions: the browse route is asserted STILL rendered as well as the read never happening, because
+ * the two rule out different outcomes: the read would show a navigation that reached this screen again,
+ * and the browse's presence shows the operator's own transition survived.
+ * @returns {Promise<void>} Completion of the case; the assertions are its effect.
+ */
+async function ignoresAResolutionThatSettlesAfterTheOperatorHasLeft(): Promise<void> {
+  const held = heldResolution();
+
+  lookupCardMock.mockReturnValue(held.promise);
+  getCardMock.mockResolvedValue(aCard(A_SELECTOR));
+
+  render(renderAt('/cards/not-a-selector'));
+  const account = await screen.findByLabelText(/Account Number/u);
+
+  await userEvent.type(account, AN_ACCOUNT_NUMBER);
+  await userEvent.type(screen.getByLabelText(/Card Number/u), A_CARD_NUMBER);
+  await userEvent.keyboard('{Enter}');
+
+  expect(
+    lookupCardMock,
+    'the resolution must be in flight before the operator leaves',
+  ).toHaveBeenCalledWith(A_CARD_NUMBER);
+
+  // Assumptions: the exit is taken through the KEY the mapset paints rather than a rendered control,
+  //   because `app/bms/COCRDSL.bms` legends exactly `ENTER=Search Cards  F3=Exit` and the key is how an
+  //   operator leaves this screen. It unmounts the screen while leaving the router mounted, which is
+  //   what makes the stale answer's navigation observable at all.
+  await userEvent.keyboard('{F3}');
+  expect(await screen.findByText('CARD BROWSE')).toBeInTheDocument();
+
+  await act(
+    /**
+     * Answers the abandoned resolution.
+     * @returns {Promise<void>} Resolves once its continuation has run.
+     */
+    async (): Promise<void> => {
+      held.settle(aCard(A_SELECTOR));
+      await Promise.resolve();
+    },
+  );
+
+  expect(
+    screen.getByText('CARD BROWSE'),
+    'the operator must still be where their own transition took them',
+  ).toBeInTheDocument();
+  expect(
+    getCardMock,
+    'no address change means no selector read, so the abandoned answer reached nothing',
+  ).not.toHaveBeenCalled();
+}
+
+/**
  * Asserts that the screen reports a failed read with the sentence its status selects.
  * @returns {Promise<void>} Completion of the case; the assertions are its effect.
  */
@@ -651,6 +851,14 @@ function renderingCases(): void {
   it(
     'resolves a typed pair to the address the record is published under',
     resolvesATypedPairToTheAddressTheRecordIsPublishedUnder,
+  );
+  it(
+    'ignores a resolution a second turn has superseded',
+    ignoresAResolutionASecondTurnHasSuperseded,
+  );
+  it(
+    'ignores a resolution that settles after the operator has left',
+    ignoresAResolutionThatSettlesAfterTheOperatorHasLeft,
   );
   it(
     'reports a failed read with the sentence its status selects',

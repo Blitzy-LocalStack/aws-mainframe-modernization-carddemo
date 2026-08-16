@@ -38,7 +38,6 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.math.BigDecimal;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
@@ -1707,8 +1706,6 @@ class InquiryMessageListenerTest {
      *
      * @throws NoSuchMethodException if the handler method cannot be found, which would mean the contract this
      *     case reads has been renamed rather than that the assertion failed
-     * @throws IOException if the base configuration cannot be read from the class path, which would mean the
-     *     module publishes no {@code application.yml} and its mandatory limits could not resolve
      */
     @Test
     @DisplayName("the handler's annotation binds a queue and sizes nothing")
@@ -1772,12 +1769,15 @@ class InquiryMessageListenerTest {
      * poll. A mock therefore stands in with no stubbing at all, which is why this case does not need a queue,
      * an emulator or a network.</p>
      *
-     * <p>Assumptions: the endpoint's queue name is a literal rather than the resolved placeholder, and that is
-     * deliberate. {@code carddemo.account.inquiry.request-queue} resolves to
-     * {@code ${CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE_URL}}, which is supplied by the deployment and is absent
-     * here; the destination has no bearing on container sizing, and the preceding case already asserts that
-     * the annotation commits no location. Alternatives Considered: setting the variable for this case, which
-     * was rejected because it would make a sizing assertion depend on a value it does not read.</p>
+     * <p>⚠️ Assumptions: the endpoint's queue name is a literal rather than the resolved placeholder,
+     * and that is deliberate. This note used to say that {@code carddemo.account.inquiry.request-queue}
+     * resolves to {@code ${CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE_URL}}; it did not resolve to anything,
+     * because no profile declared that key -- the declared one is {@code request-queue-url}, which the
+     * annotation now names. Using a literal here is what let the mismatch survive, so the sibling case
+     * {@code theListenerBindsADeclaredDestination} asserts the annotation's placeholder against the declared
+     * keys instead. The destination still has no bearing on container sizing.
+     * Alternatives Considered: setting the variable for this case, which was rejected because it would make a
+     * sizing assertion depend on a value it does not read.</p>
      *
      * <p>Assumptions: both profiles are exercised rather than development alone, because the failure this case
      * exists to catch is an override that applies to EVERY profile. A case that asserted two under development
@@ -1845,6 +1845,64 @@ class InquiryMessageListenerTest {
      */
     private static SqsListener handlerAnnotation() throws NoSuchMethodException {
         return handlerMethod().getAnnotation(SqsListener.class);
+    }
+
+    /**
+     * The handler's destination placeholder names a key this module actually declares.
+     *
+     * <p>⚠️ Purpose: this case exists because the annotation named
+     * {@code carddemo.account.inquiry.request-queue} and no profile declared it. The one key this module
+     * publishes is {@code request-queue-url}, so the placeholder was unresolvable, registering the endpoint
+     * would have failed the context refresh, and the service could not have started with inquiry consumption
+     * enabled. Nothing caught it: the two sibling cases that read this annotation assert its SIZING
+     * attributes and deliberately never resolve its destination, and the one that mentions the destination
+     * did so in prose that asserted nothing.</p>
+     *
+     * <p>Assumptions: the placeholder is RESOLVED against this module's own configuration rather than
+     * compared to a literal key name. A literal would restate the annotation and pass whenever the two were
+     * edited together -- which is how the mismatch arose -- whereas resolution fails unless the key exists in
+     * the documents the running service loads.</p>
+     *
+     * <p>Assumptions: declaration is tested with {@code containsProperty} rather than by resolving the
+     * placeholder, and the difference is what makes the case work at all. The declared value is itself a
+     * reference to a deployment-supplied environment variable that this case runs without, so
+     * {@code resolveRequiredPlaceholders} raises for BOTH the defect and the design -- once for the
+     * undeclared outer key and once for the absent inner variable -- and cannot tell them apart.
+     * {@code containsProperty} consults the documents without resolving anything, so it answers exactly the
+     * question asked: is the key the annotation names one this module declares. Reading its raw value
+     * additionally pins that the location stays in the deployment's hands, which needs the nested-placeholder
+     * flag set because {@code getProperty} would otherwise resolve the inner reference and raise.</p>
+     *
+     * <p>Assumptions: both profiles are exercised, because a key declared in only one would start one
+     * environment and fail the other, and the base document is where this key belongs.</p>
+     *
+     * @param profile the profile whose document is layered over the base, as a resource name component
+     * @throws NoSuchMethodException if the handler method cannot be found, which would mean the contract this
+     *     case reads has been renamed rather than that the assertion failed
+     */
+    @ParameterizedTest(name = "the {0} profile declares the handler's destination key")
+    @CsvSource({"dev", "prod"})
+    @DisplayName("the handler is bound to a destination the configuration declares")
+    void theListenerBindsADeclaredDestination(String profile) throws NoSuchMethodException {
+        PropertySourcesPropertyResolver resolver =
+                new PropertySourcesPropertyResolver(profileSources(profile));
+        resolver.setIgnoreUnresolvableNestedPlaceholders(true);
+        String placeholder = handlerAnnotation().queueNames()[0];
+
+        assertThat(placeholder)
+                .as("the destination must stay a placeholder so no location is committed in source")
+                .startsWith("${")
+                .endsWith("}");
+        String key = placeholder.substring(2, placeholder.length() - 1);
+        assertThat(resolver.containsProperty(key))
+                .as("the %s profile must declare '%s', the key the handler's placeholder names", profile, key)
+                .isTrue();
+        assertThat(resolver.getProperty(key))
+                .as("the declared key must carry the deployment variable, not a committed location")
+                .isEqualTo("${CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE_URL}");
+        assertThat(key)
+                .as("the destination is a queue URL on every path, so its key must say so")
+                .isEqualTo("carddemo.account.inquiry.request-queue-url");
     }
 
     /**

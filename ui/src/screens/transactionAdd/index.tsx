@@ -72,6 +72,7 @@ import {
 } from '../../messages/messages';
 import { MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
 import { BMS_TEXT_COLOR_TOKENS, FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../../theme/tokens';
+import { ScreenTitle } from '../../layout/ScreenTitle';
 
 /*
  * WHY : Assumptions: every sentence this screen renders is imported rather than retyped, because
@@ -301,7 +302,7 @@ export interface TransactionAddFieldError {
 }
 
 /**
- * The key pair the service resolved on the last turn it answered.
+ * What the service resolved on the last turn it answered, and the token that binds a confirmation to it.
  *
  * Purpose
  * -------
@@ -310,14 +311,28 @@ export interface TransactionAddFieldError {
  * L209, the card arm reads at L219 and moves the account identifier into `ACTIDINI` at L221. This is that
  * pair, as the service reported it, so the confirmation surface can name the record being committed.
  *
- * Assumptions: the card number is carried in FULL and masked only where it is displayed. A masked suffix
- * cannot distinguish two cards on one account, which is the only comparison this pair exists to support.
+ * ⚠️ Refactoring Rationale: the card number is carried MASKED and this shape held sixteen digits,
+ * defended on the ground that a masked suffix cannot distinguish two cards on one account. The premise is
+ * true and the conclusion was not available: AAP section 0.4.1.9 masks a primary account number in every
+ * response but the administrative card-detail read. The distinction the digits were for is drawn by
+ * {@link ResolvedKeys.confirmationToken} instead -- the service compares the token against its own
+ * resolution on the confirming turn -- so the browser never holds a primary account number for this
+ * screen and the guarantee is stronger rather than weaker, because it no longer depends on the client
+ * choosing to submit what it was shown.
  */
 interface ResolvedKeys {
   /** The account identifier the service resolved, zero-filled to its eleven declared positions. */
   readonly accountId: string;
-  /** The card number the cross-reference resolved, sixteen digits and unmasked. */
-  readonly cardNumber: string;
+  /** The card number the cross-reference resolved, as twelve asterisks and its last four digits. */
+  readonly cardNumberMasked: string;
+  /**
+   * The opaque token the confirming turn replays so the write is bound to this resolution.
+   *
+   * Assumptions: it is held for the life of the exchange and never rendered, parsed or compared. It
+   * seals the resolved card number, so displaying it would display a sealed primary account number and
+   * comparing it would be asserting something only the service can decide.
+   */
+  readonly confirmationToken: string;
 }
 
 /**
@@ -360,8 +375,14 @@ const AMOUNT_MASK_INTEGER_DIGITS = 8;
 /** Fractional digits the same mask holds. */
 const AMOUNT_MASK_FRACTION_DIGITS = 2;
 
-/** Digits of a card number a masked rendering keeps, matching the reduction the services perform. */
-const CARD_NUMBER_VISIBLE_DIGITS = 4;
+/*
+ * WHY : ⚠️ Refactoring Rationale: there is no `CARD_NUMBER_VISIBLE_DIGITS` here any more, and no
+ *       client-side masker beside it. Both existed because the capture preview published the resolved
+ *       card as sixteen digits and this screen reduced them before rendering -- which is the shape
+ *       `ui/src/api/masking.ts` names as the exposure to avoid, because a caller that masks has to hold
+ *       the unmasked value first. The service now publishes the masked rendering itself, so the value
+ *       that reaches the browser is already reduced and there is nothing left here to reduce.
+ */
 
 /**
  * Reports whether a fixed-width field satisfies COBOL's numeric class test.
@@ -541,30 +562,6 @@ export function toEditMaskAmount(value: string): string | null {
  */
 export function toZeroFilledKey(value: string, declaredWidth: number): string {
   return value.trim().padStart(declaredWidth, '0');
-}
-
-/**
- * Reduces a card number to the rendering the services publish: twelve asterisks then the last four digits.
- *
- * Assumptions: AAP section 0.4.1.9 masks a primary account number everywhere it is displayed except on
- * the administrative card-detail endpoint, and this screen is not that endpoint. The asterisk count is
- * fixed at twelve rather than derived from the value's length so that the rendering matches the shape
- * `ui/src/api/transactions.ts` checks a response against, which is the shape a reader of either module
- * recognises.
- *
- * Trade-offs: this is applied to the confirmation summary and NOT to the card-number input. Masking a
- * field the operator is editing would hide what they keyed from them and make a correction impossible,
- * and the reference paints that field as an ordinary unprotected input.
- * @param {string} value - A card number as keyed or as resolved.
- * @returns {string} The masked rendering, or the value unchanged when it is too short to reduce.
- */
-export function maskCardNumber(value: string): string {
-  const digits = value.trim();
-  if (digits.length <= CARD_NUMBER_VISIBLE_DIGITS) {
-    return digits;
-  }
-  const hidden = '*'.repeat(TRANSACTION_ADD_FIELD_WIDTHS.cardNumber - CARD_NUMBER_VISIBLE_DIGITS);
-  return `${hidden}${digits.slice(-CARD_NUMBER_VISIBLE_DIGITS)}`;
 }
 
 /*
@@ -807,8 +804,16 @@ export function toWireAmount(value: string): string | null {
  * store bytes that differ from the same value keyed on a narrower field.
  * @param {TransactionAddValues} values - Current field values, already past {@link dataFieldFailure}.
  * @param {'accountId' | 'cardNumber'} key - Which key field addresses the submission.
+ * ⚠️ Assumptions: the binding token is carried BACK on a confirming turn and omitted when the screen
+ * holds none. It is the service's own opaque record of which card the previous turn resolved, and
+ * returning it is what lets the service prove the write lands on that same card without this browser
+ * having been given the sixteen digits to re-send. A first turn has no token and sends none, which is the
+ * single-turn arm `app/cbl/COTRN02C.cbl` L166 to L181 performs; the service treats an absent token as that
+ * arm and resolves the card from the key alone.
  * @param {string} confirmation - The confirmation character as keyed; sent only when it is one of the
  *   four letters the contract admits, and omitted otherwise so an unconfirmed turn is spelled by absence.
+ * @param {string | null} confirmationToken - The opaque binding the previous turn's preview published, or
+ *   `null` on a turn that has no preview behind it.
  * @returns {TransactionCreateRequest | null} The body to submit, or `null` when the amount cannot be
  *   expressed on the wire, which the validation chain has already excluded.
  */
@@ -816,6 +821,7 @@ export function buildCreateRequest(
   values: TransactionAddValues,
   key: 'accountId' | 'cardNumber',
   confirmation: string,
+  confirmationToken: string | null,
 ): TransactionCreateRequest | null {
   const amount = toWireAmount(values.amount);
   if (amount === null) {
@@ -847,8 +853,22 @@ export function buildCreateRequest(
           cardNumber: toZeroFilledKey(values.cardNumber, TRANSACTION_ADD_FIELD_WIDTHS.cardNumber),
         };
 
+  /*
+   * WHY : Assumptions: the token is attached whenever the screen holds one, INCLUDING on a turn whose
+   *       confirmation is blank or declining. The service refuses a token that does not name the card it
+   *       resolves, so sending it on every turn behind a preview is what makes a key edited between the
+   *       preview and the confirmation refusable rather than silently written against a different card --
+   *       and a declining turn that carries it still describes the same record in its answer.
+   *       Trade-offs: an operator whose token has expired sees a refusal naming the card number and has to
+   *       press Enter again, where a browser holding the sixteen digits would have re-sent them and written
+   *       without asking. That is the exchange AAP section 0.4.1.9 asks for: the digits do not reach the
+   *       browser, so the only thing that can go stale is a token whose refusal is recoverable in one turn.
+   */
+  const bound: TransactionCreateRequest =
+    confirmationToken === null ? addressed : { ...addressed, confirmationToken };
+
   const keyed = confirmation.trim();
-  return WIRE_CONFIRMATION.test(keyed) ? { ...addressed, confirmation: keyed } : addressed;
+  return WIRE_CONFIRMATION.test(keyed) ? { ...bound, confirmation: keyed } : bound;
 }
 
 /**
@@ -925,10 +945,12 @@ export function buildCopyRequest(
  * function the single place the eleven moves are expressed while leaving the amount's single source of
  * truth where the contract puts it.
  *
- * ⚠️ Assumptions: the resolved PAIR is a parameter of its own and NOT a member of `copied`, because the
+ * ⚠️ Assumptions: the resolved pair is a parameter of its own and NOT a member of `copied`, because the
  * service reports it on every withheld answer while `copied` arrives on a copy turn alone. That is what
- * lets an ordinary capture repaint its keys too, which is what the reference does -- L166 performs
- * `VALIDATE-INPUT-KEY-FIELDS` for the Enter arm exactly as L473 does for the copy arm.
+ * lets an ordinary capture repaint its account key too, which is what the reference does -- L166 performs
+ * `VALIDATE-INPUT-KEY-FIELDS` for the Enter arm exactly as L473 does for the copy arm. Only the ACCOUNT
+ * half is written into a control; the card half is masked and is rendered as protected text, for the
+ * reason recorded at the assignment below.
  *
  * Assumptions: each input is applied independently and an absent one suppresses nothing else. A preview
  * whose amount the screen's mask cannot express leaves the amount as it stands rather than blanking it, and
@@ -950,9 +972,14 @@ export function paintCopiedValues(
 ): TransactionAddValues {
   return {
     ...previous,
-    ...(resolved === null
-      ? {}
-      : { accountId: resolved.accountId, cardNumber: resolved.cardNumber }),
+    // WHY : ⚠️ Refactoring Rationale: only the ACCOUNT key is repainted from the resolution, and the card
+    //       control is left exactly as the operator left it. Both were repainted while the answer carried
+    //       sixteen digits; the answer now carries the masked rendering, and writing that into the card
+    //       control would put a value into an editable key field that the service refuses as non-numeric
+    //       on the next turn -- turning a display fix into a submission that cannot succeed. The resolved
+    //       card is shown beside the form instead, as protected text, and the confirming turn is bound by
+    //       the token rather than by what the control holds.
+    ...(resolved === null ? {} : { accountId: resolved.accountId }),
     ...(copied === null
       ? {}
       : {
@@ -1282,17 +1309,19 @@ export function TransactionAddScreen(): ReactElement {
   const [severity, setSeverity] = useState<MessageBandSeverity>('error');
   const [fieldErrors, setFieldErrors] = useState<readonly TransactionAddFieldError[]>([]);
   /*
-   * WHY : Purpose: the account identifier and card number the SERVICE resolved on the last turn, held so
-   *       the confirmation surface can describe the record being committed rather than merely ask about
-   *       it. The reference's confirming turn redisplays the whole populated map -- L176 to L181 moves
+   * WHY : Purpose: what the SERVICE resolved on the last turn -- the account identifier, the MASKED card
+   *       number and the opaque binding token -- held so the confirmation surface can describe the record
+   *       being committed rather than merely ask about it, and so the confirming turn can name the same
+   *       card. The reference's confirming turn redisplays the whole populated map -- L176 to L181 moves
    *       `Confirm to add this transaction...` and performs `SEND-TRNADD-SCREEN` after
    *       `VALIDATE-INPUT-KEY-FIELDS` has already overwritten both key fields -- so an operator
    *       confirming can see the resolved pair. A modal that showed only a question would take that away.
-   * WHY : ⚠️ Assumptions: this is held SEPARATELY from `values` even though the two key fields now carry
-   *       the same pair, and the separation is what makes the surface honest. The fields are editable, so
-   *       their contents state what WOULD be sent; this states what the service actually resolved, and it
-   *       is cleared the moment either key is edited. Reading the summary off the fields instead would
-   *       describe an edited, unresolved pair with the authority of a service answer.
+   * WHY : ⚠️ Assumptions: this is held SEPARATELY from `values`, and the separation carries more weight
+   *       now that the card control is NOT repainted from the answer. The controls are editable, so their
+   *       contents state what WOULD be sent; this states what the service actually resolved, and it is
+   *       cleared the moment either key is edited. Reading the summary off the controls instead would
+   *       describe an unresolved pair with the authority of a service answer -- and for the card it would
+   *       describe the operator's own entry, which the account arm discards at L209.
    * WHY : Alternatives Considered: holding the whole resolved capture -- the ten data values as well as
    *       the pair -- which an earlier shape did. Withdrawn as duplication: the ten values are painted
    *       into the fourteen controls, so the screen already holds them, and a second copy could disagree
@@ -1300,38 +1329,42 @@ export function TransactionAddScreen(): ReactElement {
    */
   const [resolvedKeys, setResolvedKeys] = useState<ResolvedKeys | null>(null);
   const [busy, setBusy] = useState(false);
+
   /*
-   * WHY : ⚠️ Refactoring Rationale: there is NO "a copy is pending" flag here any more, and the flag this
-   *       block replaces was the mechanism of a reported write hazard rather than a piece of book-keeping.
-   *       It recorded that the last submission had been a copy so that the CONFIRMING turn could be routed
-   *       back through the copy operation -- which re-resolves "the most recently stored transaction", so a
-   *       row appended between the operator's preview and their confirmation silently replaced what they
-   *       had been shown and was written instead. The reasoning that stood here was that the copy and the
-   *       confirmation are "two turns of one action", which is true of the reference and does not imply a
-   *       second read: `COPY-LAST-TRAN-DATA` at `app/cbl/COTRN02C.cbl` L480 to L493 moves the eleven values
-   *       into the operator's own unprotected MAP FIELDS and L495 then performs `PROCESS-ENTER-KEY`, so the
-   *       row is read exactly once and every later turn writes what is on the glass. The copy operation now
-   *       publishes those eleven values, this screen adopts them into its own fields, and the confirming
-   *       turn goes through the ordinary capture operation -- which is the same one read, in the same
-   *       place, as the reference performs.
-   *       Trade-offs: the earlier arrangement's one genuine merit is preserved without the flag. It cleared
-   *       itself on any field edit so that an edited screen was written rather than re-copied; here every
-   *       turn after a copy writes the screen, edited or not, so there is nothing to clear and no state
-   *
-   *       is what the guard reads. State alone cannot serialise turns: every handler closes over the
+   * WHY : ⚠️ Refactoring Rationale: there is NO "a copy is pending" flag beside `busy` any more, and the
+   *       flag this block replaces was the mechanism of a reported write hazard rather than a piece of
+   *       book-keeping. It recorded that the last submission had been a copy so that the CONFIRMING turn
+   *       could be routed back through the copy operation -- which re-resolves "the most recently stored
+   *       transaction", so a row appended between the operator's preview and their confirmation silently
+   *       replaced what they had been shown and was written instead. The reasoning that stood here was
+   *       that the copy and the confirmation are "two turns of one action", which is true of the reference
+   *       and does not imply a second read: `COPY-LAST-TRAN-DATA` at `app/cbl/COTRN02C.cbl` L480 to L493
+   *       moves the eleven values into the operator's own unprotected MAP FIELDS and L495 then performs
+   *       `PROCESS-ENTER-KEY`, so the row is read exactly once and every later turn writes what is on the
+   *       glass. The copy operation now publishes those eleven values, this screen adopts them into its
+   *       own fields, and the confirming turn goes through the ordinary capture operation -- which is the
+   *       same one read, in the same place, as the reference performs. The withdrawn flag also carried a
+   *       defect no test caught: typing the confirmation cleared it, so the confirming turn submitted the
+   *       PRE-COPY values.
+   *       Trade-offs: the earlier arrangement's one genuine merit is preserved without the flag. It
+   *       cleared itself on any field edit so that an edited screen was written rather than re-copied;
+   *       here every turn after a copy writes the screen, edited or not, so there is nothing to clear and
+   *       no state left that can disagree with the controls the operator is looking at.
+   */
+
+  /*
+   * WHY : Refactoring Rationale: the "a turn is already running" guard is this REF, not the `busy` state
+   *       member above -- the state member is what the controls and the key bindings RENDER from, and the
+   *       ref is what the guard READS. State alone cannot serialise turns: every handler closes over the
    *       `busy` value of the render it was created in, so two key presses arriving before React commits
    *       the next render both read `false` and both submit -- writing two transactions where the operator
    *       asked for one, which is precisely what the guard exists to prevent. A ref is mutated
    *       synchronously and read through the same object by every closure, so the second press sees the
-   *       first. The state member is retained because it is what the controls and the key bindings render
-   *       from, and a ref does not re-render.
-   *       Alternatives Considered: a `copyPending` flag recording that the last submission was a copy, so
-   *       the confirming turn could be routed back through the copy-and-write operation. Removed rather
-   *       than kept: the copy key press now READS the eleven values and paints them
-   *       (`app/cbl/COTRN02C.cbl` L473 to L493), so the confirming turn writes what the form holds --
-   *       which is what the reference writes, its L495 re-entry running against the fields the copy has
-   *       already replaced. The flag also had a defect no test caught: typing the confirmation cleared it,
-   *       so the confirming turn submitted the PRE-COPY values.
+   *       first.
+   *       Trade-offs: two members now describe one condition and must be set together, which is the price
+   *       of a guard that holds across a render boundary; keeping the state member alone would re-render
+   *       correctly and admit the double write, and keeping the ref alone would guard correctly and leave
+   *       the controls enabled while the turn ran.
    */
   const inFlight = useRef(false);
 
@@ -1463,6 +1496,12 @@ export function TransactionAddScreen(): ReactElement {
    * Assumptions: the chain reads the SUBMITTED values rather than the component's `values`, for the reason
    * {@link runTurn} records for the same choice -- {@link submitTurn} composes the answer into the values
    * and submits in one task, where state set in that task is not yet readable.
+   *
+   * ⚠️ Assumptions: the binding token is read from the component's `resolvedKeys` and NOT from the
+   * submitted values, and that is safe where reading `values` would not be. The pair is set by a PREVIOUS
+   * turn's completion, so the render this handler closed over already holds it, and it is discarded the
+   * moment either key field is edited -- so a token can only be sent alongside the keys it was resolved
+   * from.
    * @param {'accountId' | 'cardNumber'} key - Which key field addresses the submission.
    * @param {string} answer - The confirmation character as keyed.
    * @param {TransactionAddValues} submitted - The values this turn validates and sends.
@@ -1480,7 +1519,12 @@ export function TransactionAddScreen(): ReactElement {
       return null;
     }
 
-    const request = buildCreateRequest(submitted, key, answer);
+    const request = buildCreateRequest(
+      submitted,
+      key,
+      answer,
+      resolvedKeys?.confirmationToken ?? null,
+    );
     if (request === null) {
       /*
        * WHY : Assumptions: unreachable in practice and handled anyway. `dataFieldFailure` has already
@@ -1704,13 +1748,14 @@ export function TransactionAddScreen(): ReactElement {
          *       is last. The values are adopted here, in the one place that receives them, and the
          *       confirming turn writes them.
          * WHY : Assumptions: the CONFIRMATION is left exactly as the operator left it, because the
-         *       published shape carries no such member and the copy block moves nothing into it. The two
-         *       KEY fields are repainted from the resolved pair, for the reason
+         *       published shape carries no such member and the copy block moves nothing into it. The
+         *       ACCOUNT key field is repainted from the resolved pair, for the reason
          *       {@link paintCopiedValues} records: the copy paragraph performs
          *       `VALIDATE-INPUT-KEY-FIELDS` at L473 before it reads, and that paragraph writes both key
          *       fields from the cross-reference. A copy therefore still lands against the account the
-         *       operator was already working on -- the resolved account IS that account -- and the card
-         *       field stops disagreeing with it.
+         *       operator was already working on -- the resolved account IS that account. The card control
+         *       is NOT repainted, because the resolved card now arrives masked and a masked rendering is
+         *       not a value this screen may submit; it is shown as protected text beside the form.
          * WHY : Assumptions: the copied row's own identifier is validated on arrival by
          *       `ui/src/api/transactions.ts` and deliberately NOT retained here. No field of this mapset
          *       renders it -- the reference paints no such field, and inventing one would put text on this
@@ -1726,9 +1771,22 @@ export function TransactionAddScreen(): ReactElement {
          *       performs `VALIDATE-INPUT-KEY-FIELDS` for the Enter arm as L473 does for the copy arm --
          *       and the reference repaints both key fields each time before re-sending the screen.
          */
+        /*
+         * WHY : ⚠️ Refactoring Rationale: the card half is adopted as the service's MASKED rendering and
+         *       is accompanied by the opaque token that names the resolved card on the confirming turn.
+         *       The member read here was the full sixteen-digit number, which meant an ordinary
+         *       cardholder's primary account number reached the browser -- and stayed in component state
+         *       for as long as the screen lived -- on a route that is not the administrative card
+         *       endpoint. AAP §0.4.1.9 masks the number everywhere except that endpoint, and the
+         *       contract's own `CardNumber` schema says responses carry the masked form. Nothing on this
+         *       screen needed the digits: the summary renders them masked, and the confirming turn now
+         *       proves it is committing the same card by returning the token rather than by re-sending a
+         *       number the browser was trusted to keep.
+         */
         const resolved: ResolvedKeys = {
           accountId: outcome.preview.resolvedAccountId,
-          cardNumber: outcome.preview.resolvedCardNumber,
+          cardNumberMasked: outcome.preview.resolvedCardNumberMasked,
+          confirmationToken: outcome.preview.confirmationToken,
         };
         setResolvedKeys(resolved);
         setValues(
@@ -1970,10 +2028,13 @@ export function TransactionAddScreen(): ReactElement {
    *       keeping it afterwards would render a second title band, a second message line and a second
    *       named legend region on the screen. What stays here is everything the mapset paints between rows
    *       4 and 21 -- the title, the fourteen fields and the confirmation control.
-   * WHY : Assumptions: delegating `pfKeys` is also what keeps the keyboard singly owned. `usePfKeys`
-   *       installs one document listener per call site, and the shell binds its own sign-off key only
-   *       while NO screen has published one, so publishing here makes the shell stand down and leaves this
-   *       screen's listener the only one installed. No legend colour is delegated because
+   * WHY : ⚠️ Assumptions: delegating `pfKeys` hands the shell the bindings to RENDER and leaves
+   *       this screen owning the keyboard; an activation of a rendered legend control is forwarded
+   *       straight back to `invoke`. The claim that stood here is withdrawn in its second half: it is
+   *       true that `usePfKeys` installs one document listener per call site, but the shell installs NONE
+   *       of them -- it offers sign-off as a rendered control, for the reason recorded at
+   *       `SHELL_SIGN_OFF_LABEL`. There is nothing to make stand down, so the publication buys the
+   *       painted legend rather than sole ownership of the keyboard. No legend colour is delegated because
    *       `app/bms/COTRN02.bms` L297-L302 paints the row-24 field `COLOR=YELLOW`, the slot's own default.
    */
   useShellSlot({
@@ -2194,15 +2255,16 @@ export function TransactionAddScreen(): ReactElement {
   return (
     <Flex vertical gap="large">
       {/*
-       * Assumptions: heading level four rather than any other, because the token bridge maps a screen
-       * title to `fontSizeHeading4` and `lineHeightHeading4`, and `Typography.Title level={4}` is the
-       * component that resolves to exactly those two tokens. The field's `ATTRB=(ASKIP,BRT)` is carried by
-       * the weight token rather than by a colour, which is what keeps brightness and colour independent
-       * the way the mapset has them -- this heading is also `COLOR=NEUTRAL`.
+       * ⚠️ Assumptions: the rank comes from `ui/src/layout/ScreenTitle.tsx` and the SIZE from the
+       * bridge entries it applies, where this site read `level={4}` and relied on the component to
+       * supply both at once. Ten other screens painting the same row-4 caption reasoned the same way and
+       * arrived at `level={3}`, which outranked the application title above them, so the two decisions
+       * are now stated separately and every caption shares one rank at one size. The field's
+       * `ATTRB=(ASKIP,BRT)` is carried by the weight token rather than by a colour, which is what keeps
+       * brightness and colour independent the way the mapset has them -- this heading is also
+       * `COLOR=NEUTRAL`.
        */}
-      <Typography.Title level={4} style={titleStyle}>
-        {TRANSACTION_ADD_TITLE}
-      </Typography.Title>
+      <ScreenTitle style={titleStyle}>{TRANSACTION_ADD_TITLE}</ScreenTitle>
       {/*
        * Refactoring Rationale: the message line that used to sit here is delegated to the shell, which
        * paints it at row 23 -- below the fields, which is where the reference paints it. Composing it
@@ -2312,13 +2374,13 @@ export function TransactionAddScreen(): ReactElement {
               ? {}
               : {
                   /*
-                   * WHY : Assumptions: the card number is MASKED to its last four digits here, and this is
-                   *       the one place on this screen a card number is displayed rather than keyed. AAP
-                   *       section 0.4.1.9 reduces a primary account number everywhere except the
-                   *       administrative card-detail endpoint, and a confirmation modal is not that. The
-                   *       card-number INPUT above is deliberately left unmasked, because masking a field an
-                   *       operator is editing would hide their own keystrokes and make a correction
-                   *       impossible.
+                   * WHY : ⚠️ Assumptions: the card number rendered here is the SERVICE'S masked rendering,
+                   *       adopted verbatim, and no masking is performed in this file. AAP section 0.4.1.9
+                   *       reduces a primary account number everywhere except the administrative
+                   *       card-detail endpoint, and a confirmation modal is not that endpoint, so the
+                   *       sixteen digits never reach this browser to be reduced. The card-number INPUT
+                   *       above still shows what the operator keyed, because masking a field an operator
+                   *       is editing would hide their own keystrokes and make a correction impossible.
                    * WHY : Assumptions: the summary is composed from labels this module already publishes and
                    *       from values already on the screen, so it introduces no string the baseline does not
                    *       hold. It exists because the modal replaces a blind re-key: the reference's
@@ -2343,7 +2405,7 @@ export function TransactionAddScreen(): ReactElement {
                         {`${TRANSACTION_ADD_FIELD_LABELS.accountId} ${resolvedKeys.accountId}`}
                       </Typography.Text>
                       <Typography.Text style={fixedPitchStyle}>
-                        {`${TRANSACTION_ADD_FIELD_LABELS.cardNumber} ${maskCardNumber(resolvedKeys.cardNumber)}`}
+                        {`${TRANSACTION_ADD_FIELD_LABELS.cardNumber} ${resolvedKeys.cardNumberMasked}`}
                       </Typography.Text>
                       <Typography.Text style={fixedPitchStyle}>
                         {`${TRANSACTION_ADD_FIELD_LABELS.amount} ${values.amount}`}

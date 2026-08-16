@@ -2263,7 +2263,10 @@ components:
         #   eight the screen shows, and the two are different values. The
         #   reference row renders a display form by slicing the stored field
         #   at cbl/COPAUS0C.cbl L531-L533 and assembling a month-first,
-        #   hyphen-separated eight-character form at L534, while the stored
+        #   SOLIDUS-separated MM/DD/YY eight-character form at L534 -- the
+        #   separators come from the two FILLER positions of
+        #   WS-CURDATE-MM-DD-YY at cpy/CSDAT01Y.cpy L30-L35, each
+        #   VALUE '/' -- while the stored
         #   field is PA-AUTH-ORIG-DATE PIC X(06) at cpy/CIPAUDTY.cpy L22 held
         #   YEAR-first. Publishing the display form would put a rendering
         #   decision in the wire contract and would make this member disagree
@@ -2288,9 +2291,10 @@ components:
           description: >-
             The originating date the acquirer supplied, as the six stored
             characters in year, month, day order, or null when the row carried
-            none. The reference screen displays it month first, separated by
-            hyphens; that composition is a rendering and is performed by the
-            client.
+            none. The reference screen displays it month first as MM/DD/YY,
+            separated by the solidus its own WS-CURDATE-MM-DD-YY structure
+            carries in two FILLER positions at cpy/CSDAT01Y.cpy L30-L35; that
+            composition is a rendering and is performed by the client.
           example: '260803'
         authOrigTime:
           type:
@@ -2990,8 +2994,10 @@ components:
             The originating date the acquirer supplied, as the six stored
             characters in year, month, day order, or null when the segment carried
             none. From PA-AUTH-ORIG-DATE PIC X(06) at cpy/CIPAUDTY.cpy L22. The
-            reference screen renders it month first and hyphen separated by
-            slicing it at cbl/COPAUS0C.cbl L531-L534, and cbl/COPAUS2C.cbl
+            reference screen renders it month first as MM/DD/YY, solidus
+            separated, by slicing it at cbl/COPAUS0C.cbl L531-L534 into
+            WS-CURDATE-MM-DD-YY, whose two FILLER positions are declared
+            VALUE '/' at cpy/CSDAT01Y.cpy L32 and L34, and cbl/COPAUS2C.cbl
             L103-L105 slices it identically; the six characters are stored
             year-first and merely DISPLAYED month-first, and a reader who takes
             the stored order for the displayed one produces dates that are wrong

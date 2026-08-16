@@ -145,6 +145,7 @@ import { MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
  */
 import { fieldAriaProps, fieldErrorHelp } from '../../layout/fieldHelp';
 import { UNPOPULATED_CUSTOMER } from '../accountView/index';
+import { ScreenTitle } from '../../layout/ScreenTitle';
 
 /*
  * WHY : Assumptions: every user-visible SENTENCE on this screen resolves through
@@ -834,34 +835,18 @@ const CURSOR_ORDER: readonly AccountUpdateFieldName[] = [
 ];
 
 /*
- * WHY : Refactoring Rationale: two helpers for the withdrawn local edit chain stood here -- a
- *       constant standing in for 'both lookups unresolved' and a wrapper that turned a lookup
- *       promise into a three-valued answer -- and they are withdrawn with the wiring that used them.
- *       The reasoning for preferring the service operation is recorded at the withdrawn imports above;
- *       these two had no other caller, and leaving them would leave a reader looking for the chain
- *       they belong to.
- */
-
-/*
- * WHY : Refactoring Rationale: the status code the withdrawn lookup helpers read is withdrawn with
- *       them, for the reason recorded above. It described a reference lookup answering "no such row",
- *       a distinction the service operation now draws on this screen's behalf.
- */
-
-/*
- * WHY : Refactoring Rationale: a third helper of the withdrawn local edit chain stood here, deciding
- *       whether a lookup's refusal meant 'no such row' rather than 'the lookup failed'. It is withdrawn
- *       with the chain wiring for the reason recorded above; the distinction it drew still matters and
- *       still exists, in the service operation that now makes it.
- */
-
-/*
- * WHY : Refactoring Rationale: two helpers for the withdrawn local edit chain stood here -- a
- *       constant standing in for 'both lookups unresolved' and a wrapper that turned a lookup
- *       promise into a three-valued answer -- and they are withdrawn with the wiring that used them.
- *       The reasoning for preferring the service operation is recorded at the withdrawn imports above;
- *       these two had no other caller, and leaving them would leave a reader looking for the chain
- *       they belong to.
+ * WHY : ⚠️ Refactoring Rationale: FOUR helpers of the withdrawn local edit chain stood here, and one
+ *       note now records all four rather than four notes recording them one at a time -- two of which
+ *       were byte-identical, so the file stated the same withdrawal twice and a reader could not tell
+ *       whether two different things had been withdrawn or one thing had been described twice. The four
+ *       were: a constant standing in for 'both lookups unresolved'; a wrapper that turned a lookup
+ *       promise into a three-valued answer; the status code those two read, which described a reference
+ *       lookup answering 'no such row'; and a predicate deciding whether a lookup's refusal meant 'no
+ *       such row' rather than 'the lookup failed'. None had any other caller.
+ *       Assumptions: the note is kept at all, rather than deleted with the code, because the
+ *       DISTINCTION the four drew still matters -- it is drawn by the service operation that replaced
+ *       them, whose preference is argued at the withdrawn imports above -- so a reader looking for the
+ *       chain finds where it went instead of finding nothing.
  */
 
 const MESSAGES = STATUS_MESSAGES.COACTUPC;
@@ -2006,6 +1991,50 @@ export function AccountUpdateScreen(): ReactElement {
           ...read.account,
           customer: read.account.customer ?? UNPOPULATED_CUSTOMER,
         };
+
+        /*
+         * WHY : ⚠️ Refactoring Rationale: a read that answered NO REVISION is treated as a refused read
+         *       on this screen, and it used to seed the form as though it had succeeded. The service
+         *       withholds the entity tag on exactly one arm -- the account row was located and the
+         *       customer master holds no matching row -- so the screen presented forty editable fields
+         *       whose save could not possibly be issued: `saveEdits` requires a revision to form the
+         *       precondition, so the operator's only route out was a refusal, and the refusal it reached
+         *       was `No input received`, which is false of a screen they had just filled in.
+         *       The reference does not reach that state either, and its own handling is what this now
+         *       reproduces: `9400-GETCUSTDATA-BYCUST` sets `INPUT-ERROR` with `FLG-CUSTFILTER-NOT-OK` on
+         *       a customer miss and composes a `not found in customer master` sentence, `9000-READ-ACCT`
+         *       then branches to its exit at `app/cbl/COACTUPC.cbl` L3636 to L3638 BEFORE
+         *       `9500-STORE-FETCHED-DATA` runs, and the cancel arm at L2577 sets the show-details action
+         *       only `IF FOUND-CUST-IN-MASTER`. So the baseline stores nothing, presents nothing and
+         *       states the miss -- which is a failed read, not a read-only one.
+         *       Alternatives Considered: seeding the form and rendering it read-only, which is what the
+         *       ACCOUNT VIEW screen does with the same response. Rejected here because the two screens
+         *       answer different questions: the view screen exists to display, so a half-populated
+         *       display is its partial success, while this screen exists to update, and a record it can
+         *       never write is not a partial success of updating -- it is the read failing. Presenting it
+         *       would also mean carrying a fourth display-only action through a state machine transcribed
+         *       from `3300-SETUP-SCREEN-ATTRS`, which declares four arms and no such state.
+         *       Trade-offs: the operator is not shown the account half they might have wanted to look at.
+         *       The view screen shows exactly that, from the same response, and is one route change away.
+         */
+        if (read.revision === null) {
+          setValues({ ...blankFormValues(), accountId });
+          setBaseline(null);
+          setRevision(null);
+          setStoredIdentifiers(null);
+          setProtectedValues(null);
+          /*
+           * WHY : Assumptions: the sentence is the RESPONSE'S own and is only defaulted when the response
+           *       carried none. The service latches `Did not find associated customer in master file` on
+           *       this arm, which is `DID-NOT-FIND-CUST-IN-CUSTDAT` at `app/cbl/COACTUPC.cbl` L501
+           *       verbatim, so reading it from the answer keeps one wording rather than two -- and the
+           *       catalog constant behind the default is that same declared sentence, so the fallback
+           *       cannot say anything the reference does not.
+           */
+          report(read.account.returnMessage ?? MESSAGES.DID_NOT_FIND_CUST_IN_CUSTDAT.text, 'error');
+          return false;
+        }
+
         const seeded = formValuesFrom(populated);
         setValues(seeded);
         setBaseline(seeded);
@@ -2041,8 +2070,16 @@ export function AccountUpdateScreen(): ReactElement {
          *       standing. It describes the customer the refused read failed to reach, so keeping it
          *       would caption a blank form with the masked identifiers of whichever account was read
          *       LAST -- attributing one customer's identifiers to another operator's key.
+         * WHY : ⚠️ Refactoring Rationale: BOTH holders of the masked identifiers are cleared, and
+         *       clearing one of them was the defect. `storedIdentifiers` feeds the `extra` slot beside
+         *       each control and `protectedValues` feeds the caption BELOW it, and only the first was
+         *       cleared here -- so a refused read left the previous customer's markers captioning a
+         *       blank form under a different account number, which is exactly the attribution the note
+         *       above says this clearing exists to prevent. Two pieces of state describing one fact must
+         *       be retired together; they are set together at the fulfilment arm above.
          */
         setStoredIdentifiers(null);
+        setProtectedValues(null);
         report(readFailureMessage(failure), 'error');
 
         return false;
@@ -2442,8 +2479,22 @@ export function AccountUpdateScreen(): ReactElement {
       return;
     }
     setConfirmingSave(false);
+    /*
+     * WHY : ⚠️ Refactoring Rationale: this guard now reports the reference's own read-failure sentence
+     *       and no longer reports `No input received`, which was false of every screen that could reach
+     *       it. A revision is absent only when no record was read -- the reader refuses the one answer
+     *       that arrives without an entity tag, so this state is now unreachable through the read path
+     *       and the guard is a safety net rather than a route an operator takes. It is kept because the
+     *       write cannot form its precondition without one, and a silent return would leave a pressed
+     *       key with no outcome at all; the sentence names the record's absence, which is the condition,
+     *       instead of naming absent input, which is not.
+     *       Assumptions: the sentence is `DID-NOT-FIND-ACCT-IN-ACCTDAT` at `app/cbl/COACTUPC.cbl` L500
+     *       rather than the customer-miss sentence, because what this guard establishes is that NO
+     *       record stands behind the form -- the read arm above states the customer miss itself, where
+     *       it knows the miss is the reason.
+     */
     if (revision === null) {
-      report(MESSAGES.NO_SEARCH_CRITERIA_RECEIVED.text, 'error');
+      report(MESSAGES.DID_NOT_FIND_ACCT_IN_ACCTDAT.text, 'error');
       return;
     }
 
@@ -2748,7 +2799,17 @@ export function AccountUpdateScreen(): ReactElement {
         setValues(blankFormValues());
         setBaseline(null);
         setRevision(null);
+        /*
+         * WHY : ⚠️ Assumptions: both holders of the masked identifiers are retired here, where only
+         *       `storedIdentifiers` was. This arm returns the screen to its opening state -- the
+         *       reference re-initialises its work areas at `app/cbl/COACTUPC.cbl` L968 to L989 -- and a
+         *       caption sourced from `protectedValues` outlived that reset, so the blank opening form
+         *       carried the committed customer's markers under an empty account field. The caption
+         *       renders only when the state is non-null precisely so that an unfetched screen shows
+         *       none; leaving it set defeated the guard rather than the guard defeating it.
+         */
         setStoredIdentifiers(null);
+        setProtectedValues(null);
         setFieldErrors(new Map());
         enterAction('DETAILS_NOT_FETCHED');
         return;
@@ -2934,10 +2995,16 @@ export function AccountUpdateScreen(): ReactElement {
    *       and two legends. The row-22 INFORMATIONAL band stays local, because the mapset declares
    *       that line inside the screen's own field area at `POS=(22,23)`; the row-23 message line is
    *       delegated below, so exactly one element paints each of the four rows.
-   * WHY : Assumptions: the legend is delegated rather than dropped, so the SCREEN keeps owning
-   *       its keys -- `bindings` and `invoke` come from this screen's own `usePfKeys` call and
-   *       are handed up unchanged. The shell adds its sign-off key beside them only when this
-   *       screen leaves that attention identifier free, which is decided by AID in the shell.
+   * WHY : ⚠️ Assumptions: the legend is delegated rather than dropped, so the SCREEN keeps
+   *       owning the keyboard -- `bindings` and `invoke` come from this screen's own `usePfKeys`
+   *       call and travel up unchanged, and an activation of a rendered legend control is
+   *       forwarded straight back to `invoke`. The claim that stood here, that the shell "adds its
+   *       sign-off key beside them only when this screen leaves that attention identifier free,
+   *       which is decided by AID in the shell", is withdrawn: the shell installs NO keyboard
+   *       listener at all and offers sign-off as a rendered control, for the reason recorded at
+   *       `SHELL_SIGN_OFF_LABEL`. So there is no second listener to stand down and no AID
+   *       arbitration anywhere -- this screen's bindings are the only ones on the document while it
+   *       is mounted.
    */
   useShellSlot({
     screen: {
@@ -3402,14 +3469,16 @@ export function AccountUpdateScreen(): ReactElement {
        * `FUNCTION CURRENT-DATE` gave every terminal.
        */}
       {/*
-       * Assumptions: the heading is a `Typography.Title` carrying the mapset's own 14-character
-       * `COLOR=NEUTRAL` field, and its colour and size come from the bridge rather than from a literal
-       * -- `NEUTRAL` resolves to the de-emphasis role and the title size to the fourth heading step,
-       * which the bridge chose because a larger step costs vertical space on a screen of 128 fields.
+       * ⚠️ Assumptions: the heading carries the mapset's own 14-character `COLOR=NEUTRAL` field,
+       * and its colour comes from the bridge while its RANK now comes from
+       * `ui/src/layout/ScreenTitle.tsx`. The rank was a literal 4 here, which happened to be correct --
+       * ten of the thirteen screens painting a caption chose 3 and outranked the application title
+       * above them -- so this site changes to remove the LITERAL rather than to correct a value, and it
+       * is the same change: the outline is a property of one module or of thirteen, and thirteen is how
+       * it drifted. The size reasoning is unchanged: the bridge maps the fourth heading step because a
+       * larger step costs vertical space on a screen of 128 fields.
        */}
-      <Typography.Title level={4} style={titleStyle}>
-        {ACCOUNT_UPDATE_HEADINGS.screen}
-      </Typography.Title>
+      <ScreenTitle style={titleStyle}>{ACCOUNT_UPDATE_HEADINGS.screen}</ScreenTitle>
       {/*
        * Refactoring Rationale: the message line that used to sit here is delegated to the shell, which
        * renders it unconditionally and reserves its space at all times -- what row 23 of a 24-row

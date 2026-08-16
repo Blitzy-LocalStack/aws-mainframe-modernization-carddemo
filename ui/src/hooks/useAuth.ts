@@ -477,13 +477,33 @@ function isGroupName(group: unknown): group is string {
 }
 
 /**
- * Number of sign-on, challenge or refresh exchanges currently in flight.
+ * The identities of the sign-on, challenge and refresh exchanges currently in flight.
  *
- * Assumptions: a count rather than a boolean, so two exchanges overlapping — a scheduled refresh
- * firing while an operator re-submits sign-on — cannot have the first to settle report the session
- * as no longer authenticating while the second is still running.
+ * Assumptions: a SET of identities rather than a boolean, so two exchanges overlapping — a scheduled
+ * refresh firing while an operator re-submits sign-on — cannot have the first to settle report the
+ * session as no longer authenticating while the second is still running.
+ *
+ * ⚠️ Refactoring Rationale: a set of identities rather than a COUNT, and the count could go negative.
+ * {@link resetAuthSession} zeroes what is in flight, because the published status is derived and an
+ * exchange in flight dominates that derivation; every exchange decrements in a `finally`. So an exchange
+ * abandoned rather than awaited — which is exactly what the reset is for — decremented a counter the
+ * reset had already zeroed, leaving it at minus one. From there `> 0` reads false while an exchange is
+ * genuinely running, so the next sign-on published `anonymous` instead of `authenticating`, and a second
+ * abandoned exchange took it to minus two, from which even two live exchanges could not lift it above
+ * zero. A set cannot hold a negative number of anything: retiring an identity that is no longer a member
+ * is a no-op, which is precisely the semantics an abandoned exchange needs.
  */
-let exchangesInFlight = 0;
+const exchangesInFlight = new Set<number>();
+
+/**
+ * The identity the next exchange will be recorded under.
+ *
+ * Assumptions: a monotonically increasing number rather than the session generation, because two
+ * exchanges can belong to ONE generation — a challenge answer completes the sign-on that raised it, and
+ * a scheduled refresh can fire alongside either — so a generation would not identify them apart and the
+ * first to settle would retire the other's membership.
+ */
+let nextExchangeIdentity = 0;
 
 /** Whether the most recent completed exchange was refused, which is what `status` reports. */
 let exchangeWasRefused = false;
@@ -591,7 +611,7 @@ function decodeGroupsMemoised(idToken: string | null): readonly string[] {
  * @returns {AuthStatus} The status to publish for this reading.
  */
 function deriveStatus(authenticated: boolean): AuthStatus {
-  if (exchangesInFlight > 0) {
+  if (exchangesInFlight.size > 0) {
     return 'authenticating';
   }
   if (authenticated) {
@@ -693,23 +713,23 @@ function cancelScheduledRefresh(): void {
  * session-storage slot, so this call installs it into a variable rather than into a store. Nothing about
  * the direction changes; what changes is that neither module leaves a credential where another script on
  * the origin could read it.
+ * ⚠️ Refactoring Rationale: EVERY failure of the write is allowed out, where anything that was not a
+ * `RangeError` used to be swallowed. The reasoning for swallowing was that such a failure comes from the
+ * owning module rather than from this token, and that "the caller's own guard reports the refusal" -- but
+ * there is no such guard: {@link installTokens} calls this and then writes the session record on the very
+ * next statement, so a swallowed failure installed an identity whose requests would carry NO bearer. That
+ * is the one state the whole all-or-nothing install exists to prevent, and it is worse than a raised
+ * error because the session looks established and every request is refused. Which module the failure came
+ * from does not change what it means here: the bearer was not written, so no session may be claimed.
  * @param {string | null} token - Bearer token to store, or `null` to discard the stored one.
  * @returns {void} Nothing; the slot holds the token, or holds nothing.
- * @throws {RangeError} If a non-null token is blank or carries control characters. The error is
- *   allowed out because a service that issued an unusable bearer has not established a session, so
- *   the caller must see the refusal rather than proceed with a half-installed one.
+ * @throws {unknown} Whatever the owning module raised. A `RangeError` means the token itself is
+ *   unusable -- blank or carrying control characters -- and anything else means the write failed for a
+ *   reason this module cannot interpret. Both leave the bearer unwritten, so both must reach the caller
+ *   rather than let a session be installed without a credential.
  */
 function applyBearerToken(token: string | null): void {
-  try {
-    setAccessToken(token);
-  } catch (cause: unknown) {
-    if (cause instanceof RangeError) {
-      throw cause;
-    }
-    // Assumptions: anything that is not a RangeError came from the store itself rather than from the
-    //   token's shape, so it came from a defect in the owning module rather than from this token.
-    //   Swallowing it leaves the session uninstalled, and the caller's own guard reports the refusal.
-  }
+  setAccessToken(token);
 }
 
 /**
@@ -783,6 +803,34 @@ function supersedeGeneration(): number {
 function currentAbortSignal(): AbortSignal {
   sessionAbort ??= new AbortController();
   return sessionAbort.signal;
+}
+
+/**
+ * Records that an exchange has begun, and answers the identity it was recorded under.
+ *
+ * Assumptions: the caller keeps the identity and hands it back to {@link endExchange} from a `finally`,
+ * so an exchange retires exactly its own membership. A helper that retired "the most recent" instead
+ * would let the first of two overlapping exchanges to settle retire the second's.
+ * @returns {number} The identity this exchange is recorded under; never reused within a page load.
+ */
+function beginExchange(): number {
+  nextExchangeIdentity += 1;
+  exchangesInFlight.add(nextExchangeIdentity);
+  return nextExchangeIdentity;
+}
+
+/**
+ * Records that an exchange has settled, whatever its outcome.
+ *
+ * Assumptions: retiring an identity that is no longer a member is a NO-OP rather than an error, and that
+ * is the property {@link resetAuthSession} depends on: the reset abandons everything in flight, and the
+ * abandoned exchanges still run their own `finally` afterwards. With a counter each of those decremented
+ * below zero; here each removes a member that is already gone and nothing is disturbed.
+ * @param {number} identity - The identity {@link beginExchange} answered for this exchange.
+ * @returns {void} Nothing; the caller notifies listeners.
+ */
+function endExchange(identity: number): void {
+  exchangesInFlight.delete(identity);
 }
 
 /**
@@ -894,10 +942,14 @@ async function exchangeRefreshToken(
   refreshToken: string,
   generation: number,
 ): Promise<void> {
-  exchangesInFlight += 1;
+  const exchange = beginExchange();
   notifyListeners();
   try {
-    installTokens(await refreshTokens(userId, refreshToken, currentAbortSignal()), generation);
+    installTokens(
+      await refreshTokens(userId, refreshToken, currentAbortSignal()),
+      generation,
+      'RENEWAL',
+    );
   } catch (cause: unknown) {
     // Assumptions: the FAILURE path is guarded as well as the success path, and a review named the
     //   reason: a stale failure could clear a session established after this exchange started, so an
@@ -910,7 +962,7 @@ async function exchangeRefreshToken(
     discardSession();
     recordRefusal(cause);
   } finally {
-    exchangesInFlight -= 1;
+    endExchange(exchange);
     notifyListeners();
   }
 }
@@ -992,6 +1044,15 @@ function armRefresh(): void {
 }
 
 /**
+ * Which kind of exchange produced a token set, which decides whether a held renewal token may survive it.
+ *
+ * ⚠️ Purpose: this distinction exists because a review found one token set inheriting another
+ * PRINCIPAL'S renewal token. It is named rather than expressed as a boolean so that a call site states
+ * which exchange it is, and a reader of that call site does not have to work out what `true` meant.
+ */
+type TokenInstallOrigin = 'FRESH_SIGN_ON' | 'RENEWAL';
+
+/**
  * Installs an issued token set as this tab's session, if the generation that asked for it is current.
  *
  * Refactoring Rationale: no password reaches this function, and none reaches this module's state.
@@ -1017,6 +1078,9 @@ function armRefresh(): void {
  * every request carried another's bearer.
  * @param {SignOnTokens} tokens - Tokens returned by sign-on, the challenge answer or a renewal.
  * @param {number} generation - The session generation the exchange that obtained them belonged to.
+ * @param {TokenInstallOrigin} origin - Whether the set came from a fresh sign-on, in which case it
+ *   REPLACES everything held, or from a renewal of the session already held, in which case a set arriving
+ *   without a renewal token keeps the one held.
  * @returns {boolean} `true` when the session was installed, `false` when the generation had been
  *   superseded and nothing was changed. A caller uses the answer to decide whether to publish an
  *   outcome, never to decide whether the exchange succeeded.
@@ -1025,7 +1089,11 @@ function armRefresh(): void {
  *   {@link applyBearerToken} when the issued bearer is unusable. Nothing is installed in any of those
  *   cases, so a refused set leaves whatever was held before exactly as it was.
  */
-function installTokens(tokens: SignOnTokens, generation: number): boolean {
+function installTokens(
+  tokens: SignOnTokens,
+  generation: number,
+  origin: TokenInstallOrigin,
+): boolean {
   // Assumptions: the guard is FIRST, before the validation and before any mutation, because a
   //   superseded outcome must not even be able to raise. A stale set that failed validation would
   //   otherwise report a refusal against a session it does not belong to.
@@ -1073,14 +1141,32 @@ function installTokens(tokens: SignOnTokens, generation: number): boolean {
   //   installed first would describe a session no request could carry a credential for.
   applyBearerToken(tokens.accessToken);
 
-  // Assumptions: a set without a renewal token keeps the one already held, which is the rotation
-  //   tolerance `SignOnTokens` documents: the pool answers a renewal without a replacement where a
-  //   retry grace period leaves the submitted token current, and discarding the held one would make the
-  //   session unrenewable from that point on.
+  /*
+   * Assumptions: a RENEWAL without a renewal token keeps the one already held, which is the rotation
+   *   tolerance `SignOnTokens` documents: the pool answers a renewal without a replacement where a retry
+   *   grace period leaves the submitted token current, and discarding the held one would make the session
+   *   unrenewable from that point on.
+   * ⚠️ Refactoring Rationale: that tolerance is now applied to a renewal ALONE, where it applied to
+   *   every install. A fresh sign-on and a challenge answer both reached it, and neither clears the held
+   *   session first -- `supersedeGeneration` moves the generation and aborts what is in flight, and does
+   *   not touch `heldSession` -- so an operator signing on at a tab another operator had signed on at,
+   *   with an answer that carried no renewal token, was installed WITH THE PREVIOUS OPERATOR'S. From
+   *   there the scheduled refresh presents one principal's renewal token under the other's identifier:
+   *   at best the pool refuses it and the new operator's session dies at the first renewal, at worst it
+   *   is accepted and this tab holds a session neither operator asked for. A challenge answer is the
+   *   likeliest arrival without a renewal token, so the state was reachable by the ordinary path.
+   *   Alternatives Considered: clearing `heldSession` in `supersedeGeneration` so the fallback would find
+   *   nothing on a fresh sign-on. Rejected because that function is also what a renewal's own supersession
+   *   goes through, and it is called from `discardSession` where the clear already happens -- making it
+   *   clear the session would end the current session every time a sign-on was merely ATTEMPTED, so a
+   *   mistyped password would sign the operator out.
+   */
   const renewal =
     typeof tokens.refreshToken === 'string' && tokens.refreshToken.length > 0
       ? tokens.refreshToken
-      : (heldSession?.refreshToken ?? null);
+      : origin === 'RENEWAL'
+        ? (heldSession?.refreshToken ?? null)
+        : null;
 
   heldSession = Object.freeze({
     generation,
@@ -1116,12 +1202,12 @@ async function signIn(userId: string, password: string): Promise<SignOnResult> {
   //   session being replaced. Opening it here also abandons those requests, so a credential for the
   //   previous session stops travelling the moment a new one is submitted.
   const generation = supersedeGeneration();
-  exchangesInFlight += 1;
+  const exchange = beginExchange();
   notifyListeners();
   try {
     const result = await signOn(userId, password, currentAbortSignal());
     if (result.outcome === SIGN_ON_AUTHENTICATED) {
-      installTokens(result, generation);
+      installTokens(result, generation, 'FRESH_SIGN_ON');
     } else if (generation === sessionGeneration) {
       // Assumptions: a challenge is not a failure, so the remembered refusal is cleared -- but only
       //   while this sign-on is still the current one. Clearing it from a superseded exchange would
@@ -1136,7 +1222,7 @@ async function signIn(userId: string, password: string): Promise<SignOnResult> {
     }
     throw cause;
   } finally {
-    exchangesInFlight -= 1;
+    endExchange(exchange);
     notifyListeners();
   }
 }
@@ -1160,7 +1246,7 @@ async function answerChallenge(
   //   handle it is presenting. What it does capture is that generation, so a sign-out or a fresh sign-on
   //   while the operator is choosing a password still supersedes the answer.
   const generation = sessionGeneration;
-  exchangesInFlight += 1;
+  const exchange = beginExchange();
   notifyListeners();
   try {
     const tokens = await answerSignOnChallenge(
@@ -1169,7 +1255,15 @@ async function answerChallenge(
       newPassword,
       currentAbortSignal(),
     );
-    installTokens(tokens, generation);
+    /*
+     * WHY : ⚠️ Assumptions: a challenge answer is a FRESH sign-on for this purpose, even though it
+     *       completes the sign-on that raised the challenge rather than starting a new attempt. What the
+     *       origin decides is whether a held renewal token may survive the install, and the session being
+     *       established here is not the one any held token belongs to -- it is the first session this
+     *       operator has had at this tab. It is also the arrival LEAST likely to carry a renewal token,
+     *       which is what made it the reachable path into the defect.
+     */
+    installTokens(tokens, generation, 'FRESH_SIGN_ON');
     return tokens;
   } catch (cause: unknown) {
     if (generation === sessionGeneration) {
@@ -1177,7 +1271,7 @@ async function answerChallenge(
     }
     throw cause;
   } finally {
-    exchangesInFlight -= 1;
+    endExchange(exchange);
     notifyListeners();
   }
 }
@@ -1393,26 +1487,34 @@ export function useAuth(): UseAuthResult {
  * the reset has to be published or the isolation those files depend on is simply lost. This is the same
  * bargain `resetApiClient` in `ui/src/api/client.ts` already strikes for the same reason.
  *
- * Alternatives Considered: having those files call {@link useAuth}'s own `signOut`. Rejected on two
- * counts: it DISPATCHES a revocation, so every case would have to arrange an answer for a request it
- * has no interest in and one that carried a held token would count against its own request assertions;
- * and it is asynchronous, so a synchronous `beforeEach` could not complete it. A reset that talks to
- * nothing is what a fixture needs.
+ * ⚠️ Alternatives Considered: having those files call {@link useAuth}'s own `signOut`. Rejected because
+ * it DISPATCHES a revocation, so every case would have to arrange an answer for a request it has no
+ * interest in, and one that carried a held token would count against its own request assertions. The
+ * second count that stood here -- that `signOut` "is asynchronous, so a synchronous `beforeEach` could
+ * not complete it" -- was false: it is declared `signOut(): void`, and it clears locally and
+ * synchronously before dispatching the revocation without awaiting it. What a fixture actually needs is a
+ * reset that talks to NOTHING, which is the count above; the withdrawn one would have had a reader
+ * looking for an `await` that no signature admits.
  *
  * Assumptions: this is a CLEARER and not a writer, which is the whole reason it is safe to publish. It
  * can only move the module towards holding nothing, so no caller can use it to arrange a session that
  * {@link installTokens} would have refused — which is exactly the drift a published installer would
  * have permitted. A test that needs a session must still perform an exchange.
- * Assumptions: the in-flight counter is zeroed as well as the session discarded, because the published
+ * Assumptions: what is in flight is emptied as well as the session discarded, because the published
  * status is DERIVED and an exchange in flight dominates that derivation. A case whose exchange was
- * abandoned rather than awaited would otherwise leave the counter above zero, and the next case would
- * read `authenticating` from a module holding nothing at all.
+ * abandoned rather than awaited would otherwise leave a membership standing, and the next case would read
+ * `authenticating` from a module holding nothing at all.
+ *
+ * ⚠️ Assumptions: the abandoned exchanges still run their own `finally` after this returns, and that is
+ * why what is in flight is a SET of identities rather than a count. Each retires a membership this has
+ * already removed, which is a no-op; against a counter each decremented below zero, and a negative count
+ * reads as "nothing in flight" while an exchange is genuinely running.
  * @returns {void} Nothing; no session is held, nothing in flight can install one, and the next reading
  *   is the anonymous one. Listeners are notified, so a mounted component re-renders.
  */
 export function resetAuthSession(): void {
   discardSession();
   clearFailureState();
-  exchangesInFlight = 0;
+  exchangesInFlight.clear();
   notifyListeners();
 }

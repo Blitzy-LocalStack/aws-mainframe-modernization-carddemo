@@ -600,15 +600,19 @@ public class TransactionController {
      * format string written in the obvious way would emit one space and be byte-wrong against the
      * baseline, and a future reader tidying the two spaces away would break the same guarantee.</p>
      *
-     * @param request the submitted capture, of type {@link TransactionAddRequest}, whose fourteen
-     *     members open with the account identifier and close with the confirmation and which carries no
-     *     transaction identifier; validated against its declared constraints before this method is
-     *     entered, and never {@code null}
+     * @param request the submitted capture, of type {@link TransactionAddRequest}, whose fifteen
+     *     members open with the account identifier and close with the optional confirmation token, and
+     *     which carries no transaction identifier; validated against its declared constraints before this
+     *     method is entered, and never {@code null}
+     * @param principal the authenticated caller the framework resolves from the verified bearer token,
+     *     whose name binds the preview's confirmation token to the operator it is issued to; must not be
+     *     {@code null}
      * @return a 201 response carrying the {@link TransactionAddResponse} for a written transaction, with
      *     the assigned identifier, the normalised amount and the baseline's acknowledgement sentence, and
      *     a {@code Location} header addressing it; or a 200 response carrying the
-     *     {@link TransactionAddPreview} shape -- the normalised amount, the discriminator fixed false and
-     *     the prompt -- when the confirmation was withheld and nothing was written; never {@code null}
+     *     {@link TransactionAddPreview} shape -- the normalised amount, the discriminator fixed false, the
+     *     prompt, the resolved account, the masked resolved card and the binding token a confirming turn
+     *     presents -- when the confirmation was withheld and nothing was written; never {@code null}
      * @throws NullPointerException if the deserialised body is {@code null}
      * @throws org.springframework.web.bind.MethodArgumentNotValidException if a submitted member breaks a
      *     constraint the request shape declares, which the shared advice renders as 400 with one entry per
@@ -629,8 +633,14 @@ public class TransactionController {
      */
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<TransactionAddOutcome> addTransaction(
-            @Valid @RequestBody TransactionAddRequest request) {
-        return answer(this.addService.addTransaction(request));
+            @Valid @RequestBody TransactionAddRequest request, Principal principal) {
+
+        // WHY : Assumptions: the name is required before it is used rather than dereferenced and allowed
+        //       to fail, for the reason the browse handler above records: the chain admits these routes
+        //       only to an authenticated caller, so a null here means the chain was bypassed rather than
+        //       that a caller sent something wrong, and a named requirement says so in the message.
+        Objects.requireNonNull(principal, "principal must not be null");
+        return answer(this.addService.addTransaction(request, this.cursorToken, principal.getName()));
     }
 
     /**
@@ -675,6 +685,9 @@ public class TransactionController {
      * @param request the submission whose key member selects the account or card and whose confirmation
      *     decides whether the copied capture is written; validated against its declared constraints
      *     before this method is entered, and never {@code null}
+     * @param principal the authenticated caller the framework resolves from the verified bearer token,
+     *     whose name binds the preview's confirmation token to the operator it is issued to; must not be
+     *     {@code null}
      * @return a 201 response carrying the {@link TransactionAddResponse} for a written transaction with a
      *     {@code Location} header addressing it, or a 200 response carrying the
      *     {@link TransactionAddPreview} shape when the confirmation was withheld; never {@code null}
@@ -692,8 +705,11 @@ public class TransactionController {
      */
     @PostMapping(path = COPY_LAST_PATH, consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<TransactionAddOutcome> copyLastTransaction(
-            @Valid @RequestBody CopyLastRequest request) {
-        return answer(this.addService.copyLastTransactionData(request));
+            @Valid @RequestBody CopyLastRequest request, Principal principal) {
+
+        Objects.requireNonNull(principal, "principal must not be null");
+        return answer(
+                this.addService.copyLastTransactionData(request, this.cursorToken, principal.getName()));
     }
 
     /**

@@ -137,6 +137,15 @@ const MASKED_AMOUNTS = {
 } as const;
 
 /** The read result the transport publishes for a successful fetch. */
+/**
+ * The sentence the service latches when the account was located and its customer was not.
+ *
+ * Assumptions: it is `DID-NOT-FIND-CUST-IN-CUSTDAT` at `app/cbl/COACTUPC.cbl` L501 verbatim, which is
+ * what `AccountViewService` publishes on that arm, so a case asserting it is asserting the reference's
+ * own wording rather than one invented for the target.
+ */
+const CUSTOMER_MISS_SENTENCE = 'Did not find associated customer in master file';
+
 const READ_RESULT = {
   account: {
     accountId: ACCOUNT_ID,
@@ -355,6 +364,45 @@ async function readOneAccount(user: ReturnType<typeof userEvent.setup>): Promise
   await act(
     /**
      * Drains the microtask queue so the seeded form is committed.
+     * @returns {Promise<void>} Resolves once the queue is empty.
+     */
+    async (): Promise<void> => {
+      await Promise.resolve();
+    },
+  );
+}
+
+/**
+ * Dispatches a read whose answer carries no entity tag, which is the customer-master miss.
+ *
+ * ⚠️ Assumptions: the fixture is the one arm the service answers WITHOUT a revision -- the account row
+ * was located and the customer master holds no matching row, so `customer` is null and the response
+ * carries the reference's own miss sentence. It is the answer this screen used to seed an editable form
+ * from, and this helper exists so both cases below arrange it identically.
+ * @param {ReturnType<typeof userEvent.setup>} user - The interaction driver for this case.
+ * @param {string} accountId - The identifier to submit.
+ * @returns {Promise<void>} Resolves once the answer has been applied.
+ */
+async function readAnAccountWithNoCustomer(
+  user: ReturnType<typeof userEvent.setup>,
+  accountId: string,
+): Promise<void> {
+  const { readAccountView } = await import('../../api/accounts');
+  vi.mocked(readAccountView).mockResolvedValueOnce({
+    account: {
+      accountId,
+      account: ACCOUNT,
+      customer: null,
+      informationMessage: null,
+      returnMessage: CUSTOMER_MISS_SENTENCE,
+    },
+    revision: null,
+  });
+
+  await submitFilter(user, accountId);
+  await act(
+    /**
+     * Drains the microtask queue so the refusal is committed.
      * @returns {Promise<void>} Resolves once the queue is empty.
      */
     async (): Promise<void> => {
@@ -855,6 +903,105 @@ async function standsTheTurnKeysDownWhileARequestIsOutstanding(): Promise<void> 
 }
 
 /**
+ * A read whose answer carries no revision refuses, states the miss, and presents no editable record.
+ *
+ * ⚠️ Purpose: this is the case whose absence let a defect ship. The service withholds the entity tag
+ * on exactly one arm -- the account located, the customer master holding no matching row -- and the
+ * screen seeded forty editable fields from it. `saveEdits` needs a revision to form its precondition, so
+ * the operator's only reachable outcome was a refusal, and the refusal was `No input received` on a form
+ * they had just filled in. The reference does not present that state at all:
+ * `9400-GETCUSTDATA-BYCUST` sets `INPUT-ERROR` on the miss and `9000-READ-ACCT` exits before
+ * `9500-STORE-FETCHED-DATA` at `app/cbl/COACTUPC.cbl` L3636.
+ *
+ * Assumptions: THREE properties are asserted, because each is separately losable -- the response's own
+ * sentence is stated, the record's own values are absent from the form, and the typed key is retained so
+ * the operator can correct one digit. Asserting only the sentence would pass against a screen that stated
+ * it and seeded the form anyway, which is the defect wearing a message.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function refusesAReadThatCarriesNoRevision(): Promise<void> {
+  const { nationalIdentifierCaption } = await import('./index');
+  const user = userEvent.setup();
+  await renderScreen();
+
+  await readAnAccountWithNoCustomer(user, ACCOUNT_ID);
+
+  expect(await screen.findByText(CUSTOMER_MISS_SENTENCE)).toBeInTheDocument();
+  expect(control('accountId')).toHaveValue(ACCOUNT_ID);
+  expect(control('creditLimit')).toHaveValue('');
+  expect(screen.queryByText(CUSTOMER.ssnMasked, EXACT_TEXT)).not.toBeInTheDocument();
+  expect(screen.queryByText(nationalIdentifierCaption(CUSTOMER.ssnMasked))).not.toBeInTheDocument();
+}
+
+/**
+ * A refused read retires the masked identifiers of the account read before it.
+ *
+ * ⚠️ Purpose: the two masked markers are held in TWO pieces of state -- one feeds the slot beside each
+ * control, the other the caption below it -- and a refused read cleared only the first. So a good read
+ * followed by a refused one left the previous customer's markers captioning a blank form under a
+ * different account number, which is the attribution the clearing exists to prevent.
+ *
+ * Assumptions: the case reads a real record FIRST, so there is something to leak; a case that refused on
+ * the opening turn would pass against the defect, because the state it fails to clear would never have
+ * been set.
+ *
+ * Assumptions: the second read is reached by the CANCEL key rather than by re-keying the filter, and the
+ * screen's own faithfulness is why. In the show-details action the filter is protected -- `accountId` is
+ * one of the three fields `3300-SETUP-SCREEN-ATTRS` never unprotects -- so an operator cannot type a new
+ * key there at all, and the reference's own second read is exactly this one: the PF12 arm at
+ * `app/cbl/COACTUPC.cbl` L2572 to L2580 performs `9000-READ-ACCT` again rather than restoring its
+ * snapshot, which is what makes a customer row deleted while the operator was typing reachable.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function retiresTheMaskedIdentifiersOfTheAccountReadBefore(): Promise<void> {
+  const { readAccountView } = await import('../../api/accounts');
+  const { nationalIdentifierCaption, governmentIdentifierCaption } = await import('./index');
+  const user = userEvent.setup();
+  await renderScreen();
+  await readOneAccount(user);
+
+  /*
+   * WHY : ⚠️ Assumptions: the CAPTIONS are what this case asserts on, not the bare marker, and the
+   *       distinction is the whole of the defect. The marker appears twice on this screen -- in the slot
+   *       beside each control, fed by `storedIdentifiers`, and inside the caption below it, fed by
+   *       `protectedValues` -- and only the first was being cleared. An assertion on the bare marker
+   *       matches the slot and passes while the caption still stands, which is the defect surviving its
+   *       own test; the caption text can only come from the holder that was leaking.
+   */
+  const ssnCaption = nationalIdentifierCaption(CUSTOMER.ssnMasked);
+  const governmentCaption = governmentIdentifierCaption(CUSTOMER.governmentIssuedIdMasked);
+  expect(screen.getByText(ssnCaption)).toBeInTheDocument();
+  expect(screen.getByText(governmentCaption)).toBeInTheDocument();
+
+  vi.mocked(readAccountView).mockResolvedValueOnce({
+    account: {
+      accountId: ACCOUNT_ID,
+      account: ACCOUNT,
+      customer: null,
+      informationMessage: null,
+      returnMessage: CUSTOMER_MISS_SENTENCE,
+    },
+    revision: null,
+  });
+  await user.keyboard('{F12}');
+  await act(
+    /**
+     * Drains the microtask queue so the refusal is committed.
+     * @returns {Promise<void>} Resolves once the queue is empty.
+     */
+    async (): Promise<void> => {
+      await Promise.resolve();
+    },
+  );
+
+  expect(await screen.findByText(CUSTOMER_MISS_SENTENCE)).toBeInTheDocument();
+  expect(screen.queryByText(ssnCaption)).not.toBeInTheDocument();
+  expect(screen.queryByText(governmentCaption)).not.toBeInTheDocument();
+  expect(screen.queryByText(CUSTOMER.ssnMasked, EXACT_TEXT)).not.toBeInTheDocument();
+  expect(screen.queryByText(CUSTOMER.governmentIssuedIdMasked, EXACT_TEXT)).not.toBeInTheDocument();
+}
+
+/**
  * Registers every case, and resets the transport between them.
  * @returns {void} Nothing; the registrations are the effect.
  */
@@ -895,6 +1042,11 @@ function accountUpdateTurnCases(): void {
   it(
     'stands the turn keys down while a request is outstanding',
     standsTheTurnKeysDownWhileARequestIsOutstanding,
+  );
+  it('refuses a read that carries no revision', refusesAReadThatCarriesNoRevision);
+  it(
+    'retires the masked identifiers of the account read before',
+    retiresTheMaskedIdentifiersOfTheAccountReadBefore,
   );
 }
 

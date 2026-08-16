@@ -714,19 +714,24 @@ resource "aws_apigatewayv2_route" "service" {
 }
 
 resource "aws_apigatewayv2_route" "public" {
-  #checkov:skip=CKV_AWS_309:Only the exact pre-token POST operations are public, because a caller cannot present the JWT these operations exist to issue or renew; var.public_route_keys is validated down to that closed set.
-  # WHY : (1) Assumptions: these three routes are the ones that MINT or RENEW the
-  #       token every other route requires, so attaching the JWT authorizer to them
-  #       would deadlock the whole surface -- a caller could never obtain a
-  #       credential, because obtaining one would itself require presenting one. The
-  #       set is three rather than one because token issuance is not a single
-  #       exchange: sign-on starts it, challenge completes the exchanges the pool
-  #       answers with a challenge instead of a token set, and refresh renews an
-  #       expired access token from a refresh token, which is by definition not a
-  #       bearer credential this authorizer accepts. This matches the sign-on
-  #       program's position in the baseline: it is the entry transaction, reached
-  #       with no prior identity, and it is what establishes the identity every
-  #       later screen carries.
+  #checkov:skip=CKV_AWS_309:Only the four exact token-lifecycle POST operations are public -- signon, challenge, refresh and signout -- because a caller reaches each precisely when it holds no usable access token; var.public_route_keys is validated down to that closed set of four.
+  # WHY : (1) ⚠️ Assumptions: these FOUR routes are the token-lifecycle
+  #       operations, so attaching the JWT authorizer to them would deadlock the
+  #       whole surface -- a caller could never obtain a credential, because
+  #       obtaining one would itself require presenting one. This block and the
+  #       suppression above both said THREE, and each of the four is here for its
+  #       own reason rather than as a variation of one: sign-on starts the exchange
+  #       with no prior identity; challenge completes an exchange the pool answered
+  #       with a challenge instead of a token set; refresh renews an expired access
+  #       token from a refresh token, which is by definition not a bearer credential
+  #       this authorizer accepts; and signout revokes that same refresh token, so
+  #       it is authorised by the very credential it destroys and would be
+  #       unreachable behind an access-token check -- a caller whose access token had
+  #       already expired could then never end its session. The count is corrected
+  #       rather than the list trimmed, for the reason item (6) records. This matches
+  #       the sign-on program's position in the baseline: it is the entry
+  #       transaction, reached with no prior identity, and it is what establishes the
+  #       identity every later screen carries.
   #       (2) Alternatives Considered: having the browser authenticate directly
   #       against the user pool so that no sign-on route exists at all. Rejected
   #       because the app client this edge's authorizer validates against is
@@ -739,28 +744,35 @@ resource "aws_apigatewayv2_route" "public" {
   #       expression rather than about which resource declares the route. Two
   #       resources make the answer readable at a glance: the set above is
   #       authenticated, this one is not, and this one is held by validation to a
-  #       closed list of three exact method-and-path pairs -- widening it requires
+  #       closed list of four exact method-and-path pairs -- widening it requires
   #       editing the condition in variables.tf, not a value in a tfvars file.
   #       (4) Trade-offs: an open route is an unauthenticated surface, so it is
   #       throttled independently on the stage below instead of sharing the
   #       account-level allowance the authenticated routes sit on. The cost
   #       accepted is that a burst of credential attempts is rejected at the edge
   #       before it reaches the service, which is the intended behaviour for the
-  #       three routes an unauthenticated caller can reach.
+  #       four routes an unauthenticated caller can reach.
   #       (5) Assumptions: an empty `var.public_route_keys` produces no instance of
   #       this resource, so an environment fronting a pool whose app client is
   #       public -- where the browser can perform the exchange itself -- publishes
   #       no open route at all, with no edit to this module.
-  #       (6) Refactoring Rationale: this block described a SINGLE open route
-  #       throughout -- "exactly one method on exactly one path", "the one route an
-  #       unauthenticated caller can reach" -- while `var.public_route_keys` has
-  #       always defaulted to three keys and validates to exactly those three. The
-  #       count was the only thing wrong: the reasoning applies unchanged to all
-  #       three, because each is reached precisely when no usable access token is
-  #       available. It is corrected rather than resolved the other way, since
-  #       trimming the list would leave `challenge` and `refresh` unreachable, and
-  #       a caller forced to change a credential, or holding only a refresh token,
-  #       could then never obtain one.
+  #       (6) ⚠️ Refactoring Rationale: the count in this block has now been
+  #       wrong twice, in the same way, and the second correction is recorded beside
+  #       the first because the pattern is the lesson. It first described a SINGLE
+  #       open route -- "exactly one method on exactly one path" -- while
+  #       `var.public_route_keys` defaulted to three; the correction to three then
+  #       went stale when the sign-out key was added to the default and to the
+  #       validation in variables.tf without this block being revisited. Each time
+  #       the count was the only thing wrong: the reasoning applies unchanged to
+  #       every key, because each is reached precisely when no usable access token
+  #       is available. It is corrected rather than resolved the other way, since
+  #       trimming the list would leave `challenge`, `refresh` and `signout`
+  #       unreachable, and a caller forced to change a credential, holding only a
+  #       refresh token, or wanting to end a session after its access token expired
+  #       could then never proceed. The durable fix for the pattern is not a third
+  #       correction: `variables.tf` is the single place the set is declared and
+  #       validated, so this block now names the FOUR and points a reader there for
+  #       the list itself rather than restating it.
   for_each = toset(var.public_route_keys)
 
   api_id    = aws_apigatewayv2_api.this.id

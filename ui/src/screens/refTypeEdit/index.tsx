@@ -73,6 +73,7 @@ import {
 } from '../../messages/messages';
 import { ADMIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
 import { BMS_COLOR_TOKENS, FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../../theme/tokens';
+import { ScreenTitle } from '../../layout/ScreenTitle';
 
 /*
  * WHY : Alternatives Considered: declaring the ADD destination here as well, beside the pattern below.
@@ -722,7 +723,7 @@ export function RefTypeEditScreen(): ReactElement {
         programName={REF_TYPE_EDIT_PROGRAM_NAME}
         now={paintedAt}
       />
-      <Typography.Title level={3}>{REF_TYPE_EDIT_SUBTITLE}</Typography.Title>
+      <ScreenTitle>{REF_TYPE_EDIT_SUBTITLE}</ScreenTitle>
       {/*
         Trade-offs: the two controls are laid out by grouping rather than at the mapset's `POS=(12,26)`
         and `POS=(14,26)`, which is documented gap G1. What is kept is the pair's order, the label-to-

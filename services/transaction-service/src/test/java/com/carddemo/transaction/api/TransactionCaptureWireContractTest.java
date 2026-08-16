@@ -101,6 +101,25 @@ class TransactionCaptureWireContractTest {
     /** The identifier the stubbed append reports back, at the declared width. */
     private static final String APPENDED_ID = "0000000000000042";
 
+    /**
+     * The authenticated caller every request in this class carries.
+     *
+     * <p>⚠️ Assumptions: a principal is supplied on every request because BOTH handlers now require one --
+     * each passes its caller's name to the service so the confirmation binding can be scoped to it. This
+     * class stands the controller up WITHOUT the security chain, so nothing else would populate it, and a
+     * request lacking one would fail the handler's own null requirement and report 500 for every case.</p>
+     */
+    private static final java.security.Principal CALLER = () -> "TESTUSR1";
+
+    /**
+     * A stand-in sealed binding for the stubbed preview, shaped as the sealer's grammar.
+     *
+     * <p>Assumptions: this class stubs the service, so no real seal happens and the value's only requirement
+     * is that it be a plausible token the writer will render. Its opening is asserted where the sealing
+     * actually occurs, in {@code TransactionAddServiceTest}.</p>
+     */
+    private static final String SEALED_BINDING = "v2.0123456789abcdef.QUJDREVGR0hJSktMTU5PUFFS";
+
     /** The capture this controller delegates to, stubbed per test. */
     private TransactionAddService addService;
 
@@ -161,7 +180,7 @@ class TransactionCaptureWireContractTest {
 
     /** Arranges the capture to answer with an appended row, so an admitted body reaches 201. */
     private void theCaptureAppends() {
-        when(this.addService.addTransaction(any())).thenReturn(new TransactionAddResponse(
+        when(this.addService.addTransaction(any(), any(), any())).thenReturn(new TransactionAddResponse(
                 APPENDED_ID, Money.of("1234.50"), "Transaction added successfully."));
     }
 
@@ -199,12 +218,13 @@ class TransactionCaptureWireContractTest {
         theCaptureAppends();
 
         this.mockMvc.perform(post(TransactionController.BASE_PATH)
+                        .principal(CALLER)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body(ACCOUNT_ID, CARD_NUMBER, "1234.50")))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.transactionId").value(APPENDED_ID));
 
-        verify(this.addService).addTransaction(any());
+        verify(this.addService).addTransaction(any(), any(), any());
     }
 
     /**
@@ -227,6 +247,7 @@ class TransactionCaptureWireContractTest {
         theCaptureAppends();
 
         this.mockMvc.perform(post(TransactionController.BASE_PATH)
+                        .principal(CALLER)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body(accountId, cardNumber, "1234.50")))
                 .andExpect(status().isCreated());
@@ -251,6 +272,7 @@ class TransactionCaptureWireContractTest {
     @DisplayName("refuse a submission carrying neither key, per the residual arm at line 224")
     void refusesASubmissionCarryingNeitherKey() throws Exception {
         this.mockMvc.perform(post(TransactionController.BASE_PATH)
+                        .principal(CALLER)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body("", "", "1234.50")))
                 .andExpect(status().isBadRequest())
@@ -258,7 +280,7 @@ class TransactionCaptureWireContractTest {
                 .andExpect(jsonPath("$.fieldErrors[0].message")
                         .value(TransactionAddRequest.KEY_FIELD_REQUIRED));
 
-        verify(this.addService, never()).addTransaction(any());
+        verify(this.addService, never()).addTransaction(any(), any(), any());
     }
 
     /**
@@ -282,16 +304,17 @@ class TransactionCaptureWireContractTest {
     @Test
     @DisplayName("admit a copy request carrying only a key, per the lone validation at line 473")
     void admitsACopyRequestCarryingOnlyAKey() throws Exception {
-        when(this.addService.copyLastTransactionData(any()))
+        when(this.addService.copyLastTransactionData(any(), any(), any()))
                 .thenReturn(TransactionAddPreview
                         .prompting(Money.of("42.75"), "Confirm to add this transaction...",
-                                ACCOUNT_ID, "4111111111111111")
+                                ACCOUNT_ID, "4111111111111111", SEALED_BINDING)
                         .withCopiedSource(new CopiedTransactionData("0000000000000001", "02", "0002",
                                 "ATM TERM", "FUEL PURCHASE", "987654321", "FUEL STOP", "TACOMA",
                                 "98402", "2026-01-10", "2026-01-11")));
 
         this.mockMvc.perform(post(TransactionController.BASE_PATH
                                 + TransactionController.COPY_LAST_PATH)
+                        .principal(CALLER)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"accountId\":\"" + ACCOUNT_ID + "\"}"))
                 .andExpect(status().isOk())
@@ -299,8 +322,8 @@ class TransactionCaptureWireContractTest {
                 .andExpect(jsonPath("$.copied.typeCode").value("02"))
                 .andExpect(jsonPath("$.copied.merchantZip").value("98402"));
 
-        verify(this.addService).copyLastTransactionData(any());
-        verify(this.addService, never()).addTransaction(any());
+        verify(this.addService).copyLastTransactionData(any(), any(), any());
+        verify(this.addService, never()).addTransaction(any(), any(), any());
     }
 
     /**
@@ -319,11 +342,12 @@ class TransactionCaptureWireContractTest {
     void refusesACopyRequestCarryingADataMember() throws Exception {
         this.mockMvc.perform(post(TransactionController.BASE_PATH
                                 + TransactionController.COPY_LAST_PATH)
+                        .principal(CALLER)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"accountId\":\"" + ACCOUNT_ID + "\",\"typeCode\":\"01\"}"))
                 .andExpect(status().isBadRequest());
 
-        verify(this.addService, never()).copyLastTransactionData(any());
+        verify(this.addService, never()).copyLastTransactionData(any(), any(), any());
     }
 
     /**
@@ -341,6 +365,7 @@ class TransactionCaptureWireContractTest {
         theCaptureAppends();
 
         this.mockMvc.perform(post(TransactionController.BASE_PATH)
+                        .principal(CALLER)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body(ACCOUNT_ID, "", "1234.50")))
                 .andExpect(status().isCreated());
@@ -361,10 +386,11 @@ class TransactionCaptureWireContractTest {
     @Test
     @DisplayName("admit a negative amount, whose minus the record's sign position declares")
     void admitsANegativeAmount() throws Exception {
-        when(this.addService.addTransaction(any())).thenReturn(new TransactionAddResponse(
+        when(this.addService.addTransaction(any(), any(), any())).thenReturn(new TransactionAddResponse(
                 APPENDED_ID, Money.of("-1234.50"), "Transaction added successfully."));
 
         this.mockMvc.perform(post(TransactionController.BASE_PATH)
+                        .principal(CALLER)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body(ACCOUNT_ID, "", "-1234.50")))
                 .andExpect(status().isCreated())
@@ -425,6 +451,7 @@ class TransactionCaptureWireContractTest {
         //       expectation reports "expected 400 but was 201" for four different forms and leaves a
         //       reader to work out which one and why; the cost is two statements where one would do.
         MvcResult refused = this.mockMvc.perform(post(TransactionController.BASE_PATH)
+                        .principal(CALLER)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body(ACCOUNT_ID, "", rawAmount)))
                 .andReturn();
@@ -446,7 +473,7 @@ class TransactionCaptureWireContractTest {
         //       refusal from a normalisation. Every one of these four forms previously REACHED the
         //       service, as a value it could not tell apart from the canonical one, so "the body was
         //       refused" and "the append did not happen" are two different facts here and both matter.
-        verify(this.addService, never()).addTransaction(any());
+        verify(this.addService, never()).addTransaction(any(), any(), any());
     }
 
     /**
@@ -469,12 +496,13 @@ class TransactionCaptureWireContractTest {
                 .replace("\"amount\":\"1234.50\"", "\"amount\":1234.50");
 
         this.mockMvc.perform(post(TransactionController.BASE_PATH)
+                        .principal(CALLER)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(numericAmount))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message")
                         .value(GlobalExceptionHandler.MESSAGE_MALFORMED_REQUEST));
 
-        verify(this.addService, never()).addTransaction(any());
+        verify(this.addService, never()).addTransaction(any(), any(), any());
     }
 }

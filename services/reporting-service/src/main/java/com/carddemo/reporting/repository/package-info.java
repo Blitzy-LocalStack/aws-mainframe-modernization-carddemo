@@ -68,27 +68,23 @@
  *
  * <h2>The closed inventory: this charter plus six interfaces</h2>
  *
- * <p>Refactoring Rationale: this inventory formerly declared itself a <b>target contract</b>
- * rather than a measurement, on the ground that a role named in it with no file beside this one
- * was planned rather than missing. That caveat is spent: all six interfaces are authored, so the
- * inventory below is now a target contract <em>and</em> a measurement of this directory at the same
- * time, and a reader can take it in the present tense without qualification. The caveat is
- * recorded rather than deleted because the sibling charters still carry the same wording where
- * their own sets are still incomplete, and a reader comparing the two should be able to see that
- * the difference is a difference in delivery rather than in convention. The count remains a
- * closed set on both readings: a file beyond the set is a defect and not an addition, which
- * is the same guarantee the sibling projection charter states for its own set at its L11.
- * Refactoring Rationale: that count was 6 and is now 7.
- * {@code CategoryBalanceReportRepository} arrived with the category-balance report of
- * {@code app/jcl/PRTCATBL.jcl}, so the closed set is seven and the defect an eighth.
- * Refactoring Rationale: the sentence retiring the caveat said "all five interfaces are authored"
- * while the same addition had already moved the heading above it to six, the file total to seven and
- * the list below to six named roles. Five was the interface count before
- * {@code CategoryBalanceReportRepository} arrived, and it survived the addition because it is prose
- * about a withdrawn caveat rather than one of the figures the enumeration re-derives -- so the
- * paragraph announcing the inventory was a measurement contradicted the measurement three lines
- * later. It now says six, taken from this directory: six interface files beside this charter, each
- * named in the list below.
+ * <p>⚠️ Refactoring Rationale: four stacked paragraphs stood here, each narrating the
+ * correction of the one above it -- a caveat that the inventory was a target rather than a
+ * measurement, its retirement, a count moving from six to seven when
+ * {@code CategoryBalanceReportRepository} arrived, and then a correction of the retirement sentence
+ * for having said five where it meant six. They are consolidated into this one because a register of
+ * successive counts is not a rationale: a reader arriving at an inventory needs the figure that holds
+ * and the reason it is closed, and four figures in four paragraphs left the current one to be worked
+ * out by reading them in order. What each recorded is kept exactly once, below.
+ *
+ * <p>The inventory is a measurement of this directory AND a closed contract, and both readings are
+ * stated because they answer different questions. As a measurement it is seven files -- this charter
+ * and six interfaces, each named in the list below -- taken by reading the directory rather than by
+ * carrying a figure forward. As a contract it is closed: a file beyond the set is a defect and not an
+ * addition, which is the same guarantee the sibling projection charter states for its own set at its
+ * L11. The measurement and the contract can only agree while every named role is authored, which is
+ * now the case; the sibling charters still qualify their own inventories as targets alone, and that
+ * difference is a difference in delivery rather than in convention.
  *
  * <p>Seven files, and an eighth is a defect rather than an addition:
  * <ul>

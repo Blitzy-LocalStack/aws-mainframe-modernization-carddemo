@@ -31,7 +31,7 @@
  */
 
 import { ConfigProvider } from 'antd';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -49,6 +49,7 @@ import type {
   PendingAuthSummary,
 } from '../../api/types';
 import { AppShell } from '../../layout/AppShell';
+import { SHARED_MESSAGES } from '../../messages/messages';
 import { fieldErrorId } from '../../layout/fieldHelp';
 import { cardDemoTheme } from '../../theme/antdTheme';
 import {
@@ -56,6 +57,7 @@ import {
   AUTH_SUMMARY_SELECTION_PROMPT,
   AuthSummaryScreen,
   accountIdRefusal,
+  describeListingFailure,
   selectionActionLabel,
 } from './index';
 
@@ -275,6 +277,198 @@ async function fetchPage(): Promise<void> {
 }
 
 /**
+ * Builds a problem document carrying one status and one sentence, as the transport delivers one.
+ *
+ * Assumptions: it names no field, because the statuses these cases pass carry no per-field entry -- a
+ * fault and a misroute are whole-request outcomes.
+ * @param {number} status - The HTTP status the failure carries.
+ * @param {string} message - Whatever sentence the answer carried.
+ * @returns {ApiError} The normalised document the screen's mapping reads.
+ */
+function problemWith(status: number, message: string): ApiError {
+  return {
+    code: 'CARDDEMO-PAUS-0002',
+    secondaryCode: '',
+    message,
+    severity: 'CRITICAL',
+    subsystem: 'APPLICATION',
+    status,
+    correlationId: 'UITESTAUTH000000000BB',
+    path: '/api/v1/authorizations',
+    timestamp: '2022-07-18 22:10:31.000000',
+    fieldErrors: [],
+    abend: null,
+  };
+}
+
+/**
+ * Builds a listing answer this case settles itself, so a read can be held in flight across a turn.
+ * @returns {{ promise: Promise<ReturnType<typeof listing>>; settle: () => void }} The held answer and
+ *   the function that delivers it.
+ */
+function heldListing(): {
+  readonly promise: Promise<ReturnType<typeof listing>>;
+  readonly settle: () => void;
+} {
+  /**
+   * Stands in until the promise's executor has run, so the binding is never read unset.
+   * @returns {never} Never returns; a call means the case settled before the read was armed.
+   * @throws {Error} Always, for that reason.
+   */
+  function notYetArmed(): never {
+    throw new Error('the held listing was settled before it was armed');
+  }
+
+  let deliver: (answer: ReturnType<typeof listing>) => void = notYetArmed;
+  const promise = new Promise<ReturnType<typeof listing>>(
+    /**
+     * Captures the answering route without taking it.
+     * @param {(answer: ReturnType<typeof listing>) => void} resolve - Answers the held read.
+     * @returns {void} Nothing; the read is held until the case answers it.
+     */
+    function holdItOpen(resolve): void {
+      deliver = resolve;
+    },
+  );
+
+  return {
+    promise,
+    /**
+     * Answers the held read with a full page for the account it was opened under.
+     * @returns {void} Nothing; the awaiting caller resumes.
+     */
+    settle(): void {
+      deliver(listing());
+    },
+  };
+}
+
+/**
+ * A read still in flight cannot repaint the account panel after the scope has been refused away.
+ *
+ * ⚠️ Purpose: the panel above the table carries the account holder's NAME, both address lines,
+ * the phone number and four money totals, and this screen writes it from inside the read rather than
+ * from the page envelope the paging hook guards. A turn whose entry is blank or non-numeric clears the
+ * scope and the panel, and it used to leave the outstanding read admissible -- so that read settled and
+ * put the previous account holder's details back above an emptied entry field, attributing them to
+ * nothing the operator could see.
+ *
+ * Assumptions: the verdict is read off the CUSTOMER NAME and the address line, because those two come
+ * only from the summary the read writes. The rows are not asserted: the paging hook discards a
+ * superseded page on its own, so a table assertion would pass with the defect fully present.
+ *
+ * Assumptions: the second turn is REFUSED rather than scoped to another account, because the refusal path
+ * is the one that lacked the withdrawal -- the scope-change path had it -- and a case that scoped to a
+ * second account would exercise the half that already worked.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function doesNotRepaintARefusedScopeFromAReadInFlight(): Promise<void> {
+  const held = heldListing();
+
+  listStub().mockReturnValueOnce(held.promise);
+
+  render(renderAuthSummary());
+  await userEvent.type(filterControl(), ELEVEN_DIGIT_ACCOUNT_ID);
+  await userEvent.keyboard('{Enter}');
+
+  expect(
+    listStub(),
+    'the first read must be outstanding for the ordering to be under test',
+  ).toHaveBeenCalledTimes(1);
+
+  await userEvent.clear(filterControl());
+  await userEvent.type(filterControl(), SHORT_ACCOUNT_ID);
+  await userEvent.keyboard('{Enter}');
+
+  expect(screen.getByText(accountIdRefusal('NOT_OK'))).toBeInTheDocument();
+
+  await act(
+    /**
+     * Delivers the answer to the read the refused turn left outstanding.
+     * @returns {Promise<void>} Resolves once its continuation has run.
+     */
+    async (): Promise<void> => {
+      held.settle();
+      await Promise.resolve();
+    },
+  );
+
+  const cleared = summary();
+
+  /*
+   * Assumptions: the two values are read through `String(...)` because the published summary types them
+   *   as nullable -- a row may carry no name and no address -- and a matcher will not take `null`. The
+   *   fixture supplies both, so the conversion narrows a type without weakening the assertion.
+   */
+  expect(
+    screen.queryByText(String(cleared.customerName)),
+    'the refused turn cleared the panel, so the account holder must not reappear',
+  ).toBeNull();
+  expect(
+    screen.queryByText(String(cleared.addressLine1)),
+    'nor may the address the same summary carried',
+  ).toBeNull();
+  expect(
+    listStub(),
+    'a refused scope issues no read of its own, so the count must not have moved',
+  ).toHaveBeenCalledTimes(1);
+}
+
+/**
+ * A 404 is reported as an unexpected condition and never as an account that does not exist.
+ *
+ * ⚠️ Purpose: this operation declares NO 404 -- an account with no summary row answers 200 with
+ * zero counts and an empty page, which the contract states on the 200 itself -- so the mapping that
+ * turned a 404 into "Account ID NOT found..." described an outcome the service cannot produce. A 404
+ * arriving anyway means the request reached something other than the operation, and the sentence has to
+ * say so rather than making a routing fault look like a business answer.
+ *
+ * Assumptions: the answer's OWN sentence is asserted absent as well. Whatever produced an undeclared 404
+ * is not this service, so its body is a proxy's text, and falling through to it would put words on the
+ * message band that nothing in this migration authored.
+ * @returns {void} Completion of the case; the assertions are its effect.
+ */
+function reportsAnUndeclared404AsAnUnexpectedCondition(): void {
+  const notice = describeListingFailure(problemWith(404, 'Not Found'));
+
+  expect(notice?.message).toBe(SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED);
+  expect(
+    notice?.message,
+    'a status the operation does not declare is not an account-not-found answer',
+  ).not.toBe(SHARED_MESSAGES.ACCOUNT_ID_NOT_FOUND);
+  expect(notice?.message, 'and a proxy sentence is not shown to the operator').not.toBe(
+    'Not Found',
+  );
+}
+
+/**
+ * A 500 keeps the abend replacement the diagnostics register gives it.
+ *
+ * Assumptions: this sits beside the case above so the pair states which statuses share one sentence and
+ * why they share it for different reasons -- eight of the ten source diagnostics are replaced by it, and
+ * the undeclared 404 joins them as a condition with no authored sentence of its own.
+ * @returns {void} Completion of the case; the assertions are its effect.
+ */
+function reportsAServiceFaultAsAnUnexpectedCondition(): void {
+  expect(describeListingFailure(problemWith(500, 'Internal Server Error'))?.message).toBe(
+    SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
+  );
+}
+
+/**
+ * A refusal the service authored is shown in its own words.
+ *
+ * Assumptions: a 400 is used, because that is a status this operation DOES declare -- so its body is the
+ * service's own sentence and showing it unchanged is Transformation Rule T8 rather than a fall-through.
+ * @returns {void} Completion of the case; the assertions are its effect.
+ */
+function showsAnAuthoredRefusalInItsOwnWords(): void {
+  expect(
+    describeListingFailure(problemWith(400, 'Please correct the highlighted fields'))?.message,
+  ).toBe('Please correct the highlighted fields');
+}
+
+/**
  * A numeric identifier narrower than the declared field is refused locally, in the source's words.
  *
  * Assumptions: BOTH halves are asserted — the sentence appears AND no request was issued — because the
@@ -464,6 +658,19 @@ function usesTheSharedNavigationSeam(): void {
 /** Registers every case of this suite. */
 function authSummaryCases(): void {
   it('refuses a short identifier locally', refusesAShortIdentifierLocally);
+  it(
+    'does not repaint a refused scope from a read in flight',
+    doesNotRepaintARefusedScopeFromAReadInFlight,
+  );
+  it(
+    'reports an undeclared 404 as an unexpected condition',
+    reportsAnUndeclared404AsAnUnexpectedCondition,
+  );
+  it(
+    'reports a service fault as an unexpected condition',
+    reportsAServiceFaultAsAnUnexpectedCondition,
+  );
+  it('shows an authored refusal in its own words', showsAnAuthoredRefusalInItsOwnWords);
   it('accepts the declared width', acceptsTheDeclaredWidth);
   it('links the filter refusal to the control', linksTheFilterRefusalToTheControl);
   it('names both address lines', namesBothAddressLines);

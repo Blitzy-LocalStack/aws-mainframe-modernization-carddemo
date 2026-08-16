@@ -16,9 +16,11 @@
  *
  * Exports and failures
  * --------------------
- * The module evaluates to {@link AuthSummaryScreen} (as the default and as a named export, so the
- * lazy route table can reach it under either), the two builders {@link buildAuthSummaryDescriptions}
- * and {@link buildPendingAuthColumns}, and the verbatim constants transcribed from the mapset. It
+ * The module publishes {@link AuthSummaryScreen} under its NAME ONLY -- the default export it once
+ * carried alongside was withdrawn, for the reason recorded at the foot of this file -- together with the
+ * two builders {@link buildAuthSummaryDescriptions} and {@link buildPendingAuthColumns} and the verbatim
+ * constants transcribed from the mapset. `ui/src/router.tsx` republishes the named export under the
+ * `default` key that `React.lazy` requires, so the lazy route reaches it through that adapter. It
  * declares no wire shape of its own and reads no module-level input. Nothing here throws: the one
  * failure source is the listing request, which the shared client normalises into an `ApiError` that
  * {@link describeListingFailure} turns into a message-band sentence.
@@ -65,10 +67,18 @@
  * with a server-derived paint instant, so `ui/src/layout/AppShell.tsx` renders the band above the
  * outlet with this screen's own `Tran:` and `Prog:` values in it.
  *
- * Assumptions: only the header zone is delegated. The message band and the key legend stay composed
- * here, because this mapset's message field is 78 characters wide and its legend colour and bindings
- * are this screen's, and `useShellSlot` renders a zone only when it is delegated -- so delegating
- * those two as well would paint a second live region and a second legend beside the ones below.
+ * ⚠️ Refactoring Rationale: ALL THREE persistent zones are delegated, where this said only the
+ * header was. The screen delegated its message and its legend in the same revision that mounted the
+ * shell -- the `useShellSlot` call passes `screen`, `now`, `message` and `pfKeys`, and the body's last
+ * element is the mapset's row-22 selection prompt -- but this paragraph kept the earlier arrangement's
+ * reasoning, so a reader was told to expect two locally composed bands that are not there. The width
+ * and the legend colour it argued from are both carried across the delegation: the band receives this
+ * mapset's name so it applies the mapset's own width, and the legend takes the yellow this mapset paints
+ * because that colour is the slot's default.
+ *
+ * Assumptions: nothing is composed twice. `useShellSlot` renders a zone only when it is delegated, so
+ * the reason for withdrawing the two local bands was precisely that keeping them beside a mounted shell
+ * would paint a second live region and a second legend.
  */
 
 import { Descriptions, Flex, Form, Input, Radio, Table, Typography, theme } from 'antd';
@@ -107,6 +117,7 @@ import {
 } from '../../theme/tokens';
 import { RECORD_VIEW_COLUMNS } from '../../layout/recordLayout';
 import { VISUALLY_HIDDEN_STYLE, fieldAriaProps, fieldErrorHelp } from '../../layout/fieldHelp';
+import { ScreenTitle } from '../../layout/ScreenTitle';
 
 /**
  * The `var(--…)` reference form of the design tokens, as antd's theme hook publishes it.
@@ -593,6 +604,18 @@ export function resolveSelectionAction(flag: string, key: string | null): Select
 }
 
 /**
+ * The status this operation does not declare, kept as a named value because it is reported as a fault.
+ *
+ * Assumptions: named rather than written twice as a literal, so the branch below reads as the contract
+ * statement it is: the listing has no not-found outcome, so this status can only mean the request
+ * reached something other than the operation.
+ */
+const UNDECLARED_NOT_FOUND_STATUS = 404;
+
+/** The lowest status the listing's own fault family starts at. */
+const SERVICE_FAULT_STATUS = 500;
+
+/**
  * Reduces a listing failure to the sentence the target shows for it.
  *
  * Trade-offs: the source composes ten diagnostics that end in a CICS response code or an IMS status
@@ -608,10 +631,26 @@ export function resolveSelectionAction(flag: string, key: string | null): Select
  * problem document.
  *
  * Assumptions: the status selects the family, since that is the only member of the problem document
- * that carries the same distinction the source's `EVALUATE WS-RESP-CD` did. A 404 takes the not-found
- * replacement the register gives L836 and L886, a 5xx takes the abend replacement it gives the other
- * eight, and any other refusal shows the service's own sentence when it sent one -- it is authored
- * server-side to be read, so rewording it here would be a second voice for one message.
+ * that carries the same distinction the source's `EVALUATE WS-RESP-CD` did. A 5xx takes the abend
+ * replacement the register gives eight of the ten sites, and any other refusal shows the service's own
+ * sentence when it sent one -- it is authored server-side to be read, so rewording it here would be a
+ * second voice for one message.
+ *
+ * ⚠️ Refactoring Rationale: a 404 was mapped to `ACCOUNT_ID_NOT_FOUND` and is now treated as an
+ * unexpected condition, because this operation DECLARES NO 404. Its contract settles the absent account
+ * twice over: `services/authorization-service/src/main/resources/openapi/authorization-api.yaml` states
+ * on the 200 that an account with no summary row answers 200 with zero counts, an empty item array and
+ * absent cursors, and that "This operation therefore has no 404" -- following the baseline, which
+ * RENDERS the absence rather than reporting it, moving zero into all six aggregate positions at
+ * `COPAUS0C.cbl` L800-L807 and skipping the browse at L354-L356. So an operator who reached this screen
+ * for an account that does not exist sees an empty summary, and the mapping could not fire for the
+ * reason it named. A 404 arriving anyway is a misroute -- a gateway or load-balancer rule that no longer
+ * reaches this operation -- which is why it now takes the same unexpected-condition sentence a 5xx takes.
+ *
+ * Assumptions: an undeclared 404 does NOT fall through to the service's own sentence, and that is the
+ * point of naming it. Whatever answered is not this service, so its body is a proxy's text rather than
+ * an authored operator sentence, and showing it would put words on the message band that nothing in this
+ * migration wrote.
  * @param {ApiError | null} error - The normalised problem document, or `null` when nothing failed.
  * @returns {ScreenNotice | null} The sentence and appearance to show, or `null` when there is no
  *   failure to report.
@@ -620,13 +659,7 @@ export function describeListingFailure(error: ApiError | null): ScreenNotice | n
   if (error === null) {
     return null;
   }
-  if (error.status === 404) {
-    return {
-      message: SHARED_MESSAGES.ACCOUNT_ID_NOT_FOUND,
-      severity: AUTH_SUMMARY_MESSAGE_SEVERITY,
-    };
-  }
-  if (error.status >= 500) {
+  if (error.status === UNDECLARED_NOT_FOUND_STATUS || error.status >= SERVICE_FAULT_STATUS) {
     return {
       message: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
       severity: AUTH_SUMMARY_MESSAGE_SEVERITY,
@@ -1199,11 +1232,11 @@ export function buildPendingAuthColumns(
  *
  * Chrome is part composed and part delegated
  * -----------------------------------------
- * Assumptions: this screen mounts its own message band and function-key bar, and DELEGATES the shared
- * title band to the frame. `ui/src/layout/AppShell.tsx` is the frame, `ui/src/router.tsx` mounts it as
- * the authenticated layout route, and it paints each of its zones only for a screen that has published
- * one -- so publishing the screen identity through `useShellSlot` gets the band this mapset omits while
- * the two bands composed below are left untouched.
+ * Assumptions: this screen composes no chrome of its own and DELEGATES all three persistent zones to
+ * the frame. `ui/src/layout/AppShell.tsx` is the frame, `ui/src/router.tsx` mounts it as the layout
+ * route, and it paints each zone only for a screen that has published one -- so the one `useShellSlot`
+ * call below carries the title band this mapset omits, the row-23 message line and the row-24 legend
+ * together, and the body renders the mapset's own regions and nothing else.
  *
  * Refactoring Rationale: this section previously stated that `ui/src/layout/` held no shell component
  * and concluded that every screen must therefore compose all of its own chrome. The first half was
@@ -1213,7 +1246,9 @@ export function buildPendingAuthColumns(
  * `PIC X(40)` title constants belong to the band rather than to this mapset. Both grounds were
  * defensible and their combination was not, because with the shell mounted by no route the omitted band
  * was painted by nobody: rows 1 and 2 of this screen -- `TRNNAME`, `TITLE01`, `CURDATE`, `PGMNAME`,
- * `TITLE02` and `CURTIME` -- rendered nothing at all.
+ * `TITLE02` and `CURTIME` -- rendered nothing at all. The remedy went further than the band: with the
+ * shell mounted, the two locally composed bands would have doubled the shell's own, so they were
+ * withdrawn and delegated with it.
  *
  * Assumptions: the title constants still belong to the band rather than to this module, which is why
  * the band is delegated rather than composed. What this mapset contributes to the heading is the row-3
@@ -1362,6 +1397,32 @@ export function AuthSummaryScreen(): ReactElement {
   });
 
   /**
+   * Withdraws every read outstanding under the scope being left, and clears what described it.
+   *
+   * ⚠️ Refactoring Rationale: this was open-coded on the scope-CHANGE path and MISSING from the
+   * refusal path, and the omission is a disclosure. A turn whose account identifier is blank or
+   * non-numeric clears the scope and the panel, but a `readPage` opened under the PREVIOUS account was
+   * still outstanding, and its guard compares the generation it captured against a counter nothing had
+   * advanced -- so it settled as current and put the previous account holder's name, address and
+   * balances back above an emptied entry field, after the screen had been scoped away from that account.
+   * Naming the pair means neither half can be written without the other.
+   *
+   * Assumptions: the generation is advanced BEFORE the state is cleared, so there is no instant at which
+   * an outstanding read is still admissible and the panel is already empty. Both happen in one event
+   * handler, so nothing renders between them, but the order states the intent for the next reader.
+   *
+   * Assumptions: the scope itself is not set here. The two callers leave the scope in different places
+   * -- a refusal empties it, a change moves it to the entered account -- and folding that into this
+   * helper would make it decide something only its caller knows.
+   * @returns {void} Nothing; nothing outstanding can repaint and no panel describes the account left.
+   */
+  function withdrawScopedReads(): void {
+    readGeneration.current += 1;
+    setSummary(null);
+    setServiceMessage(null);
+  }
+
+  /**
    * Runs the source program's Enter arm.
    *
    * Assumptions: the four steps run in the source's order and short-circuit exactly where it does,
@@ -1381,9 +1442,8 @@ export function AuthSummaryScreen(): ReactElement {
     if (fault !== null) {
       setEntryFault(fault);
       setNotice({ message: accountIdRefusal(fault), severity: AUTH_SUMMARY_MESSAGE_SEVERITY });
+      withdrawScopedReads();
       setScopedAccountId('');
-      setSummary(null);
-      setServiceMessage(null);
       return;
     }
     setEntryFault(null);
@@ -1455,10 +1515,10 @@ export function AuthSummaryScreen(): ReactElement {
      *       another. Advancing the generation is the other half: it withdraws any read still outstanding
      *       under the previous scope, so that read cannot repaint what this clears. The source has no
      *       equivalent moment because it composes the whole screen once per turn, after its read.
+     * WHY : Refactoring Rationale: the pair is performed by `withdrawScopedReads` rather than open-coded
+     *       here, because writing it in one place is what left the refusal path above without it.
      */
-    readGeneration.current += 1;
-    setSummary(null);
-    setServiceMessage(null);
+    withdrawScopedReads();
     setScopedAccountId(accountIdEntry);
   }
 
@@ -1593,11 +1653,14 @@ export function AuthSummaryScreen(): ReactElement {
    *       screen: this module documented that the band was the shell's to paint, and no shell was
    *       mounted and nothing published to it, so the transaction identifier, program name and clock
    *       reached no display at all.
-   * WHY : Assumptions: the resolved `bindings` and `invoke` from this screen's own `usePfKeys` call are
-   *       handed over rather than re-derived by the shell, and delegating them is also what keeps the
-   *       keyboard singly owned. The shell binds its own sign-off key only while NO screen has published
-   *       one, so publishing here makes it stand down and exactly one document listener stays installed
-   *       while this screen is mounted.
+   * WHY : ⚠️ Assumptions: the resolved `bindings` and `invoke` from this screen's own `usePfKeys`
+   *       call are handed over rather than re-derived by the shell, so what is delegated is the legend to
+   *       RENDER while this screen keeps the keyboard: an activation of a rendered control is forwarded
+   *       straight back to `invoke`. The claim that stood here, that the shell "binds its own sign-off key
+   *       only while NO screen has published one" and is made to stand down by publishing, is withdrawn.
+   *       The shell installs NO keyboard listener at all and offers sign-off as a rendered control, for
+   *       the reason recorded at `SHELL_SIGN_OFF_LABEL`, so this screen's listener is the only one
+   *       installed either way -- publishing buys the painted legend, not the ownership.
    * WHY : Assumptions: no `legendColor` is delegated, because this mapset paints its row-24 legend
    *       `COLOR=YELLOW` at L507 to L512, which is the slot's own default and the majority across the
    *       mapset population. Stating it would suggest this screen departs from the majority when it does
@@ -1642,16 +1705,20 @@ export function AuthSummaryScreen(): ReactElement {
   return (
     <Flex vertical gap="large">
       {/*
-       * Assumptions: the heading is `level={3}`, matching the authored card screens, because a screen's
-       * own title sits one level above the shared title band -- `ScreenHeader` renders that band at
-       * `level={4}`. The sub-title is painted `COLOR=NEUTRAL` at `COPAU00.bms` L75, which the theme
-       * bridge resolves to `colorTextSecondary`; the heading size and line height come from the level
-       * itself, which is already the token pair the design mapping assigns to a screen title, so no
-       * font token is restated here.
+       * ⚠️ Refactoring Rationale: the rank comes from `ui/src/layout/ScreenTitle.tsx` and this note
+       * previously stated the defect as though it were the design: that the heading is `level={3})`
+       * because "a screen's own title sits one level above the shared title band". It sits BELOW it. The
+       * band is painted on rows 1 and 2 of every mapset including the four extension mapsets, and this
+       * sub-title on row 4 of this one, so the band is the page's title and this is the section's -- and
+       * a rank-3 caption above a rank-4 band told an operator navigating by heading the opposite. The
+       * sub-title is painted `COLOR=NEUTRAL` at `COPAU00.bms` L75, which the theme bridge resolves to
+       * `colorTextSecondary`; the size and line height now come from the bridge entries the shared
+       * component applies rather than from the rank, which is what lets the rank be chosen for the
+       * outline without moving the appearance.
        */}
-      <Typography.Title level={3} style={{ color: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL] }}>
+      <ScreenTitle style={{ color: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL] }}>
         {AUTH_SUMMARY_SUBTITLE}
-      </Typography.Title>
+      </ScreenTitle>
       {/*
        * WHY : Alternatives Considered: `component={false}` renders NO form element, and the
        *       alternative was an ordinary form with `onFinish` carrying the Enter arm. It is rejected

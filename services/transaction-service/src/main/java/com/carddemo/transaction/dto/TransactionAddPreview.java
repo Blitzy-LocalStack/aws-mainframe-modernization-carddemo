@@ -1,6 +1,7 @@
 package com.carddemo.transaction.dto;
 
 import com.carddemo.common.money.Money;
+import com.carddemo.common.security.CardNumberMasker;
 
 import java.util.Objects;
 
@@ -16,8 +17,16 @@ import java.util.Objects;
  *
  * <p>This record is the Java form of the {@code TransactionAddPreview} schema in
  * {@code openapi/transaction-api.yaml} and of the {@code TransactionAddPreview} interface in
- * {@code ui/src/api/transactions.ts}. All three carry the amount and the discriminator and none of them
- * carries an identifier, because no row was written.</p>
+ * {@code ui/src/api/transactions.ts}. All three carry the amount, the discriminator, the resolved
+ * account identifier, the resolved card number MASKED to its last four digits and the opaque binding
+ * token a confirming turn presents. None of them carries a TRANSACTION identifier, because no row was
+ * written, and none of them carries an unmasked primary account number.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: the overview above stated that no shape here carried an identifier at
+ * all, which was false in both directions once the resolved key pair was added: two of the components
+ * ARE identifiers. It is corrected rather than deleted, because the fact it was reaching for is real
+ * and load-bearing -- the absence of a transaction identifier is what distinguishes this shape from
+ * {@link TransactionAddResponse} and what its published schema closes its object around.</p>
  *
  * <p>⚠️ Refactoring Rationale: this record exists because {@link TransactionAddResponse} was being
  * returned on the unconfirmed turn with its identifier left null. That body was invalid against its own
@@ -62,13 +71,30 @@ import java.util.Objects;
  *     for the Enter arm and L473 for the copy arm, and L221 of that paragraph moves the cross-reference's
  *     account identifier into {@code ACTIDINI} on the card key path. Publishing it only on the copy turn
  *     left an ordinary capture unable to show the operator the key the row would carry
- * @param resolvedCardNumber the card number the cross-reference resolved, in FULL and unmasked; never
- *     {@code null}. It is the counterpart of the above: L209 moves the entry's card number over the card
- *     field on the account key path, after which the reference re-sends the screen, so by the time the
- *     confirming keystroke is made the field holds this value. The full number is published rather than a
- *     suffix because a suffix cannot distinguish two cards on one account, which is the only comparison
- *     this disclosure exists to support; the prohibition the sensitive-data contract states is on durable
- *     diagnostics, which is why {@link #toString()} withholds it and this body does not
+ * @param resolvedCardNumberMasked the card number the cross-reference resolved, rendered as twelve
+ *     asterisks followed by its last four digits by
+ *     {@link com.carddemo.common.security.CardNumberMasker#mask(String)}; never {@code null}. ⚠️ It is
+ *     the counterpart of the above: L209 moves the entry's card number over the card field on the account
+ *     key path, after which the reference re-sends the screen, so by the time the confirming keystroke is
+ *     made the terminal field holds that value and the operator has seen which card the row will carry.
+ *     Refactoring Rationale: this component published the SIXTEEN-DIGIT number, arguing that a suffix
+ *     cannot distinguish two cards on one account and that the sensitive-data prohibition covers durable
+ *     diagnostics alone. Both halves were wrong. AAP section 0.4.1.9 masks a primary account number in
+ *     every response except the administrative card-detail endpoint, which this operation is not, and
+ *     this contract's own {@code CardNumber} schema states that the unmasked form "appears on requests
+ *     only; responses carry the masked form" -- so the body contradicted the document that declares it.
+ *     The comparison the full number was published to support is now made by the SERVICE, against
+ *     {@link #confirmationToken}, which is a stronger guarantee than asking a client to compare digits
+ *     it should never have held
+ * @param confirmationToken the opaque, authenticated value a confirming submission presents to prove it
+ *     is confirming THIS resolution; never {@code null}. ⚠️ Assumptions: it is minted by
+ *     {@code com.carddemo.common.web.CursorToken}, which seals the resolved card number under the
+ *     deployment key, binds it to the calling operator and expires it, so a client can neither read the
+ *     number out of it nor manufacture one for a card it was never shown. Alternatives Considered:
+ *     publishing the masked number alone and letting the confirming turn re-resolve from the submitted
+ *     key. Rejected because the cross-reference can change between the two stateless requests, so a
+ *     confirmation would silently write against a card the operator was never shown -- the very hazard
+ *     the withdrawn full-number publication was defending against
  * @param copied the ten data members a copy-last turn lifted out of the stored row, paired with that
  *     row's identifier, or {@code null} on the ordinary capture operation, which copies nothing. See
  *     {@link CopiedTransactionData} for why the eleventh copied value is the {@link #amount()} above and
@@ -96,7 +122,18 @@ public record TransactionAddPreview(
     //       copied block is attached to the copy turn alone, so holding them there published the repaint
     //       on one of the two turns that perform it.
     String resolvedAccountId,
-    String resolvedCardNumber,
+    // WHY : Assumptions: the masked rendering is a component of this shape and the sixteen-digit value
+    //       is a component of nothing. The masking is applied at the one construction site below rather
+    //       than by every caller, so no path can build this shape around an unmasked number by omitting
+    //       a step; the factory takes the resolved number and this component can only ever hold what
+    //       CardNumberMasker returned for it.
+    String resolvedCardNumberMasked,
+    // WHY : Assumptions: the binding token is a component rather than a response header, because a
+    //       client has to carry it back on the NEXT request body and a header would put one half of one
+    //       exchange in a different place from the other. Trade-offs: it lengthens the body by a bounded
+    //       token in exchange for the confirming write being bound to the previewed resolution without
+    //       any primary account number reaching the browser.
+    String confirmationToken,
     // WHY : Assumptions: the member is nullable rather than optional, and it is the fourth component
     //       rather than a fourth shape. Both choices are argued at CopiedTransactionData: the
     //       inclusion policy writes every component on every response, so an absent member is not a
@@ -129,14 +166,26 @@ public record TransactionAddPreview(
      *     {@code null}
      * @param resolvedAccountId the account identifier the key resolution settled on; must not be
      *     {@code null}
-     * @param resolvedCardNumber the card number the cross-reference resolved; must not be {@code null}
-     * @return the shape with its discriminator fixed to {@link #CAPTURE_WITHHELD} and no copied source,
-     *     never {@code null}
+     * @param resolvedCardNumber the card number the cross-reference resolved, in full; must not be
+     *     {@code null}. It is MASKED here and the unmasked value is not retained on the returned shape
+     * @param confirmationToken the opaque binding token a confirming submission presents; must not be
+     *     {@code null}
+     * @return the shape with its discriminator fixed to {@link #CAPTURE_WITHHELD}, its card number
+     *     masked and no copied source, never {@code null}
+     * @throws NullPointerException if {@code resolvedCardNumber} is {@code null}
+     * @throws IllegalArgumentException if {@code resolvedCardNumber} is not sixteen digits, raised by
+     *     the masker, which is a service fault rather than a caller error
      */
     public static TransactionAddPreview prompting(Money amount, String returnMessage,
-            String resolvedAccountId, String resolvedCardNumber) {
+            String resolvedAccountId, String resolvedCardNumber, String confirmationToken) {
+
+        // WHY : Assumptions: the masking happens HERE and not in the mapper, because this shape is
+        //       composed directly by the capture path rather than converted from a stored row -- the
+        //       service's own note records why -- so there is no mapper on this path to place it in.
+        //       Putting it at the single construction site is what makes the component's contract
+        //       true by construction rather than by every caller remembering.
         return new TransactionAddPreview(amount, CAPTURE_WITHHELD, returnMessage, resolvedAccountId,
-                resolvedCardNumber, null);
+                CardNumberMasker.mask(resolvedCardNumber), confirmationToken, null);
     }
 
     /**
@@ -166,26 +215,29 @@ public record TransactionAddPreview(
     public TransactionAddPreview withCopiedSource(CopiedTransactionData source) {
         Objects.requireNonNull(source, "source must not be null");
         return new TransactionAddPreview(this.amount, this.written, this.returnMessage,
-                this.resolvedAccountId, this.resolvedCardNumber, source);
+                this.resolvedAccountId, this.resolvedCardNumberMasked, this.confirmationToken, source);
     }
 
     /**
      * Renders this preview WITHOUT the amount it quotes.
      *
      * <p>Purpose. The amount is a monetary value and is prohibited from a diagnostic rendering by
-     * {@code docs/architecture/observability.md} L1093 to L1112. It is also the only component of this
-     * shape that carries data at all, the other two being a fixed discriminator and a message constant,
-     * so the compiler-generated rendering would have disclosed the whole of what the record holds.</p>
+     * {@code docs/architecture/observability.md} L1093 to L1112. Four of this shape's seven components
+     * carry restricted data -- the amount, the two resolved keys and the sealed binding token -- so the
+     * compiler-generated rendering would have disclosed a money figure, an account number and a sealed
+     * card number in one line.</p>
      *
      * <p>Assumptions: the amount is omitted rather than rounded, bucketed or reported as a digit count.
      * Each of those is an abbreviation of a prohibited value, which the rule's first clause forbids for
      * a reason that applies here in particular: this shape exists to be confirmed, so a bucketed figure
      * in a log would be read as the figure that was confirmed.</p>
      *
-     * <p>Trade-offs: the two remaining components are kept and they answer the question this shape is
-     * logged for -- the discriminator fixed to false proves the turn captured nothing, and the sentence
-     * is the verbatim confirmation prompt. What is lost is the ability to see the normalised figure a
-     * client would be confirming, which the request body and the subsequent capture both carry.</p>
+     * <p>Trade-offs: the three remaining components are kept and they answer the question this shape is
+     * logged for -- the discriminator fixed to false proves the turn captured nothing, the sentence is
+     * the verbatim confirmation prompt, and the copied source says which kind of turn it was. What is
+     * lost is the ability to see the normalised figure a client would be confirming, which the request
+     * body and the subsequent capture both carry, and the ability to tell from a log which account a
+     * withheld turn was about -- recoverable through the correlation identifier on the same records.</p>
      *
      * <p>Assumptions: the copied source is rendered through its OWN {@code toString}, which carries the
      * identifier of the row that was copied and none of the ten values lifted out of it, for the same
@@ -193,20 +245,34 @@ public record TransactionAddPreview(
      * copied row is the one thing that distinguishes a copy turn from a capture turn in a log, and it is
      * a null-or-not fact rather than a business value.</p>
      *
-     * <p>Assumptions: the resolved ACCOUNT identifier is rendered and the resolved CARD number is not.
-     * An account identifier is a business key this service logs on every request through its correlation
-     * fields; a card number is a primary account number, which the same rule prohibits from a durable
-     * diagnostic whether it arrived from a client or from a cross-reference.</p>
+     * <p>⚠️ Refactoring Rationale: NEITHER resolved key is rendered, where the account identifier was.
+     * The note this replaces argued that an account identifier is "a business key this service logs on
+     * every request through its correlation fields". That premise is false and is the reason the
+     * disclosure was invisible: {@code docs/architecture/observability.md} names account identifiers
+     * among the values a durable diagnostic may not hold, and this context's own client module keeps them
+     * out of a request LINE for exactly that reason -- an access log outlives the request. The two
+     * resolved keys are therefore both omitted, and what remains identifies the TURN rather than the
+     * account.</p>
      *
-     * @return a rendering carrying the written discriminator, the return message, the resolved account
-     *     identifier and the copied row's identifier, with the amount, the resolved card number and every
-     *     copied value omitted entirely; never {@code null}
+     * <p>Assumptions: the binding token is omitted too, and that is a confidentiality decision rather
+     * than a length one. It seals the resolved card number, so a token in a durable log is a sealed
+     * primary account number in a durable log -- recoverable by anyone who also holds the deployment key,
+     * which is a smaller step than it looks in an environment where logs and secrets are read by
+     * overlapping sets of people.</p>
+     *
+     * <p>Assumptions: the masked card number is omitted as well, even though publishing it in a response
+     * body is permitted. A rendering exists to answer "what happened on this turn", and a four-digit
+     * suffix answers no question a reader of this log has; carrying it would put a fragment of a primary
+     * account number into a durable store for no diagnostic gain.</p>
+     *
+     * @return a rendering carrying the written discriminator, the return message and the copied row's
+     *     identifier, with the amount, both resolved keys, the binding token and every copied value
+     *     omitted entirely; never {@code null}
      */
     @Override
     public String toString() {
         return "TransactionAddPreview[written=" + this.written
                 + ", returnMessage=" + this.returnMessage
-                + ", resolvedAccountId=" + this.resolvedAccountId
                 + ", copied=" + this.copied + ']';
     }
 }

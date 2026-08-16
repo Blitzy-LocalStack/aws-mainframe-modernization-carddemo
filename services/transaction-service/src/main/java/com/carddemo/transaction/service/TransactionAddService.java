@@ -6,6 +6,7 @@ import com.carddemo.common.error.RecordConflictException;
 import com.carddemo.common.money.Money;
 import com.carddemo.common.validation.DateEditValidator;
 import com.carddemo.common.validation.FieldValidationFlag;
+import com.carddemo.common.web.CursorToken;
 import com.carddemo.transaction.domain.Transaction;
 import com.carddemo.transaction.dto.CopiedTransactionData;
 import com.carddemo.transaction.dto.CopyLastRequest;
@@ -178,6 +179,28 @@ public class TransactionAddService {
 
     /** The request member the card number is keyed by. */
     public static final String FIELD_CARD_NUMBER = "cardNumber";
+
+    /**
+     * The request member the preview's binding token is carried back on.
+     *
+     * <p>Assumptions: a refusal of the token names THIS member rather than {@link #FIELD_CARD_NUMBER},
+     * even though what the token binds is a card number. A per-field entry is what a form marks a
+     * control from, and the card control holds a value the operator typed while the token is a value the
+     * service issued -- marking the control for a fault in the token would point the operator at the one
+     * thing on the screen they cannot correct.</p>
+     */
+    public static final String FIELD_CONFIRMATION_TOKEN = "confirmationToken";
+
+    /**
+     * The stable query name the preview's binding token is sealed under.
+     *
+     * <p>Assumptions: it names the ACTION rather than a resource, because the token binds a decision
+     * about one submission rather than a position in a listing. The value is authenticated but never
+     * carried, so it also purpose-separates this token from the pagination cursors the same sealer
+     * mints: a cursor presented as a confirmation, or the reverse, fails verification rather than being
+     * opened into a value of the wrong kind.</p>
+     */
+    private static final String CONFIRMATION_QUERY_NAME = "transaction-add-confirmation";
 
     /** The request member the transaction type code is keyed by. */
     public static final String FIELD_TYPE_CODE = "typeCode";
@@ -501,15 +524,27 @@ public class TransactionAddService {
      * cross-schema write happens on this path. The balance-affecting write belongs to the payment screen
      * and its own service, and {@code ADD-TRANSACTION} at line 442 writes exactly one file.</p>
      *
+     * <p>⚠️ Assumptions: the sealer and the subject are PARAMETERS rather than injected collaborators,
+     * which is the arrangement {@code TransactionListService.listTransactions} already uses for the same
+     * type. The subject is per-request and cannot be a field on a singleton service, and taking the
+     * sealer beside it keeps one call site handing over both halves of one binding rather than pairing a
+     * constructor-held key with a per-call subject that a reader has to go and find.</p>
+     *
      * @param request the submitted capture, whose shape the API layer has already constrained; must not
      *     be {@code null}
+     * @param confirmationSealer the seam that seals the preview's binding token and opens the one a
+     *     confirming submission presents, of type {@code CursorToken}; must not be {@code null}
+     * @param subject the authenticated operator the binding token is issued to, being the bearer
+     *     token's subject claim; must not be {@code null} or blank
      * @return {@link TransactionAddResponse} carrying the generated identifier, the normalised amount
      *     and the composed sentence when the capture was confirmed and appended; otherwise
      *     {@link TransactionAddPreview} carrying the normalised amount, the discriminator fixed false
      *     and the prompt; never {@code null}
-     * @throws NullPointerException if {@code request} is {@code null}
-     * @throws ClientInputException if a key field, a data field or the confirmation carries a value the
-     *     reference refuses, each carrying that program's own sentence and naming one field
+     * @throws NullPointerException if {@code request}, {@code confirmationSealer} or {@code subject} is
+     *     {@code null}
+     * @throws ClientInputException if a key field, a data field, the confirmation or the binding token
+     *     carries a value the reference refuses, each carrying that program's own sentence and naming
+     *     one field
      * @throws NoSuchElementException if the supplied key resolves to no cross-reference entry, carrying
      *     the absence sentence for the key that was supplied
      * @throws RecordConflictException if the derived identifier is already stored, carrying the
@@ -517,8 +552,12 @@ public class TransactionAddService {
      * @throws IllegalStateException if a read or the append failed for a reason the caller cannot
      *     correct, carrying the sentence the reference emits for that operation
      */
-    public TransactionAddOutcome addTransaction(TransactionAddRequest request) {
+    public TransactionAddOutcome addTransaction(TransactionAddRequest request,
+            CursorToken confirmationSealer, String subject) {
+
         Objects.requireNonNull(request, "request must not be null");
+        Objects.requireNonNull(confirmationSealer, "confirmationSealer must not be null");
+        Objects.requireNonNull(subject, "subject must not be null");
 
         AccountContextClient.CardXref resolved = validateInputKeyFields(request);
         String resolvedCardNumber = resolved.cardNumber();
@@ -555,26 +594,140 @@ public class TransactionAddService {
                 //       lines 173 to 176, so the operator confirming has already been shown the pair.
                 //       Publishing it on one of the two turns left an ordinary capture unable to show
                 //       it, which is the display half of the confirmed-card defect.
+                // WHY : ⚠️ Refactoring Rationale: the card half of that pair is published MASKED and a
+                //       sealed binding token is published beside it, where the sixteen digits used to
+                //       travel. AAP section 0.4.1.9 masks a primary account number in every response but
+                //       the administrative card-detail read, and this contract's own CardNumber schema
+                //       says the unmasked form appears on requests only -- so the body was contradicting
+                //       the document that declares it. The token carries the resolved identity the digits
+                //       used to carry, and carries it in a form the browser cannot read, cannot store as
+                //       a card number and cannot manufacture for a card it was never shown.
                 return TransactionAddPreview.prompting(canonicalAmount, MESSAGE_CONFIRM_ADD,
-                        resolved.accountId(), resolvedCardNumber);
+                        resolved.accountId(), resolvedCardNumber,
+                        confirmationSealer.seal(confirmationBinding(subject), resolvedCardNumber));
             }
             throw new ClientInputException(ApiError.CODE_VALIDATION, FIELD_CONFIRMATION,
                     FieldValidationFlag.NOT_OK, MESSAGE_INVALID_CONFIRMATION);
         }
 
         requireTheConfirmedCardIsTheResolvedCard(request.cardNumber(), resolvedCardNumber);
+        requireTheBindingTokenNamesTheResolvedCard(request.confirmationToken(), resolvedCardNumber,
+                confirmationSealer, subject);
         return appendTransaction(request, resolvedCardNumber);
+    }
+
+    /**
+     * Composes the binding a preview's token is sealed under and opened against.
+     *
+     * <p>Assumptions: the composition goes through {@code CursorToken.binding} rather than being spelled
+     * here, so this token and the pagination cursors of the same context are bound by one rule. The three
+     * parts are the action name, the authenticated subject and {@code SCOPE_NONE}: there is no narrowing
+     * predicate to render for a single submission, and naming its absence explicitly is what that method's
+     * own contract asks for rather than letting a caller omit a scope it should have supplied.</p>
+     *
+     * <p>Assumptions: the SUBJECT is bound and the submitted key is not. Binding the key would make the
+     * token verifiable only against the same key spelling, so a client that previewed by account and
+     * confirmed by the resolved card -- which the reference's own repaint invites -- would be refused for
+     * doing exactly what the screen leads it to do. Binding the subject is what stops a token issued to
+     * one operator being presented by another.</p>
+     *
+     * @param subject the authenticated operator, being the bearer token's subject claim; must not be
+     *     {@code null} or blank
+     * @return the composed binding, never {@code null}
+     * @throws NullPointerException if {@code subject} is {@code null}
+     * @throws IllegalArgumentException if {@code subject} is blank, which would bind the token to no
+     *     caller and make it transferable
+     */
+    private static String confirmationBinding(String subject) {
+        return CursorToken.binding(CONFIRMATION_QUERY_NAME, subject, CursorToken.SCOPE_NONE);
+    }
+
+    /**
+     * Refuses a CONFIRMING turn whose binding token does not name the card the key resolved to.
+     *
+     * <p>⚠️ Purpose: this is what replaced the full card number in the preview body. The disclosure it
+     * replaces existed so that a confirming client could echo the resolved card back and be checked
+     * against it; that check is now made against a value the client cannot read, so the guarantee is kept
+     * and the primary account number never leaves this service.</p>
+     *
+     * <p>Assumptions: an ABSENT token passes, and that is the one concession this guard makes. The
+     * reference reaches its affirmative arm from a screen turn rather than from a second request, so it
+     * has no notion of a preview to bind to, and refusing a submission that carried no token would refuse
+     * a client that confirmed in one request -- which the contract permits and which the reference's own
+     * single-turn path is. What such a client gives up is the binding: its write goes to whatever its
+     * submitted key resolves to at the moment it confirms, which is precisely the reference's behaviour.
+     * Trade-offs: the guarantee is therefore opt-in rather than mandatory. Making the token required was
+     * rejected because it would make a two-request confirmation the only permitted shape and would refuse
+     * the direct capture the published contract declares.</p>
+     *
+     * <p>Assumptions: the refusal names {@link #FIELD_CONFIRMATION_TOKEN} and carries
+     * {@link #MESSAGE_CONFIRM_RESOLVED_CARD}, the same sentence the submitted-key guard carries, because
+     * the two detect the same condition by two routes -- the card the operator is confirming is not the
+     * card the service would write -- and one condition with two sentences would read on screen as two
+     * different problems.</p>
+     *
+     * <p>Assumptions: an unopenable token is refused with that same sentence rather than with the
+     * sealer's own wording. {@code CursorToken.InvalidCursorException} names the member {@code cursor} and
+     * describes a paging position, so allowing it out would mark a control this screen does not render
+     * and tell the operator about a browse they are not performing. Its cause is retained, so the
+     * specific reason -- expired, malformed, or issued to another caller -- stays recoverable from the
+     * server-side record keyed by the correlation identifier.</p>
+     *
+     * @param submittedToken the binding token the confirming submission carried, possibly absent
+     * @param resolvedCardNumber the card number the supplied key resolves to now; must not be
+     *     {@code null}
+     * @param confirmationSealer the seam the token is opened with; must not be {@code null}
+     * @param subject the authenticated operator the token must have been issued to; must not be
+     *     {@code null} or blank
+     * @throws ClientInputException if a token was submitted and cannot be opened for this caller, or
+     *     names a card other than the one the key resolves to now
+     */
+    private static void requireTheBindingTokenNamesTheResolvedCard(String submittedToken,
+            String resolvedCardNumber, CursorToken confirmationSealer, String subject) {
+
+        if (FieldValidationFlag.isNeverSupplied(submittedToken)) {
+            return;
+        }
+
+        String previewedCardNumber;
+        try {
+            previewedCardNumber = confirmationSealer.open(confirmationBinding(subject),
+                    submittedToken.trim());
+        } catch (CursorToken.InvalidCursorException unopenable) {
+            // WHY : Assumptions: the cause is attached with initCause rather than through a constructor,
+            //       because ClientInputException declares none that takes one. Widening that type for
+            //       this one site was the alternative and was rejected: every other raiser in the estate
+            //       composes its own sentence from a value it already holds and has no cause to carry, so
+            //       the constructor set would have grown a variant with a single caller.
+            ClientInputException refusal = new ClientInputException(ApiError.CODE_VALIDATION,
+                    FIELD_CONFIRMATION_TOKEN, FieldValidationFlag.NOT_OK,
+                    MESSAGE_CONFIRM_RESOLVED_CARD);
+            refusal.initCause(unopenable);
+            throw refusal;
+        }
+
+        if (!resolvedCardNumber.equals(previewedCardNumber)) {
+            // WHY : Assumptions: neither card number appears in the refusal, and the sentence names
+            //       neither the previewed one nor the resolved one. Both are primary account numbers, and
+            //       a message reaches a browser and every store that records one; the operator's remedy
+            //       is to re-read the preview, which the sentence states, and does not depend on being
+            //       told which of the two values differed.
+            throw new ClientInputException(ApiError.CODE_VALIDATION, FIELD_CONFIRMATION_TOKEN,
+                    FieldValidationFlag.NOT_OK, MESSAGE_CONFIRM_RESOLVED_CARD);
+        }
     }
 
     /**
      * Refuses a CONFIRMING turn whose submitted card is not the card the key resolved to.
      *
-     * <p>⚠️ Purpose: this is the second half of the fix for a confirmation that could name the wrong card,
-     * and it is what binds the write to what was previewed. The disclosure half is the preview reporting the
-     * resolved identity, which {@link TransactionAddPreview} carries as its {@code resolvedAccountId} and
-     * {@code resolvedCardNumber} components on EVERY withheld answer; this half makes a client that
-     * confirms some OTHER card unable to write. Without it the resolved identity would be published and a client would remain free to
-     * ignore it, so the operator could still confirm one card while the service wrote another.</p>
+     * <p>⚠️ Purpose: this guards a client that echoes the resolved card back as a KEY, which is what the
+     * disclosure half used to invite. {@link TransactionAddPreview} reports the resolved identity on every
+     * withheld answer as its {@code resolvedAccountId}, {@code resolvedCardNumberMasked} and
+     * {@code confirmationToken} components, so a browser can no longer echo the digits at all and this guard
+     * is inert for one -- the binding is checked by
+     * {@link #requireTheBindingTokenNamesTheResolvedCard(String, String, CursorToken, String)} instead. It
+     * is retained because the contract still admits a card-keyed submission, and a client that confirms a
+     * card the key does not resolve to must not write.</p>
      *
      * <p>Assumptions: the condition is UNREACHABLE in the reference, and that is what makes refusing it
      * faithful rather than a divergence in behaviour. The reference's account arm reads the cross-reference
@@ -639,12 +792,18 @@ public class TransactionAddService {
      *
      * @param request the submission whose key fields select the account or card and whose confirmation
      *     decides whether the copied capture is appended; must not be {@code null}
-     * @return the same outcome {@link #addTransaction(TransactionAddRequest)} returns for the copied
+     * @param confirmationSealer the seam the preview's binding token is sealed with, handed straight to
+     *     the shared path below, of type {@code CursorToken}; must not be {@code null}
+     * @param subject the authenticated operator the binding token is issued to; must not be {@code null}
+     *     or blank
+     * @return the same outcome
+     *     {@link #addTransaction(TransactionAddRequest, CursorToken, String)} returns for the copied
      *     capture, being {@link TransactionAddResponse} when it was confirmed and appended and
      *     {@link TransactionAddPreview} when it was not -- and in that second case carrying the
      *     {@link CopiedTransactionData} a caller adopts so that its confirming turn writes the values it
      *     was shown rather than re-resolving which row is last; never {@code null}
-     * @throws NullPointerException if {@code request} is {@code null}
+     * @throws NullPointerException if {@code request}, {@code confirmationSealer} or {@code subject} is
+     *     {@code null}
      * @throws ClientInputException if a key field, a copied data field or the confirmation carries a
      *     value the reference refuses
      * @throws NoSuchElementException if the supplied key resolves to no cross-reference entry, or if the
@@ -653,15 +812,24 @@ public class TransactionAddService {
      * @throws IllegalStateException if a read or the append failed for a reason the caller cannot
      *     correct
      */
-    public TransactionAddOutcome copyLastTransactionData(CopyLastRequest request) {
+    public TransactionAddOutcome copyLastTransactionData(CopyLastRequest request,
+            CursorToken confirmationSealer, String subject) {
+
         Objects.requireNonNull(request, "request must not be null");
-        String resolvedCardNumber = validateInputKeyFields(request).cardNumber();
+
+        // WHY : ⚠️ Refactoring Rationale: the resolution is performed for its REFUSAL and its result is
+        //       discarded, where it was assigned to a local nothing then read. The call has to stay,
+        //       because line 473 validates the key fields BEFORE the backward read at lines 475 to 478
+        //       and a submission with an unresolvable key must be refused without reading anything; but
+        //       the card it resolves is re-resolved by the shared path below, so binding a name to it
+        //       here left a reader looking for the second use of a value that had none.
+        validateInputKeyFields(request);
 
         Transaction latest = readLatestTransaction()
                 .orElseThrow(() -> new NoSuchElementException(MESSAGE_TRANSACTION_LOOKUP_FAILED));
 
         TransactionAddRequest copied = copiedSubmission(request, latest);
-        TransactionAddOutcome outcome = addTransaction(copied);
+        TransactionAddOutcome outcome = addTransaction(copied, confirmationSealer, subject);
 
         // WHY : ⚠️ Refactoring Rationale: the withheld turn now answers with WHAT WAS COPIED and not with
         //       the amount alone, and the omission it replaces was a write hazard rather than a display
@@ -725,13 +893,21 @@ public class TransactionAddService {
             throw new IllegalStateException(MESSAGE_TRANSACTION_LOOKUP_FAILED);
         }
 
+        // WHY : Assumptions: the binding token is NULL on a copied submission, and that is not an
+        //       omission. A token is minted by a withheld turn and presented by the turn that confirms
+        //       it, and this submission is being built for its FIRST turn -- the copy operation resolves
+        //       which row is last, so there is no earlier preview of it to be bound to. A copy that is
+        //       confirmed outright therefore travels the unbound path, which is exactly the reference's
+        //       single-turn behaviour at line 495; a copy that is previewed receives a token in its
+        //       answer and presents it through the ordinary capture operation, which is the route this
+        //       operation's own answer directs a client to.
         return new TransactionAddRequest(request.accountId(), latest.getTranTypeCd(),
                 latest.getTranCatCd(), latest.getTranSource(), latest.getTranDesc(),
                 Money.of(latest.getTranAmt()),
                 zeroPadded(merchantId, TransactionAddRequest.MERCHANT_ID_WIDTH),
                 latest.getMerchantName(), latest.getMerchantCity(), latest.getMerchantZip(),
                 request.cardNumber(), latest.getOrigTs().toLocalDate().toString(),
-                latest.getProcTs().toLocalDate().toString(), request.confirmation());
+                latest.getProcTs().toLocalDate().toString(), request.confirmation(), null);
     }
 
     /**

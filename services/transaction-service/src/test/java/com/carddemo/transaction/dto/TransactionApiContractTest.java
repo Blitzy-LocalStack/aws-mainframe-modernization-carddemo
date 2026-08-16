@@ -794,7 +794,8 @@ class TransactionApiContractTest {
 
         assertSerialisedBodySatisfiesSchema(writer, "TransactionAddPreview",
                 TransactionAddPreview.prompting(Money.of("125.50"),
-                        "Confirm to add this transaction...", "00000000011", "4111111111111111"));
+                        "Confirm to add this transaction...", "00000000011", "4111111111111111",
+                        "v2.0123456789abcdef.QUJDREVGR0hJSktMTU5PUFFS"));
         assertSerialisedBodySatisfiesSchema(writer, "TransactionCreated",
                 new TransactionAddResponse("0000000000683580", Money.of("125.50"),
                         "Transaction added successfully."));

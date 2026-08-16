@@ -90,6 +90,7 @@ import {
   characterCellWidthShare,
 } from '../../theme/tokens';
 import { fieldAriaProps, fieldErrorHelp } from '../../layout/fieldHelp';
+import { ScreenTitle } from '../../layout/ScreenTitle';
 
 /**
  * Sentences this screen's own program emits, from the single catalog that owns them.
@@ -239,16 +240,29 @@ export const REF_TYPE_ROW_ACTION_CODES = Object.freeze({
 /**
  * Narrows an action-cell entry to one of the two accepted codes.
  *
- * Assumptions: the entry has already been trimmed and upper-cased by the caller. The
- * reference compares the raw `PIC X(1)` byte, but a terminal field arrives in the case it was
- * typed and a browser control does not upper-case for free, so folding case here is what keeps
- * a lower-case `d` from reaching the `WHEN OTHER` arm and being reported as invalid when the
- * operator plainly selected a delete.
+ * ⚠️ Refactoring Rationale: the comparison is BYTE-EXACT and the caller no longer folds case. It
+ * did, on the ground that a browser control does not upper-case for free and a lower-case `d` plainly
+ * means delete -- but the reference does not agree, and the difference is observable behaviour rather
+ * than presentation. `88 SELECT-OK VALUES 'D', 'U'` at
+ * `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` L183 tests the raw `PIC X(1)` byte, so a lower-case
+ * entry falls to the `WHEN OTHER` arm and is refused with `'Action code selected is invalid'` moved at
+ * L1038. Folding case made this screen accept a turn the reference refuses, which is a functional-parity
+ * divergence, and no entry in `docs/architecture/cobol-to-service-traceability.md` registers one.
+ *
+ * Assumptions: the entry is still TRIMMED by the caller, and trimming is not case folding. A 3270 field
+ * delivers unentered positions as spaces or low values -- `88 SELECT-BLANK VALUES ' ', LOW-VALUES` at
+ * L186-L188 is a distinct arm from `WHEN OTHER` and does not refuse -- so treating surrounding blanks as
+ * "nothing typed" reproduces the reference, while accepting a different byte would not.
+ *
+ * Trade-offs: an operator with caps lock off now sees the reference's refusal instead of a silent
+ * promotion of their keystroke. That is the intended exchange: the sentence names the fault and the
+ * entry is one character to retype, whereas the accepted lower-case byte made the browser and the
+ * mainframe disagree about the same page for the same input.
  *
  * Trade-offs: this exists so the two codes are recognised without a type assertion anywhere.
  * Returning the frozen constants rather than the argument is what makes the narrowing sound to
  * the compiler, at the cost of two comparisons instead of a cast.
- * @param {string} entry - A trimmed, upper-cased action-cell entry.
+ * @param {string} entry - A trimmed action-cell entry, in the case it was typed.
  * @returns {RowActionCode | null} The recognised code, or `null` for a blank or invalid entry.
  */
 function toRowActionCode(entry: string): RowActionCode | null {
@@ -367,6 +381,26 @@ const DESCRIPTION_FILTER_INPUT_ID = 'ref-type-list-description-filter';
  *       contract constrains to digits, so it contributes no character an attribute selector would treat
  *       specially.
  */
+
+/**
+ * Builds the identifier of the action cell beside one row.
+ *
+ * ⚠️ Refactoring Rationale: the action cells had NO identifiers, and the grid renders up to
+ * seven of them. A refused turn coloured every contributing cell red and put one sentence on the
+ * message band, so which of the seven was at fault was carried by colour alone -- unavailable to a
+ * screen reader and to an operator who cannot distinguish the hue. Deriving the identifier from the
+ * row key gives each cell something its refusal text can be attached to, exactly as the description
+ * editor beside it already had.
+ *
+ * Assumptions: derived from the row key rather than from the row's ORDINAL, because the seven grid
+ * positions hold different rows after a page turn while a `typeCd` names the same record on every page.
+ * An ordinal-keyed identifier would move a refusal onto whatever row later occupied that position.
+ * @param {string} typeCd - Key of the row whose action cell is being addressed.
+ * @returns {string} The identifier that cell renders with.
+ */
+function actionCellId(typeCd: string): string {
+  return `ref-type-list-action-${typeCd}`;
+}
 
 /**
  * Builds the identifier of the description editor open on one row.
@@ -724,15 +758,18 @@ export function isFilteredEmptyRefusal(failure: ApiError | null): boolean {
  * L1116.
  
  *
- * Assumptions: ⚠️ `'00'` is accepted here and FORWARDED, and it does not narrow anything -- but not
- * for the reason this note used to give. It said `'00'` reaches the numeric arm and passes it; in
- * fact it never reaches that arm at all. L1103's third disjunct is
+ * Assumptions: ⚠️ `'00'` is ACCEPTED here and collapsed to "no narrowing" by the caller, not
+ * forwarded. Two earlier revisions of this note were each wrong in turn. The first said `'00'` reaches
+ * the numeric arm and passes it; it never reaches that arm, because L1103's third disjunct is
  * `OR WS-IN-TYPE-CD EQUAL ZEROS`, which is true of a two-character field holding `'00'`, so the
  * reference exits at L1104-L1106 having set `FLG-TYPEFILTER-BLANK` -- `'00'` MEANS "no narrowing"
- * there, exactly as blank does. This client does not have to reproduce that collapse because the
- * service performs it: `TransactionTypeRepository.typeCodeFilter` maps an all-zeros code to no
- * filter, and the published `TransactionTypeCodeFilter` schema states that meaning outright. What
- * this function must do with `'00'` is accept it, which it does.
+ * there, exactly as blank does. The second said the client need not reproduce that collapse because
+ * the service performs it; the service does perform it -- `TransactionTypeRepository.typeCodeFilter`
+ * maps an all-zeros code to no filter -- but leaving it to the service was itself found to be a
+ * defect, because `appliedFilters` then HELD a value that narrows nothing, and three derived readings
+ * went wrong with it. {@link canonicalTypeFilter} now performs the collapse at the boundary where the
+ * entry becomes an applied filter, and its own note records the three readings. What THIS function
+ * must do with `'00'` is accept it, which it does; deciding what it means is not its job.
  *
  * Assumptions: a supplied entry must be EXACTLY TWO digits, so a single digit is refused, and
  * the reference refuses it through the same one test. Its field is two characters wide from end
@@ -869,7 +906,7 @@ export function reduceActionSelection(
   let invalidMessage: string | null = null;
 
   for (const row of rows) {
-    const entry = (codes[row.typeCd] ?? '').trim().toUpperCase();
+    const entry = (codes[row.typeCd] ?? '').trim();
 
     if (entry === '') {
       continue;
@@ -896,7 +933,7 @@ export function reduceActionSelection(
     //      code, so each contributing row is marked and an operator can see which choices
     //      are in conflict rather than being told a count with nothing indicated.
     for (const row of rows) {
-      if (toRowActionCode((codes[row.typeCd] ?? '').trim().toUpperCase()) !== null) {
+      if (toRowActionCode((codes[row.typeCd] ?? '').trim()) !== null) {
         errorKeys.push(row.typeCd);
       }
     }
@@ -1013,6 +1050,16 @@ export default function RefTypeListScreen(): ReactElement {
   const [band, setBand] = useState<BandMessage | null>(null);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>(NO_FIELD_ERRORS);
   const [rowErrorKeys, setRowErrorKeys] = useState<readonly string[]>([]);
+  /*
+   * WHY : ⚠️ Assumptions: the sentence that marked the rows is held BESIDE the keys, so each
+   *       marked cell can point at it. The keys alone were enough while the marking was a colour, and
+   *       they are not enough for a description: `aria-describedby` has to name an element that holds
+   *       text, and the only text a refused turn produces is the one sentence the band shows. Holding it
+   *       here rather than reading the band back keeps the two independent -- the band is cleared by
+   *       every turn and by the shell's own delegation, while a marked cell must describe itself for as
+   *       long as it stays marked.
+   */
+  const [rowErrorMessage, setRowErrorMessage] = useState<string | null>(null);
   const [protectSelectRows, setProtectSelectRows] = useState(false);
   const [lastPageShown, setLastPageShown] = useState(false);
   const [committing, setCommitting] = useState(false);
@@ -1102,6 +1149,7 @@ export default function RefTypeListScreen(): ReactElement {
     setBand(null);
     setFieldErrors(NO_FIELD_ERRORS);
     setRowErrorKeys([]);
+    setRowErrorMessage(null);
     setProtectSelectRows(false);
   }
 
@@ -1168,6 +1216,7 @@ export default function RefTypeListScreen(): ReactElement {
 
     if (selection.message !== null) {
       setRowErrorKeys(selection.errorKeys);
+      setRowErrorMessage(selection.message);
       setBand({ text: selection.message, severity: 'error' });
       clearPendingAction();
       return;
@@ -1244,6 +1293,19 @@ export default function RefTypeListScreen(): ReactElement {
    * confirmation a confirmation: it can only commit the request an operator was actually shown,
    * so editing a filter or moving the action code cancels it rather than silently committing
    * something else.
+   *
+   * ⚠️ Refactoring Rationale: the type filter is compared through {@link canonicalTypeFilter},
+   * where the raw trimmed draft was compared against the applied value. The two are not the same thing
+   * for one entry an operator can legitimately type: a draft of `'00'` collapses to `''` on the way into
+   * `appliedFilters`, so the raw comparison held `'00' === ''` and the gate could NEVER open while that
+   * entry stood. PF10 fell to `submit()` on every press, which re-armed the same request and reported
+   * the same "press PF10 to confirm" sentence, so a delete or an update was unreachable for as long as
+   * the operator left a zeroed filter in place -- and the reference has no such state, because it
+   * collapses zeros to blank before its own gate ever runs.
+   *
+   * Assumptions: the DESCRIPTION filter is compared on its trimmed draft with no canonicalisation,
+   * because it has none to apply -- `appliedFilters.description` stores exactly the trimmed entry. The
+   * asymmetry is in the filters and not in this gate.
    * @returns {Promise<void>} Resolves once the request has settled and the screen has been
    *   updated. Failures are reduced to a band message rather than propagating.
    */
@@ -1252,7 +1314,7 @@ export default function RefTypeListScreen(): ReactElement {
 
     const gateOpen =
       request !== null &&
-      typeFilterDraft.trim() === appliedFilters.typeCode &&
+      canonicalTypeFilter(typeFilterDraft.trim()) === appliedFilters.typeCode &&
       descriptionFilterDraft.trim() === appliedFilters.description &&
       selection.typeCd === request.typeCd &&
       selection.code === request.code &&
@@ -1882,10 +1944,13 @@ export default function RefTypeListScreen(): ReactElement {
    *       keeping it afterwards would render a second title band, a second message line and a second
    *       named legend region on this screen. Everything the mapset paints between rows 4 and 21 -- the
    *       heading and page ordinal, the two filters, the grid and the add row -- stays here.
-   * WHY : Assumptions: delegating `pfKeys` is also what keeps the keyboard singly owned. `usePfKeys`
-   *       installs one document listener per call site, and the shell binds its own sign-off key only
-   *       while NO screen has published one, so the publication makes it stand down and leaves this
-   *       screen's listener the only one installed.
+   * WHY : ⚠️ Assumptions: delegating `pfKeys` hands the shell the bindings to RENDER and leaves
+   *       this screen owning the keyboard; an activation of a rendered legend control is forwarded
+   *       straight back to `invoke`. The claim that stood here is withdrawn in its second half: it is
+   *       true that `usePfKeys` installs one document listener per call site, but the shell installs NONE
+   *       of them -- it offers sign-off as a rendered control, for the reason recorded at
+   *       `SHELL_SIGN_OFF_LABEL`. There is nothing to make stand down, so the publication buys the
+   *       painted legend rather than sole ownership of the keyboard.
    * WHY : Assumptions: `legendColor` IS delegated, because all five legend fields carry
    *       `COLOR=TURQUOISE` at `app/app-transaction-type-db2/bms/COTRTLI.bms` L312-L336, whereas the
    *       slot defaults to the yellow that 15 of the 17 base mapsets use.
@@ -1975,38 +2040,65 @@ export default function RefTypeListScreen(): ReactElement {
    */
   function renderActionCell(typeCd: string): ReactElement {
     const inError = rowErrorKeys.includes(typeCd);
+    const controlId = actionCellId(typeCd);
+    /*
+     * WHY : ⚠️ Assumptions: the cell is described only while it is BOTH marked and a sentence is
+     *       held, and both halves are needed. A marked cell with no sentence would point
+     *       `aria-describedby` at an element this render does not emit, which is a dangling reference
+     *       some assistive technologies announce as nothing and others skip -- the exact failure
+     *       `fieldAriaProps` documents and asks its caller to state.
+     */
+    const refusal = inError ? rowErrorMessage : null;
 
     const cell = (
-      <Input
-        aria-label={`${REF_TYPE_LIST_LABELS.selectColumn.trim()} ${typeCd}`}
-        disabled={actionCellsDisabled}
-        maxLength={ACTION_CODE_LENGTH}
-        onChange={
-          /**
-           * Records the action code typed beside this row.
-           * @param {object} event - The change event the design system forwards.
-           * @param {object} event.target - The control the event came from.
-           * @param {string} event.target.value - The entry as it now stands.
-           * @returns {void} State is updated in place.
-           */
-          (event: { target: { value: string } }): void => {
-            const { value } = event.target;
-            setActionCodes(
-              /**
-               * Replaces this row's entry, leaving the other rows' entries alone.
-               * @param {Readonly<Record<string, string>>} current - Entries so far.
-               * @returns {Readonly<Record<string, string>>} Entries with this row's replaced.
-               */
-              (current: Readonly<Record<string, string>>): Readonly<Record<string, string>> => ({
-                ...current,
-                [typeCd]: value,
-              }),
-            );
+      <Form.Item
+        help={refusal === null ? undefined : fieldErrorHelp(controlId, refusal)}
+        /*
+         * WHY : Assumptions: `noStyle` while there is nothing to explain, so an unmarked cell keeps the
+         *       grid's own row height and no form-item spacing is introduced into a table cell. The
+         *       styled form is taken only when the item has help text to lay out, which is the same
+         *       arrangement the description editor beside it uses.
+         */
+        noStyle={refusal === null}
+        validateStatus={refusal === null ? '' : 'error'}
+      >
+        <Input
+          {...fieldAriaProps(controlId, {
+            hasError: refusal !== null,
+            hasHint: false,
+            invalid: inError,
+          })}
+          aria-label={`${REF_TYPE_LIST_LABELS.selectColumn.trim()} ${typeCd}`}
+          disabled={actionCellsDisabled}
+          id={controlId}
+          maxLength={ACTION_CODE_LENGTH}
+          onChange={
+            /**
+             * Records the action code typed beside this row.
+             * @param {object} event - The change event the design system forwards.
+             * @param {object} event.target - The control the event came from.
+             * @param {string} event.target.value - The entry as it now stands.
+             * @returns {void} State is updated in place.
+             */
+            (event: { target: { value: string } }): void => {
+              const { value } = event.target;
+              setActionCodes(
+                /**
+                 * Replaces this row's entry, leaving the other rows' entries alone.
+                 * @param {Readonly<Record<string, string>>} current - Entries so far.
+                 * @returns {Readonly<Record<string, string>>} Entries with this row's replaced.
+                 */
+                (current: Readonly<Record<string, string>>): Readonly<Record<string, string>> => ({
+                  ...current,
+                  [typeCd]: value,
+                }),
+              );
+            }
           }
-        }
-        status={inError ? 'error' : ''}
-        value={actionCodes[typeCd] ?? ''}
-      />
+          status={inError ? 'error' : ''}
+          value={actionCodes[typeCd] ?? ''}
+        />
+      </Form.Item>
     );
 
     if (pendingAction === null || pendingAction.code !== REF_TYPE_ROW_ACTION_CODES.delete) {
@@ -2257,9 +2349,9 @@ export default function RefTypeListScreen(): ReactElement {
        * walked rather than the pages that exist.
        */}
       <Flex align="baseline" gap="middle" justify="space-between" wrap>
-        <Typography.Title level={3} style={{ color: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL] }}>
+        <ScreenTitle style={{ color: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL] }}>
           {REF_TYPE_LIST_LABELS.heading}
-        </Typography.Title>
+        </ScreenTitle>
         <Typography.Text style={{ color: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL] }}>
           {`${REF_TYPE_LIST_LABELS.pagePrefix}${String(browse.pageNumber)}`}
         </Typography.Text>
@@ -2446,9 +2538,9 @@ export default function RefTypeListScreen(): ReactElement {
        *      named fields outside the seven `TRTSEL1`-`TRTSEL7` families, and all three carry
        *      `PROT` -- so the reference paints them and never accepts input through them. Adding
        *      them to the grid would make the page eight rows and break the arity that L60, the
-       *      two `OCCURS 7` arrays and the seven field families all agree on. They are rendered
-       *      disabled, at their declared widths, because that is what the mapset paints; the
-       *      route to actually add a type is F2, which transfers to the maintenance screen.
+       *      two `OCCURS 7` arrays and the seven field families all agree on. The row is rendered as
+       *      STATIC space at the grid's own column shares; the route to actually add a type is F2,
+       *      which transfers to the maintenance screen.
        *      Assumptions: the identically named `TRTSELA`/`TRTTYPA`/`TRTYPDA` in
        *      `COTRTLIC.cbl` L433-L475 are NOT these fields -- they are the attribute bytes of
        *      the seven grid rows, redefined over the symbolic map. Conflating the two is the
@@ -2465,31 +2557,30 @@ export default function RefTypeListScreen(): ReactElement {
        *      the grid's own column positions exactly. Sharing the grid's mapset-derived column
        *      shares restores both the single line and that vertical alignment.
        */}
-      <Row>
-        <Col flex={COLUMN_WIDTH_SHARES.action}>
-          <Input
-            aria-label={REF_TYPE_LIST_LABELS.selectColumn.trim()}
-            disabled
-            maxLength={ACTION_CODE_LENGTH}
-            value=""
-          />
-        </Col>
-        <Col flex={COLUMN_WIDTH_SHARES.typeCd}>
-          <Input
-            aria-label={REF_TYPE_LIST_LABELS.typeColumn}
-            disabled
-            maxLength={TYPE_CODE_LENGTH}
-            value=""
-          />
-        </Col>
-        <Col flex={COLUMN_WIDTH_SHARES.description}>
-          <Input
-            aria-label={REF_TYPE_LIST_LABELS.descriptionColumn}
-            disabled
-            maxLength={DESCRIPTION_LENGTH}
-            value=""
-          />
-        </Col>
+      {/*
+       * WHY : ⚠️ Refactoring Rationale: the three fields are STATIC cells and were `disabled`
+       *       `Input`s carrying accessible names and permanently empty values. Two things were wrong with
+       *       that. Against the mapset: all three carry `HILIGHT=OFF` at
+       *       `app/app-transaction-type-db2/bms/COTRTLI.bms` L280-L298, where the grid's own selection
+       *       fields carry `HILIGHT=UNDERLINE` -- and design gap G4 records that the underline is exactly
+       *       what an `Input` border stands in for, so painting a border here drew an affordance the
+       *       terminal deliberately did not. Against the operator: three named but permanently
+       *       unavailable controls entered the accessibility tree, so a screen reader announced three
+       *       empty dimmed fields with nothing to do, on a row the reference never accepted input
+       *       through -- all three are `PROT`.
+       * WHY : Alternatives Considered: omitting the row entirely, which the finding also admits.
+       *       Rejected because the mapset paints it and a later reader comparing the two would find a
+       *       declared row missing with nothing to say why; keeping it as space preserves the structure
+       *       and the column alignment with rows 12-18 while removing what was wrong with it.
+       * WHY : Assumptions: the row's height comes from `controlHeight`, the same token the grid's own
+       *       controls take theirs from, so the space it occupies matches one grid row rather than being
+       *       a chosen number. Empty cells alone would collapse to nothing and the painted row would
+       *       vanish.
+       */}
+      <Row style={{ minBlockSize: cssVar.controlHeight }}>
+        <Col flex={COLUMN_WIDTH_SHARES.action} />
+        <Col flex={COLUMN_WIDTH_SHARES.typeCd} />
+        <Col flex={COLUMN_WIDTH_SHARES.description} />
       </Row>
       {/*
        * Refactoring Rationale: the key legend that used to close this body, and the message line above

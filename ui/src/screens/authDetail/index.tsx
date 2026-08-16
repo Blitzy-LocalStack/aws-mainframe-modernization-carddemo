@@ -61,6 +61,7 @@ import {
 } from '../../messages/messages';
 import { navigateSafely } from '../../routes/navigation';
 import { TYPOGRAPHY_TOKENS } from '../../theme/tokens';
+import { SECTION_HEADING_LEVEL, ScreenTitle } from '../../layout/ScreenTitle';
 
 /** Route pattern this screen is mounted at, whose parameter is the summary row's sealed selector. */
 export const AUTHORIZATION_DETAIL_ROUTE = '/authorizations/:key';
@@ -568,7 +569,7 @@ export function AuthDetailScreen(): ReactElement {
         transactionId={detail?.transactionName ?? AUTH_DETAIL_TRANSACTION_ID}
         programName={detail?.programName ?? AUTH_DETAIL_PROGRAM_NAME}
       />
-      <Typography.Title level={3}>{AUTH_DETAIL_SUBTITLE}</Typography.Title>
+      <ScreenTitle>{AUTH_DETAIL_SUBTITLE}</ScreenTitle>
       {detail === null ? null : (
         <>
           {/*
@@ -638,7 +639,17 @@ export function AuthDetailScreen(): ReactElement {
               {detail.fraudMark}
             </Descriptions.Item>
           </Descriptions>
-          <Typography.Title level={4}>{AUTH_DETAIL_MERCHANT_HEADING}</Typography.Title>
+          {/*
+           * ⚠️ Assumptions: the rank is READ from `SECTION_HEADING_LEVEL` rather than written as
+           *       a literal, so this block heading stays one below the screen caption above it. The
+           *       literal was 4, which was subordinate only while this screen's caption was a literal 3;
+           *       `ui/src/layout/ScreenTitle.tsx` now ranks the caption, and a literal here would have
+           *       become its peer. The mapset states the subordination positionally -- the merchant
+           *       fields are painted below the authorization panel, not beside the caption.
+           */}
+          <Typography.Title level={SECTION_HEADING_LEVEL}>
+            {AUTH_DETAIL_MERCHANT_HEADING}
+          </Typography.Title>
           <Descriptions bordered column={2}>
             <Descriptions.Item label={AUTH_DETAIL_FIELD_LABELS.merchantName}>
               {detail.merchantName}

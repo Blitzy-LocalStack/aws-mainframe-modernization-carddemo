@@ -17,8 +17,8 @@
  * no longer to render it with a clock but to publish `now` through `useShellSlot`. Asserting the old
  * shape after that migration would fail every screen for doing the right thing, and — worse — would
  * pass a screen that reintroduced its own band. So the negative half is now asserted too: a screen
- * that composes a title band, a message band or a key legend of its own fails here, which is the
- * invariant that keeps the shell's stand-down condition for the keyboard sound.
+ * that composes a title band, a message band or a key legend of its own fails here, which is what keeps
+ * each zone painted exactly once.
  *
  * WHY : Alternatives Considered: rendering each screen and reading the displayed date. Rejected
  * because each screen needs its router, its authentication state and its API responses stubbed to
@@ -195,11 +195,14 @@ function everyScreenDelegatesAnInstant(): void {
 /**
  * Asserts every production screen delegates a row-23 message and a key legend.
  *
- * Assumptions: the key delegation is what makes the shell stand its own sign-off key down, so its
- * absence is a keyboard defect and not merely a missing legend — `ui/src/layout/AppShell.tsx` renders
- * its own sign-off control beside the legend and every screen installs a document listener of its own,
- * so the publication is what keeps exactly one listener installed. Asserting the publication is
- * therefore asserting single ownership at the source level.
+ * ⚠️ Assumptions: the key delegation is what gets a screen's legend PAINTED, and its absence is
+ * therefore a missing legend rather than a keyboard defect. The claim that stood here, that the
+ * publication "makes the shell stand its own sign-off key down" and so keeps exactly one document
+ * listener installed, is withdrawn: `ui/src/layout/AppShell.tsx` installs no keyboard listener at all
+ * and offers sign-off as a rendered control, so each screen's own listener is the only one either way.
+ * What the assertion still buys is the other half of the delegation — `onInvoke: invoke` is checked
+ * alongside the bindings, so a screen cannot publish keys the shell renders and then fail to receive
+ * their activations back.
  * @returns {void} Nothing; assertions raise on failure.
  */
 function everyScreenDelegatesItsMessageAndKeys(): void {

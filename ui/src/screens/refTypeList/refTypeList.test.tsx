@@ -46,15 +46,25 @@ import type { PageResponse, ReferenceListQuery, TransactionType } from '../../ap
 
 const listTransactionTypesMock = vi.fn();
 
+/**
+ * Stands in for the delete this screen's confirmation arm dispatches.
+ *
+ * Assumptions: the WRITE is now substituted where it was deliberately left real, because a case
+ * reaches the confirmation arm for the first time. Leaving it real would send a request from a
+ * component test, and its absence is what the confirmation case reads as its verdict.
+ */
+const deleteTransactionTypeMock = vi.fn();
+
 vi.mock(
   '../../api/reference',
   /**
    * Replaces the browse operation while leaving every other export intact.
    *
-   * Assumptions: only the LIST operation is substituted. The two write operations are reached solely
-   * through a confirmation this file never gives, so stubbing them would stand in for calls no case
-   * makes; leaving them real keeps the substitution the smallest thing that answers the question.
-   * @returns {Promise<typeof ReferenceModule>} The real module with the browse stubbed.
+   * ⚠️ Assumptions: the browse and the DELETE are substituted, where only the browse used to be.
+   * A case now drives the confirmation arm -- the arm a review found unreachable while a zeroed filter
+   * stood -- and whether that arm dispatched its request is the whole verdict, so the operation has to
+   * be observable. The update operation is still left real: no case reaches it.
+   * @returns {Promise<typeof ReferenceModule>} The real module with the browse and the delete stubbed.
    */
   async () => {
     const actual = await vi.importActual<typeof ReferenceModule>('../../api/reference');
@@ -65,6 +75,11 @@ vi.mock(
        * @returns {Promise<unknown>} Whatever the case configured.
        */
       listTransactionTypes: listTransactionTypesMock,
+      /**
+       * Stands in for the delete of one transaction type.
+       * @returns {Promise<unknown>} Whatever the case configured.
+       */
+      deleteTransactionType: deleteTransactionTypeMock,
     };
   },
 );
@@ -77,6 +92,7 @@ vi.mock(
 const {
   default: RefTypeListScreen,
   REF_TYPE_LIST_KEY_LABELS,
+  reduceActionSelection,
   validateTypeFilter,
 } = await import('./index');
 const { AppShell } = await import('../../layout/AppShell');
@@ -84,6 +100,7 @@ const { PF_KEY_BAR_REGION_LABEL } = await import('../../layout/PfKeyBar');
 const { MESSAGE_BAND_TEST_ID } = await import('../../layout/MessageBand');
 const { PROGRAM_MESSAGES } = await import('../../messages/messages');
 const { STATUS_MESSAGES } = await import('../../messages/messages');
+const { fieldErrorId } = await import('../../layout/fieldHelp');
 
 /** The verbatim refusal the reference moves at `COTRTLIC.cbl` L1115-L1117. */
 const TWO_DIGIT_REFUSAL =
@@ -320,6 +337,132 @@ async function exitsToTheAdministrativeMenuWithoutASentence(): Promise<void> {
   expect(screen.queryByText(EXIT_SENTENCE)).toBeNull();
 }
 
+/** The verbatim refusal the reference moves for an unrecognised action byte, at L1038. */
+const INVALID_ACTION_REFUSAL = STATUS_MESSAGES.COTRTLIC.WS_MESG_INVALID_ACTION_CODE.text;
+
+/** The sentence the reference paints when a delete is armed and awaits its confirmation. */
+const DELETE_ARMED_SENTENCE = STATUS_MESSAGES.COTRTLIC.WS_INFORM_DELETE.text;
+
+/**
+ * Returns one row's action cell.
+ * @param {string} typeCd - Key of the row whose cell is wanted.
+ * @returns {HTMLInputElement} That row's action control.
+ * @throws {Error} When no control carries that row's identifier, which is a rename to report.
+ */
+function actionCell(typeCd: string): HTMLInputElement {
+  const element = document.getElementById(`ref-type-list-action-${typeCd}`);
+  if (element === null) {
+    throw new Error(`No action control is rendered for row ${typeCd}.`);
+  }
+  return element as HTMLInputElement;
+}
+
+/**
+ * The action byte is compared exactly, so a lower-case code is refused as the reference refuses it.
+ *
+ * ⚠️ Purpose: the reduction upper-cased each entry before comparing it, on the ground that a
+ * browser control does not fold case and a lower-case `d` plainly means delete. The reference does not
+ * agree: `88 SELECT-OK VALUES 'D', 'U'` at `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` L183 tests
+ * the raw byte, so `'d'` reaches the `WHEN OTHER` arm and is refused with the sentence moved at L1038.
+ * Accepting it made this screen act on a turn the mainframe rejects, with no divergence registered.
+ *
+ * Assumptions: the accepted spellings are asserted in the SAME case as the refused ones, because the
+ * property is a boundary and one half of it cannot state it. `'D'` and `'U'` must still select, `'d'`
+ * and `'u'` must refuse, and the surrounding blanks must still be trimmed -- the reference's own
+ * `88 SELECT-BLANK VALUES ' ', LOW-VALUES` arm at L186-L188 does not refuse.
+ * @returns {void} Completion of the case; the assertions are its effect.
+ */
+function comparesTheActionByteExactly(): void {
+  const rows = FIRST_PAGE.items;
+
+  expect(reduceActionSelection(rows, { '01': 'D' }).code).toBe('D');
+  expect(reduceActionSelection(rows, { '01': 'U' }).code).toBe('U');
+  expect(reduceActionSelection(rows, { '01': ' D ' }).code).toBe('D');
+  expect(reduceActionSelection(rows, { '01': '' }).code).toBeNull();
+  expect(reduceActionSelection(rows, { '01': '   ' }).code).toBeNull();
+
+  const lowerDelete = reduceActionSelection(rows, { '01': 'd' });
+
+  expect(lowerDelete.code, 'a lower-case byte is not one of the two accepted codes').toBeNull();
+  expect(lowerDelete.badActions).toBe(true);
+  expect(lowerDelete.message).toBe(INVALID_ACTION_REFUSAL);
+  expect(lowerDelete.errorKeys).toStrictEqual(['01']);
+  expect(reduceActionSelection(rows, { '01': 'u' }).message).toBe(INVALID_ACTION_REFUSAL);
+}
+
+/**
+ * A refused action cell says which row failed, and says it to assistive technology too.
+ *
+ * ⚠️ Purpose: a refused turn coloured every contributing cell and put one sentence on the shared
+ * band, so which of up to seven cells was at fault was carried by hue alone. The cells had no
+ * identifiers, no `aria-invalid` and nothing describing them, which leaves an operator using a screen
+ * reader -- or unable to distinguish the colour -- with a sentence and no way to find its subject.
+ *
+ * Assumptions: the described text is followed to the element it names rather than merely asserted
+ * present, because the failure this closes is a REFERENCE that resolves to nothing: an
+ * `aria-describedby` naming an absent element is announced as nothing by some assistive technologies
+ * and skipped by others, which reads exactly like the defect it was meant to fix.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function marksTheRefusedActionCellForAssistiveTechnology(): Promise<void> {
+  const user = userEvent.setup();
+  await renderWithFirstPage();
+
+  await user.type(actionCell('01'), 'X');
+  await user.keyboard('{Enter}');
+  await settle();
+
+  expect(within(messageBand()).getByText(INVALID_ACTION_REFUSAL)).toBeInTheDocument();
+  expect(actionCell('01')).toHaveAttribute('aria-invalid', 'true');
+  expect(actionCell('01').getAttribute('aria-describedby')).toBe(
+    fieldErrorId('ref-type-list-action-01'),
+  );
+  expect(document.getElementById(fieldErrorId('ref-type-list-action-01'))).toHaveTextContent(
+    INVALID_ACTION_REFUSAL,
+  );
+  expect(actionCell('02'), 'the row that carried no entry must not be marked').not.toHaveAttribute(
+    'aria-invalid',
+  );
+}
+
+/**
+ * A delete can be confirmed while a zeroed type filter stands in the control.
+ *
+ * ⚠️ Purpose: the confirmation gate compared the RAW trimmed filter draft against the APPLIED
+ * filter, and the applied value is canonicalised -- a zeroed entry means "no narrowing" and is stored
+ * as the empty string. So with `'00'` typed the gate tested `'00' === ''`, could never open, and F10
+ * fell back to the ordinary turn: it re-armed the same request and repainted the same "press F10"
+ * sentence, so a delete and an update were unreachable for as long as that entry stood. The reference
+ * has no such state, because it collapses zeros to blank before its own gate at L666-L678 runs.
+ *
+ * Assumptions: the verdict is the DISPATCH, not the sentence. A gate that never opens repaints the
+ * armed sentence, so a case asserting the sentence would pass against the defect; only the request
+ * distinguishes them.
+ *
+ * Assumptions: `'00'` is typed rather than a two-digit narrowing like `'01'`, because a narrowing
+ * would make the applied and drafted values compare equal and the gate would open either way. The
+ * zeroed entry is the one value where canonicalisation makes them differ.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function confirmsADeleteWhileAZeroedFilterStands(): Promise<void> {
+  const user = userEvent.setup();
+  await renderWithFirstPage();
+  deleteTransactionTypeMock.mockResolvedValue(undefined);
+
+  await submitFilter(user, '00');
+  await user.type(actionCell('01'), 'D');
+  await user.keyboard('{Enter}');
+  await settle();
+
+  expect(within(messageBand()).getByText(DELETE_ARMED_SENTENCE)).toBeInTheDocument();
+
+  await user.click(keyButton(REF_TYPE_LIST_KEY_LABELS.PFK10));
+  await settle();
+  await settle();
+
+  expect(deleteTransactionTypeMock).toHaveBeenCalledWith('01');
+}
+
 /**
  * Registers every case, and resets the spy between them.
  * @returns {void} Nothing; the registrations are the effect.
@@ -332,6 +475,7 @@ function refTypeListCases(): void {
      */
     (): void => {
       listTransactionTypesMock.mockReset();
+      deleteTransactionTypeMock.mockReset();
     },
   );
   afterEach(
@@ -345,6 +489,12 @@ function refTypeListCases(): void {
   );
 
   it('accepts only blank or exactly two digits', acceptsOnlyBlankOrTwoDigits);
+  it('compares the action byte exactly', comparesTheActionByteExactly);
+  it(
+    'marks the refused action cell for assistive technology',
+    marksTheRefusedActionCellForAssistiveTechnology,
+  );
+  it('confirms a delete while a zeroed filter stands', confirmsADeleteWhileAZeroedFilterStands);
   it(
     'refuses a one-digit filter without dispatching it',
     refusesAOneDigitFilterWithoutDispatchingIt,

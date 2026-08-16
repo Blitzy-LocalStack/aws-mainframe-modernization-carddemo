@@ -76,13 +76,24 @@ const ADD_MESSAGES = PROGRAM_MESSAGES.COTRN02C;
 const ACCOUNT_ID = '00000000011';
 
 /**
- * The card the cross-reference resolves for that account, sixteen digits and unmasked.
+ * The MASKED rendering the service publishes for the card the cross-reference resolved.
  *
- * Assumptions: every withheld answer reports it, because the service resolves the pair on every turn --
+ * ⚠️ Assumptions: every withheld answer reports it, because the service resolves the pair on every turn --
  * `app/cbl/COTRN02C.cbl` L166 performs `VALIDATE-INPUT-KEY-FIELDS` for the Enter arm as L473 does for the
- * copy arm -- and the screen repaints its card control from it, as L209 does.
+ * copy arm. The screen does NOT repaint its card control from it: the reference moves sixteen digits it
+ * already holds into `CARDNINI` at L209, whereas the migrated preview publishes only this masked rendering,
+ * which a numeric key field cannot carry.
+ *
+ * ⚠️ Refactoring Rationale: this held the sixteen digits until a review found that a non-administrative
+ * preview disclosed a whole primary account number to the browser. AAP section 0.4.1.9 masks it everywhere
+ * except the administrative card-detail read, so the member is masked and the confirming turn names the card
+ * with an opaque binding instead.
  */
-const RESOLVED_CARD = '4111111111111111';
+const RESOLVED_CARD_MASKED = '************1111';
+
+/** The opaque binding the preview publishes so a confirming turn can name the same resolved card. */
+// The value is deliberately low-entropy; `ui/src/api/transactions.test.ts` records why.
+const CONFIRMATION_TOKEN = 'v2.aaaaaaaaaaaaaaaa.notarealsealedvalue';
 
 /**
  * The ten non-monetary copied columns, as the service reports them, and the pair it resolved.
@@ -147,7 +158,8 @@ function copiedPreview(): TransactionAddOutcome {
       written: false,
       returnMessage: null,
       resolvedAccountId: ACCOUNT_ID,
-      resolvedCardNumber: RESOLVED_CARD,
+      resolvedCardNumberMasked: RESOLVED_CARD_MASKED,
+      confirmationToken: CONFIRMATION_TOKEN,
       copied: COPIED,
     },
   };
@@ -166,7 +178,8 @@ function capturePreview(amount: string): TransactionAddOutcome {
       written: false,
       returnMessage: null,
       resolvedAccountId: ACCOUNT_ID,
-      resolvedCardNumber: RESOLVED_CARD,
+      resolvedCardNumberMasked: RESOLVED_CARD_MASKED,
+      confirmationToken: CONFIRMATION_TOKEN,
       copied: null,
     },
   };
@@ -418,6 +431,13 @@ async function confirmsWithTheDisplayedDraft(): Promise<void> {
     merchantCity: COPIED.merchantCity,
     merchantZip: COPIED.merchantZip,
     confirmation: 'Y',
+    /*
+     * WHY : ⚠️ Assumptions: the binding token appears on the confirming body, and the expectation is an
+     *       EXACT equality rather than a subset match, so a member appearing here that the contract does
+     *       not declare fails the case. That is what keeps a future change from reintroducing a card
+     *       number: the body may carry the token and no other card-shaped member.
+     */
+    confirmationToken: CONFIRMATION_TOKEN,
   });
 }
 
@@ -498,12 +518,15 @@ function buildsACopyBodyCarryingOneKeyOnly(): void {
  * Asserts adoption writes all eleven copied values, the resolved pair, and leaves the confirmation alone.
  *
  * ⚠️ Refactoring Rationale: the expectation is written out member by member rather than spread from the
- * fixture, and the CARD field is expected to hold the resolved card rather than to stay blank. The fixture
- * now carries three members that are not screen fields -- the source row and the resolved pair -- so
- * spreading it would assert three properties on a values object that has no such fields. And the card field
- * is written: `app/cbl/COTRN02C.cbl` L473 performs `VALIDATE-INPUT-KEY-FIELDS` before the read, whose
- * account arm moves the cross-reference's card number into `CARDNINI` at L209, after which the screen is
- * re-sent.
+ * fixture, because the fixture carries three members that are not screen fields -- the source row and the
+ * resolved pair -- so spreading it would assert three properties on a values object that has no such fields.
+ *
+ * ⚠️ Refactoring Rationale: the CARD field is expected to stay exactly as it was, where it used to be
+ * expected to hold the resolved card. The reference does write it -- `app/cbl/COTRN02C.cbl` L473 performs
+ * `VALIDATE-INPUT-KEY-FIELDS` before the read and L209 moves the cross-reference's card number into
+ * `CARDNINI` -- but it writes sixteen digits it already holds in storage. The migrated preview publishes the
+ * MASKED rendering, so writing the answer into this control would leave a value there that the next turn's
+ * own numeric pattern refuses; the resolved card is rendered as protected text instead.
  * @returns {void} Nothing; the case asserts.
  */
 function adoptsElevenValuesAndKeepsTheKey(): void {
@@ -511,13 +534,17 @@ function adoptsElevenValuesAndKeepsTheKey(): void {
   const adopted = paintCopiedValues(
     held,
     COPIED,
-    { accountId: ACCOUNT_ID, cardNumber: RESOLVED_CARD },
+    {
+      accountId: ACCOUNT_ID,
+      cardNumberMasked: RESOLVED_CARD_MASKED,
+      confirmationToken: CONFIRMATION_TOKEN,
+    },
     toEditMaskAmount(COPIED_AMOUNT),
   );
 
   expect(adopted).toEqual({
     accountId: ACCOUNT_ID,
-    cardNumber: RESOLVED_CARD,
+    cardNumber: '',
     typeCode: COPIED.typeCode,
     categoryCode: COPIED.categoryCode,
     source: COPIED.source,
@@ -546,7 +573,11 @@ function leavesAnUnrenderableAmountAlone(): void {
   const adopted = paintCopiedValues(
     { ...BLANK, amount: '' },
     COPIED,
-    { accountId: ACCOUNT_ID, cardNumber: RESOLVED_CARD },
+    {
+      accountId: ACCOUNT_ID,
+      cardNumberMasked: RESOLVED_CARD_MASKED,
+      confirmationToken: CONFIRMATION_TOKEN,
+    },
     toEditMaskAmount('123456789.00'),
   );
   expect(adopted.amount).toBe('');

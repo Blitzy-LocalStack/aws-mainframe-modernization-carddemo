@@ -2,8 +2,12 @@
 // services/reference-service/src/test/java/com/carddemo/reference/api/DateConversionControllerTest.java
 // -----------------------------------------------------------------------------
 // Purpose:
-//      Boundary cases over DateConversionController that no other class in this
-//      package reaches: that the shared advice registration is load-bearing and
+//      Boundary cases over DateConversionController, exercised through the
+//      framework's servlet context slice -- @WebMvcTest over this controller
+//      alone, with the OAuth2 resource-server auto-configuration excluded, the
+//      shared common auto-configuration imported, and the movable clock and the
+//      real date evaluation supplied by the nested SliceFixtures -- covering what
+//      no other class in this package reaches: that the shared advice registration is load-bearing and
 //      not decorative, that this route publishes the date-edit contract and NOT
 //      the queue-borne system-date reply, that the severity and the message
 //      number arrive as two separate members with the tolerated rejection
@@ -48,7 +52,13 @@
 //      way for the deployed boundary to break while a hand-assembled one stays
 //      green. The slice obtains the controller, the advice, the filters and the
 //      message converters from the deployed configuration and substitutes only
-//      the collaborator and the clock.
+//      the collaborator and the clock, through the @Import'ed SliceFixtures.
+//      Assumptions: two hand-assembled dispatchers REMAIN and are not leftovers.
+//      One is deliberately bare, so case one can contrast a boundary with the
+//      shared advice against one without it, and one is built over a second
+//      clock, so the case that proves a verdict does not follow the clock can
+//      compare two clocks. Neither could be obtained from the slice, which
+//      publishes one configured dispatcher over one clock.
 //  (4) Assumptions: the shared advice is what makes every status assertion here
 //      mean anything, and its absence does not fail loudly -- without it the
 //      framework's own error handling answers instead, so a refusal that should
@@ -845,10 +855,13 @@ class DateConversionControllerTest {
      * a date-edit is for. The projection's two models are therefore reconciled by locating each one
      * rather than by merging them, and the divergence is the FORM of the control, not its substance.</p>
      *
-     * <p>Alternatives Considered: asserting this through the context-slicing web-test annotation the same
-     * projection requested. Not available rather than not chosen -- see
-     * {@link #theWebSliceAnnotationIsGenuinelyAbsentFromThisModulesTestClasspath}, which turns that
-     * unavailability into a live assertion instead of a prose claim.</p>
+     * <p>⚠️ Assumptions: this case reaches the boundary through a dispatcher it assembles itself even
+     * though the class as a whole runs under the context slice, and the reason is the SECOND clock. The
+     * slice's own dispatcher is built over the one clock {@code SliceFixtures} publishes, and the property
+     * under test is that two different clocks produce one identical verdict -- so a second dispatcher over a
+     * second clock is what the comparison needs. This paragraph previously said the slice annotation was
+     * "not available rather than not chosen"; it is available, it is applied at the class declaration above,
+     * and it supplies the dispatcher the first half of this case uses.</p>
      *
      * @throws Exception if either request cannot be performed or a body cannot be parsed
      */
@@ -890,42 +903,46 @@ class DateConversionControllerTest {
     }
 
     /**
-     * Shows the context-slicing web-test annotation is genuinely absent from this module's test classpath.
+     * Shows the slice annotation this class uses is the framework's CURRENT one and not the retired name.
      *
-     * <p>Purpose: header note 3 states that the framework's fourth generation moved
-     * {@code @WebMvcTest} out of the test auto-configuration artifact into a servlet-slice artifact this
-     * module does not declare, and that the dispatcher idiom used throughout this package is a
-     * consequence rather than a preference. That statement decides the shape of nine test classes and
-     * until now nothing checked it. This case checks it, so the claim is live: if the annotation ever
-     * becomes resolvable -- because the slice artifact is added, or because the framework moves it back
-     * -- this case fails and tells its reader that the reason for the idiom has expired.</p>
+     * <p>⚠️ Purpose: this case asserted that the slice annotation was absent from this module's test
+     * classpath, on the ground -- stated in its own Purpose and in header note 3 -- that the framework's
+     * fourth generation had moved it into an artifact this module does not declare, which is why the whole
+     * package assembled dispatchers by hand. Every part of that reasoning has expired: this module declares
+     * the artifact, the class above IS annotated with the slice, and the dispatcher helpers that remain serve
+     * cases needing a second clock or a deliberately bare dispatcher rather than serving an unavailability.
+     * What the assertion itself checks is still worth checking, because it never referred to the annotation
+     * this class uses: the name it asks the class loader for is the RETIRED, third-generation one. Pinning
+     * that name as unresolvable is what stops a copied-in class or a migration guide from reintroducing the
+     * old import, which would resolve to nothing and silently drop the slice.</p>
      *
-     * <p>Assumptions: absence is established by asking the CLASS LOADER for the type rather than by
-     * reading the build descriptor, because what decides whether a test can use an annotation is the
-     * classpath the test runs on and not the dependency list somebody believes produces it. The check is
-     * therefore true of the environment the assertion runs in.</p>
+     * <p>Assumptions: both halves are asserted -- the retired name absent, the current one present and
+     * carried by this very class -- because either alone is misleading. The absence alone reads as the claim
+     * this case used to make, that no slice is available; the presence alone would pass while an obsolete
+     * import sat beside it.</p>
      *
-     * <p>Alternatives Considered: declaring the missing artifact in
-     * {@code services/reference-service/pom.xml} so the projection's requested slice posture could be
-     * implemented literally. Rejected on measurement rather than on ownership: the artifact is not
-     * present in the build's resolvable repository at all, so declaring it makes every module in the
-     * reactor unbuildable rather than making one test class more idiomatic. The resolution taken is the
-     * one available -- keep the dispatcher idiom, which exercises the controller through a real
-     * dispatcher, a real message converter and the real shared advice, and pin the reason it is
-     * necessary so it cannot quietly become false.</p>
+     * <p>Assumptions: the class LOADER is asked rather than the build descriptor read, because what decides
+     * whether a test can use an annotation is the classpath it runs on and not the dependency list somebody
+     * believes produces it.</p>
      *
      * <p>It takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the context-slicing web-test annotation is absent from this module's test classpath")
-    void theWebSliceAnnotationIsGenuinelyAbsentFromThisModulesTestClasspath() {
+    @DisplayName("the slice annotation in use is the current one and the retired name is unresolvable")
+    void theSliceAnnotationInUseIsTheFrameworksCurrentName() {
         assertThatExceptionOfType(ClassNotFoundException.class)
-                .as("header note 3 rests on this annotation being unresolvable; if it resolves, the "
-                        + "dispatcher idiom in this package is a choice again and must be revisited")
+                .as("the third-generation name must stay unresolvable, so an obsolete import cannot be "
+                        + "reintroduced and quietly drop the slice")
                 .isThrownBy(() -> Class.forName(
                         "org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest",
                         false,
                         DateConversionControllerTest.class.getClassLoader()));
+        assertThat(WebMvcTest.class.getName())
+                .as("the slice this class runs under must be the framework's current servlet slice")
+                .isEqualTo("org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest");
+        assertThat(DateConversionControllerTest.class.getAnnotation(WebMvcTest.class))
+                .as("this class must actually run under the slice, not merely have it on the classpath")
+                .isNotNull();
     }
 
     /**

@@ -2,6 +2,7 @@ package com.carddemo.transaction.dto;
 
 import com.carddemo.common.money.Money;
 import com.carddemo.common.security.CardNumberMasker;
+import com.carddemo.common.web.CursorToken;
 import jakarta.validation.Constraint;
 import jakarta.validation.ConstraintValidator;
 import jakarta.validation.ConstraintValidatorContext;
@@ -519,6 +520,14 @@ import tools.jackson.databind.annotation.JsonDeserialize;
  *     than a record field, from {@code CONFIRMI PIC X(1)} at line 138 of the map; at most one
  *     character and restricted to the affirmative and negative characters the reference recognises,
  *     null or blank when the submission is the first turn of the confirmation exchange
+ * @param confirmationToken the opaque binding token a preview published, echoed back so the write is
+ *     bound to the resolution the operator was shown; optional, and null or blank on a submission that
+ *     confirms in one turn, which is what the reference itself does. It has NO baseline counterpart --
+ *     a terminal turn carries its own context, so the reference never has to name which earlier answer
+ *     a confirmation belongs to -- and it replaced the unmasked primary account number the preview used
+ *     to publish for the same purpose. Bounded and shaped by
+ *     {@code com.carddemo.common.web.CursorToken}, and interpreted only by the service that holds the
+ *     sealing key
  */
 @TransactionAddRequest.AtLeastOneKey
 public record TransactionAddRequest(
@@ -651,7 +660,23 @@ public record TransactionAddRequest(
     //       application.yml, the wrong one of the two would be refused outright.
     @Size(max = CONFIRM_WIDTH)
     @Pattern(regexp = CONFIRM_VALUES, message = CONFIRM_INVALID_VALUE)
-    String confirmation) implements TransactionKeySelection {
+    String confirmation,
+    // WHY : ⚠️ Assumptions: this member is OPTIONAL and has no baseline counterpart at all, because the
+    //       state it exists for has no baseline counterpart: the reference confirms inside one screen
+    //       turn, so it never has to say which earlier answer a confirmation belongs to. Splitting that
+    //       turn into two stateless requests is what created the question, and this is the answer to it.
+    // WHY : Assumptions: the shape is checked and the VALUE is not interpreted here. Bounding the length
+    //       and the alphabet at the boundary means a hostile caller cannot choose how much cryptographic
+    //       work an open costs, while the decision about what the token names belongs to the service that
+    //       holds the key -- so no constraint here can be mistaken for having verified it.
+    // WHY : Alternatives Considered: carrying it as a request HEADER, in the manner of the account
+    //       context's If-Match precondition. Rejected because a precondition header states a revision of
+    //       the resource being written, and this states which earlier ANSWER is being confirmed; putting
+    //       it in the body keeps it beside the confirmation character it qualifies, and keeps one
+    //       exchange described in one place.
+    @Size(max = CursorToken.MAX_TOKEN_LENGTH)
+    @Pattern(regexp = CursorToken.SEALED_SHAPE_PATTERN, message = CONFIRMATION_TOKEN_MALFORMED)
+    String confirmationToken) implements TransactionKeySelection {
 
   /**
    * The declared width of the account identifier, from {@code ACTIDINI PIC X(11)} at line 60 of
@@ -987,6 +1012,26 @@ public record TransactionAddRequest(
    * layer that decides whether to perform the add.
    */
   public static final String CONFIRM_INVALID_VALUE = "Invalid value. Valid values are (Y/N)...";
+
+  /**
+   * The message reported when the binding token is not the shape this service issues.
+   *
+   * <p>⚠️ Assumptions: the sentence is AUTHORED rather than transcribed, and it is authored because the
+   * baseline has none to transcribe -- the reference confirms inside one screen turn and so never
+   * reports that a confirmation belongs to an answer it cannot recognise. It names the remedy the
+   * operator actually has, which is to take the preview again, rather than describing a token they never
+   * see. The divergence is registered as {@code D-CONFIRMED-CARD-BINDING} in
+   * {@code docs/architecture/cobol-to-service-traceability.md}, beside the guard it belongs to.</p>
+   *
+   * <p>Assumptions: it is the same sentence
+   * {@code TransactionAddService.MESSAGE_CONFIRM_RESOLVED_CARD} carries, and the repetition is
+   * deliberate rather than an oversight: a malformed token and a token naming another card are one
+   * condition from the operator's side -- this confirmation cannot be trusted to name what they were
+   * shown -- and two sentences for it would read on screen as two different problems with two different
+   * remedies.</p>
+   */
+  public static final String CONFIRMATION_TOKEN_MALFORMED =
+      "Card Number changed. Review the transaction and confirm again...";
 
   /**
    * Requires at least one of the two key alternatives, reporting against both of them.

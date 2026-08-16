@@ -80,13 +80,23 @@ const NOT_FOUND_STATUS = 404;
 const SERVER_ERROR_STATUS = 500;
 
 /**
- * The card the cross-reference resolves for the keyed account, sixteen digits and unmasked.
+ * The MASKED rendering the service publishes for the card the cross-reference resolved.
  *
- * Assumptions: every withheld answer this suite stubs reports it, because the service resolves the pair on
- * every turn -- `app/cbl/COTRN02C.cbl` L166 performs `VALIDATE-INPUT-KEY-FIELDS` for the Enter arm as L473
- * does for the copy arm -- and the screen repaints its card control from it, as L209 does.
+ * ⚠️ Assumptions: every withheld answer this suite stubs reports it, because the service resolves the pair
+ * on every turn -- `app/cbl/COTRN02C.cbl` L166 performs `VALIDATE-INPUT-KEY-FIELDS` for the Enter arm as
+ * L473 does for the copy arm. What the screen does with it has changed: the reference repaints its card
+ * FIELD from the resolved number, and the migrated preview publishes only this masked rendering, so the
+ * control is left as the operator keyed it and the masked value is shown as protected text instead.
+ *
+ * ⚠️ Refactoring Rationale: the constant used to hold the sixteen digits, which is what the preview
+ * published. A review found that a non-administrative preview disclosed a whole primary account number to
+ * the browser, and AAP section 0.4.1.9 masks it everywhere but the administrative card-detail read.
  */
-const RESOLVED_CARD_NUMBER = '4111111111111111';
+const RESOLVED_CARD_NUMBER_MASKED = '************1111';
+
+/** The opaque binding the preview publishes so a confirming turn can name the same resolved card. */
+// The value is deliberately low-entropy; `ui/src/api/transactions.test.ts` records why.
+const CONFIRMATION_TOKEN = 'v2.aaaaaaaaaaaaaaaa.notarealsealedvalue';
 
 /**
  * The ten copied members the service publishes, and the row they came from.
@@ -137,7 +147,8 @@ function copiedOutcome(): TransactionAddOutcome {
       written: false,
       returnMessage: null,
       resolvedAccountId: VALID_ACCOUNT_ID,
-      resolvedCardNumber: RESOLVED_CARD_NUMBER,
+      resolvedCardNumberMasked: RESOLVED_CARD_NUMBER_MASKED,
+      confirmationToken: CONFIRMATION_TOKEN,
       copied: copiedValues(),
     },
   };
@@ -354,7 +365,14 @@ function transactionAddCases(): void {
     expect(controlFor('processDate')).toHaveValue('2026-01-11');
 
     expect(controlFor('accountId')).toHaveValue(VALID_ACCOUNT_ID);
-    expect(controlFor('cardNumber')).toHaveValue(RESOLVED_CARD_NUMBER);
+    /*
+     * WHY : ⚠️ Assumptions: the card control is asserted to stay BLANK, where it used to be asserted to
+     *       hold the resolved number. The resolved card now arrives masked, and a masked rendering is not a
+     *       value this screen may put into a numeric key field -- the next turn's own pattern refuses it --
+     *       so the control keeps what the operator keyed and the resolved card is rendered as protected text
+     *       on the confirmation surface, which `transactionAddTurns.test.tsx` asserts.
+     */
+    expect(controlFor('cardNumber')).toHaveValue('');
     expect(controlFor('confirmation')).toHaveValue('');
   }
 
@@ -579,7 +597,8 @@ function transactionAddCases(): void {
         written: false,
         returnMessage: null,
         resolvedAccountId: VALID_ACCOUNT_ID,
-        resolvedCardNumber: RESOLVED_CARD_NUMBER,
+        resolvedCardNumberMasked: RESOLVED_CARD_NUMBER_MASKED,
+        confirmationToken: CONFIRMATION_TOKEN,
         copied: null,
       },
     });

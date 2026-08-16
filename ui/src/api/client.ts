@@ -7,8 +7,9 @@
  * Construct and memoise one axios instance carrying six boundaries that must be identical on every
  * request, so no per-operation client can implement any of them differently:
  *
- * - Authentication: the bearer token is attached by a request interceptor from the one
- *   session-storage key this module owns. No other module writes that key.
+ * - Authentication: the bearer token is attached by a request interceptor from the one MODULE-SCOPED
+ *   variable this module owns. Nothing is written to browser storage -- the reasoning for holding the
+ *   credential in memory is recorded on that variable -- and {@link setAccessToken} is its only writer.
  * - Correlation: every request carries a correlation identifier whose length and alphabet match
  *   what `CorrelationIdFilter` in `services/common-lib` accepts, so a browser-named request and a
  *   service-named one are indistinguishable in shape and a trace spans both sides.
@@ -30,7 +31,7 @@
  * kinds — a service's own problem document, an answer from something between the browser and the
  * service whose body is not one, the configured timeout expiring, or no answer at all. The
  * classification is what decides the remedy a screen can offer; the document is what decides the
- * text it shows and which of its fields it marks. HTTP 401 additionally discards the stored token
+ * text it shows and which of its fields it marks. HTTP 401 additionally discards the held token
  * and signals that re-authentication is required, and it does so WITHOUT navigating: routing is
  * `ui/src/router.tsx`'s concern and a redirect issued from an interceptor loops.
  *
@@ -67,7 +68,7 @@ import type {
 
 // WHY : Alternatives Considered: ONE instance for the whole package, memoised below, rather than one
 //       per typed client module. Seven instances would each need the bearer header, the correlation
-//       identifier, the timeout and the failure normalisation attached, and four boundaries repeated
+//       identifier, the timeout and the failure normalisation attached, and boundaries repeated
 //       seven times drift: the concrete failure is a module whose requests carry no correlation
 //       identifier, which reports nothing and simply stops joining traces up. One instance also
 //       means one place to answer "what did the browser send", which is why `client.test.ts` can pin
@@ -119,22 +120,24 @@ const HTTP_TOKEN_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u;
 
 /*
  * WHY : Refactoring Rationale: the request configuration is augmented with ONE optional member rather
- *       than a second axios instance being created for the unauthenticated operations. Three requests
- *       in the whole application are declared `security: []` by their contract -- the sign-on, the
- *       token refresh and the challenge answer -- and each of them was nevertheless dispatched with
- *       whatever bearer this tab happened to hold, because the interceptor attaches one to everything.
+ *       than a second axios instance being created for the unauthenticated operations. FOUR requests
+ *       in the whole application are declared `security: []` by their contract -- `signOn`,
+ *       `refreshTokens`, `answerSignOnChallenge` and `signOut`, at L376, L566, L683 and L819 of
+ *       `services/auth-service/src/main/resources/openapi/auth-api.yaml` -- and each of them was
+ *       nevertheless dispatched with whatever bearer this tab happened to hold, because the interceptor
+ *       attaches one to everything.
  *       A held token that has expired or been revoked is therefore processed by the resource-server
  *       filter BEFORE the permit-all rule for these paths is reached, so a stale credential could
  *       refuse the very exchange whose purpose is to replace it -- and the operator would read
  *       "unauthorized" at the sign-on screen having presented nothing.
  * WHY : Alternatives Considered: a second axios instance with no authentication interceptor, which is
- *       the obvious shape. Rejected because the other four boundaries this module owns -- the
+ *       the obvious shape. Rejected because the other boundaries this module owns -- the
  *       correlation identifier, the clamped timeout, the failure normalisation and the server-clock
  *       anchoring -- would then exist twice, and the copy that fell behind would do so silently: the
  *       concrete failure is a sign-on whose requests carry no correlation identifier, which reports
  *       nothing and simply stops joining traces up.
- * WHY : Alternatives Considered: classifying by TARGET inside the interceptor, matching the three
- *       token-exchange paths. Rejected because it would put a copy of the contract's own security
+ * WHY : Alternatives Considered: classifying by TARGET inside the interceptor, matching the four
+ *       unauthenticated paths. Rejected because it would put a copy of the contract's own security
  *       declaration inside this module, keyed by path text: an operation renamed on the service side
  *       would leave the classification silently stale, and this module deliberately knows no endpoint.
  *       Metadata supplied by the caller keeps the decision beside the operation that owns it.
@@ -159,12 +162,17 @@ declare module 'axios' {
 }
 
 /**
- * The request configuration the three unauthenticated token exchanges are dispatched with.
+ * The request configuration the four unauthenticated auth-service operations are dispatched with.
  *
  * Assumptions: frozen and shared rather than constructed per call, because axios merges a supplied
  * configuration into a fresh object and never writes back into it, so one immutable value is safe for
  * every caller and makes "this request carries no session" a single named fact rather than a boolean
- * repeated at three call sites.
+ * repeated at four call sites.
+ *
+ * ⚠️ Assumptions: the revocation is one of the four, which is not obvious -- ending a session
+ * sounds like an operation that must present it. Its contract declares `security: []` because the
+ * credential it is asked to revoke may already be refused, and a revocation that could only be
+ * accepted while the token was still valid would leave exactly the expired sessions unrevoked.
  */
 export const WITHOUT_STORED_SESSION: Readonly<AxiosRequestConfig> = Object.freeze({
   carddemoOmitStoredSession: true,
@@ -585,8 +593,8 @@ export function newCorrelationId(): string {
  *
  * Refactoring Rationale: the stored token is attached CONDITIONALLY on the request's own metadata,
  * and the condition is checked first. A request marked {@link WITHOUT_STORED_SESSION} has the header
- * removed rather than merely not added, which is what makes the guarantee hold for the three token
- * exchanges however their configuration was composed: the reasoning for the flag, and the two
+ * removed rather than merely not added, which is what makes the guarantee hold for the four
+ * unauthenticated operations however their configuration was composed: the reasoning for the flag, and the two
  * alternatives rejected in its favour, are recorded on its declaration above.
  *
  * Assumptions: the correlation identifier is attached to EVERY request including the suppressed ones.

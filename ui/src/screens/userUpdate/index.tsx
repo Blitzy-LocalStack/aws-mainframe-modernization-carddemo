@@ -75,6 +75,7 @@ import type {
 } from '../../api/types';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { useShellSlot } from '../../layout/AppShell';
+import { fieldAriaProps, fieldErrorHelp, fieldHintId } from '../../layout/fieldHelp';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
 import { UNIFORM_PF_KEY_LABELS, decodeBmsLegendText } from '../../layout/PfKeyBar';
 import { usePfKeys } from '../../layout/usePfKeys';
@@ -88,6 +89,7 @@ import {
 } from '../../messages/messages';
 import type { MapsetName } from '../../messages/messages';
 import { ADMIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
+import { ScreenTitle } from '../../layout/ScreenTitle';
 import {
   BMS_COLOR_TOKENS,
   BMS_TEXT_COLOR_TOKENS,
@@ -748,6 +750,18 @@ export function UserUpdateScreen(): ReactElement {
         setMessage(BLANK_FIELD_MESSAGES.userId);
         setSeverity('error');
         setPendingFocus('userId');
+        /*
+         * WHY : ⚠️ Refactoring Rationale: the flag is CLEARED here, and its absence left the screen
+         *       permanently disabled. This arm opens a turn -- deliberately, so an outstanding read
+         *       cannot seed the form beneath a refusal -- and then issues no request, so it never sets
+         *       the flag itself; meanwhile the read it superseded returns without touching the flag,
+         *       because a superseded answer must not re-enable keys while a NEWER request is in flight.
+         *       With neither party clearing it, an operator who emptied the identifier while a read was
+         *       outstanding was left with every key inert and no way back except the clear key. The
+         *       invariant the superseded arm below states -- that every superseding path either opens a
+         *       turn of its own or clears the flag itself -- is what this line restores.
+         */
+        setBusy(false);
         return;
       }
 
@@ -1384,30 +1398,29 @@ export function UserUpdateScreen(): ReactElement {
   });
 
   /*
-   * WHY : ⚠️ Refactoring Rationale: this screen DELEGATES its title band and its key legend to
-   *       the shell instead of painting them itself. `ui/src/layout/AppShell.tsx` is mounted as
-   *       the authenticated layout route, so the frame is painted once above the outlet rather
-   *       than rebuilt per screen; a screen that also painted them would show two title bands
-   *       and two legends. The message band stays local, because the shell paints a zone only
-   *       when it is delegated and this screen's message is bound to controls in its own body.
-   * WHY : Assumptions: the legend is delegated rather than dropped, so the SCREEN keeps owning
-   *       its keys -- `bindings` and `invoke` come from this screen's own `usePfKeys` call and
-   *       are handed up unchanged. The shell adds its sign-off key beside them only when this
-   *       screen leaves that attention identifier free, which is decided by AID in the shell.
-   */
-  /*
-   * WHY : ⚠️ Refactoring Rationale: the row-23 message line is delegated WITH the title band and the
-   *       legend, and this publication omitted it while the screen's own band had already been removed
-   *       -- so every sentence `report` wrote into state, including all five field refusals and the
-   *       invalid-key sentence, was computed and then painted nowhere. The mapset's `severity` travels
-   *       with the text because this channel carries the stored-write acknowledgement as well as
-   *       refusals, and painting that in the refusal colour would tell an operator a committed write
-   *       had failed.
-   * WHY : Assumptions: delegating `pfKeys` is what keeps the keyboard singly owned. This screen binds
-   *       PF12 as its exit and the shell binds PF12 as sign-off whenever no screen has published keys,
-   *       so without the publication both listeners would sit on the document and one PF12 press would
-   *       leave the screen AND end the session. No legend colour is delegated because
-   *       `app/bms/COUSR02.bms` L160 paints this screen's row-24 field `COLOR=YELLOW`, the slot default.
+   * WHY : ⚠️ Refactoring Rationale: ALL THREE persistent zones are delegated to the shell -- the
+   *       title band, the row-23 message line and the row-24 legend -- and each half of that arrived by
+   *       its own correction, which is why two contradictory notes stood here. The first said the message
+   *       band "stays local"; it does not, and by the time that sentence was written this screen's own
+   *       band had already been removed, so every sentence `report` wrote into state -- all five field
+   *       refusals, the invalid-key sentence and the stored-write acknowledgement -- was computed and
+   *       painted nowhere. `ui/src/layout/AppShell.tsx` is mounted as the layout route and paints a zone
+   *       only for a screen that published one, so publishing all three is what gets them painted once,
+   *       and a screen that also composed them would show two of each.
+   * WHY : Assumptions: the mapset's `severity` travels with the text because this one channel carries the
+   *       stored-write acknowledgement as well as the refusals, and painting an acknowledgement in the
+   *       refusal colour would tell an operator a committed write had failed. No legend colour is
+   *       delegated, because `app/bms/COUSR02.bms` L160 paints this screen's row-24 field `COLOR=YELLOW`,
+   *       which is the slot's own default.
+   * WHY : ⚠️ Assumptions: delegating `pfKeys` hands the shell the bindings to RENDER and leaves this
+   *       screen owning the keyboard -- `bindings` and `invoke` come from its own `usePfKeys` call and
+   *       travel up unchanged, and an activation of a rendered legend control is forwarded straight back
+   *       to `invoke`. The claim that stood here, that the shell adds a sign-off key of its own "when
+   *       this screen leaves that attention identifier free, which is decided by AID in the shell", is
+   *       withdrawn: the shell installs NO keyboard listener at all and offers sign-off as a rendered
+   *       control, for the reason recorded at `SHELL_SIGN_OFF_LABEL`. So there is no second listener to
+   *       stand down and no AID arbitration anywhere -- this screen's PF12 exit is the only PF12 on the
+   *       document while it is mounted.
    */
   useShellSlot({
     screen: { transactionId: USER_UPDATE_TRANSACTION_ID, programName: USER_UPDATE_PROGRAM_NAME },
@@ -1461,6 +1474,20 @@ export function UserUpdateScreen(): ReactElement {
    * by nesting, so assistive technology announces the mapset's own label text when the control takes
    * focus. The 3270 original was keyboard-only, so this is fidelity rather than an addition: a label
    * that was merely adjacent on a character grid has to be associated explicitly in a browser.
+   *
+   * ⚠️ Refactoring Rationale: the refusal sentence and the width hint are now ASSOCIATED with the
+   * control as well as rendered beside it, through the shared `ui/src/layout/fieldHelp.tsx` helpers. The
+   * label was bound and the other two were not: the refusal was passed to `Form.Item` as a bare string,
+   * so the design system rendered it in its own container with an identifier nothing referenced, and the
+   * hint went to `extra` the same way. The control therefore carried no `aria-invalid` and no
+   * `aria-describedby`, which leaves an operator using a screen reader with a marked field whose reason
+   * is announced only if they happen to move past it -- and on this screen the reason is the whole of the
+   * refusal, since the band shows the same sentence for whichever of the four controls failed.
+   *
+   * Assumptions: the helpers are used rather than the attributes written here, and that is what keeps
+   * this screen consistent with the four that already use them. `fieldAriaProps` also encodes the order
+   * the design system renders the two containers in -- refusal above hint -- so the description is
+   * announced in the order it is read.
    * @param {UserUpdateField} field - Control to render.
    * @returns {ReactElement} The form item, its control, and the marker and help text a refusal adds.
    */
@@ -1485,6 +1512,11 @@ export function UserUpdateScreen(): ReactElement {
      *       draws between its two arms.
      */
     const controlProps = {
+      ...fieldAriaProps(controlId, {
+        invalid: refusal !== undefined,
+        hasError: refusal !== undefined,
+        hasHint: presentation.hint !== undefined,
+      }),
       id: controlId,
       ref: registerControl(field),
       value: values[field],
@@ -1514,11 +1546,26 @@ export function UserUpdateScreen(): ReactElement {
         htmlFor={controlId}
         {...(refusal === undefined
           ? {}
-          : { validateStatus: 'error' as const, help: refusal.message })}
+          : {
+              validateStatus: 'error' as const,
+              help: fieldErrorHelp(controlId, refusal.message),
+            })}
         {...(presentation.hint === undefined
           ? {}
           : {
-              extra: <Typography.Text style={hintStyle}>{presentation.hint}</Typography.Text>,
+              extra:
+                (
+                  /*
+                   * WHY : Assumptions: the hint element carries the identifier `fieldAriaProps` derives for
+                   *       it, so the control's description resolves to something rendered. The style stays
+                   *       on this element rather than moving into the helper, because the colour is the
+                   *       mapset's own `COLOR=BLUE` on that field and the helper is colour-agnostic by
+                   *       design -- the design system colours the refusal container itself.
+                   */
+                  <Typography.Text id={fieldHintId(controlId)} style={hintStyle}>
+                    {presentation.hint}
+                  </Typography.Text>
+                ),
             })}
       >
         {/*
@@ -1559,14 +1606,15 @@ export function UserUpdateScreen(): ReactElement {
   return (
     <Flex vertical gap="large">
       {/*
-       * Assumptions: heading level four rather than any other, because the token bridge maps a screen
-       * caption to `fontSizeHeading4` and `lineHeightHeading4`, and `Typography.Title level={4}` is the
-       * component that resolves to exactly those two tokens. This is the mapset's own row-4 field and
-       * not the title band, which the shell paints from rows 1 and 2 out of the delegated identity.
+       * ⚠️ Assumptions: the rank comes from `ui/src/layout/ScreenTitle.tsx` and the SIZE from the
+       * bridge entries it applies, where this site read `level={4}` and relied on the component to
+       * supply both. That reliance is what the outline could not survive: ten other screens painting the
+       * same row-4 caption chose `level={3}` for the same size reason and thereby outranked the
+       * application title above them. Separating the two lets every caption share one rank without any
+       * of them changing size. This is the mapset's own row-4 field and not the title band, which the
+       * shell paints from rows 1 and 2 out of the delegated identity.
        */}
-      <Typography.Title level={4} style={captionStyle}>
-        {USER_UPDATE_CAPTION}
-      </Typography.Title>
+      <ScreenTitle style={captionStyle}>{USER_UPDATE_CAPTION}</ScreenTitle>
       {/*
        * Refactoring Rationale: the message line that used to sit here is delegated to the shell, which
        * paints it at row 23 -- below the fields, which is where the reference paints it. Composing it

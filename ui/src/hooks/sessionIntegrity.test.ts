@@ -44,7 +44,7 @@ import { AxiosError } from 'axios';
 import type { AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { useAuth } from './useAuth';
+import { resetAuthSession, useAuth } from './useAuth';
 import type { UseAuthResult } from './useAuth';
 import { getApiClient } from '../api/client';
 import type { DispatchedRequest } from '../test/apiHarness';
@@ -264,6 +264,26 @@ function settleStartedInside(): () => Promise<void> {
 }
 
 /**
+ * Builds a thunk that discards the module's session INSIDE an `act` scope, abandoning what is in flight.
+ *
+ * Assumptions: the reset runs inside the scope rather than before it because it notifies listeners
+ * synchronously, and a notification delivered outside a scope is reported by React as an unwrapped
+ * update -- the same reason {@link startSignOnInside} exists.
+ * @returns {() => Promise<void>} A thunk that resets and yields one turn, so whatever the abandonment
+ *   rejected can reach its handlers.
+ */
+function resetInside(): () => Promise<void> {
+  /**
+   * Discards the session and lets the abandonment propagate.
+   * @returns {Promise<void>} Resolves after one turn of the microtask queue.
+   */
+  return async function resetTheSession(): Promise<void> {
+    resetAuthSession();
+    await Promise.resolve();
+  };
+}
+
+/**
  * Builds a thunk that advances the mocked clock inside an `act` scope.
  * @param {number} milliseconds - How far to advance.
  * @returns {() => Promise<void>} A thunk that runs every timer due in that span.
@@ -275,6 +295,39 @@ function advanceInside(milliseconds: number): () => Promise<void> {
    */
   return async function advanceTheClock(): Promise<void> {
     await vi.advanceTimersByTimeAsync(milliseconds);
+  };
+}
+
+/**
+ * Builds a thunk that lets work an install started reach the transport, inside an `act` scope.
+ *
+ * Assumptions: this crosses a MACROTASK boundary rather than yielding a fixed number of microtask
+ * turns, because the request path is a promise chain of unknown length -- the client's interceptors,
+ * then the adapter -- and a count that happened to be one turn short would report a request as never
+ * dispatched. A macrotask boundary drains the whole microtask queue behind it, so what has not been
+ * dispatched by then was not going to be.
+ *
+ * Assumptions: this is the REAL-CLOCK counterpart of {@link advanceInside}, which requires mocked
+ * timers. A case asserting that nothing was dispatched must not mock the clock, because the immediate
+ * renewal it is ruling out is dispatched without any timer at all.
+ * @returns {() => Promise<void>} A thunk that resolves once the queues behind it have drained.
+ */
+function letStartedWorkReachTheTransportInside(): () => Promise<void> {
+  /**
+   * Yields to the event loop so anything already started can reach the transport.
+   * @returns {Promise<void>} Resolves on the next macrotask.
+   */
+  return async function letItReach(): Promise<void> {
+    await new Promise<void>(
+      /**
+       * Resumes on the next macrotask.
+       * @param {() => void} resume - Continues the awaiting caller.
+       * @returns {void} Nothing; the caller resumes once the queue behind it has drained.
+       */
+      function onTheNextMacrotask(resume: () => void): void {
+        setTimeout(resume, 0);
+      },
+    );
   };
 }
 
@@ -652,6 +705,129 @@ async function anAnswerWithoutARefreshTokenKeepsTheHeldOne(): Promise<void> {
 }
 
 /**
+ * A FRESH sign-on that answers without a refresh token does not inherit the previous operator's.
+ *
+ * ⚠️ Purpose: this is the complement of the case above, and the pair states where the rotation
+ * tolerance ends. The tolerance keeps a held refresh token when an answer omits one, which is right for a
+ * RENEWAL of the session that token belongs to and wrong for every other install. Signing on does not
+ * clear the held session first -- the generation moves and what is in flight is abandoned, and the record
+ * stays until an install replaces it -- so an operator signing on at a tab another operator had signed on
+ * at, with an answer carrying no refresh token, was installed WITH THE PREVIOUS OPERATOR'S refresh token.
+ * The scheduled renewal then presents one principal's credential under the other's identifier.
+ *
+ * Assumptions: the verdict is that NO renewal is dispatched, which is what a session holding no refresh
+ * token does -- nothing is armed for it, and the scheduled refresh returns without exchanging even if it
+ * ran. Against the defect a renewal IS dispatched, carrying the first operator's token, so the two
+ * outcomes are distinguishable by the presence of the request alone. The token is additionally asserted
+ * absent from every dispatched body, so a renewal reaching some other target could not slip past.
+ *
+ * Assumptions: the second sign-on answers with a SHORT lifetime, already inside the renewal margin, so
+ * the renewal the defect would dispatch is dispatched IMMEDIATELY and with no timer -- arming a session
+ * already inside its margin exchanges at once. A case arranging a long lifetime would have to mock and
+ * advance a clock to reach the same point, and would read as green against the defect for as long as it
+ * did not.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function aFreshSignOnDoesNotInheritAHeldRefreshToken(): Promise<void> {
+  answerWith(authenticatedBody(LONG_LIFETIME_SECONDS));
+
+  const { refreshToken: removedMember, ...withoutRefresh } =
+    authenticatedBody(SHORT_LIFETIME_SECONDS);
+  expect(
+    removedMember,
+    'the answer being reduced must have carried a refresh token for its removal to arrange anything',
+  ).not.toBeUndefined();
+  answerWith(withoutRefresh);
+  answerEveryRequestWith(authenticatedBody(LONG_LIFETIME_SECONDS));
+  const { result } = renderHook(useAuth);
+
+  await act(startSignOnInside(result, 'the-first-password'));
+  await act(settleStartedInside());
+  forgetDispatchedRequests();
+
+  await act(startSignOnInside(result, 'the-second-password'));
+  await act(settleStartedInside());
+  await act(letStartedWorkReachTheTransportInside());
+
+  expect(
+    dispatchedRequests().filter(dispatchIsARenewal),
+    'a session installed without a refresh token has nothing to renew with, so no renewal may be sent',
+  ).toHaveLength(0);
+  expect(
+    dispatchedRequests().map(
+      /**
+       * Renders one dispatched request's body as text, so it can be searched for a credential.
+       * @param {DispatchedRequest} dispatched - A request the transport recorded.
+       * @returns {string} That request's body, serialised.
+       */
+      function bodyOf(dispatched: DispatchedRequest): string {
+        return JSON.stringify(dispatched.body ?? {});
+      },
+    ),
+    'the first operator credential must not travel on any request made for the second',
+  ).not.toContainEqual(expect.stringContaining('a-refresh-token'));
+  expect(result.current.signedOn, 'the second session must be established').toBe(true);
+}
+
+/**
+ * An exchange abandoned by a reset must not leave a later, live exchange reading as not in flight.
+ *
+ * ⚠️ Purpose: this is the arithmetic case. What is in flight decides the published status, and an
+ * exchange in flight dominates that derivation, so the bookkeeping has to survive the one thing that
+ * deliberately abandons exchanges: the reset a fixture performs between cases. With a COUNT it did not.
+ * The reset zeroed the count, the abandoned exchange still ran its own `finally` and decremented to minus
+ * one, and from there `> 0` read false while an exchange was genuinely running -- so the next sign-on
+ * published `anonymous` while it was in flight, and a screen keyed on that status showed no progress and
+ * left its submit control live for a second submission.
+ *
+ * Assumptions: the discriminating assertion is the one taken while the SECOND sign-on is in flight, not
+ * the ones around the reset. Before the second sign-on both a set and a negative count report nothing in
+ * flight, so a case that stopped there would read as green against the defect; it is the live exchange
+ * that a negative count cannot lift above zero.
+ *
+ * Assumptions: the abandoned exchange is settled EXPLICITLY rather than left pending, because its
+ * `finally` is what the defect ran too late -- a case that never let it run would never reach the state
+ * being ruled out.
+ * @returns {Promise<void>} Resolves once the assertions hold.
+ */
+async function anAbandonedExchangeCannotHideALiveOne(): Promise<void> {
+  getApiClient().defaults.adapter = gatedAdapter;
+  const { result } = renderHook(useAuth);
+
+  await act(startSignOnInside(result, 'the-abandoned-password'));
+  expect(result.current.status, 'a dispatched sign-on is in flight').toBe('authenticating');
+
+  await act(resetInside());
+  // Assumptions: the abandoned request is ANSWERED rather than left pending, and it has to be answered
+  //   by the case: this file's adapter holds every request open and ignores `signal`, so the reset's
+  //   abort does not settle it and awaiting it unanswered would hang. The answer is judged against the
+  //   generation it belonged to and installs nothing -- which the first case in this file asserts -- so
+  //   what it contributes here is only that the exchange's own `finally` runs.
+  held[0]?.answer(authenticatedBody());
+  await act(settleStartedInside());
+
+  expect(
+    result.current.status,
+    'with nothing held and nothing running the reading is the anonymous one',
+  ).toBe('anonymous');
+
+  await act(startSignOnInside(result, 'the-live-password'));
+
+  expect(
+    result.current.status,
+    'a live exchange must be reported as in flight however many were abandoned before it',
+  ).toBe('authenticating');
+
+  held[held.length - 1]?.answer(authenticatedBody());
+  await act(settleStartedInside());
+
+  expect(result.current.signedOn, 'the live exchange must still establish its session').toBe(true);
+  expect(result.current.status, 'and the settled session is the authenticated reading').toBe(
+    'authenticated',
+  );
+}
+
+/**
  * Registers the session-integrity cases.
  * @returns {void} Nothing; the cases are registered with the runner.
  */
@@ -675,6 +851,14 @@ function sessionIntegrityCases(): void {
     aMismatchedSubjectEstablishesNoSession,
   );
   it('renews at once a session already inside the margin', aSessionInsideTheMarginIsRenewedAtOnce);
+  it(
+    'reports a live exchange as in flight after a reset abandoned another',
+    anAbandonedExchangeCannotHideALiveOne,
+  );
+  it(
+    'does not inherit a held refresh token on a fresh sign-on',
+    aFreshSignOnDoesNotInheritAHeldRefreshToken,
+  );
   it(
     'keeps the held refresh token when a renewal answers without one',
     anAnswerWithoutARefreshTokenKeepsTheHeldOne,

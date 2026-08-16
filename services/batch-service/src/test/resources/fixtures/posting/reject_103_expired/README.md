@@ -14,8 +14,9 @@
 > [master contract](../../README.md) for every encoding rule, which this document cites by section
 > rather than restating (master section 1.3).
 >
-> **Label form.** Rationales below are tagged `Alternatives Considered:`, `Assumptions:` and
-> `Trade-offs:` -- plain, plural, colon retained, no emphasis markup, per
+> **Label form.** Rationales below are tagged with the four canonical labels --
+> `Alternatives Considered:`, `Assumptions:`, `Trade-offs:` and `Refactoring Rationale:` -- plain,
+> plural, colon retained, no emphasis markup, per
 > `docs/CODE_DOCUMENTATION_STANDARD.md` and master section 1.4. This whole file is pure ASCII for
 > the reason that section gives.
 
@@ -649,36 +650,28 @@ which was true of the tree at the time and stopped being true when the parity cl
 carry away is the first one: **driven input, not mirror.**
 
 Assumptions: a correction like the one above looks as though it belongs under Rule 1's fourth category
-name -- the one its line 32 scopes to *replacing existing code* -- and that category is **factually
-unavailable in this file**, for the reason master section 1.4 gives. Nothing in this folder replaces
-anything: all five files are net-new, the COBOL baseline they derive from is untouched, and the house
-fixture tree they parallel still runs unchanged. Section 1.4 names the two categories that carry such a
-difference instead, and this note uses one of them. The category name itself is left unwritten here as
-well as unused, because a reviewer auditing this tree finds each rationale by literal string search, and
-a mention inside a sentence saying the category does not apply is indistinguishable from a use of it.
-The header of this file enumerates exactly the three labels it uses, and that enumeration is meant to be
-verifiable by the same search.
+name -- the one its line 32 scopes to *replacing existing code* -- and it is not used HERE, for the
+reason master section 1.4 gives. Nothing in this folder replaces anything: all five files are net-new,
+the COBOL baseline they derive from is untouched, and the house fixture tree they parallel still runs
+unchanged. Section 1.4 names the two categories that carry such a difference instead, and this note uses
+one of them.
+⚠️ Refactoring Rationale: this paragraph went further and said the category was **factually
+unavailable in this file** and "left unwritten here as well as unused", and that the header "enumerates
+exactly the three labels it uses". Section 10 uses that fourth label, about this document's own prose
+rather than about the records -- which is a replacement, of a paragraph that credited the wrong mechanism
+-- so the claim was false and the enumeration short. It was invisible for a mechanical reason worth
+recording: the label there was WRAPPED across a line break, so the literal string search this paragraph
+recommends found nothing, and a claim of absence was made from a search that could not have found it.
+The wrap is joined, the header enumerates four labels, and this paragraph now says only what remains
+true -- that the category is not used about these RECORDS.
+Assumptions: the header enumerates WHICH labels appear and no longer says how many times or in which
+section. A per-section tally is a second statement of something the file already states by containing
+the labels, and it goes stale on any edit that adds or moves one -- which is exactly how it went stale
+here, twice over. Membership is stable under editing and is what a reviewer's literal search actually
+answers.
 
-Assumptions: this section exists because two record files sitting in the same tree can differ in
-whether a job opens them, and the difference is invisible from the layout. Master section 1.5 holds the
-measurement, taken from the resource root each consuming class declares rather than from prose: all four
-files in every one of the NINE `posting/**` scenarios are opened -- by `PostTransactionsJobTest` under
-the classpath prefix `fixtures/posting/` and by `PostTransactionsJobParityIT` under `/fixtures/posting/`
--- all four files in every one of the THREE `interest/**` scenarios are opened by
-`CalculateInterestJobTest` under `fixtures/interest/`, and `PreflightDailyTransactionsJobTest` opens the
-three `preflight/**` feed files plus `preflight/unmatched_card/acctdata.txt` under
-`fixtures/preflight/`. **53 of the 62 record files in this tree are live job input**; master section 1.5
-names the nine that are not.
-
-Assumptions: this paragraph previously said the sibling `preflight/**` and `interest/**` families were
-mirrors that no test in this module read, and that `CalculateInterestJobTest` resolved its inputs from
-the repository-root `tests/fixtures/interest/` tree. Both claims were false. That class declares
-`FIXTURE_INTEREST_ROOT` as the classpath prefix `fixtures/interest/` and loads through
-`getClassLoader().getResourceAsStream(...)`, so it reads this tree; it DISCUSSES the reference oracle
-tree in its prose, and the two were conflated -- a path named in a docstring is not a path being opened.
-The correction matters in exactly the direction the paragraph was warning about: a reader told that a
-sibling directory was inert would carry that belief into it and edit a live job input believing the
-change was free.
+Assumptions: the tree-wide inventory is NOT restated here. Master section 1.5 measures it, and that
+section records why two paragraphs of it were withdrawn from this README and eight others.
 
 ---
 
@@ -686,8 +679,8 @@ change was free.
 required by master section 10 and by user-specified Rule 1. **No gate reads this prose.**
 `config/checkstyle/checkstyle.xml` limits its audit set to `java`, and `config/rule1/rule1_gate.py`
 excludes every path containing `/src/test/resources/fixtures/` in its `_is_governed` check, which is
-this path -- so neither its `labels` check nor its `what` check ever opens this file. Refactoring
-Rationale: this paragraph previously credited `config/rule1/rule1_gate.py` with deciding the form of
+this path -- so neither its `labels` check nor its `what` check ever opens this file.
+Refactoring Rationale: this paragraph previously credited `config/rule1/rule1_gate.py` with deciding the form of
 the rationale labels above "repository-wide and including Markdown". The gate does run
 repository-wide, which is what made the claim plausible, but this path is explicitly outside its
 remit, so the sentence let a green build be read as evidence about a document the gate never opens.

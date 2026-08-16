@@ -218,6 +218,17 @@ census, its geometry, its governance rules and the values the scenario documents
 division is also why the nine are worth committing at all -- the contract test is their consumer,
 and without it they would be bytes no process reads.
 
+⚠️ Refactoring Rationale: this table used to be restated, in prose, inside NINE of the
+scenario READMEs beside it -- every family, every consumer, the 53-of-62 live-input count and the
+nine-file exception -- together with a second paragraph narrating the correction recorded above. Both are
+withdrawn from all nine, and each now carries a two-line pointer here instead. The duplication was not
+merely verbose: the measurement existed in ten places and the correction in nine, so a test that moved
+its resource root would have to be followed into ten files, and the version of the reasoning that this
+section has already superseded once sat in nine copies where a reader could find the old answer first.
+What stays local in each scenario README is the fact that differs per folder -- which of the files
+beside it are opened, and by which class -- because that is what a maintainer editing those bytes needs
+and it cannot be centralised without losing its meaning.
+
 ---
 
 ## 2. Directory organization and file naming

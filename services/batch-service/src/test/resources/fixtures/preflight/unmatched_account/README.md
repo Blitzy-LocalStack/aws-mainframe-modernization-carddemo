@@ -679,8 +679,8 @@ sixteen things to keep in step.
 required by master section 10 and by user-specified Rule 1. **No gate reads this prose.**
 `config/checkstyle/checkstyle.xml` limits its audit set to `java`, and `config/rule1/rule1_gate.py`
 excludes every path containing `/src/test/resources/fixtures/` in its `_is_governed` check, which is
-this path -- so neither its `labels` check nor its `what` check ever opens this file. Refactoring
-Rationale: this paragraph previously said the gate "decides the form of the rationale labels above,
+this path -- so neither its `labels` check nor its `what` check ever opens this file.
+Refactoring Rationale: this paragraph previously said the gate "decides the form of the rationale labels above,
 repository-wide and including Markdown". The gate does run repository-wide, which is what made the
 claim plausible, but this path is explicitly outside its remit -- so the sentence credited a
 build-failing gate with cover it does not provide, and a green build could be read as evidence about

@@ -2563,6 +2563,45 @@ components:
             transaction..." verbatim from app/cbl/COTRN02C.cbl L178; any other
             character is refused with "Invalid value. Valid values are (Y/N)..."
             verbatim from L184.
+        # WHY : ⚠️ Refactoring Rationale: this member is NEW and it replaced a
+        #       response member rather than adding a request one. The preview used
+        #       to publish resolvedCardNumber as sixteen digits so that a
+        #       confirming submission could echo it back and be checked against the
+        #       resolution -- which put an unmasked primary account number in a
+        #       non-administrative response body, contradicting AAP section 0.4.1.9
+        #       and the CardNumber schema in this same document, whose description
+        #       states the unmasked form "appears on requests only". The check is
+        #       kept and the disclosure is not: the preview now publishes the masked
+        #       rendering for the operator to read and this sealed token for the
+        #       service to verify.
+        # WHY : Assumptions: it is OPTIONAL, and its absence is a supported shape
+        #       rather than a tolerated one. The baseline confirms inside a single
+        #       screen turn -- L495 re-enters PROCESS-ENTER-KEY with the operator's
+        #       own map -- so a caller that submits a confirming value directly has
+        #       no earlier answer to be bound to, and requiring the token would
+        #       refuse the one-request capture this operation exists to offer. What
+        #       such a caller gives up is the binding, and its write then goes to
+        #       whatever its key resolves to at that moment, which is the
+        #       baseline's own behaviour.
+        # WHY : Assumptions: it reuses the CursorToken schema rather than declaring
+        #       a second sealed-token shape. Both are minted by
+        #       com.carddemo.common.web.CursorToken under the same deployment key
+        #       and have byte-identical form, so a second declaration would be two
+        #       descriptions of one wire shape, free to drift; the two are kept
+        #       apart where it matters -- inside the seal, by a purpose string this
+        #       document cannot express -- rather than by two patterns that agree.
+        confirmationToken:
+          allOf:
+            - $ref: "#/components/schemas/CursorToken"
+          description: >-
+            The opaque binding token a 200 preview published, replayed unaltered so
+            that the write is bound to the resolution the operator was shown. Omit
+            it to confirm in one request, in which case the card the row is written
+            against is whatever the submitted key resolves to at that moment. A
+            token this service did not issue to this caller, or one naming a card
+            the key no longer resolves to, is refused with 400 naming
+            confirmationToken and carrying "Card Number changed. Review the
+            transaction and confirm again...".
 
     # WHY : (1) Assumptions: this shape carries no transaction identifier, because
     #       on the turn it describes the baseline has not minted one. The identifier
@@ -2595,7 +2634,13 @@ components:
       #       a member as optional described an omission this service cannot produce, and generated
       #       a type that was optional AND nullable -- two states for one fact.
       required:
-        [amount, written, returnMessage, resolvedAccountId, resolvedCardNumber, copied]
+        - amount
+        - written
+        - returnMessage
+        - resolvedAccountId
+        - resolvedCardNumberMasked
+        - confirmationToken
+        - copied
       additionalProperties: false
       properties:
         amount:
@@ -2645,17 +2690,52 @@ components:
             which app/cbl/COTRN02C.cbl L206 moves back into the screen's own field;
             on the card path it is the cross-reference entry's account, which L221
             moves into that field.
-        resolvedCardNumber:
+        # WHY : ⚠️ Refactoring Rationale: this member publishes the MASKED rendering
+        #       and it published sixteen digits. The reasoning that stood here --
+        #       that a suffix cannot distinguish two cards on one account, and that
+        #       the sensitive-data prohibition covers durable diagnostics alone --
+        #       was wrong on both counts. AAP section 0.4.1.9 masks a primary account
+        #       number in every response except the administrative card-detail
+        #       endpoint, which this operation is not; and the CardNumber schema in
+        #       this same document already states that the unmasked form "appears on
+        #       requests only; responses carry the masked form", so the body
+        #       contradicted the contract that declares it.
+        # WHY : Assumptions: the comparison the full number was published to support
+        #       has NOT been dropped, it has moved to where it can be made without a
+        #       disclosure. confirmationToken below carries the resolved identity in
+        #       sealed form and the service compares it against the resolution on the
+        #       confirming turn, which is a stronger guarantee than asking a browser
+        #       to compare digits it should never have held.
+        resolvedCardNumberMasked:
           allOf:
-            - $ref: "#/components/schemas/CardNumber"
+            - $ref: "#/components/schemas/MaskedCardNumber"
           description: >-
-            The card number the cross-reference resolved, in full and unmasked. It is
-            the value app/cbl/COTRN02C.cbl L209 moves over the screen's card field on
-            the account path, and the value L459 then stores. It is published
-            unmasked because a suffix cannot distinguish two cards on one account,
-            which is the only comparison this disclosure exists to support; the
-            sensitive-data prohibition is on durable diagnostics, which is why the
-            record's own rendering withholds it and this body does not.
+            The card number the cross-reference resolved, masked to its last four
+            digits. The unmasked value is what app/cbl/COTRN02C.cbl L209 moves over
+            the screen's card field on the account path and what L459 then stores;
+            the terminal showed all sixteen characters and this response deliberately
+            does not, so an operator confirming sees WHICH card the row will carry
+            without the number reaching the browser.
+        # WHY : ⚠️ Assumptions: this member is what makes the masking above safe to
+        #       adopt without losing a guarantee. A confirmation is a SECOND request
+        #       in the migrated system where it is a second screen turn in the
+        #       baseline, so the cross-reference can change between the two; a client
+        #       that replays this token lets the service refuse a write that would go
+        #       to a card the operator was never shown.
+        # WHY : Assumptions: it is present on EVERY withheld answer rather than only
+        #       where a client is expected to use it, because a client cannot tell in
+        #       advance whether its next turn will confirm, and a member that appeared
+        #       conditionally would be a second thing for a schema to describe.
+        confirmationToken:
+          allOf:
+            - $ref: "#/components/schemas/CursorToken"
+          description: >-
+            The opaque token a confirming submission replays in its own
+            confirmationToken member so that the write is bound to this resolution.
+            It seals the resolved card number under the deployment key and is bound
+            to the calling operator, so it discloses nothing about the card, cannot
+            be presented by another caller and cannot be manufactured for a card this
+            answer did not name. It is stored and replayed unaltered, never parsed.
         # WHY : ⚠️ Refactoring Rationale: this member is new, and the omission it
         #       closes was a WRITE hazard rather than a display gap. The copy-last
         #       operation used to answer with the normalised amount alone, so a

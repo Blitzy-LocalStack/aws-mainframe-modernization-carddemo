@@ -616,8 +616,8 @@ so no link here points at nothing.
   over-limit code nor its text survives, which is the later-guard-wins ordering. The
   paired pass case `anOriginatingDateEqualToTheExpirationDateProducesNoRejectStreamRow`
   drives `boundary_expiry_equal` and asserts an empty reject table, so the inclusive
-  guard is straddled from this folder's bytes and from its pair's. Refactoring
-  Rationale: the three case citations above named line numbers in that test file as
+  guard is straddled from this folder's bytes and from its pair's.
+  Refactoring Rationale: the three case citations above named line numbers in that test file as
   well as the members they mean. The numbers went stale when a case above them was
   deleted, so they are dropped and the names kept -- a name is searchable and survives
   any edit that does not rename it, a number only holds for the revision it was read

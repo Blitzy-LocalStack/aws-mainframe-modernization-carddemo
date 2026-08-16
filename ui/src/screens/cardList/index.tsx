@@ -76,6 +76,7 @@ import { MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
 import type { CardListQuery } from '../../api/types';
 import { VISUALLY_HIDDEN_STYLE, fieldAriaProps, fieldErrorId } from '../../layout/fieldHelp';
 import { usePagedQuery } from '../../hooks/usePagedQuery';
+import { ScreenTitle } from '../../layout/ScreenTitle';
 
 /** Paging refusals this screen renders, taken verbatim from the catalog keyed by its program. */
 const CARD_LIST_PAGING_MESSAGES = PROGRAM_MESSAGES.COCRDLIC;
@@ -791,10 +792,16 @@ export function CardListScreen(): ReactElement {
    *       than rebuilt per screen; a screen that also painted them would show two title bands
    *       and two legends. The message band stays local, because the shell paints a zone only
    *       when it is delegated and this screen's message is bound to controls in its own body.
-   * WHY : Assumptions: the legend is delegated rather than dropped, so the SCREEN keeps owning
-   *       its keys -- `bindings` and `invoke` come from this screen's own `usePfKeys` call and
-   *       are handed up unchanged. The shell adds its sign-off key beside them only when this
-   *       screen leaves that attention identifier free, which is decided by AID in the shell.
+   * WHY : ⚠️ Assumptions: the legend is delegated rather than dropped, so the SCREEN keeps
+   *       owning the keyboard -- `bindings` and `invoke` come from this screen's own `usePfKeys`
+   *       call and travel up unchanged, and an activation of a rendered legend control is
+   *       forwarded straight back to `invoke`. The claim that stood here, that the shell "adds its
+   *       sign-off key beside them only when this screen leaves that attention identifier free,
+   *       which is decided by AID in the shell", is withdrawn: the shell installs NO keyboard
+   *       listener at all and offers sign-off as a rendered control, for the reason recorded at
+   *       `SHELL_SIGN_OFF_LABEL`. So there is no second listener to stand down and no AID
+   *       arbitration anywhere -- this screen's bindings are the only ones on the document while it
+   *       is mounted.
    */
   /*
    * WHY : ⚠️ Refactoring Rationale: the row-23 message line is delegated WITH the title band and the
@@ -941,7 +948,7 @@ export function CardListScreen(): ReactElement {
        *       not render the band on this screen's behalf; the hook supplies the one value that is
        *       NOT screen-specific without inventing a component to hold it.
        */}
-      <Typography.Title level={3}>{CARD_LIST_TITLE}</Typography.Title>
+      <ScreenTitle>{CARD_LIST_TITLE}</ScreenTitle>
       {/*
         WHY : Assumptions: ONE input serves both narrowing the browse and reaching a single card,
               because the baseline screen's card-number field served both too -- an operator typed a

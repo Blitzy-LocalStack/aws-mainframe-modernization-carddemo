@@ -388,9 +388,6 @@ class LookupControllerTest {
     /** The query parameter carrying the paging direction, read from the enumeration that owns the name. */
     private static final String PARAM_DIRECTION = PageDirection.PARAMETER_NAME;
 
-    /** The query parameter carrying the area-code classification filter. */
-    private static final String PARAM_CODE_CLASS = "codeClass";
-
     /**
      * The page width the browse publishes, which every full page below must carry exactly.
      *

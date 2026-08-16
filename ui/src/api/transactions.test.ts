@@ -137,8 +137,42 @@ function submission(): TransactionCreateRequest {
   };
 }
 
-/** The card the cross-reference resolves for the keyed account, sixteen digits and unmasked. */
+/** The card the cross-reference resolves, sixteen digits, used only where a REQUEST carries a key. */
 const RESOLVED_CARD = '4111111111111111';
+
+/**
+ * The masked rendering a preview publishes for that same card: twelve asterisks then its last four digits.
+ *
+ * ⚠️ Refactoring Rationale: the preview fixture used to carry `RESOLVED_CARD` itself, because the
+ * response member was the full number. A review found that a non-administrative preview therefore disclosed
+ * a whole primary account number to the browser, so the member now publishes this rendering and the
+ * unmasked spelling has become a REFUSAL case rather than the happy path.
+ */
+const RESOLVED_CARD_MASKED = '************1111';
+
+/**
+ * A binding token shaped as the sealed-cursor grammar the services emit and this client shape-checks.
+ *
+ * Assumptions: the value is opaque and nothing here interprets it; only its SHAPE is asserted, because
+ * that is all the client verifies -- the service alone can open it. The three segments are the version
+ * marker, a sixteen-character key identifier and the sealed payload.
+ */
+/*
+ * WHY : ⚠️ Assumptions: the fabricated value is deliberately LOW-ENTROPY, and the shape is the only
+ *       property any assertion reads. It was
+ *       'v2.<sixteen hex characters>.<a base64 payload>', which is shape-valid and was flagged by the
+ *       repository's secret scan as a generic API key -- the identifier beside it contains the word
+ *       "token", so the rule falls back to entropy, and a base64-looking payload clears its threshold.
+ *       A fixture that trips the scanner is worse than a duller one: the gate runs under `set -euo
+ *       pipefail` in `.github/workflows/infra-ci.yml` and fails on any finding, so five copies of this
+ *       constant would have failed every run, and the usual answer to a gate that always fails is to
+ *       widen its allowlist -- which would then admit any value assigned to a name containing "token".
+ *       Alternatives Considered: allowlisting this exact literal, as that workflow already does for two
+ *       fabricated signing keys. Rejected because those two have to be high-entropy to stand in for
+ *       real keys, whereas this value is never used as key material -- nothing here signs or opens it --
+ *       so the cheaper fix is to make it self-evidently not a secret.
+ */
+const CONFIRMATION_TOKEN = 'v2.aaaaaaaaaaaaaaaa.notarealsealedvalue';
 
 /**
  * The copied record a copy turn's preview carries, in the published shapes.
@@ -185,7 +219,8 @@ function previewBody(overrides: Record<string, unknown> = {}): Record<string, un
     written: false,
     returnMessage: null,
     resolvedAccountId: ACCOUNT_ID,
-    resolvedCardNumber: RESOLVED_CARD,
+    resolvedCardNumberMasked: RESOLVED_CARD_MASKED,
+    confirmationToken: CONFIRMATION_TOKEN,
     copied: copiedRecord(),
     ...overrides,
   };
@@ -301,7 +336,8 @@ async function readsTheCopiedRecordFromTheCopyAnswer(): Promise<void> {
   expect(outcome.preview.copied).toEqual(copiedRecord());
   expect(Object.keys(outcome.preview.copied ?? {})).toHaveLength(COPIED_FIELD_COUNT);
   expect(outcome.preview.resolvedAccountId).toBe(ACCOUNT_ID);
-  expect(outcome.preview.resolvedCardNumber).toBe(RESOLVED_CARD);
+  expect(outcome.preview.resolvedCardNumberMasked).toBe(RESOLVED_CARD_MASKED);
+  expect(outcome.preview.confirmationToken).toBe(CONFIRMATION_TOKEN);
 }
 
 /**
@@ -326,15 +362,23 @@ async function refusesACopyAnswerMissingAnyOneField(): Promise<void> {
  * Asserts a copy answer whose members breach their published shapes is refused.
  *
  * Assumptions: the breaches are chosen one per validation kind the shapes use -- a pattern on the category
- * code, a bound on the merchant name, the amount's mandatory two decimal places, and a masked spelling of
- * the resolved card -- so a validator that checked presence and JavaScript type alone would fail every one.
+ * code, a bound on the merchant name, the amount's mandatory two decimal places, an UNMASKED spelling of
+ * the resolved card, and a binding token outside the sealed grammar -- so a validator that checked presence
+ * and JavaScript type alone would fail every one.
+ *
+ * ⚠️ Refactoring Rationale: the resolved-card breach is INVERTED from what it was. It used to arrange
+ * the masked rendering and expect a refusal, because the member published sixteen digits; the member now
+ * publishes the masked rendering, so the sixteen-digit spelling is the breach -- and it is the one that
+ * matters, because admitting it would let a service that had stopped masking put a whole primary account
+ * number on a screen while every assertion still passed.
  */
 async function refusesACopyAnswerBreachingItsPublishedShapes(): Promise<void> {
   const breaches: readonly Record<string, unknown>[] = [
     previewBody({ copied: { ...copiedRecord(), categoryCode: '1' } }),
     previewBody({ copied: { ...copiedRecord(), merchantName: '' } }),
     previewBody({ amount: '100.4' }),
-    previewBody({ resolvedCardNumber: '************1111' }),
+    previewBody({ resolvedCardNumberMasked: RESOLVED_CARD }),
+    previewBody({ confirmationToken: 'not-a-sealed-token' }),
   ];
   for (const breach of breaches) {
     nextStatus = HTTP_OK;

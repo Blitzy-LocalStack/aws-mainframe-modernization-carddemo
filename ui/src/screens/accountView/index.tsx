@@ -83,6 +83,7 @@ import {
   screenTransitionState,
 } from '../../routes/navigation';
 import { FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../../theme/tokens';
+import { SECTION_HEADING_LEVEL, ScreenTitle } from '../../layout/ScreenTitle';
 
 /**
  * Mapset this screen stands in, which selects the width the message band is sized to.
@@ -147,16 +148,24 @@ const ACCOUNT_ID_PATTERN = /^[0-9]{11}$/u;
  *       Keeping the identifier out of the API request line while accepting it in the browser URL
  *       protects the shorter-lived of the two records and leaves the longer-lived one open.
  * WHY : Assumptions: nothing in this repository produced such a URL -- no screen, no route table entry
- *       and no test -- so the withdrawal removes a reachable disclosure and no working behaviour. The
+ *       and no test, the main menu navigating to the bare path -- so the withdrawal removes a reachable
+ *       disclosure and no working behaviour. The
  *       screen now starts with an empty filter, which is exactly the state `IF EIBCALEN = 0` at
  *       `app/cbl/COACTVWC.cbl` L462-L463 gives the reference on first entry.
  * WHY : Alternatives Considered: keeping the hand-over and moving it into router transition state,
  *       which is the report's other option and the closer analogue of the communication area. Rejected
- *       for now rather than on principle: the single validated navigation seam this tree transitions
- *       through takes a destination and no state, so a state-carrying hand-over would mean bypassing
- *       that seam, and no caller exists to hand anything over -- this screen is not yet reachable from
- *       another. When one is authored, the seam and the hand-over belong to that change, where a reader
- *       can see both halves at once.
+ *       on the disclosure above rather than on availability: the single validated navigation seam this
+ *       tree transitions through takes a destination and no state, so a state-carrying hand-over would
+ *       mean bypassing that seam. ⚠️ The reasoning that stood here added that "no caller exists to hand
+ *       anything over -- this screen is not yet reachable from another", and that was false when it was
+ *       written: `MAIN_MENU_DESTINATIONS` in `ui/src/screens/menu/index.tsx` maps `COACTVWC` to
+ *       `/account/view`, so the main menu reaches this screen exactly as `app/cbl/COMEN01C.cbl` reaches
+ *       `COACTVWC`. What the menu hands over is the DESTINATION and nothing else, which is the point:
+ *       the reference's own `CDEMO-ACCT-ID` hand-over is not reproduced, and an operator arriving from
+ *       the menu keys the account here, so the empty filter above is what EVERY arrival sees rather
+ *       than only a direct one.
+ */
+
 /*
  * WHY : Refactoring Rationale: withdrawing the seed does NOT withdraw the transition state itself. A
  *       competing remedy for the same disclosure moved the identifier out of the query string and into
@@ -1277,19 +1286,26 @@ export function AccountViewScreen(): ReactElement {
          * `app/cbl/COACTVWC.cbl` L471-L472 and the customer block on `FOUND-CUST-IN-MASTER` at L493 --
          * so a failed read paints neither, and clearing the view reproduces that.
          *
-         * Assumptions: the two blocks are ALL-OR-NOTHING here, which is a narrowing of those two
-         * differing gates and is enforced three layers deep rather than only rendered that way.
-         * `AccountViewService.readAccountView` answers `404` when either half is absent, `account` and
-         * `customer` are both required members of `AccountViewResponse` in `account-api.yaml` and in
-         * `ui/src/api/types.ts`, and the render below consequently gates both blocks on one non-null
-         * `view` and reads both halves of it. Refactoring Rationale: this note claimed the opposite --
-         * that a partially resolved read is a legitimate state the render honours by testing each
-         * block separately -- which no layer implemented; the render has always required both. The
-         * narrowing is deliberate and is recorded at the service: a machine caller handed a
-         * half-populated view has no way to tell it from a complete one, and the reference's
-         * disjunctive gate exists to paint a located account beside an unlocated customer on a
-         * TERMINAL, where an operator can see the empty region. That reasoning does not carry to a
-         * JSON body, so the contract refuses the half instead of publishing it.
+         * ⚠️ Assumptions: the two blocks are NOT all-or-nothing, and clearing them both here is a
+         * property of a FAILED read rather than a narrowing of the reference's two gates. A located
+         * account whose customer master holds no matching row is a SUCCESS, answered as a 200 whose
+         * `customer` member is null and whose return message carries the reference's own sentence naming
+         * the miss: `AccountViewService.readAccountView` composes exactly that, the contract declares
+         * `customer` as `oneOf` a customer and the null type, `ui/src/api/types.ts` types it
+         * `CustomerDetail | null`, and the render below supplies the blank customer block for it. Only an
+         * absent ACCOUNT is a 404, which is the reference's own asymmetry -- with no account row both of
+         * its gates are false and neither region is painted -- so this handler, which runs on the
+         * rejection, clears both blocks and the partial arm never reaches it.
+         *
+         * ⚠️ Refactoring Rationale: the note this replaces asserted the opposite of the delivered
+         * contract in three places at once -- that the service "answers 404 when either half is absent",
+         * that `account` and `customer` are "both required members" in the sense of being non-nullable,
+         * and that the render "reads both halves" of one non-null view. None of the three is true, and
+         * the second is the kind of claim that reads as verified: `customer` IS a required member, and it
+         * is required to be PRESENT while permitted to be null, which is the distinction the sentence
+         * elided. A reader who trusted it would conclude the null arm was unreachable, which is precisely
+         * the conclusion the browser client had already drawn -- its redaction guard refused every
+         * null-customer response until that was corrected.
          * @param {unknown} reason - The value the read rejected with: the normalised problem document
          *   for a refused or failed request, or a `RangeError` from the client's own argument check.
          * @returns {void} Completion is represented by this screen's own state.
@@ -1535,9 +1551,7 @@ export function AccountViewScreen(): ReactElement {
        *       the token this prop selects, so the prop IS the bridge's decision rather than a bypass
        *       of it.
        */}
-      <Typography.Title level={3} type="secondary">
-        {ACCOUNT_VIEW_HEADINGS.ACCOUNT}
-      </Typography.Title>
+      <ScreenTitle type="secondary">{ACCOUNT_VIEW_HEADINGS.ACCOUNT}</ScreenTitle>
       {/*
        * Alternatives Considered: rendering the whole screen as a form. Of the 37 named
        * `DFHMDF` definitions in this mapset exactly ONE is an input -- `ACCTSID`, the only field
@@ -1678,12 +1692,17 @@ export function AccountViewScreen(): ReactElement {
            * Trade-offs: the two-column record view stands in for the mapset's absolute row and
            * column positions, which is documented gap G1. Reading order, grouping and tab order
            * are preserved because the rows are emitted in `DFHMDF` declaration order and filled
-           * left to right, and on the customer block that reproduces the terminal's own rows
-           * exactly -- `ACSADL1`/`ACSSTTE`, `ACSADL2`/`ACSZIPC`, `ACSCITY`/`ACSCTRY` are rows
-           * 16, 17 and 18. What is NOT preserved is row-for-row alignment on the account block,
-           * where `ACRCYCR` occupies the right half of row 9 with nothing in the left half, so a
-           * two-up grid necessarily closes that hole; and pixel-for-character positioning
-           * nowhere, which a browser cannot offer responsively or accessibly.
+           * left to right. ⚠️ Row-for-row alignment is NOT preserved, on either block, and this
+           * note used to claim it was on the customer block -- naming `ACSADL1`/`ACSSTTE`,
+           * `ACSADL2`/`ACSZIPC` and `ACSCITY`/`ACSCTRY` as the terminal's rows 16, 17 and 18. That
+           * claim is withdrawn where it is made, at {@link customerBlockRows}, and repeating it here
+           * left the file asserting both halves of a contradiction: the two address lines are now
+           * ONE item, so the fill does not pair `ACSADL2` with `ACSZIPC`, and the grid collapses to
+           * a single column below the design system's medium breakpoint, where there are no pairs
+           * at all. On the account block the hole is structural too -- `ACRCYCR` occupies the right
+           * half of row 9 with nothing in the left half, so a two-up grid necessarily closes it.
+           * Pixel-for-character positioning is preserved nowhere, which a browser cannot offer
+           * responsively or accessibly.
            */}
           <Descriptions
             bordered
@@ -1718,12 +1737,16 @@ export function AccountViewScreen(): ReactElement {
            *       always carries it and the operation answers 404 otherwise.
            */}
           {/*
-           * WHY : Assumptions: level 4 sits one below the screen heading above, so the customer block
-           *       reads as subordinate to it and the heading order skips nothing. The mapset states the
-           *       same subordination positionally -- `Customer Details` is painted at row 11, inside the
-           *       body, where `View Account` is painted at row 4 above the first field.
+           * WHY : ⚠️ Assumptions: the rank sits one below the screen caption above, so the customer
+           *       block reads as subordinate to it and the heading order skips nothing -- and it is now
+           *       READ from `SECTION_HEADING_LEVEL` rather than written as a literal here. The literal
+           *       was 4, which was one below this screen's caption only while that caption was a
+           *       literal 3; the caption is now ranked by `ui/src/layout/ScreenTitle.tsx`, so a literal
+           *       here would have silently become a PEER of it. The mapset states the same subordination
+           *       positionally -- `Customer Details` is painted at row 11, inside the body, where
+           *       `View Account` is painted at row 4 above the first field.
            */}
-          <Typography.Title level={4} type="secondary">
+          <Typography.Title level={SECTION_HEADING_LEVEL} type="secondary">
             {ACCOUNT_VIEW_HEADINGS.CUSTOMER}
           </Typography.Title>
           <Descriptions

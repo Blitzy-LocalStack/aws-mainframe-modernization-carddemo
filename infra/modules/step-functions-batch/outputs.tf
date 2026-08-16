@@ -232,33 +232,41 @@ output "execution_role_names" {
 # Execution log groups
 # -----------------------------------------------------------------------------
 
-# WHY : Refactoring Rationale: these eight values are DISCOVERY contracts, and the
-#       descriptions below used to describe them as inputs to work that does not
-#       exist -- "the metric filters, subscription filters and log-based alarms
-#       observability attaches to this exact group". No metric filter, subscription
-#       filter or log-based alarm is attached to any of these four groups anywhere in
-#       this repository, and NO module or environment root reads any of the eight
-#       outputs. A description that names a consumer which does not exist is worse
-#       than one that names none: a reader wires nothing because they believe it is
-#       already wired, and an auditor reads the alarm coverage as broader than it is.
-#       Each description below now states what the value IS and what an operator or a
-#       future root may do with it, in the conditional, and claims no current reader.
-# WHY : Assumptions: they are published rather than deleted, and that is a choice with
-#       a reason. The alternative -- letting a consumer find these groups by naming
-#       convention, since each is /aws/vendedlogs/states/ followed by its machine's
-#       name -- would make the group name an implicit contract that nothing validates,
-#       so a rename inside this module would leave a future dashboard or filter
-#       addressing a group that no longer exists and reporting nothing rather than
-#       failing. Publishing the identities means the same rename fails at plan time in
-#       whichever root wires the two together. Trade-offs: eight outputs with no
-#       current reader, accepted because output names are a contract this file states
-#       is external, so adding one later is cheap and removing one is not.
+# WHY : ⚠️ Refactoring Rationale: these eight values split into FOUR CONSUMED and
+#       four discovery, and this paragraph said all eight were unread -- "NO module or
+#       environment root reads any of the eight outputs" and "No metric filter,
+#       subscription filter or log-based alarm is attached to any of these four
+#       groups anywhere in this repository". Both halves are false, and the eight
+#       descriptions below said so individually while this summary above them said the
+#       opposite. The four *_log_group_NAME outputs are read by both roots --
+#       infra/envs/dev/main.tf L5409-L5414 and infra/envs/prod/main.tf pass them as the
+#       daily, adhoc, dataset and authz entries of the observability module's
+#       state_machine_log_group_names -- and that module attaches a metric filter over
+#       terminal ExecutionFailed and ExecutionTimedOut events plus an alarm on the
+#       resulting metric to each. The correction runs in the opposite direction to the
+#       one before it: an earlier version overstated the wiring by naming filters that
+#       did not exist, this one understated it by denying filters that do, and the
+#       hazard differs each way -- an overstatement leaves a reader wiring nothing, an
+#       understatement leaves an auditor reading alarm coverage as narrower than it is
+#       and a maintainer free to delete a consumed output believing it unread.
+# WHY : Assumptions: the four *_log_group_ARN outputs genuinely have no reader, and
+#       they are published rather than deleted for a reason. The alternative -- letting
+#       a consumer find these groups by naming convention, since each is
+#       /aws/vendedlogs/states/ followed by its machine's name -- would make the group
+#       name an implicit contract that nothing validates, so a rename inside this
+#       module would leave a future dashboard or filter addressing a group that no
+#       longer exists and reporting nothing rather than failing. Publishing the
+#       identities means the same rename fails at plan time in whichever root wires the
+#       two together, which is exactly what the four consumed name outputs already buy.
+#       Trade-offs: four outputs with no current reader, accepted because output names
+#       are a contract this file states is external, so adding one later is cheap and
+#       removing one is not.
 # WHY : Assumptions: this module owns these four log groups and nothing else in
 #       the observability tier. Dashboards, the notification topic and every
 #       alarm except the four guarding the out-of-execution bracket release
 #       belong to infra/modules/observability.
 output "daily_log_group_arn" {
-  description = "ARN of the encrypted CloudWatch log group receiving daily-machine execution events. Discovery only in the sense that matters here: no module or root reads this ARN, because modules/observability takes the group by NAME. A metric filter and an execution-failure alarm ARE attached to the group itself through that path, so this value is the identity a further consumer would scope to rather than evidence the group is unwatched. It is the identity a future consumer would scope one to, or that an operator names in a Logs Insights query."
+  description = "ARN of the encrypted CloudWatch log group receiving daily-machine execution events. No module or root reads this ARN, because modules/observability takes the group by NAME; a metric filter and an execution-failure alarm ARE attached to the group itself through that path, so an unread ARN is not evidence the group is unwatched. It is the identity a further consumer would scope one to, or that an operator names in a Logs Insights query."
   value       = aws_cloudwatch_log_group.daily.arn
 }
 

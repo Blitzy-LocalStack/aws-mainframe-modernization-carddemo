@@ -708,15 +708,22 @@ spring:
     #   that injects the runtime credential and forgets this one fails at startup
     #   on an unresolved placeholder, which names the variable it is missing,
     #   rather than migrating as the wrong identity and succeeding.
-    # Assumptions: setting spring.flyway.user is also what gives Flyway its own
-    #   DataSource. Spring Boot builds a separate SimpleDriverDataSource derived
-    #   from the application DataSource whenever this key is set -- verified
-    #   against FlywayAutoConfiguration in spring-boot-flyway 4.1.0, whose
-    #   getMigrationDataSource falls to a derivedFrom builder when the Flyway URL
-    #   is absent and the Flyway user is not -- so the URL, driver and TLS terms
-    #   are inherited while the credential is replaced. That separation matters
-    #   beyond tidiness: sharing the Hikari pool would leave the SET ROLE below
-    #   applied to pooled connections that later serve runtime queries.
+    # ⚠️ Assumptions: setting spring.flyway.user is what gives Flyway its own
+    #   DataSource, and this module SUPPLIES that data source rather than letting
+    #   Boot derive one. The note here previously said the opposite -- that Boot
+    #   builds a derived SimpleDriverDataSource and "the URL, driver and TLS terms
+    #   are inherited while the credential is replaced". The URL and driver are
+    #   inherited; the TLS terms are NOT. A derived source carries neither
+    #   sslmode nor sslrootcert, because those reach the runtime pool through
+    #   spring.datasource.hikari.data-source-properties, which a derivedFrom
+    #   builder does not copy -- so migrations would have opened the one
+    #   connection that creates every table with transport security unverified.
+    #   config/DataSourceConfig.java therefore publishes an @FlywayDataSource
+    #   bean, conditional on this very key, that sets both properties on the
+    #   driver explicitly; this key is what activates it.
+    # Assumptions: a separate source matters beyond tidiness: sharing the Hikari
+    #   pool would leave the SET ROLE below applied to pooled connections that
+    #   later serve runtime queries.
     user: ${SPRING_FLYWAY_USER}
     password: ${SPRING_FLYWAY_PASSWORD}
 
@@ -1005,8 +1012,14 @@ logging:
 #   file. They exist because the framework publishes no standard key for
 #   these values, and they are grouped last so that everything above can be
 #   read as standard Spring configuration. None of them is a credential: the
-#   client identifier names an app client and is not a secret, and the three
-#   queue values are names rather than URLs or ARNs.
+#   client identifier names an app client and is not a secret.
+#   ⚠️ Refactoring Rationale: this sentence also said "the three queue values are
+#   names rather than URLs or ARNs". There are no queue values here at all: the
+#   inquiry queue-name trio was withdrawn with this module's queue consumer, as the
+#   closing note of this file records, so the sentence reassured a reader about the
+#   sensitivity of keys that do not exist. It is corrected rather than deleted
+#   because a reader who saw it needs to know the keys are absent rather than
+#   renamed.
 #   -----------------------------------------------------------------------------
 carddemo:
 

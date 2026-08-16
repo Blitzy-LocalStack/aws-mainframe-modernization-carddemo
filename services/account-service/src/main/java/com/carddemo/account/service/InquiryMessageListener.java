@@ -208,13 +208,16 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  * does the same and then propagates.</p>
  *
  * <h2>Queue topology and endpoints</h2>
- * <p>Assumptions: all three destinations arrive from configuration as queue NAMES, not addresses, and none
- * is written into this class -- which is what the baseline itself does. A name is what
- * {@code @SqsListener} binds and what {@link #queueUrl(String)} resolves an address from, so the calling
- * root publishes {@code infra/modules/sqs}'s {@code _queue_name} outputs rather than its {@code _queue_url}
- * outputs: handed a full URL, the resolution call would ask the service for the address of a queue whose
- * name contains a scheme and a host, and the publication would fail on the reply path rather than at
- * start-up. {@code 01 QUEUE-INFO.} at physical line 92 declares four
+ * <p>⚠️ Assumptions: all three destinations arrive from configuration as fully-qualified queue URLs,
+ * and none is written into this class -- which is what the baseline itself does. This paragraph previously
+ * said the opposite, that they arrive as NAMES and that the calling root publishes
+ * {@code infra/modules/sqs}'s {@code _queue_name} outputs; both halves were false. The environment roots
+ * set every one of the three variables from a {@code _queue_url} output, the constructor admits only a URL
+ * through {@link QueueDestination#requireQueueUrl(String, String)}, and the container accepts a URL on the
+ * annotation below because {@code QueueAttributesResolver} uses a value whose scheme is {@code http} or
+ * {@code https} verbatim and issues a name lookup only for a bare name. So a URL is the one representation
+ * that works on all three paths, and it is the one the deployment supplies.
+ * {@code 01 QUEUE-INFO.} at physical line 92 declares four
  * queue-name fields -- the queue manager, the input queue, the reply queue and the error queue -- and every
  * one of them is {@code PIC X(48) VALUE SPACES}, filled at run time. The two places the baseline does assign
  * a name by literal produce dotted uppercase names that
@@ -485,16 +488,19 @@ public class InquiryMessageListener {
     private final SqsClient sqs;
 
     /**
-     * The configured destination replies are published to, either a queue address or a queue name.
+     * The queue URL replies are published to, validated at construction.
      *
-     * <p>Assumptions: both representations are admitted, because the environment roots inject the
-     * queue's URL while the property is named for a queue. {@link #queueUrl(String)} records why, and
-     * is the one place the two are told apart.</p>
+     * <p>⚠️ Assumptions: exactly ONE representation is admitted -- a fully-qualified queue URL --
+     * where this field was documented as accepting "either a queue address or a queue name". It never
+     * accepted both: {@link QueueDestination#requireQueueUrl(String, String)} refuses a bare name outright,
+     * and the property it is bound to is named {@code reply-queue-url} precisely so the value's form is
+     * stated by its key. Publishing needs no lookup as a result, which is the point: a name would have to be
+     * resolved on the reply path, after a request had already been consumed.</p>
      */
     private final String replyQueueUrl;
 
     /**
-     * The configured destination error reports are published to, either a queue address or a queue name.
+     * The queue URL error reports are published to, validated at construction.
      */
     private final String errorQueueUrl;
 
@@ -615,37 +621,17 @@ public class InquiryMessageListener {
         this.ledgerTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
-    /**
-     * Validates a configured queue name.
-     *
-     * <p>Assumptions: a blank name is refused at construction rather than at first use. The baseline opens
-     * all three of its queues before it gets a single message -- input at physical line 222, output at
-     * physical line 255, error at physical line 289 -- and terminates the task if any open fails, so a
-     * misconfigured destination stops the program before it can consume anything. Deferring the check would
-     * let this consumer start, take requests off the request queue and fail to answer every one of them.</p>
-     *
-     * <p>Assumptions: only BLANKNESS is refused, and the shape of a non-blank value is deliberately not
-     * examined here. A destination may legitimately arrive as a queue address or as a queue name --
-     * {@link #queueUrl(String)} records why both reach this class -- so a name-shaped check would reject
-     * the very value the environment roots inject, and an address-shaped check would reject a local
-     * configuration that names its queue. Blankness is the one condition that is wrong under either
-     * reading, so it is the one condition tested at construction.</p>
-     *
-     * @param value the configured value
-     * @param property the property name, so a refusal names exactly what to set
-     * @return the trimmed destination, never {@code null}
-     * @throws NullPointerException if {@code value} is {@code null}
-     * @throws IllegalArgumentException if the value is blank
+    /*
+     * WHY : ⚠️ Refactoring Rationale: a private requireQueueName helper stood here and was
+     *   UNREACHABLE -- no call site anywhere referenced it, because the constructor validates both
+     *   destinations through QueueDestination.requireQueueUrl instead. It survived a change of contract: it
+     *   refused blankness only, on the documented ground that "a destination may legitimately arrive as a
+     *   queue address or as a queue name", and once the shared validator narrowed the contract to a URL that
+     *   ground no longer existed and nothing called it. It is deleted rather than kept for symmetry, because
+     *   a second, weaker validator beside the real one is an invitation to use it: the next destination added
+     *   to this class would have had two helpers to choose between, one of which admits a value the reply
+     *   path cannot address.
      */
-    private static String requireQueueName(String value, String property) {
-        Objects.requireNonNull(value, property + " must not be null");
-        if (value.isBlank()) {
-            throw new IllegalArgumentException(property
-                    + " must name a queue: without it this consumer would take requests off the request"
-                    + " queue and be unable to answer any of them");
-        }
-        return value.trim();
-    }
 
     /**
      * Answers one account-inquiry request.
@@ -747,7 +733,19 @@ public class InquiryMessageListener {
     //   set of keys outranked it. Trade-offs: the sizing is no longer visible at the handler, so the poll
     //   wait transcribed from COACCT01 L337 must be read in application.yml where poll-timeout: 5s
     //   carries it. That is accepted because one authoritative location beats two agreeing ones.
-    @SqsListener(queueNames = "${carddemo.account.inquiry.request-queue}")
+    // WHY : ⚠️ Refactoring Rationale: the placeholder names request-queue-URL, where it named
+    //   carddemo.account.inquiry.request-queue -- a key declared in NO profile. The only key this module
+    //   publishes is request-queue-url (application.yml L1549), so the placeholder was unresolvable and
+    //   registering this endpoint would have failed the context refresh outright; the service could not
+    //   start with inquiry consumption enabled. The mistake is the same name-versus-URL confusion this
+    //   class's own Javadoc carried, and it was invisible to the tests because the two cases that read this
+    //   annotation assert its SIZING attributes and never resolve its destination.
+    // WHY : Assumptions: a URL is passed where the attribute is named for queue NAMES, and the pinned
+    //   spring-cloud-aws-sqs 4.1.0 admits it: QueueAttributesResolver.isValidQueueUrl accepts any value
+    //   whose scheme is http or https and uses it verbatim, issuing a GetQueueUrl lookup only for a bare
+    //   name. Passing the URL therefore removes a start-up round trip as well as matching what the
+    //   deployment supplies for the other two destinations.
+    @SqsListener(queueNames = "${carddemo.account.inquiry.request-queue-url}")
     public void onRequest(Message<String> message) {
         Objects.requireNonNull(message, "message must not be null");
 

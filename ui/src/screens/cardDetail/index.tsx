@@ -87,7 +87,7 @@ import { RECORD_VIEW_COLUMNS } from '../../layout/recordLayout';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { usePfKeys } from '../../layout/usePfKeys';
 import {
-  ACCESS_DENIED_ADMIN_ONLY,
+  ACCESS_DENIED_NOT_AUTHORIZED,
   CARD_DETAIL_EDIT_CONTROL_LABEL,
   CARD_DETAIL_INVALID_LINK_GUIDANCE,
   SHARED_MESSAGES,
@@ -96,6 +96,7 @@ import {
 import { FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../../theme/tokens';
 import { cardDetailPath, cardEditPath, isCardSelector } from '../../routes/cards';
 import { navigateSafely, navigationHandler } from '../../routes/navigation';
+import { ScreenTitle } from '../../layout/ScreenTitle';
 
 /** Screen-level messages this screen renders, taken verbatim from the catalog keyed by its program. */
 const CARD_DETAIL_MESSAGES = STATUS_MESSAGES.COCRDSLC;
@@ -503,9 +504,17 @@ function problemFrom(reason: unknown): ApiError | null {
  * flash for one frame or, worse, imply the card is missing when the session is.
  *
  * Assumptions: a 400 shows the service's own sentence when it sent one, because it is authored
- * server-side to be read and rewording it here would give one message two voices. A 403 shows the
- * application's own authority refusal, which is the only such sentence any COBOL source in this
- * application holds.
+ * server-side to be read and rewording it here would give one message two voices.
+ *
+ * ⚠️ Refactoring Rationale: a 403 shows {@link ACCESS_DENIED_NOT_AUTHORIZED} and no longer the
+ * transcribed administrator-only refusal. Both operations this screen calls -- the lookup and the
+ * selector read -- declare `x-required-authority: carddemo-user` in
+ * `services/card-service/src/main/resources/openapi/card-api.yaml`, which its authority model defines as
+ * any authenticated caller, so a refusal of either means the token carries NEITHER CardDemo group. Naming
+ * administrative authority told the operator the function was reserved when it was not, and pointed them
+ * at rights they must not be granted while hiding the cause. The transcribed sentence stays where the
+ * baseline used it -- the administrative route guard and the whole-number administrative read, which this
+ * screen does not call.
  * @param {unknown} reason - The value the read rejected with.
  * @returns {string | null} The sentence to show, or `null` when the outcome is reported elsewhere.
  */
@@ -519,7 +528,7 @@ export function describeRetrievalFailure(reason: unknown): string | null {
     return null;
   }
   if (problem.status === AUTHORITY_REFUSED_STATUS) {
-    return ACCESS_DENIED_ADMIN_ONLY;
+    return ACCESS_DENIED_NOT_AUTHORIZED;
   }
   if (problem.status === NOT_FOUND_STATUS) {
     return CARD_DETAIL_MESSAGES.DID_NOT_FIND_ACCTCARD_COMBO.text;
@@ -660,6 +669,66 @@ export function CardDetailScreen(): ReactElement {
   const selector =
     routeIdentifier !== undefined && isCardSelector(routeIdentifier) ? routeIdentifier : null;
 
+  const openRead = useCallback(
+    /**
+     * Opens a new read generation and answers the predicate its settlements are guarded by.
+     *
+     * ⚠️ Refactoring Rationale: this bookkeeping was inline in the selector read and ABSENT from
+     * the criteria lookup, so one of the screen's two service calls applied its answer unconditionally.
+     * The lookup's answer is a NAVIGATION, which makes the omission worse than a stale paint: a
+     * resolution settling after the operator had already left -- followed a different row, signed off,
+     * or unmounted the screen -- moved the address to a card they were no longer asking for, and in the
+     * sign-off case moved it while the session that authorised the lookup no longer existed. Naming the
+     * bookkeeping once means a third caller cannot repeat the omission by writing the easy half.
+     *
+     * Alternatives Considered: a second ref of its own for the lookup. Rejected because the two calls
+     * are alternatives rather than companions -- an arrival with a selector reads, an arrival without one
+     * looks up, and a route change turns the second into the first -- so they must supersede EACH OTHER.
+     * Two counters would each look current while the other's answer was applied.
+     * @returns {() => boolean} A predicate that is true only while no later read has been opened.
+     */
+    (): (() => boolean) => {
+      const generation = readGeneration.current + 1;
+
+      readGeneration.current = generation;
+
+      /**
+       * Whether the read this predicate was made for is still the one the screen wants.
+       * @returns {boolean} True while no later read has been opened.
+       */
+      return function isCurrent(): boolean {
+        return readGeneration.current === generation;
+      };
+    },
+    [],
+  );
+
+  useEffect(
+    /**
+     * Supersedes whatever read or lookup is outstanding when this screen unmounts.
+     *
+     * Assumptions: the cleanup moves the generation rather than setting a flag, because the guard the
+     * settlements already hold is a generation comparison -- so one mechanism covers supersession by a
+     * later read and supersession by the screen going away, and there is no second condition for a
+     * settlement to forget to test.
+     *
+     * Assumptions: an empty dependency list, so this runs at mount and its cleanup at unmount ONLY. A
+     * cleanup keyed on the selector would fire on every route change, which the read opened by that
+     * change already handles by opening a later generation.
+     * @returns {() => void} Cleanup that invalidates every generation opened so far.
+     */
+    (): (() => void) => {
+      /**
+       * Moves the generation past every read opened so far, so no outstanding answer applies.
+       * @returns {void} Nothing; the moved generation is the whole effect.
+       */
+      return function invalidateOutstandingReads(): void {
+        readGeneration.current += 1;
+      };
+    },
+    [],
+  );
+
   /*
    * WHY : Refactoring Rationale: the read is a named callback rather than a body inlined in the
    *       effect, because two callers now need it -- the mount effect and the Enter key. The source
@@ -695,17 +764,10 @@ export function CardDetailScreen(): ReactElement {
         setLoading(false);
         return;
       }
-      const generation = readGeneration.current + 1;
+      const isCurrent = openRead();
 
-      readGeneration.current = generation;
       setLoading(true);
       setError(null);
-
-      /**
-       * Whether this read is still the one whose answer the screen wants.
-       * @returns {boolean} True while no later read has been opened.
-       */
-      const isCurrent = (): boolean => readGeneration.current === generation;
 
       getCard(selector).then(
         /**
@@ -760,7 +822,7 @@ export function CardDetailScreen(): ReactElement {
         },
       );
     },
-    [selector],
+    [openRead, selector],
   );
 
   useEffect(
@@ -859,13 +921,27 @@ export function CardDetailScreen(): ReactElement {
        */
       setError(null);
       setLoading(true);
+
+      const isCurrent = openRead();
+
       lookupCard(outcome.cardNumber).then(
         /**
-         * Moves to the address the resolved record is published under.
+         * Moves to the address the resolved record is published under, unless this turn was superseded.
          * @param {CardDetail} resolved - The record the typed number named.
          * @returns {void} Completion is the route change.
          */
         (resolved: CardDetail): void => {
+          /*
+           * WHY : ⚠️ Assumptions: a superseded resolution navigates NOWHERE, and this is the arm
+           *       the guard exists for. The screen has left the state that asked the question by the
+           *       time a superseded answer arrives -- the operator followed a list row, took a later
+           *       turn, signed off, or the tree unmounted -- and a navigation is not a stale paint the
+           *       next render corrects: it moves the address to a card nobody asked for, under whatever
+           *       session is current, and the operator's own destination is lost.
+           */
+          if (!isCurrent()) {
+            return;
+          }
           setLoading(false);
           // WHY : Assumptions: the selector is read from `key`, which is the member `CardSummary`
           //       publishes it under in `ui/src/api/types.ts`; `CardDetail` extends that shape rather
@@ -879,12 +955,18 @@ export function CardDetailScreen(): ReactElement {
          * @returns {void} Nothing; the outcome is published through the screen's own state.
          */
         (reason: unknown): void => {
+          // Assumptions: the FAILURE arm is guarded too, for the reason the selector read's own failure
+          //   arm records: a superseded refusal would print "card not found" over whatever the screen
+          //   moved on to, so an operator would be told a read failed while looking at its result.
+          if (!isCurrent()) {
+            return;
+          }
           setError(describeRetrievalFailure(reason));
           setLoading(false);
         },
       );
     },
-    [accountEntry, cardEntry, navigate],
+    [accountEntry, cardEntry, navigate, openRead],
   );
 
   /*
@@ -983,12 +1065,15 @@ export function CardDetailScreen(): ReactElement {
    *       row and both message fields included -- under the comment "COMING FROM SOME OTHER CONTEXT /
    *       SELECTION CRITERIA TO BE GATHERED" at `app/cbl/COCRDSLC.cbl` L350-L356, so it publishes the
    *       whole slot and the operator can take a turn from it.
-   * WHY : Trade-offs: the empty list is published rather than the `pfKeys` member being omitted, and the
-   *       difference is not cosmetic. The shell binds its own sign-off key only while NO screen has
-   *       published one, so omitting the member would activate the shell's key handling beside this
-   *       screen's -- which is still installed, the hook above being unconditional -- and this screen
-   *       coerces every unmapped key into its Enter arm, so one PF12 press would both end the session and
-   *       take a turn. Publishing an empty list keeps the shell stood down while painting no legend.
+   * WHY : ⚠️ Trade-offs: the empty list is published rather than the `pfKeys` member being
+   *       omitted, and the difference IS cosmetic where this note said it was not. The reason given was
+   *       that omitting the member would activate key handling of the shell's own beside this screen's,
+   *       and one PF12 press would then both end the session and take a turn; it is withdrawn, because
+   *       the shell installs NO keyboard listener at all and offers sign-off as a rendered control, for
+   *       the reason recorded at `SHELL_SIGN_OFF_LABEL`. The two forms also render the same thing --
+   *       `PfKeyBar` returns `null` for an empty binding list, so neither paints a legend. The empty list
+   *       is kept so the two arms of this ternary differ only in which zones carry content, which is what
+   *       makes the erased arm reviewable against the one beside it.
    */
   useShellSlot(
     loading
@@ -1114,7 +1199,7 @@ export function CardDetailScreen(): ReactElement {
        * rows the band reproduces -- so the two are not competing for one slot. Level 2 was used here
        * before the band was composed, when this was the only heading on the screen.
        */}
-      <Typography.Title level={3}>{CARD_DETAIL_TITLE}</Typography.Title>
+      <ScreenTitle>{CARD_DETAIL_TITLE}</ScreenTitle>
       {/*
        * WHY : Refactoring Rationale: the row-23 error line this screen used to compose is DELEGATED to the
        *       one `AppShell` above, published in the `useShellSlot` call as `message`. The prose that stood

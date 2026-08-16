@@ -17,8 +17,9 @@
 > [master contract](../../README.md) for every encoding rule, which this document cites by section
 > rather than restating (master section 1.3).
 >
-> **Label form.** Rationales below are tagged `Alternatives Considered:`, `Assumptions:`,
-> `Trade-offs:` and, once in section 10, `Refactoring Rationale:` -- plain, plural, colon retained,
+> **Label form.** Rationales below are tagged with the four canonical labels --
+> `Alternatives Considered:`, `Assumptions:`, `Trade-offs:` and `Refactoring Rationale:` -- plain,
+> plural, colon retained,
 > no emphasis markup, per `docs/CODE_DOCUMENTATION_STANDARD.md` and master section 1.4. All four are
 > permitted forms. `config/rule1/rule1_gate.py` is the mechanism that decides the spelling
 > repository-wide, but it excludes every path containing `/src/test/resources/fixtures/`, so it does
@@ -575,8 +576,16 @@ COBOL baseline or the parity oracle.
 required by master section 10 and by user-specified Rule 1. **No gate reads this prose.**
 `config/checkstyle/checkstyle.xml` limits its audit set to `java`, and `config/rule1/rule1_gate.py`
 excludes every path containing `/src/test/resources/fixtures/` in its `_is_governed` check, which is
-this path -- so neither its `labels` check nor its `what` check ever opens this file. Refactoring
-Rationale: this paragraph previously credited `config/rule1/rule1_gate.py` with deciding the form of
+this path -- so neither its `labels` check nor its `what` check ever opens this file.
+Refactoring Rationale: the header of this file counted THIS occurrence as absent. It said
+`Refactoring Rationale:` appears "once in section 10", when it appears in this section as well, because
+the label on this very paragraph was WRAPPED across a line break -- so the literal search the header
+invites could not find it and the count was taken from that search. The wrap is joined and the header
+corrected together, since either alone leaves the header and the file disagreeing.
+Assumptions: the header now enumerates WHICH labels appear rather than how many times and where. A
+tally restates something the file already states by containing the labels, and it goes stale on any
+edit that adds or moves one; membership does not.
+Refactoring Rationale: this paragraph previously credited `config/rule1/rule1_gate.py` with deciding the form of
 the rationale labels above "repository-wide and including Markdown". The gate does run
 repository-wide, which is what made the claim plausible, but this path is explicitly outside its
 remit, so the sentence let a green build be read as evidence about a document the gate never opens.
@@ -614,23 +623,5 @@ and the measured consumer was the tie-breaker: `PostTransactionsJobParityIT` nam
 has since been remeasured against the consuming classes and now agrees, so the disagreement is
 closed and the tie-breaker is no longer needed.
 
-Assumptions: this section exists because two record files sitting in the same tree can differ in
-whether a job opens them, and the difference is invisible from the layout. Master section 1.5 holds the
-measurement, taken from the resource root each consuming class declares rather than from prose: all four
-files in every one of the NINE `posting/**` scenarios are opened -- by `PostTransactionsJobTest` under
-the classpath prefix `fixtures/posting/` and by `PostTransactionsJobParityIT` under `/fixtures/posting/`
--- all four files in every one of the THREE `interest/**` scenarios are opened by
-`CalculateInterestJobTest` under `fixtures/interest/`, and `PreflightDailyTransactionsJobTest` opens the
-three `preflight/**` feed files plus `preflight/unmatched_card/acctdata.txt` under
-`fixtures/preflight/`. **53 of the 62 record files in this tree are live job input**; master section 1.5
-names the nine that are not.
-
-Assumptions: this paragraph previously said the sibling `preflight/**` and `interest/**` families were
-mirrors that no test in this module read, and that `CalculateInterestJobTest` resolved its inputs from
-the repository-root `tests/fixtures/interest/` tree. Both claims were false. That class declares
-`FIXTURE_INTEREST_ROOT` as the classpath prefix `fixtures/interest/` and loads through
-`getClassLoader().getResourceAsStream(...)`, so it reads this tree; it DISCUSSES the reference oracle
-tree in its prose, and the two were conflated -- a path named in a docstring is not a path being opened.
-The correction matters in exactly the direction the paragraph was warning about: a reader told that a
-sibling directory was inert would carry that belief into it and edit a live job input believing the
-change was free.
+Assumptions: the tree-wide inventory is NOT restated here. Master section 1.5 measures it, and that
+section records why two paragraphs of it were withdrawn from this README and eight others.

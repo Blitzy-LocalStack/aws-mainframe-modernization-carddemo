@@ -3804,6 +3804,39 @@ export const SCREEN_NOT_AVAILABLE_TITLE = 'Screen not available';
 export const SCREEN_NOT_AVAILABLE_DETAIL =
   'The requested CardDemo screen is not part of this delivery. Use a listed screen below.';
 
+/**
+ * Explanation shown when a service refuses an ORDINARY operation on authority grounds.
+ *
+ * Purpose
+ * -------
+ * A 403 answered to an operation every signed-on operator may reach means the presented token carries
+ * NEITHER CardDemo group. `services/card-service/src/main/resources/openapi/card-api.yaml` declares
+ * `x-required-authority: carddemo-user` on the card lookup and the card read, and its own authority
+ * model records that `carddemo-user` "means any authenticated caller may reach it, because every user of
+ * this system holds one of the two groups" -- so a refusal of one of those operations says nothing about
+ * administrative authority at all.
+ *
+ * ⚠️ Refactoring Rationale: this exists because {@link ACCESS_DENIED_ADMIN_ONLY} was being shown
+ * for it. That sentence is `app/cbl/COMEN01C.cbl` L140's, transcribed, and it is exactly right where the
+ * baseline used it -- a non-administrator choosing an administrative menu option -- and wrong here: an
+ * operator refused a card read was told the function is administrator-only when it is not, which sends
+ * them to ask for administrative rights they must not be given and hides the real cause, a token
+ * carrying no CardDemo group. Only `/api/v1/admin/cards/{cardKey}` and the administrative routes guarded
+ * in `ui/src/routes/guards.tsx` are administrator-only, and those keep the transcribed sentence.
+ *
+ * Assumptions: AUTHORED, with no {@link SourceRef}, for the reason this whole group records: the
+ * baseline had one authority refusal and it is already transcribed above, so inventing a citation for a
+ * second sentence it never held would be worse than declaring the absence. The omission is what marks it
+ * as authored.
+ *
+ * Assumptions: it names no group, no claim and no endpoint. An operator cannot act on a group name and a
+ * refused caller must not be told which authority would have succeeded -- the contract's own `Forbidden`
+ * response withholds even whether the row exists for the same reason -- so the sentence states the
+ * outcome and the one action available.
+ */
+export const ACCESS_DENIED_NOT_AUTHORIZED =
+  'Your sign-on is not authorized for this CardDemo function. Contact your administrator.';
+
 /** Label of the control on the not-available surface that returns to the card browse. */
 export const OPEN_CARD_BROWSE_LABEL = 'Open card browse';
 

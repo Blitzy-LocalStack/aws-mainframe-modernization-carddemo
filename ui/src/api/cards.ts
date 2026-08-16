@@ -285,8 +285,9 @@ export const CARD_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
  *   the masked form the contract declares, or if the row carries no well-formed selector.
  * @throws {Error} If the request fails, as the normalised failure `./client` raises, carrying the
  *   service's problem document: HTTP 400 for a malformed account filter or a cursor that cannot be
- *   opened, 401 when no session is held, 403 for a caller outside the required group, and 500 or 503
- *   for a service fault or a write window.
+ *   opened, 401 when no session is held, 403 for a caller outside the required group, and 500 for a
+ *   service fault. This operation publishes NO 503: only the update below declares one, because the
+ *   write window it reports applies to a write.
  */
 export async function listCards(query: CardListQuery = {}): Promise<PageResponse<CardSummary>> {
   // Refactoring Rationale: these criteria were assembled into a query-parameter record and are now
@@ -340,7 +341,7 @@ export async function listCards(query: CardListQuery = {}): Promise<PageResponse
  * @throws {Error} If the request fails, as the normalised failure `./client` raises, carrying the
  *   service's problem document: HTTP 400 for a number the service refuses, 401 when no session is
  *   held, 403 for a caller outside the required group, 404 when no card carries the number, and 500
- *   or 503 for a service fault or a write window.
+ *   for a service fault. No 503 is declared for it, for the reason recorded on the browse above.
  */
 export async function lookupCard(cardNumber: string): Promise<CardDetail> {
   const number = requireCardNumber(cardNumber);
@@ -380,7 +381,7 @@ export async function lookupCard(cardNumber: string): Promise<CardDetail> {
  * @throws {Error} If the request fails, as the normalised failure `./client` raises, carrying the
  *   service's problem document: HTTP 400 for a selector that cannot be opened, 401 when no session is
  *   held, 403 for a caller outside the required group, 404 when the selector addresses no row, and 500
- *   or 503 for a service fault or a write window.
+ *   for a service fault. No 503 is declared for it, for the reason recorded on the browse above.
  */
 export async function getCard(cardKey: string): Promise<CardDetail> {
   const identifier = requireCardSelector(cardKey);
@@ -407,7 +408,7 @@ export async function getCard(cardKey: string): Promise<CardDetail> {
  * @throws {Error} If the request fails, as the normalised failure `./client` raises, carrying the
  *   service's problem document: HTTP 400 for a selector that cannot be opened, 401 when no session is
  *   held, 403 for a caller outside the administrative group, 404 when the selector addresses no row,
- *   and 500 or 503 for a service fault or a write window.
+ *   and 500 for a service fault. No 503 is declared for it either: it is a read.
  */
 export async function getAdminCardDetail(cardKey: string): Promise<AdminCardDetail> {
   const identifier = requireCardSelector(cardKey);

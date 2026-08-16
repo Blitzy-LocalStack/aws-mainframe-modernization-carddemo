@@ -569,23 +569,5 @@ four files here -- `acctdata.txt`, `cardxref.txt` and `tcatbal.txt` to seed the 
 to seed the feed -- and `PostTransactionsJobTest` reads the same four under the classpath prefix
 `fixtures/posting/`, so an edit to these bytes changes what two classes assert.
 
-Assumptions: this section exists because two record files sitting in the same tree can differ in
-whether a job opens them, and the difference is invisible from the layout. Master section 1.5 holds the
-measurement, taken from the resource root each consuming class declares rather than from prose: all four
-files in every one of the NINE `posting/**` scenarios are opened -- by `PostTransactionsJobTest` under
-the classpath prefix `fixtures/posting/` and by `PostTransactionsJobParityIT` under `/fixtures/posting/`
--- all four files in every one of the THREE `interest/**` scenarios are opened by
-`CalculateInterestJobTest` under `fixtures/interest/`, and `PreflightDailyTransactionsJobTest` opens the
-three `preflight/**` feed files plus `preflight/unmatched_card/acctdata.txt` under
-`fixtures/preflight/`. **53 of the 62 record files in this tree are live job input**; master section 1.5
-names the nine that are not.
-
-Assumptions: this paragraph previously said the sibling `preflight/**` and `interest/**` families were
-mirrors that no test in this module read, and that `CalculateInterestJobTest` resolved its inputs from
-the repository-root `tests/fixtures/interest/` tree. Both claims were false. That class declares
-`FIXTURE_INTEREST_ROOT` as the classpath prefix `fixtures/interest/` and loads through
-`getClassLoader().getResourceAsStream(...)`, so it reads this tree; it DISCUSSES the reference oracle
-tree in its prose, and the two were conflated -- a path named in a docstring is not a path being opened.
-The correction matters in exactly the direction the paragraph was warning about: a reader told that a
-sibling directory was inert would carry that belief into it and edit a live job input believing the
-change was free.
+Assumptions: the tree-wide inventory is NOT restated here. Master section 1.5 measures it, and that
+section records why two paragraphs of it were withdrawn from this README and eight others.

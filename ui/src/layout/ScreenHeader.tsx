@@ -132,6 +132,7 @@ import type { CSSProperties, ReactElement } from 'react';
 
 import { APP_ORGANISATION_TITLE_DISPLAY, APP_TITLE_DISPLAY } from '../messages/messages';
 import { BMS_TEXT_COLOR_TOKENS, TYPOGRAPHY_TOKENS } from '../theme/tokens';
+import { APP_TITLE_HEADING_LEVEL, screenHeadingSizeStyle } from './ScreenTitle';
 
 /**
  * The four status-line prompt words the band paints beside its value slots,
@@ -505,7 +506,7 @@ export function ScreenHeader(props: ScreenHeaderProps): ReactElement {
   // Rejected because AppShell paints one surface across all three zones precisely so that one
   // contrast measurement is the whole answer, and reintroducing a second surface here would
   // reopen the defect that decision closed.
-  // Trade-offs: the band loses the gold accent. The application title keeps its heading level,
+  // Trade-offs: the band loses the gold accent. The application title keeps its heading SIZE,
   // its weight and its position, so the emphasis the source carried through colour is carried
   // here through size and weight - the same substitution BMS_TEXT_COLOR_TOKENS records for
   // ATTRB=BRT, which becomes fontWeightStrong rather than a colour.
@@ -594,35 +595,34 @@ export function ScreenHeader(props: ScreenHeaderProps): ReactElement {
         <Col span={24} md={12}>
           <Flex justify="center">
             {/*
-             * Assumptions: level 4 is a design-system mapping fixed by AAP
-             * section 0.3.2, not a judgement about document outline depth. The
-             * band occupies one of 24 rows in the baseline, so a larger heading
-             * would consume vertical space on screens whose field count reaches
-             * 128 - the reasoning tokens.ts records for screenTitleSize. Because
-             * the level is chosen for size, the outline correctness is carried
-             * separately: this is the only heading in the band, and its id names
-             * the enclosing region through aria-labelledby, so the region is
-             * announced by the application title rather than by its depth.
-             * COLOR=YELLOW reaches this element through the text-grade half of
-             * the bridge, appTitleStyle above, and not through the design
-             * system's warning type. That prop resolved to the warning anchor,
-             * which is the hue map's answer for fills and icons and measures
-             * 1.90:1 as text; the reasoning for the snap is recorded at that
-             * style's declaration.
-             * Alternatives Considered: setting fontSize and lineHeight here from
-             * the bridge's screenTitleSize and screenTitleLineHeight entries.
-             * Rejected because level={4} is already the instruction that makes
-             * antd apply exactly those two tokens - fontSizeHeading4 and
-             * lineHeightHeading4 - so restating them would duplicate the
-             * component's own decision and, being a style on the element, would
-             * override rather than configure it. That is why those two entries
-             * are satisfied here without appearing as identifiers: the prop is
-             * the reference. Writing them explicitly would also freeze the pair
-             * at render time, so a later theme that re-derived the heading scale
-             * would move the component's internal value and leave this override
-             * behind, silently.
+             * ⚠️ Refactoring Rationale: the RANK and the SIZE of this heading are now stated
+             * separately, and the note that stood here rejected exactly that. It
+             * argued that level={4} already applies fontSizeHeading4 and
+             * lineHeightHeading4, so naming them would duplicate the component's
+             * own decision. That held only while one number could serve both
+             * purposes, and it could not: every route also paints a caption of
+             * its own, ten of them chose level 3 for it, and a level-3 caption
+             * structurally OUTRANKS a level-4 band, so an operator navigating by
+             * heading was told the screen's caption was the document's highest
+             * heading and this band a subheading of nothing. The rank therefore
+             * comes from APP_TITLE_HEADING_LEVEL, which is above the one every
+             * caption now shares, and the size from the bridge entries directly
+             * -- so the band looks exactly as it did and the outline is correct.
+             * The reason the bridge chose the fourth step is unchanged: the band
+             * occupies one of 24 rows in the baseline, and a larger step costs
+             * vertical space on screens whose field count reaches 128.
+             * Assumptions: COLOR=YELLOW reaches this element through the
+             * text-grade half of the bridge, appTitleStyle above, and not through
+             * the design system's warning type. That prop resolved to the warning
+             * anchor, which is the hue map's answer for fills and icons and
+             * measures 1.90:1 as text; the reasoning for the snap is recorded at
+             * that style's declaration.
              */}
-            <Typography.Title level={4} id={titleId} style={appTitleStyle}>
+            <Typography.Title
+              level={APP_TITLE_HEADING_LEVEL}
+              id={titleId}
+              style={{ ...appTitleStyle, ...screenHeadingSizeStyle(cssVar) }}
+            >
               {APP_TITLE_DISPLAY}
             </Typography.Title>
           </Flex>

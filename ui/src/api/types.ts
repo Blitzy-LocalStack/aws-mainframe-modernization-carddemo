@@ -1554,6 +1554,13 @@ export interface TransactionDetail {
  * Assumptions: `accountId` and `cardNumber` are both optional and exactly one identifies the card to
  * post against, which is why neither is required by the contract. `confirmation` is optional too: its
  * absence is the unconfirmed first pass that answers 200 with nothing written.
+ *
+ * Assumptions: `confirmationToken` is optional for a different reason from the two above, and the
+ * difference matters. The keys are alternatives, so exactly one is always supplied; the token is
+ * genuinely absent on a submission that confirms in one request, which the reference itself does -- its
+ * confirmation is a screen turn rather than a second request, so there is no earlier answer to bind to.
+ * Supplying it is what asks the service to refuse a write that would land on a card other than the one
+ * the preview reported.
  */
 export interface TransactionCreateRequest {
   readonly accountId?: string;
@@ -1570,6 +1577,14 @@ export interface TransactionCreateRequest {
   readonly merchantCity: string;
   readonly merchantZip: string;
   readonly confirmation?: string;
+  /**
+   * The preview's binding token, replayed unaltered so the write is bound to the resolution shown.
+   *
+   * Assumptions: it is carried back exactly as received and is never constructed here. A value this
+   * client composed would be refused by the service, which is the point of it being sealed, so a
+   * builder for it would be a builder for a rejection.
+   */
+  readonly confirmationToken?: string;
 }
 
 /**
@@ -1680,12 +1695,24 @@ export interface TransactionAddPreview {
    *       L473 both perform `VALIDATE-INPUT-KEY-FIELDS`, whose L209 and L221 write them) and then
    *       re-sends the screen, so a client that could not read the pair rendered the key the operator
    *       TYPED while the service wrote the key it resolved.
-   * WHY : Assumptions: the card number arrives UNMASKED, because it is the one value the operator must be
-   *       able to compare against what they typed and a suffix cannot distinguish two cards on one
-   *       account. The screen masks it where it displays it.
+   * WHY : ⚠️ Refactoring Rationale: the card half arrives MASKED and this member used to be
+   *       `resolvedCardNumber`, sixteen digits, defended on the ground that a suffix cannot distinguish
+   *       two cards on one account. The premise is true and the conclusion was not available: AAP section
+   *       0.4.1.9 masks a primary account number in every response but the administrative card-detail
+   *       read, and `transaction-api.yaml`'s own `CardNumber` schema states the unmasked form appears on
+   *       requests only. The distinction the digits were for is now drawn by `confirmationToken` below,
+   *       server-side, so the browser never holds a primary account number for this screen at all.
    */
   readonly resolvedAccountId: string;
-  readonly resolvedCardNumber: string;
+  readonly resolvedCardNumberMasked: string;
+  /*
+   * WHY : Assumptions: this token is OPAQUE to this client in the strong sense -- it is never parsed,
+   *       compared, shortened or rendered, only stored for the life of the confirmation exchange and
+   *       replayed in the confirming request's own `confirmationToken` member. It seals the resolved card
+   *       number under the deployment key, so treating it as data would be treating a sealed primary
+   *       account number as data.
+   */
+  readonly confirmationToken: string;
   /*
    * WHY : Refactoring Rationale: this member is `copied`, of type CopiedTransactionData, and FOUR
    *       shapes for it were authored independently -- `copiedDraft: TransactionCopiedDraft`,

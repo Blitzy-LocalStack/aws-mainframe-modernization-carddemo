@@ -73,6 +73,24 @@ const TYPED_CARD = '4111111111111111';
 const RESOLVED_CARD = '5555444433332222';
 
 /**
+ * The masked rendering the service publishes for {@link RESOLVED_CARD}.
+ *
+ * ⚠️ Refactoring Rationale: the preview member carries this rendering rather than the sixteen digits, so
+ * the parity case below compares the SERVICE'S masked value against the masked spelling of what the operator
+ * typed. The screen no longer masks anything itself -- the helper it used to call is gone, because a helper
+ * that masks has to be handed the unmasked value first, which is the disclosure the service-side mask
+ * exists to remove.
+ */
+const RESOLVED_CARD_MASKED = '************2222';
+
+/** The masked spelling of {@link TYPED_CARD}, which must NOT appear on the confirmation surface. */
+const TYPED_CARD_MASKED = '************1111';
+
+/** The opaque binding the preview publishes alongside the masked card. */
+// The value is deliberately low-entropy; `ui/src/api/transactions.test.ts` records why.
+const CONFIRMATION_TOKEN = 'v2.aaaaaaaaaaaaaaaa.notarealsealedvalue';
+
+/**
  * Every value the service reports as the record it copied.
  *
  * ⚠️ Refactoring Rationale: this is the published `CopiedTransactionData`, where a distinct
@@ -112,7 +130,8 @@ const COPY_PREVIEW: TransactionAddOutcome = {
      *       record published it on the copy turn alone.
      */
     resolvedAccountId: ACCOUNT_ID,
-    resolvedCardNumber: RESOLVED_CARD,
+    resolvedCardNumberMasked: RESOLVED_CARD_MASKED,
+    confirmationToken: CONFIRMATION_TOKEN,
     copied: CAPTURE,
   },
 };
@@ -337,7 +356,7 @@ async function showsEveryCopiedValue(): Promise<void> {
 async function namesTheResolvedCardAndNotTheTypedOne(): Promise<void> {
   const { copyLastTransaction } = await import('../../api/transactions');
   vi.mocked(copyLastTransaction).mockResolvedValueOnce(COPY_PREVIEW);
-  const { TRANSACTION_ADD_FIELD_LABELS, maskCardNumber } = await import('./index');
+  const { TRANSACTION_ADD_FIELD_LABELS } = await import('./index');
   const user = userEvent.setup();
   await renderScreen();
 
@@ -346,10 +365,26 @@ async function namesTheResolvedCardAndNotTheTypedOne(): Promise<void> {
   await pressCopyKey(user);
   await openConfirmation(user);
 
-  const resolved = `${TRANSACTION_ADD_FIELD_LABELS.cardNumber} ${maskCardNumber(RESOLVED_CARD)}`;
-  const typed = `${TRANSACTION_ADD_FIELD_LABELS.cardNumber} ${maskCardNumber(TYPED_CARD)}`;
+  /*
+   * WHY : ⚠️ Assumptions: both spellings are written out as literals rather than produced by calling a
+   *       masking helper the screen exports. The screen exported one while the preview carried sixteen
+   *       digits, and asserting through it made the case agree with whatever the helper did -- including
+   *       agreeing with a helper that had stopped masking. Comparing against the literal rendering the
+   *       contract publishes is what makes the case able to fail.
+   * WHY : Assumptions: the typed card's masked spelling is asserted ABSENT as well, and the two literals
+   *       differ in their last four digits by construction, so a summary composed from the control instead
+   *       of from the service's answer fails the second assertion.
+   */
+  const resolved = `${TRANSACTION_ADD_FIELD_LABELS.cardNumber} ${RESOLVED_CARD_MASKED}`;
+  const typed = `${TRANSACTION_ADD_FIELD_LABELS.cardNumber} ${TYPED_CARD_MASKED}`;
   expect(screen.getByText(resolved)).toBeInTheDocument();
   expect(screen.queryByText(typed)).not.toBeInTheDocument();
+  /*
+   * WHY : ⚠️ Assumptions: the sixteen-digit resolved number is asserted to appear NOWHERE in the rendered
+   *       document, which is the disclosure property the migrated contract exists to hold. The two
+   *       assertions above would both pass on a screen that also printed the full number somewhere else.
+   */
+  expect(screen.queryByText(new RegExp(RESOLVED_CARD, 'u'))).not.toBeInTheDocument();
 }
 
 /**

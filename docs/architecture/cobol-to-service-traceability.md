@@ -5949,8 +5949,9 @@ this register for the identifier learns why it is absent rather than concluding 
   pair as `anyOf` with neither branch forbidding the other. `TransactionAddService`
   resolves account-first and discards a card number supplied alongside an account
   identifier, exactly as **L209** does. The discard is silent on a PREVIEW turn, where the
-  response reports the resolved card in its own `resolvedCardNumber` member; on a CONFIRMING turn a
-  submitted card that is not the resolved one is refused rather than discarded. See
+  response reports the resolved card in its own `resolvedCardNumberMasked` member; on a
+  CONFIRMING turn a submitted card that is not the resolved one is refused rather than
+  discarded. See
   `D-CONFIRMED-CARD-BINDING` below, which records why that one turn differs.
 * **Category.** Not a divergence — a **correction** to one. The delivered code carried an
   unregistered divergence that is now removed, and this entry records it so a reader
@@ -5995,7 +5996,8 @@ this register for the identifier learns why it is absent rather than concluding 
   disagreement between the card an operator sees and the card that is written is
   **unreachable** in the reference, and no sentence exists for it.
 * **Target behaviour.** Two halves, one for each turn. The preview turn returns
-  `TransactionAddPreview.resolvedAccountId` and `TransactionAddPreview.resolvedCardNumber` on
+  `TransactionAddPreview.resolvedAccountId`, `TransactionAddPreview.resolvedCardNumberMasked`
+  and `TransactionAddPreview.confirmationToken` on
   EVERY withheld answer, and additionally `TransactionAddPreview.copied` — a
   `CopiedTransactionData` of eleven members, being the source row's identifier and the ten data
   values — on a copy turn. ⚠️ The resolved pair are members of the PREVIEW rather than of the
@@ -6009,7 +6011,9 @@ this register for the identifier learns why it is absent rather than concluding 
   `appendTransaction`: it passes when no card number was submitted, and refuses with
   `MESSAGE_CONFIRM_RESOLVED_CARD` — `"Card Number changed. Review the transaction and
   confirm again..."` — when a submitted card number is not the one the supplied key resolved
-  to.
+  to; and it calls `requireTheBindingTokenNamesTheResolvedCard`, which refuses with the same
+  sentence when a returned `confirmationToken` cannot be opened for this caller or names a
+  card other than the one the key resolves to now.
 * **Category.** A target-owned **refusal and disclosure** for a condition the baseline
   cannot reach, introduced because splitting one screen turn into two HTTP requests removed
   the mechanism that made it unreachable.
@@ -6029,25 +6033,48 @@ this register for the identifier learns why it is absent rather than concluding 
   an operator acts on it. The wording therefore names the remedy — re-read the preview and
   confirm the card it reports — rather than the cross-reference or the resolution order,
   neither of which the operator can change.
-* **Why the body carries the card number in full.** A masked suffix cannot distinguish two
-  cards on one account, which is the only comparison this disclosure exists to support. The
-  sensitive-data constraint this service observes prohibits DURABLE diagnostics carrying an
-  unmasked number, which is why `TransactionAddPreview.toString()` renders the resolved account
-  identifier and withholds the resolved card number, and why the response body does not.
+* **⚠️ Why the body carries the masked card and an opaque token, and NOT the number in full.**
+  The disclosure half was first delivered as the full sixteen digits, on the reasoning that a
+  masked suffix cannot distinguish two cards on one account and that the comparison the binding
+  supports therefore needed the whole number. A review rejected that reasoning as reached in the
+  wrong order. AAP **§0.4.1.9** masks a primary account number in every response except the
+  administrative card-detail read, and this contract's own `CardNumber` schema states that the
+  unmasked form *"appears on requests only; responses carry the masked form"* — so the body
+  contradicted the document that declares it, and did so on a route reachable by an ordinary
+  cardholder rather than by an administrator. The comparison also never needed the digits in the
+  browser: the only party that has to compare two card numbers is this SERVICE, and it holds
+  both. `confirmationToken` is a `CursorToken` seal over the resolved number, bound to the
+  action name and the authenticated subject, so the confirming turn proves it is committing the
+  card the operator was shown without the browser ever being given, storing or able to
+  manufacture that card. The masked member remains for DISPLAY, which is all a summary needs,
+  and `TransactionAddPreview.toString()` renders neither identifier, since a durable diagnostic
+  is a second copy of whatever it names.
 * **Where it is verified.**
   `TransactionAddServiceTest.theAccountDirectionWinsAndTheSubmittedCardIsReportedAsResolved`
   asserts the replacement is reported on the preview turn through
-  `preview.resolvedCardNumber()`, which is the re-sent screen expressed as a body.
-  `aConfirmingTurnNamingAnUnresolvedCardIsRefused` asserts the refusal names `cardNumber`,
-  allocates no identifier and saves nothing;
-  `aConfirmingTurnNamingTheResolvedCardIsAdmitted` asserts the binding refuses the
+  `preview.resolvedCardNumberMasked()`, which is the re-sent screen expressed as a body, and
+  asserts that neither sixteen-digit value appears in it.
+  `thePreviewPublishesABindingTokenNamingTheResolvedCard` opens the published token with the
+  sealer that issued it and asserts it names the resolved card;
+  `aConfirmingTurnReturningThePreviewsTokenIsAdmitted` performs the whole two-request exchange;
+  `aConfirmingTurnReturningATokenForAnotherCardIsRefused` and
+  `aConfirmingTurnReturningAnotherOperatorsTokenIsRefused` assert the two refusals, the first
+  additionally asserting that no card number appears in the message;
+  `aConfirmingTurnCarryingNoTokenStillWrites` keeps the reference's single-turn capture
+  reachable. `aConfirmingTurnNamingAnUnresolvedCardIsRefused` asserts the submitted-key refusal
+  names `cardNumber`, allocates no identifier and saves nothing;
+  `aConfirmingTurnNamingTheResolvedCardIsAdmitted` asserts that guard refuses the
   DISAGREEMENT rather than the presence of the member.
   `TransactionControllerTest.copyPublishesTheResolvedPairAndTheCopiedRecord` asserts the pair
-  and all eleven copied members reach the wire, and
+  and all eleven copied members reach the wire, asserts `confirmationToken` reaches it, and
+  asserts `resolvedCardNumber` does NOT exist on the body, while
   `TransactionApiContractTest.previewBodiesPublishExactlyThePreviewRecordMembers` asserts the
-  published `TransactionAddPreview` schema declares exactly the record's six components —
-  including the two resolved members — requires every one and is closed, while
+  published `TransactionAddPreview` schema declares exactly the record's components —
+  including the masked card and the token — requires every one and is closed, and
   `everySerialisedBodySatisfiesItsPublishedSchema` serialises a real preview against it.
+  On the browser side, `transactions.test.ts > refuses a copy answer breaching its published
+  shapes` refuses a preview whose resolved member carries sixteen digits, and refuses a token
+  outside the sealed grammar.
   On the browser side,
   `transactionAddTurns.test.tsx > names the resolved card and not the typed one` asserts BOTH
   that the confirmation surface names the RESOLVED card's masked suffix and that it does not
@@ -6062,12 +6089,20 @@ this register for the identifier learns why it is absent rather than concluding 
   request builders send exactly ONE key, the account when both are keyed, mirroring the
   precedence at **L196** — so the refusal is unreachable from this client by construction, and
   what the browser needed instead was the DISCLOSURE. Two surfaces carry it. The screen
-  repaints its two key CONTROLS from the resolved pair on every withheld answer, which is
-  exactly what **L206**, **L209**, **L220** and **L221** do before the screen is re-sent; and
-  its confirmation popover names the resolved account and the masked resolved card, held in
-  state of its own and discarded the moment either key control is edited, so no summary can
-  outlive the values it was resolved from. Before that the screen named the discarded card when
-  both keys were keyed and named no card at all when only an account was.
+  repaints its ACCOUNT control from the resolved pair on every withheld answer, which is what
+  **L206** and **L223** do before the screen is re-sent; and its confirmation popover names the
+  resolved account and the service's masked resolved card, held in state of its own and
+  discarded the moment either key control is edited, so no summary can outlive the values it was
+  resolved from. Before that the screen named the discarded card when both keys were keyed and
+  named no card at all when only an account was.
+  ⚠️ The screen no longer repaints the CARD control, and that is the one place the browser half
+  departs from **L209** and **L221**. The reference repaints that field with sixteen digits it
+  already holds in storage; the migrated preview publishes only the masked rendering, and writing
+  a masked value into a numeric key field would leave a value there that the next turn's own
+  `^[0-9]{16}$` pattern refuses — a display fix that produced an unsubmittable form. The resolved
+  card is rendered beside the form as protected text instead, and the guarantee **L209** exists to
+  provide — that the card written is the card seen — is carried by the binding token rather than
+  by the contents of a control.
 * **Where the browser half is verified.**
   `transactionAddTurns.test.tsx > names the resolved card and not the typed one` asserts BOTH
   that the confirmation surface names the RESOLVED card's masked suffix and that it does not
@@ -6077,9 +6112,10 @@ this register for the identifier learns why it is absent rather than concluding 
   preview` keeps those two from being satisfied by a surface that always rendered the same
   text; and `withdraws the summary when a key is edited` asserts the surface stops describing a
   record once the values it was resolved from change. `transactionAdd.test.tsx > paints the
-  eleven copied values, per lines 481 to 492` asserts the card CONTROL holds the resolved card
-  after a copy turn, and `copyLast.test.tsx > puts every copied value on the screen, and leaves
-  the keys alone` asserts the account control still holds the operator's own key.
+  eleven copied values, per lines 481 to 492` asserts the card CONTROL is left as the operator
+  keyed it, and `copyLast.test.tsx > puts every copied value on the screen, and leaves the keys
+  alone` asserts the account control still holds the operator's own key and that the confirming
+  request carries the binding token.
 * **Files.**
   `services/transaction-service/src/main/java/com/carddemo/transaction/service/TransactionAddService.java`,
   `services/transaction-service/src/main/java/com/carddemo/transaction/dto/TransactionAddPreview.java`,

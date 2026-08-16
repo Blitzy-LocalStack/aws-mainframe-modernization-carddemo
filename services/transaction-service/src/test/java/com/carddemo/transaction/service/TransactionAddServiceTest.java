@@ -17,6 +17,7 @@ import com.carddemo.common.money.Money;
 import com.carddemo.common.time.TimestampFormatter;
 import com.carddemo.common.validation.DateEditValidator;
 import com.carddemo.common.validation.FieldValidationFlag;
+import com.carddemo.common.web.CursorToken;
 import com.carddemo.transaction.domain.Transaction;
 import com.carddemo.transaction.dto.CopiedTransactionData;
 import com.carddemo.transaction.dto.CopyLastRequest;
@@ -28,6 +29,8 @@ import com.carddemo.transaction.mapper.TransactionMapper;
 import com.carddemo.transaction.repository.TransactionRepository;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -235,6 +238,27 @@ class TransactionAddServiceTest {
     /** A different sixteen-digit card number, submitted so the precedence case can discard it. */
     private static final String SUBMITTED_CARD_NUMBER = "5500000000000004";
 
+    /** The masked rendering the answer publishes for {@link #RESOLVED_CARD_NUMBER}. */
+    private static final String RESOLVED_CARD_NUMBER_MASKED = "************1111";
+
+    /**
+     * The authenticated subject every case's binding is scoped to.
+     *
+     * <p>Assumptions: one subject throughout, because the property the binding cases assert is that the
+     * token names the resolved CARD; the case that varies the subject asserts the scoping separately.</p>
+     */
+    private static final String SUBJECT = "TESTUSR1";
+
+    /**
+     * Synthetic key material for the sealer, at the minimum width it accepts.
+     *
+     * <p>Assumptions: this is test-only material and is not a credential of any environment. It is a
+     * literal rather than a generated value so a sealed token is reproducible within one run, and it is
+     * plainly synthetic so no reader mistakes it for something to protect.</p>
+     */
+    private static final byte[] SEALING_KEY =
+            "carddemo-transaction-add-test-key-material".getBytes(StandardCharsets.US_ASCII);
+
     /**
      * The stored maximum identifier the COPY path's own read answers with.
      *
@@ -323,6 +347,16 @@ class TransactionAddServiceTest {
     private TransactionAddService service;
 
     /**
+     * The real sealer the service binds its previews with, rebuilt before every case.
+     *
+     * <p>Assumptions: this is the REAL {@link CursorToken} and not a stand-in, because the property the
+     * binding cases assert is that a token this service sealed is the one it will open -- which a mocked
+     * sealer would satisfy by returning whatever it was told to. The key material below is synthetic and
+     * belongs to no environment.</p>
+     */
+    private CursorToken confirmationSealer;
+
+    /**
      * Builds a service over freshly created stand-ins before every case.
      *
      * <p>Assumptions: the service is rebuilt rather than shared because it is constructed around its
@@ -333,8 +367,35 @@ class TransactionAddServiceTest {
     @BeforeEach
     void setUp() {
         this.transactionMapper = new TransactionMapper();
+        this.confirmationSealer = new CursorToken(SEALING_KEY, Duration.ofMinutes(15));
         this.service = new TransactionAddService(this.transactions, this.accounts,
                 this.transactionMapper, this.transactionManager);
+    }
+
+    /**
+     * Submits a capture with this case's sealer and subject, so no case repeats the two.
+     *
+     * <p>Refactoring Rationale: the operation took the request alone until the resolved card stopped being
+     * published in full. It now also takes the sealer that binds the preview and the subject that binding
+     * is scoped to, and threading both through one helper keeps forty-odd cases stating what they are about
+     * -- a validation arm, an outcome, a sentence -- rather than restating the seam.</p>
+     *
+     * @param request the submission under test; must not be {@code null}
+     * @return the outcome the service answers, either arm, never {@code null}
+     */
+    private TransactionAddOutcome add(TransactionAddRequest request) {
+        return this.service.addTransaction(request, this.confirmationSealer, SUBJECT);
+    }
+
+    /**
+     * Submits a copy-last turn with this case's sealer and subject, for the same reason as {@link
+     * #add(TransactionAddRequest)}.
+     *
+     * @param request the copy submission under test; must not be {@code null}
+     * @return the outcome the service answers, either arm, never {@code null}
+     */
+    private TransactionAddOutcome copyLast(CopyLastRequest request) {
+        return this.service.copyLastTransactionData(request, this.confirmationSealer, SUBJECT);
     }
 
     /**
@@ -544,13 +605,19 @@ class TransactionAddServiceTest {
      *     direction unsupplied
      * @param confirmation the confirmation discriminator to submit, of type {@code String}, empty for
      *     the never-supplied spelling
-     * @return a {@link TransactionAddRequest} carrying all fourteen components, never {@code null}
+     * <p>Assumptions: the binding token is left unsupplied here, because a first turn has none to
+     * return -- the service publishes it on the answer this submission provokes. The cases that exercise
+     * the binding supply it through {@link #withConfirmationToken(TransactionAddRequest, String)}, so
+     * every other case reads as the single-turn arm {@code app/cbl/COTRN02C.cbl} L166 to L181
+     * performs.</p>
+     *
+     * @return a {@link TransactionAddRequest} carrying all fifteen components, never {@code null}
      */
     private static TransactionAddRequest submission(String accountId, String cardNumber,
             String confirmation) {
         return new TransactionAddRequest(accountId, "01", "0001", "POS TERM", "GROCERY PURCHASE",
                 Money.of("125.50"), "123456789", "CORNER STORE", "SEATTLE", "98101", cardNumber,
-                ORIGIN_DATE, PROCESS_DATE, confirmation);
+                ORIGIN_DATE, PROCESS_DATE, confirmation, null);
     }
 
     /**
@@ -622,7 +689,8 @@ class TransactionAddServiceTest {
                 TransactionAddService.FIELD_ORIGIN_DATE.equals(field) ? value : original.originDate(),
                 TransactionAddService.FIELD_PROCESS_DATE.equals(field)
                         ? value : original.processDate(),
-                original.confirmation());
+                original.confirmation(),
+                original.confirmationToken());
     }
 
     /**
@@ -669,7 +737,30 @@ class TransactionAddServiceTest {
                 original.categoryCode(), original.source(), original.description(), amount,
                 original.merchantId(), original.merchantName(), original.merchantCity(),
                 original.merchantZip(), original.cardNumber(), original.originDate(),
-                original.processDate(), original.confirmation());
+                original.processDate(), original.confirmation(), original.confirmationToken());
+    }
+
+    /**
+     * Builds a submission differing from the original only in the binding token it returns.
+     *
+     * <p>Assumptions: this exists as its own builder rather than as an eleventh key of
+     * {@link #replacing(TransactionAddRequest, String, String)}, because the token is not a component any
+     * validation block guards -- no sentence names it, and the {@code replaceableFields} guard would
+     * refuse it. Its cases are about the BINDING rather than about field validation.</p>
+     *
+     * @param original the submission to derive from; must not be {@code null}
+     * @param confirmationToken the sealed binding to return, of type {@code String}, or {@code null} for
+     *     the single-turn arm that returns none
+     * @return a {@link TransactionAddRequest} identical to {@code original} but for the token, never
+     *     {@code null}
+     */
+    private static TransactionAddRequest withConfirmationToken(TransactionAddRequest original,
+            String confirmationToken) {
+        return new TransactionAddRequest(original.accountId(), original.typeCode(),
+                original.categoryCode(), original.source(), original.description(), original.amount(),
+                original.merchantId(), original.merchantName(), original.merchantCity(),
+                original.merchantZip(), original.cardNumber(), original.originDate(),
+                original.processDate(), original.confirmation(), confirmationToken);
     }
 
     /**
@@ -938,7 +1029,7 @@ class TransactionAddServiceTest {
     @Test
     @DisplayName("neither key supplied: refused with the blank state, and nothing is read")
     void neitherKeySuppliedIsRefusedWithTheBlankState() {
-        assertThatThrownBy(() -> this.service.addTransaction(submission("", "", "Y")))
+        assertThatThrownBy(() -> this.add(submission("", "", "Y")))
                 .isInstanceOf(ClientInputException.class)
                 .hasMessage(TransactionAddService.MESSAGE_KEY_REQUIRED)
                 .satisfies(failure -> {
@@ -994,13 +1085,20 @@ class TransactionAddServiceTest {
         //       character is typed, the field holds the resolved value. Asserting the disclosure is therefore
         //       asserting the same line of COBOL at the point where the target makes it observable.
         TransactionAddPreview preview = prompted(
-                this.service.addTransaction(submission(ACCOUNT_ID, SUBMITTED_CARD_NUMBER, "N")));
+                this.add(submission(ACCOUNT_ID, SUBMITTED_CARD_NUMBER, "N")));
 
-        assertThat(preview.resolvedCardNumber())
+        // WHY : ⚠️ Refactoring Rationale: the assertion reads the MASKED member, where it used to read the
+        //       sixteen-digit one. A review found the preview disclosed a whole primary account number on a
+        //       non-administrative route, and AAP section 0.4.1.9 masks it everywhere but the administrative
+        //       card-detail read. The reference line this case pins is unchanged -- line 209 still overwrites
+        //       the card field with the entry's value -- and the masked rendering still distinguishes the
+        //       resolved card from the submitted one, because the two differ in their last four digits.
+        assertThat(preview.resolvedCardNumberMasked())
                 .as("line 209 overwrites the card field with the entry's value, and the preview is the"
                         + " re-sent screen that shows it")
-                .isEqualTo(RESOLVED_CARD_NUMBER)
-                .isNotEqualTo(SUBMITTED_CARD_NUMBER);
+                .isEqualTo(RESOLVED_CARD_NUMBER_MASKED)
+                .doesNotContain(RESOLVED_CARD_NUMBER)
+                .doesNotContain(SUBMITTED_CARD_NUMBER);
         assertThat(preview.resolvedAccountId())
                 .as("the account the row would be attributed to, on the path that supplied it")
                 .isEqualTo(ACCOUNT_ID);
@@ -1037,7 +1135,7 @@ class TransactionAddServiceTest {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
 
         assertThatThrownBy(() ->
-                this.service.addTransaction(submission(ACCOUNT_ID, SUBMITTED_CARD_NUMBER, "Y")))
+                this.add(submission(ACCOUNT_ID, SUBMITTED_CARD_NUMBER, "Y")))
                 .isInstanceOf(ClientInputException.class)
                 .hasMessage(TransactionAddService.MESSAGE_CONFIRM_RESOLVED_CARD);
 
@@ -1064,10 +1162,157 @@ class TransactionAddServiceTest {
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
-        this.service.addTransaction(submission(ACCOUNT_ID, RESOLVED_CARD_NUMBER, "Y"));
+        this.add(submission(ACCOUNT_ID, RESOLVED_CARD_NUMBER, "Y"));
 
         assertThat(appendedRow().getCardNum())
                 .as("line 459 stores the field line 209 overwrote, so the entry's value is stored")
+                .isEqualTo(RESOLVED_CARD_NUMBER);
+    }
+
+    /**
+     * The preview publishes a token that opens, for this caller, to the card it resolved.
+     *
+     * <p>⚠️ Purpose: this is the disclosure half of the confirmed-card binding, restated for a preview that
+     * no longer carries the card number. The property is that the answer still names the resolved card
+     * VERIFIABLY -- the sealer that issued the token opens it to exactly that number under this caller's
+     * binding -- so the browser can be given something that proves the identity without being given the
+     * identity. A preview that published a token bound to nothing, or to the wrong card, would satisfy every
+     * shape assertion in the estate and lose the guarantee.</p>
+     *
+     * <p>Assumptions: the token is opened here with the REAL sealer rather than compared against a literal,
+     * because a sealed value carries a random nonce and is different on every seal. What can be asserted is
+     * the round trip, which is also the only property the confirming turn depends on.</p>
+     */
+    @Test
+    @DisplayName("the preview's binding token opens, for this caller, to the resolved card")
+    void thePreviewPublishesABindingTokenNamingTheResolvedCard() {
+        accountResolvesTo(RESOLVED_CARD_NUMBER);
+
+        TransactionAddPreview preview = prompted(this.add(submission(ACCOUNT_ID, "", "N")));
+
+        assertThat(preview.confirmationToken())
+                .as("a withheld answer carries the binding the confirming turn returns")
+                .isNotBlank();
+        assertThat(this.confirmationSealer.open(
+                CursorToken.binding("transaction-add-confirmation", SUBJECT, CursorToken.SCOPE_NONE),
+                preview.confirmationToken()))
+                .as("the token names the card the key resolved to, and names it only to this service")
+                .isEqualTo(RESOLVED_CARD_NUMBER);
+    }
+
+    /**
+     * A confirming turn returning the preview's own token writes the row.
+     *
+     * <p>⚠️ Purpose: this is the two-request exchange a browser performs end to end -- preview, then
+     * confirm carrying the token -- and it is what replaced the exchange in which the browser held the
+     * sixteen digits and sent them back. Without this case the refusals below are satisfiable by a service
+     * that refuses every token.</p>
+     *
+     * <p>Assumptions: the token is taken from the PREVIEW rather than sealed by the case, so the exchange
+     * asserted is the one a client can actually perform. A case that sealed its own token would pass against
+     * a service whose preview published a token nothing could use.</p>
+     */
+    @Test
+    @DisplayName("a confirming turn returning the preview's token writes the row")
+    void aConfirmingTurnReturningThePreviewsTokenIsAdmitted() {
+        accountResolvesTo(RESOLVED_CARD_NUMBER);
+        TransactionAddPreview preview = prompted(this.add(submission(ACCOUNT_ID, "", "N")));
+        theAllocatorAnswersWith(ALLOCATED_FIRST);
+        theAppendEchoesTheRow();
+        writeSpanRunsInline();
+
+        this.add(withConfirmationToken(submission(ACCOUNT_ID, "", "Y"),
+                preview.confirmationToken()));
+
+        assertThat(appendedRow().getCardNum())
+                .as("the row is written against the card the returned token names")
+                .isEqualTo(RESOLVED_CARD_NUMBER);
+    }
+
+    /**
+     * A confirming turn returning a token sealed for a DIFFERENT card is refused, and writes nothing.
+     *
+     * <p>⚠️ Purpose: this is the enforcement half of the binding. It is the state the reference cannot
+     * reach -- its line 209 repaints the screen field before the operator can confirm -- and that two
+     * stateless requests make reachable: the cross-reference can change between the preview and the
+     * confirmation, so the card the operator approved need not be the card the key resolves to now.</p>
+     *
+     * <p>Assumptions: the mismatch is arranged by sealing a token for the OTHER card rather than by changing
+     * the stubbed cross-reference mid-case, because the two are indistinguishable to the guard and the
+     * former needs no re-stubbing to read clearly.</p>
+     *
+     * <p>Assumptions: the refusal names {@link TransactionAddRequest#CONFIRMATION_TOKEN_MALFORMED}'s own
+     * member and carries the same sentence the submitted-key guard carries, because both detect one
+     * condition -- the card being confirmed is not the card that would be written.</p>
+     */
+    @Test
+    @DisplayName("a confirming turn whose token names another card is refused and writes nothing")
+    void aConfirmingTurnReturningATokenForAnotherCardIsRefused() {
+        accountResolvesTo(RESOLVED_CARD_NUMBER);
+        String tokenForAnotherCard = this.confirmationSealer.seal(
+                CursorToken.binding("transaction-add-confirmation", SUBJECT, CursorToken.SCOPE_NONE),
+                SUBMITTED_CARD_NUMBER);
+
+        assertThatThrownBy(() -> this.add(
+                withConfirmationToken(submission(ACCOUNT_ID, "", "Y"), tokenForAnotherCard)))
+                .isInstanceOf(ClientInputException.class)
+                .hasMessage(TransactionAddService.MESSAGE_CONFIRM_RESOLVED_CARD)
+                .satisfies(failure -> assertThat(failure.getMessage())
+                        .as("neither card number appears in a refusal that reaches a browser")
+                        .doesNotContain(RESOLVED_CARD_NUMBER)
+                        .doesNotContain(SUBMITTED_CARD_NUMBER));
+
+        verify(this.transactions, never()).allocateTransactionId();
+        verify(this.transactions, never()).saveAndFlush(any());
+    }
+
+    /**
+     * A confirming turn returning another operator's token is refused, so the binding is not transferable.
+     *
+     * <p>⚠️ Purpose: the token names a card, so a token that could be replayed by a second operator would
+     * be a way of writing against a card that operator was never shown. The binding carries the subject for
+     * exactly this reason, and this case is what proves it carries it.</p>
+     *
+     * <p>Assumptions: the token is sealed for the same CARD and differs only in subject, so the refusal can
+     * only be attributed to the subject.</p>
+     */
+    @Test
+    @DisplayName("a confirming turn returning another operator's token is refused")
+    void aConfirmingTurnReturningAnotherOperatorsTokenIsRefused() {
+        accountResolvesTo(RESOLVED_CARD_NUMBER);
+        String anotherOperatorsToken = this.confirmationSealer.seal(
+                CursorToken.binding("transaction-add-confirmation", "OTHERUSR",
+                        CursorToken.SCOPE_NONE),
+                RESOLVED_CARD_NUMBER);
+
+        assertThatThrownBy(() -> this.add(
+                withConfirmationToken(submission(ACCOUNT_ID, "", "Y"), anotherOperatorsToken)))
+                .isInstanceOf(ClientInputException.class)
+                .hasMessage(TransactionAddService.MESSAGE_CONFIRM_RESOLVED_CARD);
+
+        verify(this.transactions, never()).saveAndFlush(any());
+    }
+
+    /**
+     * A confirming turn carrying NO token still writes, so the single-turn capture stays reachable.
+     *
+     * <p>⚠️ Purpose: the binding is opt-in, and this case is what states that. The reference confirms
+     * within one screen turn and has no preview to bind to, so requiring a token would make a two-request
+     * exchange the only permitted shape and would refuse the direct capture the contract declares. What the
+     * tokenless client gives up is the binding, not the write.</p>
+     */
+    @Test
+    @DisplayName("a confirming turn carrying no token still writes, as the one-turn reference does")
+    void aConfirmingTurnCarryingNoTokenStillWrites() {
+        accountResolvesTo(RESOLVED_CARD_NUMBER);
+        theAllocatorAnswersWith(ALLOCATED_FIRST);
+        theAppendEchoesTheRow();
+        writeSpanRunsInline();
+
+        this.add(submission(ACCOUNT_ID, "", "Y"));
+
+        assertThat(appendedRow().getCardNum())
+                .as("the tokenless arm writes against whatever the submitted key resolves to")
                 .isEqualTo(RESOLVED_CARD_NUMBER);
     }
 
@@ -1092,7 +1337,7 @@ class TransactionAddServiceTest {
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
-        this.service.addTransaction(submission("", RESOLVED_CARD_NUMBER, "Y"));
+        this.add(submission("", RESOLVED_CARD_NUMBER, "Y"));
 
         assertThat(appendedRow().getCardNum())
                 .as("the card arm leaves the card field as submitted, per line 223")
@@ -1129,7 +1374,7 @@ class TransactionAddServiceTest {
     void aKeyWhoseCharactersAreNotAllDigitsIsRefused(String submittedAccountId,
             String submittedCardNumber, String expectedSentence, String expectedField) {
 
-        assertThatThrownBy(() -> this.service.addTransaction(
+        assertThatThrownBy(() -> this.add(
                 submission(submittedAccountId, submittedCardNumber, "Y")))
                 .isInstanceOf(ClientInputException.class)
                 .hasMessage(expectedSentence)
@@ -1161,7 +1406,7 @@ class TransactionAddServiceTest {
     void anAbsentAccountEntryReportsTheAccountArmsAbsenceSentence() {
         when(this.accounts.findCardXrefByAccountId(ACCOUNT_ID)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")))
+        assertThatThrownBy(() -> this.add(submission(ACCOUNT_ID, "", "Y")))
                 .isInstanceOf(NoSuchElementException.class)
                 .hasMessage(TransactionAddService.MESSAGE_ACCOUNT_NOT_FOUND);
 
@@ -1188,7 +1433,7 @@ class TransactionAddServiceTest {
                 .thenReturn(Optional.empty());
 
         assertThatThrownBy(() ->
-                this.service.addTransaction(submission("", RESOLVED_CARD_NUMBER, "Y")))
+                this.add(submission("", RESOLVED_CARD_NUMBER, "Y")))
                 .isInstanceOf(NoSuchElementException.class)
                 .hasMessage(TransactionAddService.MESSAGE_CARD_NOT_FOUND);
 
@@ -1220,7 +1465,7 @@ class TransactionAddServiceTest {
                 .thenThrow(new AccountContextClient.AccountContextUnavailableException(
                         "the account context did not answer", new IllegalStateException("transport")));
 
-        assertThatThrownBy(() -> this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")))
+        assertThatThrownBy(() -> this.add(submission(ACCOUNT_ID, "", "Y")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage(TransactionAddService.MESSAGE_ACCOUNT_XREF_LOOKUP_FAILED);
 
@@ -1248,7 +1493,7 @@ class TransactionAddServiceTest {
                         "the account context did not answer", new IllegalStateException("transport")));
 
         assertThatThrownBy(() ->
-                this.service.addTransaction(submission("", RESOLVED_CARD_NUMBER, "Y")))
+                this.add(submission("", RESOLVED_CARD_NUMBER, "Y")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage(TransactionAddService.MESSAGE_CARD_XREF_LOOKUP_FAILED);
     }
@@ -1298,7 +1543,7 @@ class TransactionAddServiceTest {
                 ? withAmount(accepted, null)
                 : replacing(accepted, arm.field(), "");
 
-        assertThatThrownBy(() -> this.service.addTransaction(deficient))
+        assertThatThrownBy(() -> this.add(deficient))
                 .isInstanceOf(ClientInputException.class)
                 .hasMessage(arm.expectedSentence())
                 .satisfies(failure -> {
@@ -1345,7 +1590,7 @@ class TransactionAddServiceTest {
         }
         TransactionAddRequest deficient = allUnsupplied;
 
-        assertThatThrownBy(() -> this.service.addTransaction(deficient))
+        assertThatThrownBy(() -> this.add(deficient))
                 .isInstanceOf(ClientInputException.class)
                 .hasMessage(TransactionAddRequest.TYPE_CODE_REQUIRED)
                 .satisfies(failure -> assertThat(((ClientInputException) failure).fields())
@@ -1380,7 +1625,7 @@ class TransactionAddServiceTest {
         TransactionAddRequest deficient =
                 replacing(submission(ACCOUNT_ID, "", "Y"), arm.field(), offendingValue);
 
-        assertThatThrownBy(() -> this.service.addTransaction(deficient))
+        assertThatThrownBy(() -> this.add(deficient))
                 .isInstanceOf(ClientInputException.class)
                 .hasMessage(arm.expectedSentence())
                 .satisfies(failure -> {
@@ -1424,7 +1669,7 @@ class TransactionAddServiceTest {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
         TransactionAddRequest deficient = withAmount(submission(ACCOUNT_ID, "", "Y"), amount);
 
-        assertThatThrownBy(() -> this.service.addTransaction(deficient))
+        assertThatThrownBy(() -> this.add(deficient))
                 .as("the disjunction at lines 340 to 343 publishes one sentence: %s",
                         failedAlternative)
                 .isInstanceOf(ClientInputException.class)
@@ -1479,7 +1724,7 @@ class TransactionAddServiceTest {
         TransactionAddRequest widest =
                 withAmount(submission(ACCOUNT_ID, "", "Y"), nineIntegerDigits);
 
-        TransactionAddResponse answer = appended(this.service.addTransaction(widest));
+        TransactionAddResponse answer = appended(this.add(widest));
 
         assertThat(answer.amount())
                 .as("the record's nine integer digits are the accepted domain, per D-AMOUNT-RECORD-WIDTH")
@@ -1519,7 +1764,7 @@ class TransactionAddServiceTest {
         TransactionAddRequest deficient =
                 replacing(submission(ACCOUNT_ID, "", "Y"), arm.field(), offendingValue);
 
-        assertThatThrownBy(() -> this.service.addTransaction(deficient))
+        assertThatThrownBy(() -> this.add(deficient))
                 .isInstanceOf(ClientInputException.class)
                 .hasMessage(arm.expectedSentence())
                 .satisfies(failure -> assertThat(((ClientInputException) failure).field())
@@ -1564,7 +1809,7 @@ class TransactionAddServiceTest {
         TransactionAddRequest deficient =
                 replacing(submission(ACCOUNT_ID, "", "Y"), arm.field(), IMPOSSIBLE_DATE);
 
-        assertThatThrownBy(() -> this.service.addTransaction(deficient))
+        assertThatThrownBy(() -> this.add(deficient))
                 .isInstanceOf(ClientInputException.class)
                 .hasMessage(arm.expectedSentence())
                 .satisfies(failure -> assertThat(((ClientInputException) failure).field())
@@ -1624,7 +1869,7 @@ class TransactionAddServiceTest {
         TransactionAddRequest forgiven =
                 replacing(submission(ACCOUNT_ID, "", "Y"), dateField, OUT_OF_RANGE_DATE);
 
-        TransactionAddResponse answer = appended(this.service.addTransaction(forgiven));
+        TransactionAddResponse answer = appended(this.add(forgiven));
 
         assertThat(answer.transactionId())
                 .as("a forgiven decline is suppressed, so the append is reached")
@@ -1661,7 +1906,7 @@ class TransactionAddServiceTest {
         TransactionAddRequest oneFractionalDigit =
                 withAmount(submission(ACCOUNT_ID, "", "N"), Money.of("125.5"));
 
-        TransactionAddPreview answer = prompted(this.service.addTransaction(oneFractionalDigit));
+        TransactionAddPreview answer = prompted(this.add(oneFractionalDigit));
 
         assertThat(answer.amount())
                 .as("the value that survives lines 383 to 386, not the characters submitted")
@@ -1700,7 +1945,7 @@ class TransactionAddServiceTest {
         TransactionAddRequest refund =
                 withAmount(submission(ACCOUNT_ID, "", "Y"), Money.of("-125.50"));
 
-        TransactionAddResponse answer = appended(this.service.addTransaction(refund));
+        TransactionAddResponse answer = appended(this.add(refund));
 
         assertThat(answer.amount().isNegative())
                 .as("the sign position of line 340 admits a leading minus")
@@ -1740,7 +1985,7 @@ class TransactionAddServiceTest {
         writeSpanRunsInline();
 
         TransactionAddResponse answer =
-                appended(this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")));
+                appended(this.add(submission(ACCOUNT_ID, "", "Y")));
 
         assertThat(answer.transactionId())
                 .as("the allocator's first value, at the key width")
@@ -1806,7 +2051,7 @@ class TransactionAddServiceTest {
                 writeSpanRunsInline();
 
                 TransactionAddResponse answer =
-                        appended(this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")));
+                        appended(this.add(submission(ACCOUNT_ID, "", "Y")));
 
                 assertThat(answer.transactionId().chars().allMatch(c -> c >= '0' && c <= '9'))
                         .as("under default locale %s the identifier must be ASCII digits, but was %s",
@@ -1852,7 +2097,7 @@ class TransactionAddServiceTest {
         writeSpanRunsInline();
 
         TransactionAddResponse answer =
-                appended(this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")));
+                appended(this.add(submission(ACCOUNT_ID, "", "Y")));
 
         assertThat(answer.transactionId())
                 .as("the allocated value, rendered at the key width")
@@ -1893,7 +2138,7 @@ class TransactionAddServiceTest {
                 .thenThrow(new IllegalStateException("unreadable"));
         writeSpanRunsInline();
 
-        assertThatThrownBy(() -> this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")))
+        assertThatThrownBy(() -> this.add(submission(ACCOUNT_ID, "", "Y")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage(TransactionAddService.MESSAGE_TRANSACTION_LOOKUP_FAILED);
 
@@ -1939,7 +2184,7 @@ class TransactionAddServiceTest {
         theAllocatorAnswersWith(10_000_000_000_000_000L);
         writeSpanRunsInline();
 
-        assertThatThrownBy(() -> this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")))
+        assertThatThrownBy(() -> this.add(submission(ACCOUNT_ID, "", "Y")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage(TransactionAddService.MESSAGE_TRANSACTION_LOOKUP_FAILED);
 
@@ -1980,7 +2225,7 @@ class TransactionAddServiceTest {
          *       establishes it without also exercising the confirming-card binding, which has a case of
          *       its own. A confirming turn naming a card the account did not resolve to is refused.
          */
-        this.service.addTransaction(submission(ACCOUNT_ID, null, "Y"));
+        this.add(submission(ACCOUNT_ID, null, "Y"));
 
         Transaction stored = appendedRow();
         assertThat(stored.getTranId()).as("line 451").isEqualTo(NEXT_IDENTIFIER);
@@ -2033,7 +2278,7 @@ class TransactionAddServiceTest {
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
-        this.service.addTransaction(submission(ACCOUNT_ID, "", "Y"));
+        this.add(submission(ACCOUNT_ID, "", "Y"));
 
         Transaction stored = appendedRow();
         assertThat(TimestampFormatter.format(stored.getOrigTs()))
@@ -2080,7 +2325,7 @@ class TransactionAddServiceTest {
         writeSpanRunsInline();
 
         TransactionAddResponse answer =
-                appended(this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")));
+                appended(this.add(submission(ACCOUNT_ID, "", "Y")));
 
         assertThat(answer.returnMessage())
                 .as("both literals are delimited by size, so both boundary spaces survive")
@@ -2118,7 +2363,7 @@ class TransactionAddServiceTest {
         writeSpanRunsInline();
 
         TransactionAddResponse answer =
-                appended(this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")));
+                appended(this.add(submission(ACCOUNT_ID, "", "Y")));
 
         assertThat(answer.returnMessage())
                 .as("the sentence arrives as a value, which is line 727's observable form")
@@ -2163,7 +2408,7 @@ class TransactionAddServiceTest {
                 .thenThrow(new DataIntegrityViolationException("duplicate key value"));
         writeSpanRunsInline();
 
-        assertThatThrownBy(() -> this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")))
+        assertThatThrownBy(() -> this.add(submission(ACCOUNT_ID, "", "Y")))
                 .isInstanceOf(RecordConflictException.class)
                 .satisfies(failure -> {
                     RecordConflictException conflict = (RecordConflictException) failure;
@@ -2212,7 +2457,7 @@ class TransactionAddServiceTest {
                 .thenThrow(new IllegalStateException("the store did not accept the row"));
         writeSpanRunsInline();
 
-        assertThatThrownBy(() -> this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")))
+        assertThatThrownBy(() -> this.add(submission(ACCOUNT_ID, "", "Y")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage(TransactionAddService.MESSAGE_ADD_FAILED);
 
@@ -2245,7 +2490,7 @@ class TransactionAddServiceTest {
         writeSpanRunsInline();
 
         TransactionAddResponse answer =
-                appended(this.service.addTransaction(submission(ACCOUNT_ID, "", confirmation)));
+                appended(this.add(submission(ACCOUNT_ID, "", confirmation)));
 
         assertThat(answer.transactionId()).isEqualTo(FIRST_IDENTIFIER);
         verify(this.transactions).saveAndFlush(any());
@@ -2287,7 +2532,7 @@ class TransactionAddServiceTest {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
 
         TransactionAddPreview answer =
-                prompted(this.service.addTransaction(submission(ACCOUNT_ID, "", confirmation)));
+                prompted(this.add(submission(ACCOUNT_ID, "", confirmation)));
 
         assertThat(answer.returnMessage())
                 .as("all four values of lines 173 to 176 publish the sentence of line 178")
@@ -2325,7 +2570,7 @@ class TransactionAddServiceTest {
     void anyOtherConfirmationValueIsRefused() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
 
-        assertThatThrownBy(() -> this.service.addTransaction(submission(ACCOUNT_ID, "", "Q")))
+        assertThatThrownBy(() -> this.add(submission(ACCOUNT_ID, "", "Q")))
                 .isInstanceOf(ClientInputException.class)
                 .hasMessage(TransactionAddService.MESSAGE_INVALID_CONFIRMATION)
                 .satisfies(failure -> {
@@ -2359,7 +2604,7 @@ class TransactionAddServiceTest {
     @Test
     @DisplayName("a submission deficient in both a key and a confirmation is answered for the key")
     void theKeyPhaseIsSettledBeforeTheConfirmationIsEvaluated() {
-        assertThatThrownBy(() -> this.service.addTransaction(submission("", "", "Q")))
+        assertThatThrownBy(() -> this.add(submission("", "", "Q")))
                 .as("line 166 runs before line 169, so the key complaint outranks the confirmation")
                 .isInstanceOf(ClientInputException.class)
                 .hasMessage(TransactionAddService.MESSAGE_KEY_REQUIRED)
@@ -2391,7 +2636,7 @@ class TransactionAddServiceTest {
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
-        this.service.addTransaction(submission(ACCOUNT_ID, "", "Y"));
+        this.add(submission(ACCOUNT_ID, "", "Y"));
 
         InOrder order = inOrder(this.accounts, this.transactionManager, this.transactions);
         order.verify(this.accounts).findCardXrefByAccountId(ACCOUNT_ID);
@@ -2423,7 +2668,7 @@ class TransactionAddServiceTest {
         theAllocatorAnswersWith(ALLOCATED_FIRST);
         theAppendEchoesTheRow();
 
-        this.service.addTransaction(submission(ACCOUNT_ID, "", "Y"));
+        this.add(submission(ACCOUNT_ID, "", "Y"));
 
         verify(this.transactionManager, times(1)).getTransaction(any());
         verify(this.transactionManager, times(1)).commit(span);
@@ -2457,7 +2702,7 @@ class TransactionAddServiceTest {
                 .thenReturn(Optional.of(storedRow(STORED_MAXIMUM)));
 
         TransactionAddPreview answer =
-                prompted(this.service.copyLastTransactionData(copySubmission(ACCOUNT_ID, "", "N")));
+                prompted(this.copyLast(copySubmission(ACCOUNT_ID, "", "N")));
 
         assertThat(answer.returnMessage())
                 .as("line 495 re-enters the construct at line 169, which prompts for a refusal")
@@ -2511,7 +2756,7 @@ class TransactionAddServiceTest {
         writeSpanRunsInline();
 
         TransactionAddResponse answer =
-                appended(this.service.copyLastTransactionData(copySubmission(ACCOUNT_ID, "", "Y")));
+                appended(this.copyLast(copySubmission(ACCOUNT_ID, "", "Y")));
 
         assertThat(answer.transactionId())
                 .as("the allocated value, never the key of the row that was copied")
@@ -2557,7 +2802,7 @@ class TransactionAddServiceTest {
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
-        this.service.copyLastTransactionData(copySubmission(ACCOUNT_ID, "", "Y"));
+        this.copyLast(copySubmission(ACCOUNT_ID, "", "Y"));
 
         Transaction appended = appendedRow();
         assertThat(appended.getTranTypeCd()).as("line 482").isEqualTo("02");
@@ -2610,7 +2855,7 @@ class TransactionAddServiceTest {
         theCopyProbeFindsNoRow();
 
         assertThatThrownBy(() ->
-                this.service.copyLastTransactionData(copySubmission(ACCOUNT_ID, "", "Y")))
+                this.copyLast(copySubmission(ACCOUNT_ID, "", "Y")))
                 .isInstanceOf(NoSuchElementException.class)
                 .hasMessage(TransactionAddService.MESSAGE_TRANSACTION_LOOKUP_FAILED);
 
@@ -2650,7 +2895,7 @@ class TransactionAddServiceTest {
                 .thenReturn(Optional.of(storedRow(STORED_MAXIMUM)));
 
         TransactionAddPreview answer =
-                prompted(this.service.copyLastTransactionData(copySubmission(ACCOUNT_ID, "", "N")));
+                prompted(this.copyLast(copySubmission(ACCOUNT_ID, "", "N")));
 
         CopiedTransactionData copied = answer.copied();
         assertThat(copied).as("a withheld copy turn must publish the screen state it produced")
@@ -2704,10 +2949,10 @@ class TransactionAddServiceTest {
         writeSpanRunsInline();
 
         TransactionAddResponse answer =
-                appended(this.service.copyLastTransactionData(copySubmission(ACCOUNT_ID, "", "Y")));
+                appended(this.copyLast(copySubmission(ACCOUNT_ID, "", "Y")));
 
         assertThat(answer.transactionId()).isEqualTo(NEXT_IDENTIFIER);
-        assertThat(this.service.copyLastTransactionData(copySubmission(ACCOUNT_ID, "", "N")))
+        assertThat(this.copyLast(copySubmission(ACCOUNT_ID, "", "N")))
                 .as("the withheld turn is the only one that publishes copied state")
                 .isInstanceOf(TransactionAddPreview.class);
     }

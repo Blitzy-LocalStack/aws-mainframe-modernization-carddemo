@@ -28,10 +28,11 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
-import { MemoryRouter, Route, Routes } from 'react-router';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { THANK_YOU_CARDDEMO } from '../messages/messages';
+import { navigateSafely } from '../routes/navigation';
 import { installApiHarness, removeApiHarness } from '../test/apiHarness';
 import { endAnySession, establishSession } from '../test/sessionHarness';
 import {
@@ -137,6 +138,78 @@ const legendInvoked = vi.fn<(aid: CicsAid) => void>();
 const LEGEND: readonly PfKeyBinding[] = [
   { aid: 'PFK03', action: 'back', label: 'F3=Exit', enabled: true },
 ];
+
+/** Path of the second nested route, standing for any route an operator reaches after signing off. */
+const ARRIVAL_PATH = '/arrival';
+
+/** Body the second nested route renders, so its arrival is observable. */
+const ARRIVAL_BODY = 'ARRIVAL BODY';
+
+/** Handle on the control that changes entry, which is rendered outside the frame on purpose. */
+const NAVIGATE_TEST_ID = 'navigate-to-arrival';
+
+/**
+ * A second nested screen, standing for the sign-on route the frame also wraps.
+ * @returns {ReactElement} The arrival screen's own body.
+ */
+function ArrivalScreen(): ReactElement {
+  return <div>{ARRIVAL_BODY}</div>;
+}
+
+/**
+ * A control that changes history entry, rendered inside the router and OUTSIDE the frame.
+ *
+ * Assumptions: outside the frame is the whole point. The sign-off surface replaces the frame, so a
+ * control rendered beneath the outlet would be gone at the moment the case needs to navigate -- which is
+ * the operator's real position too: their way onward is the address bar, a bookmark or the browser's own
+ * history control, none of which the frame renders.
+ * @returns {ReactElement} A button that navigates to {@link ARRIVAL_PATH}.
+ */
+function NavigateOutOfTheSignedOffEntry(): ReactElement {
+  const navigate = useNavigate();
+
+  /**
+   * Changes entry to the arrival route.
+   *
+   * Assumptions: the transition goes through the application's own helper rather than calling the
+   * router directly, because `ui/eslint.config.js` disallows a discarded promise even behind `void` --
+   * and the helper is what every delivered control uses, so the case navigates the way the application
+   * does.
+   * @returns {void} Nothing; the router renders the arrival route.
+   */
+  function goToTheArrival(): void {
+    navigateSafely(navigate, ARRIVAL_PATH);
+  }
+
+  return (
+    <button type="button" data-testid={NAVIGATE_TEST_ID} onClick={goToTheArrival}>
+      {ARRIVAL_PATH}
+    </button>
+  );
+}
+
+/**
+ * Renders the shell as a layout route above TWO nested routes, with a way to move between them.
+ *
+ * Assumptions: two routes rather than one, because the property under test is what the frame does on
+ * the SECOND entry -- one route cannot express a navigation, and the shell is the layout route above
+ * every screen including sign-on, so the second route stands for the one an operator signs on at.
+ * @param {ReactElement} nested - The screen mounted at the initial entry.
+ * @returns {ReactElement} The composed tree under test.
+ */
+function renderShellAcrossTwoEntries(nested: ReactElement): ReactElement {
+  return (
+    <MemoryRouter initialEntries={['/nested']}>
+      <NavigateOutOfTheSignedOffEntry />
+      <Routes>
+        <Route element={<AppShell />}>
+          <Route path="/nested" element={nested} />
+          <Route path={ARRIVAL_PATH} element={<ArrivalScreen />} />
+        </Route>
+      </Routes>
+    </MemoryRouter>
+  );
+}
 
 /**
  * Renders the shell as a layout route with one nested screen beneath its outlet.
@@ -276,6 +349,36 @@ async function signsOffFromTheRenderedControl(): Promise<void> {
 }
 
 /**
+ * Asserts the sign-off surface is confined to the entry it was raised at.
+ *
+ * ⚠️ Purpose: the surface used to be raised by a one-way latch, and this frame is the layout
+ * route above the sign-on route as well as above the guarded screens -- `ui/src/router.tsx` declares
+ * `SIGN_ON_ROUTE` inside it. Latched, the frame returned before its outlet was reached, so every route
+ * beneath it stopped rendering and the operator could not sign on again without reloading the
+ * application. The case above asserts the surface REPLACES the frame; this one asserts it does not
+ * outlive the entry, which is the other half of the same contract.
+ *
+ * Assumptions: the arrival route is asserted by its BODY and the frame by its handle, because both have
+ * to come back -- a frame with no outlet content would be an operator staring at empty chrome, and
+ * content with no frame would be a screen with no title band, message line or legend.
+ * @returns {Promise<void>} Resolves once the frame and the arrival route are on the glass.
+ */
+async function releasesTheSignedOffSurfaceOnTheNextEntry(): Promise<void> {
+  await signOn();
+  render(renderShellAcrossTwoEntries(<SelfComposingScreen />));
+  expect(await screen.findByText(SCREEN_BODY)).toBeInTheDocument();
+
+  await userEvent.click(screen.getByTestId(SHELL_SIGN_OFF_CONTROL_TEST_ID));
+  expect(await screen.findByTestId(SHELL_SIGN_OFF_TEST_ID)).toBeInTheDocument();
+
+  await userEvent.click(screen.getByTestId(NAVIGATE_TEST_ID));
+
+  expect(await screen.findByText(ARRIVAL_BODY)).toBeInTheDocument();
+  expect(screen.getByTestId(APP_SHELL_TEST_ID)).toBeInTheDocument();
+  expect(screen.queryByTestId(SHELL_SIGN_OFF_TEST_ID)).toBeNull();
+}
+
+/**
  * Asserts the sign-off control is absent with no session held.
  *
  * Assumptions: an operator with no session has nothing to end, so offering the control would offer an
@@ -363,6 +466,10 @@ function appShellCases(): void {
   it('forwards a delegated key activation', forwardsADelegatedKeyActivation);
   it('offers a skip link to a focusable content region', offersASkipLinkToAFocusableContentRegion);
   it('signs off from the rendered control', signsOffFromTheRenderedControl);
+  it(
+    'releases the signed-off surface on the next entry',
+    releasesTheSignedOffSurfaceOnTheNextEntry,
+  );
   it('omits the sign-off control without a session', omitsTheSignOffControlWithoutASession);
   it('prefers a prop over a delegated value', prefersAPropOverADelegatedValue);
   it('withdraws the delegation at unmount', withdrawsTheDelegationAtUnmount);

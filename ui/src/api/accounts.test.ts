@@ -139,13 +139,26 @@ async function sendsTheAccountIdentifierAsText(): Promise<void> {
   );
 }
 
-/** Asserts an identifier shorter than the declared width is sent as given, not padded or converted. */
-async function sendsAShortIdentifierUnchanged(): Promise<void> {
-  // WHY : the contract admits one to eleven digits and resolves a short value to the same row as its
-  //       padded form, so neither padding nor conversion belongs in the browser: doing either here
-  //       would send a value the operator did not type and would make a refusal quote a value they
-  //       could not find on their screen.
-  expect(await bodySentByAccountView('11')).toBe('{"accountId":"11"}');
+/**
+ * Asserts an identifier shorter than the declared width is REFUSED, and is neither padded nor sent.
+ *
+ * ⚠️ Refactoring Rationale: this case asserted the opposite -- that a short value was transmitted
+ * unchanged -- on the reading that the contract admitted one to eleven digits. It does not:
+ * `AccountLookupRequest.accountId` is published with `minLength: 11`, `maxLength: 11` and
+ * `pattern: '^[0-9]{11}$'`, so the short value the client used to send could only ever come back as a
+ * bean-validation refusal. The baseline agrees, and that is the stronger reason: the receiving field is
+ * `PIC 9(11)`, so `2210-EDIT-ACCOUNT` in `app/cbl/COACTVWC.cbl` fails its `IS NOT NUMERIC` test on the
+ * trailing spaces a short entry leaves rather than resolving it to a padded row.
+ *
+ * Assumptions: the case also asserts NOTHING was transmitted, because "refused" and "refused before a
+ * round trip" are two facts and only the second one saves the request. Zero-padding here was the
+ * alternative and is refused for the reason the original comment gave, which survives the inversion: it
+ * would send a value the operator did not type.
+ * @returns {Promise<void>} Resolves once the refusal has been observed.
+ */
+async function refusesAShortIdentifierWithoutSendingIt(): Promise<void> {
+  await expect(bodySentByAccountView('11')).rejects.toThrow(RangeError);
+  expect(sentBody).toBeUndefined();
 }
 
 /** Asserts the cross-reference walk composes the same textual body. */
@@ -164,7 +177,7 @@ async function refusesAMalformedIdentifierWithoutQuotingIt(): Promise<void> {
   //       it -- so the refusal describes the accepted form and never reproduces the rejected value.
   await expect(readAccountView('12X45678901')).rejects.toThrow(RangeError);
   await expect(readAccountView('123456789012')).rejects.toThrow(
-    'An account identifier must be one to eleven decimal digits.',
+    'An account identifier must be exactly eleven decimal digits.',
   );
   expect(sentBody).toBeUndefined();
 }
@@ -174,7 +187,7 @@ function accountIdentifierTransportContract(): void {
   beforeEach(stubTransport);
   afterEach(restoreTransport);
   it('sends the account identifier as text at its given width', sendsTheAccountIdentifierAsText);
-  it('sends a short identifier unchanged', sendsAShortIdentifierUnchanged);
+  it('refuses a short identifier without sending it', refusesAShortIdentifierWithoutSendingIt);
   it(
     'composes the same textual body for the cross-reference walk',
     walksCrossReferencesWithATextualIdentifier,
@@ -238,7 +251,7 @@ async function readsAnAccountThroughABody(): Promise<void> {
   expect(request.url).toBe('/accounts/view');
   // Refactoring Rationale: the body carries the identifier as TEXT at the width it was given, where
   //   this case expected the number 11. `account-api.yaml` declares `AccountLookupRequest.accountId`
-  //   as a string with pattern ^[0-9]{1,11}$, and the suite above exists for precisely this member:
+  //   as a string with pattern ^[0-9]{11}$, and the suite above exists for precisely this member:
   //   folding it into a number discards the leading zeroes of the declared eleven-character width
   //   while resolving the same row, so nothing failed and the loss was invisible from either side.
   expect(request.body).toEqual({ accountId: PADDED_ACCOUNT_KEY });
@@ -409,6 +422,38 @@ async function refusesAnUnredactedGovernmentIdentifier(): Promise<void> {
 }
 
 /**
+ * Asserts the partial-success answer -- an account with an explicit null customer -- is READ, not refused.
+ *
+ * ⚠️ Purpose: this is the case whose absence let a defect ship. `AccountViewResponse.customer` is
+ * declared `oneOf` a customer and the null type, and the service produces that null on a real success
+ * path: it answers the account together with the reference's own miss sentence when the account row was
+ * located and the customer master holds no matching row, which is exactly what `app/cbl/COACTVWC.cbl`
+ * paints by guarding its account region at L471 and its customer region at L493 separately. The client's
+ * redaction guard reached the two masked members through optional chaining, so a null customer produced
+ * `undefined` at both, and `requireRedactedIdentifier` refuses `undefined` -- so every one of those
+ * successful reads was rejected with a `RangeError` and the arm was unreachable through this client. No
+ * case covered it, because every fixture carried a customer.
+ *
+ * ⚠️ Assumptions: the OMITTED member is asserted separately below to remain a refusal, and the pair is
+ * what makes this case a fix rather than a hole. `customer` is one of the response's `required` members,
+ * so a null is a state and an absence is a service that did not answer its own schema -- and because the
+ * screen renders the two identically, admitting the absence would hide that fault behind a legitimate
+ * display.
+ * @returns {Promise<void>} Resolves once both halves have been observed.
+ */
+async function readsAnAccountWhoseCustomerIsAbsent(): Promise<void> {
+  answerWith({ accountId: '00000000011', account: {}, customer: null }, 200, { etag: REVISION });
+
+  const outcome = await readAccountView('00000000011');
+
+  expect(outcome.account.customer).toBeNull();
+  expect(outcome.revision).toBe(REVISION);
+
+  answerWith({ accountId: '00000000011', account: {} }, 200, { etag: REVISION });
+  await expect(readAccountView('00000000011')).rejects.toThrow(RangeError);
+}
+
+/**
  * Registers every account client case.
  * @returns {void} Nothing; the cases are registered as a side effect.
  */
@@ -430,6 +475,10 @@ function accountClientBehaviour(): void {
   it('refuses an unmasked row', refusesAnUnmaskedRow);
   it('refuses an unredacted national identifier', refusesAnUnredactedNationalIdentifier);
   it('refuses an unredacted government-issued identifier', refusesAnUnredactedGovernmentIdentifier);
+  it(
+    'reads an account whose customer master holds no row, and refuses an omitted member',
+    readsAnAccountWhoseCustomerIsAbsent,
+  );
 }
 
 describe('account client behaviour', accountClientBehaviour);

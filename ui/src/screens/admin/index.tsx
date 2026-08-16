@@ -60,6 +60,7 @@ import {
 import { SIGN_ON_ROUTE } from '../../routes/guards';
 import { navigateSafely } from '../../routes/navigation';
 import { TYPOGRAPHY_TOKENS } from '../../theme/tokens';
+import { ScreenTitle } from '../../layout/ScreenTitle';
 
 /** CICS transaction identifier this screen replaces, from `app/cbl/COADM01C.cbl` L37. */
 export const ADMIN_MENU_TRANSACTION_ID = 'CA00';
@@ -292,7 +293,7 @@ export function AdminMenuScreen(): ReactElement {
         programName={ADMIN_MENU_PROGRAM_NAME}
         now={paintedAt}
       />
-      <Typography.Title level={3}>{ADMIN_MENU_SUBTITLE}</Typography.Title>
+      <ScreenTitle>{ADMIN_MENU_SUBTITLE}</ScreenTitle>
       {/*
         Trade-offs: the options are text lines rather than a control each, which is design gap G1 taken
         deliberately and for the same reason as on the main menu -- the reference's option fields are

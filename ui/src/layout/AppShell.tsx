@@ -170,7 +170,7 @@
 import { Button, Col, Flex, Layout, Row, Typography, theme } from 'antd';
 import { useCallback, useLayoutEffect, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties, ReactElement, ReactNode } from 'react';
-import { Outlet } from 'react-router';
+import { Outlet, useLocation } from 'react-router';
 
 import { useAuth } from '../hooks/useAuth';
 // WHY : Assumptions: the sign-off control's label is the LOCAL SHELL_SIGN_OFF_LABEL below and not the
@@ -296,7 +296,7 @@ export const SHELL_SIGN_OFF_LABEL = 'Sign off';
 export const SHELL_SIGN_OFF_CONTROL_TEST_ID = 'shell-sign-off-control';
 
 /**
- * Stable `data-testid` on the sign-off surface that replaces the frame after sign-off.
+ * Stable `data-testid` on the sign-off surface that replaces the frame at the entry signed off at.
  *
  * Assumptions: the surface deliberately carries no landmark and no heading, for the
  * reason given at {@link AppShell} - it stands in for a cleared terminal screen - so a
@@ -800,10 +800,14 @@ export function publishShellSlot(slot: ShellSlot): () => void {
  * bands unconditionally would render a second message line and a second legend on any screen
  * that still composed its own - two live regions announcing one message, and a duplicate
  * `message-band` test handle where a caller expects one. Keeping the zone conditional on the
- * publication is also what lets a single screen withhold one deliberately: the card detail
- * and card update screens publish an empty key list and no header in their erased states,
- * because `app/cbl/COCRDSLC.cbl` L838-L848 answers an unaddressable selector with
- * `SEND TEXT ... ERASE` rather than by re-sending the map.
+ * publication is also what lets a single screen withhold one deliberately, and the two card
+ * screens withhold on different grounds. Both publish an empty key list and no header WHILE A
+ * READ IS IN FLIGHT: that state has no counterpart in the reference at all, so a title band
+ * whose clock and identifiers described a record not yet read would be an invention. The card
+ * UPDATE screen additionally withholds for an unaddressable selector, which is the state
+ * `app/cbl/COCRDSLC.cbl` L838-L848 answers with `SEND TEXT ... ERASE` rather than by re-sending
+ * the map; the card DETAIL screen publishes its whole slot in that state instead, because its
+ * own arrival path is the map the reference SENDS to gather selection criteria.
  *
  * Trade-offs: publication happens on commit rather than during render, because writing to
  * a module store from a render body would publish from renders React may discard. The cost
@@ -946,9 +950,10 @@ export interface AppShellProps {
  * documents for a `header` nested inside `section`, `article`, `aside` or `nav`. Adding
  * redundant roles would restate what the markup already exposes.
  * @param {AppShellProps} props - Optional frame overrides and body content.
- * @returns {ReactElement} The four-zone frame, or the sign-off surface once the operator
- *   has signed off through the shell's own sign-off control; see
- *   {@link SHELL_SIGN_OFF_LABEL} for why that control is not a function key.
+ * @returns {ReactElement} The four-zone frame, or the sign-off surface while the operator
+ *   remains on the history entry they signed off at with no session held; a navigation away
+ *   restores the frame, which is what lets them sign on again. See
+ *   {@link SHELL_SIGN_OFF_LABEL} for why the sign-off control is not a function key.
  */
 export function AppShell(props: AppShellProps): ReactElement {
   const { children, screen, message, pfKeys, now } = props;
@@ -999,23 +1004,17 @@ export function AppShell(props: AppShellProps): ReactElement {
    * the whole frame one measurable surface, which is what lets `BMS_TEXT_COLOR_TOKENS` be
    * verified once - at 6.16:1 for this band's text - and hold in every zone.
    *
+   * Alternatives Considered: leaving the navy in place and correcting the text shade against
+   * it. Rejected on the measurement above: `ui/src/theme/antdTheme.ts` rejects a dark surface
+   * outright on the ground that no requirement asks for one, and the fill the design system
+   * ships is `headerBg: '#001529'` -- a value no mapset declares. See {@link SURFACE_TOKENS}
+   * for that rejected alternative and {@link BMS_TEXT_COLOR_TOKENS} for the measured pairs.
+   *
    * Trade-offs: the dark band is given up, and nothing transcribed goes with it. It is a
    * design-system default and not a measured source value: the 3270 screens paint no header
    * fill at all, they paint coloured text on one uniform display, so a uniform surface is
    * closer to the baseline than the default was. The value written here is a token reference
    * rather than a colour, so the band still follows the theme.
-   */
-  /*
-   * Refactoring Rationale: the background is set here, and it is the surface half of a
-   * contrast resolution the token bridge carries the other half of. `Layout.Header` ships
-   * `headerBg: '#001529'`, a dark navy, and a review measured this band's text on it at
-   * 4.49:1 against the WCAG AA 4.5:1 minimum for normal text. The navy was never a
-   * migration decision - `ui/src/theme/antdTheme.ts` rejects a dark surface outright on the
-   * ground that no requirement asks for one, and the ten screens that compose `ScreenHeader`
-   * themselves already paint the same band on the light content surface. Naming the light
-   * surface makes both paths agree, which is what lets one text shade be legible on either.
-   * See {@link SURFACE_TOKENS} for the rejected alternative and
-   * {@link BMS_TEXT_COLOR_TOKENS} for the measured pairs.
    */
   const headerStyle: CSSProperties = {
     height: 'auto',
@@ -1088,23 +1087,47 @@ export function AppShell(props: AppShellProps): ReactElement {
   const { signedOn, signOut } = useAuth();
 
   /*
-   * Assumptions: this latch is NOT the session state the file overview forbids, and the
+   * Assumptions: this record is NOT the session state the file overview forbids, and the
    * distinction is worth drawing because a reader auditing that prohibition will find a
    * `useState` here and has to be able to tell the two apart. What the prohibition rules
    * out is continuity that substitutes for the communication area - a remembered next
    * program, a last map, a re-entry discriminator, or any assertion about who the operator
-   * is. This holds none of those: it records only that sign-off has already happened in
-   * this mounted tree, so the cleared-screen surface stays rendered instead of flickering
-   * back to the frame. It carries no identity, grants no authority, is never read by
-   * anything but the branch below, and is discarded on reload - after which the operator is
-   * anonymous because the token is gone, not because this value was remembered.
+   * is. This holds none of those: it records only WHERE sign-off happened, so the
+   * cleared-screen surface stays rendered instead of flickering back to the frame. It
+   * carries no identity, grants no authority, is never read by anything but the branch
+   * below, and is discarded on reload - after which the operator is anonymous because the
+   * token is gone, not because this value was remembered.
+   *
+   * ⚠️ Refactoring Rationale: this holds the HISTORY ENTRY signed off at rather than a
+   * boolean, because the boolean was a one-way latch and this shell is the layout route
+   * above the sign-on route as well as above the guarded subtree -- `ui/src/router.tsx`
+   * declares `SIGN_ON_ROUTE` inside it. Once latched, the branch below returned before the
+   * outlet was reached, so every route nested under this frame stopped rendering: an
+   * operator who signed off could not sign on again, because the sign-on screen is one of
+   * the routes the latch was suppressing, and only a full reload cleared it. Recording the
+   * entry makes the surface terminal for the screen it replaced and no further -- the next
+   * navigation is a different entry, so the frame and its outlet come back.
+   *
+   * Assumptions: the ENTRY key is recorded rather than the pathname, because navigating to
+   * the same path is a new entry with a new key while the pathname compares equal. The
+   * difference is not hypothetical here: sign-off happens most often at a menu, and an
+   * operator who signs on again and returns to that same menu would meet a thank-you for a
+   * session they had just established.
    *
    * Alternatives Considered: deriving the surface from `signedOn` alone, with no state at
    * all. Rejected because it cannot distinguish "signed off just now" from "never signed
    * on", so every unauthenticated first visit would open on a thank-you for a session that
    * never existed.
    */
-  const [signedOff, setSignedOff] = useState(false);
+  const [signedOffAtEntry, setSignedOffAtEntry] = useState<string | null>(null);
+
+  /*
+   * Assumptions: the location is read for its ENTRY KEY and for nothing else. This shell
+   * renders no navigation of its own and reports no route identity -- each screen publishes
+   * its own title band and transaction identifier through the slot -- so the pathname is
+   * deliberately not consulted.
+   */
+  const { key: currentEntry } = useLocation();
 
   const activeScreen = screen ?? delegated.screen;
   const activeMessage = message ?? delegated.message;
@@ -1113,14 +1136,15 @@ export function AppShell(props: AppShellProps): ReactElement {
 
   const signOffFromShell = useCallback(
     /**
-     * Ends the session and replaces the frame with the sign-off surface.
-     * @returns {void} Nothing; the surface is rendered on the resulting re-render.
+     * Ends the session and replaces the frame with the sign-off surface for this entry.
+     * @returns {void} Nothing; the surface is rendered on the resulting re-render, and stays
+     *   until the operator navigates or a session is established.
      */
     function endSession(): void {
       signOut();
-      setSignedOff(true);
+      setSignedOffAtEntry(currentEntry);
     },
-    [signOut],
+    [currentEntry, signOut],
   );
 
   /*
@@ -1141,7 +1165,15 @@ export function AppShell(props: AppShellProps): ReactElement {
    */
   const legendKeys: readonly PfKeyBinding[] = activePfKeys?.keys ?? NO_LEGEND_KEYS;
 
-  if (signedOff) {
+  /*
+   * Assumptions: the surface is shown only while BOTH conditions hold -- the operator is
+   * still on the entry they signed off at, and no session is held. The second is not
+   * redundant: a browser `back` returns to the initial entry under the key it already had,
+   * and a session established after the sign-off would otherwise be described by a
+   * thank-you. Reading a session that has just been discarded is safe in the same render,
+   * because `signOut` publishes synchronously.
+   */
+  if (signedOffAtEntry === currentEntry && !signedOn) {
     /*
      * Assumptions: sign-off REPLACES the frame rather than showing a message inside it,
      * because the baseline's sign-off is not a band message. `app/cbl/COSGN00C.cbl` L89

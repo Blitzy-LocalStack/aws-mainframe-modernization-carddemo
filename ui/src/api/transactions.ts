@@ -280,19 +280,30 @@ const TRANSACTION_AMOUNT = /^-?[0-9]{1,9}\.[0-9]{2}$/u;
 const ACCOUNT_ID = /^[0-9]{11}$/u;
 
 /*
- * WHY : Assumptions: this shape is SIXTEEN DIGITS rather than the masked form the rest of this client
- *       accepts, and the difference is deliberate and confined to one member. Every card number a read
- *       operation returns is masked to its last four, and ./masking's MASKED_CARD_NUMBER is what
- *       validates those. The copy-last answer's resolvedCardNumber is not a read of somebody's card: it
- *       is the key the row WOULD be written under, echoed back so the operator can confirm the value
- *       they just keyed -- the reference paints the same digits in the same field. Masking it would
- *       withhold from the operator the one value they are being asked to confirm.
- * WHY : Trade-offs: the digits therefore exist in the browser for the life of the copy turn. Accepted
- *       because the operator supplied them on that turn, and bounded by the shape being asserted here:
- *       a response that put anything other than sixteen digits in this member is refused rather than
- *       painted, so the field cannot become a channel for arbitrary text.
+ * WHY : ⚠️ Refactoring Rationale: a `RESOLVED_CARD_NUMBER = /^[0-9]{16}$/u` stood here, admitting the
+ *       preview's card member as SIXTEEN DIGITS where every other card member this client reads is
+ *       masked. It defended the exception on the ground that the resolved card "is not a read of
+ *       somebody's card" but the key the row would be written under, so masking it would withhold the
+ *       one value the operator is confirming. The second half was right about the operator and wrong
+ *       about the remedy: AAP section 0.4.1.9 masks a primary account number in every response but the
+ *       administrative card-detail read, and `transaction-api.yaml`'s own `CardNumber` schema states the
+ *       unmasked form appears on requests only -- so this pattern was validating a body the contract
+ *       forbids and would have PASSED the very disclosure a card guard exists to catch.
+ * WHY : Assumptions: the member is now validated by the shared `MASKED_CARD_NUMBER` imported above, so
+ *       the preview is held to the same rendering as every list row and every detail read, and the
+ *       comparison the digits were for is made server-side against the sealed binding token. Nothing in
+ *       this module admits sixteen digits in a RESPONSE any longer.
  */
-const RESOLVED_CARD_NUMBER = /^[0-9]{16}$/u;
+
+/*
+ * WHY : Assumptions: the binding token is validated for SHAPE and never interpreted. Its pattern is the
+ *       one `transaction-api.yaml` publishes for `CursorToken`, which is also the shape
+ *       `com.carddemo.common.web.CursorToken` mints -- a version marker, a fixed-width nonce and an
+ *       enciphered payload, dot-separated. Checking it here means a body carrying a raw card number in
+ *       this member, which is the mistake the withdrawn pattern above would have accepted, is refused
+ *       before any screen can store it.
+ */
+const CONFIRMATION_TOKEN = /^v2\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{1,200}$/u;
 
 /**
  * The shape the contract publishes for an account balance.
@@ -593,10 +604,11 @@ function requireTransactionAddPreview(body: unknown): TransactionAddPreview {
    *       L473 does for the copy arm. Reading it off the copied block therefore only ever saw it on a copy
    *       turn, so an ordinary capture left the screen showing the key the operator typed rather than the
    *       key the row would carry.
-   * WHY : Assumptions: the resolved card is validated against the UNMASKED sixteen-digit pattern, because
-   *       it is the value the confirming turn submits and the value the operator is being asked to compare
-   *       against what they typed. Accepting a masked form here would admit a body the screen could not
-   *       submit.
+   * WHY : ⚠️ Refactoring Rationale: the resolved card is validated against the MASKED pattern, where it
+   *       was validated against sixteen digits on the ground that "it is the value the confirming turn
+   *       submits". It is not, any longer: the confirming turn submits the sealed token below, so the
+   *       screen never needs the digits and this guard now refuses them. Accepting them was what made an
+   *       unmasked primary account number indistinguishable from correct behaviour at this boundary.
    */
   return {
     amount,
@@ -608,10 +620,16 @@ function requireTransactionAddPreview(body: unknown): TransactionAddPreview {
       'resolvedAccountId',
       'previewed transaction',
     ),
-    resolvedCardNumber: requireShaped(
-      members.resolvedCardNumber,
-      RESOLVED_CARD_NUMBER,
-      'resolvedCardNumber',
+    resolvedCardNumberMasked: requireShaped(
+      members.resolvedCardNumberMasked,
+      MASKED_CARD_NUMBER,
+      'resolvedCardNumberMasked',
+      'previewed transaction',
+    ),
+    confirmationToken: requireShaped(
+      members.confirmationToken,
+      CONFIRMATION_TOKEN,
+      'confirmationToken',
       'previewed transaction',
     ),
     copied: optionalCopiedSource(members.copied),

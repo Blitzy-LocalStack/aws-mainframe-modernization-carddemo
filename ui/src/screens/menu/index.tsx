@@ -64,6 +64,7 @@ import type { MainMenuOption } from '../../messages/messages';
 import { SIGN_ON_ROUTE } from '../../routes/guards';
 import { navigateSafely } from '../../routes/navigation';
 import { TYPOGRAPHY_TOKENS } from '../../theme/tokens';
+import { ScreenTitle } from '../../layout/ScreenTitle';
 
 /** CICS transaction identifier this screen replaces, from `app/cbl/COMEN01C.cbl` L37. */
 export const MAIN_MENU_TRANSACTION_ID = 'CM00';
@@ -376,7 +377,7 @@ export function MainMenuScreen(): ReactElement {
         programName={MAIN_MENU_PROGRAM_NAME}
         now={paintedAt}
       />
-      <Typography.Title level={3}>{MAIN_MENU_SUBTITLE}</Typography.Title>
+      <ScreenTitle>{MAIN_MENU_SUBTITLE}</ScreenTitle>
       {/*
         Trade-offs: the options are a LIST of text lines rather than a control each, and that is design
         gap G1 taken deliberately. The reference paints twelve protected 40-character fields and takes
